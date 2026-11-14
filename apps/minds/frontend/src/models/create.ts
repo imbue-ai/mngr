@@ -312,14 +312,19 @@ export function hostNameFormatError(value: string): string {
  * container down under the probe. */
 export type RecoveryIntent = "start" | "restart" | null;
 
-/** The Recovery deep-link for a workspace. */
+/** The Recovery deep-link for a workspace.
+ *
+ * `returnTo` is encoded twice: Mithril decodes the whole route once before it
+ * splits off the query, so a return path carrying its own query (the options
+ * panel's ?tab=share) would otherwise end the outer query early and arrive
+ * empty. The second decode is the query parser's own. */
 export function recoveryRoute(
   agentId: string,
   returnTo: string,
   intent: RecoveryIntent,
 ): string {
   const intentParam = intent === null ? "" : `&intent=${intent}`;
-  return `/agents/${encodeURIComponent(agentId)}/recovery?return_to=${encodeURIComponent(returnTo)}${intentParam}`;
+  return `/agents/${encodeURIComponent(agentId)}/recovery?return_to=${encodeURIComponent(encodeURIComponent(returnTo))}${intentParam}`;
 }
 
 // Optimistic machine Start/Stop tracking (port of the Landing page's

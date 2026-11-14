@@ -6,6 +6,7 @@ import m from "mithril";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   PeekedChannel,
+  UpdateFailureKind,
   UpdateState,
   UpdateStatus,
 } from "../../../electron-bridge";
@@ -82,7 +83,9 @@ function updatesModel(overrides: Partial<SettingsModel> = {}): SettingsModel {
 }
 
 function panelText(model: SettingsModel): string {
-  return renderedText(renderRoot(SettingsSections, { model }));
+  return renderedText(
+    renderDeep(renderRoot(SettingsSections, { model })) as m.Vnode,
+  );
 }
 
 interface ElementVnode {
@@ -104,6 +107,17 @@ function channelRadios(node: unknown): Record<string, unknown>[] {
       ? [vnode.attrs]
       : [];
   return [...own, ...channelRadios(vnode.children)];
+}
+
+/** The labels of the buttons drawn as primary under `node`. */
+function primaryLabels(node: unknown): string[] {
+  return collectVnodes(node)
+    .filter(
+      (vnode) =>
+        vnode.tag === "button" &&
+        classTokensOf(vnode).includes("bg-surface-inverse"),
+    )
+    .map((vnode) => collectText(vnode).join("").trim());
 }
 
 /** Whether the panel's Check now control is refused. */
@@ -157,8 +171,34 @@ describe("the Updates panel", () => {
     const cases: [string, UpdateStatus, string][] = [
       [
         "a check that could not reach the feed",
-        { type: "error", channel: "stable", message: "getaddrinfo ENOTFOUND" },
-        "Update check failed: getaddrinfo ENOTFOUND",
+        {
+          type: "error",
+          kind: "network",
+          channel: "stable",
+          message: "getaddrinfo ENOTFOUND",
+        },
+        "Couldn't check for updates —  check your internet connection, then try again .",
+      ],
+      [
+        "a check the feed answered with an error",
+        {
+          type: "error",
+          kind: "other",
+          channel: "stable",
+          message: "Cannot find channel",
+        },
+        "Couldn't check for updates. Try again. If this persists, report a bug.",
+      ],
+      [
+        "a download that failed after the check found it",
+        {
+          type: "error",
+          kind: "download",
+          channel: "stable",
+          version: "0.5.0",
+          message: "ECONNRESET",
+        },
+        "Imbue Studio 0.5.0 is available but couldn't be downloaded. It will try again at the next check.",
       ],
       [
         "an artifact waiting to be installed",
@@ -172,8 +212,22 @@ describe("the Updates panel", () => {
       ],
       [
         "a dev run, which has nothing to update",
-        { type: "disabled" },
+        { type: "disabled", reason: "dev-build" },
         "Updates are disabled in dev builds.",
+      ],
+      [
+        "a Linux copy run from source",
+        {
+          type: "disabled",
+          reason: "source-install",
+          updateCommand: "/x/scripts/install-linux.sh --version latest",
+        },
+        "doesn't update itself. To update it, run this command:",
+      ],
+      [
+        "an AppImage started without its file",
+        { type: "disabled", reason: "appimage-inactive" },
+        "Start it from the AppImage to get updates.",
       ],
     ];
     await withMindsNative({}, async () => {
@@ -183,6 +237,28 @@ describe("the Updates panel", () => {
           name,
         ).toContain(sentence);
       }
+    });
+  });
+
+  it("shows a copy run from source the command that updates it", async () => {
+    const command = "/x/scripts/install-linux.sh --version latest";
+    await withMindsNative({}, async () => {
+      const tree = renderDeep(
+        renderRoot(SettingsSections, {
+          model: updatesModel({
+            updateState: {
+              ...ON_STABLE,
+              status: {
+                type: "disabled",
+                reason: "source-install",
+                updateCommand: command,
+              },
+            },
+          }),
+        }),
+      );
+
+      expect(allText(byId(tree, "update-source-install-command"))).toBe(command);
     });
   });
 
@@ -394,12 +470,29 @@ describe("the Updates panel", () => {
     await withMindsNative({}, async () => {
       const broken = updatesModel({
         updateState: null,
-        updateError: "MINDS_ROOT_NAME is unreadable",
+        updateError: {
+          message:
+            "Couldn't load your update settings. Try again. If this persists, report a bug.",
+          details: "MINDS_ROOT_NAME is unreadable",
+          isBugReportOffered: true,
+        },
       });
+      const loadAgain = vi.spyOn(broken, "loadUpdateState").mockResolvedValue();
 
-      expect(panelText(broken)).toContain(
-        "Could not read the update state: MINDS_ROOT_NAME is unreadable",
-      );
+      const notice = collectVnodes(
+        renderRoot(SettingsSections, { model: broken }),
+      ).find((vnode) => attrsOf(vnode).id === "update-state-error");
+      expect(notice).toBeDefined();
+      expect(attrsOf(notice!).error).toBe(broken.updateError);
+      expect(attrsOf(notice!).isBugReportOffered).toBe(true);
+      // The notice is the only control on a panel that never loaded, so it carries the retry.
+      const actions = attrsOf(notice!).actions as {
+        label: string;
+        onclick: () => void;
+      }[];
+      expect(actions.map((action) => action.label)).toEqual(["Try again"]);
+      actions[0].onclick();
+      expect(loadAgain).toHaveBeenCalledTimes(1);
       expect(panelText(broken)).not.toContain(
         "Updates are managed by the desktop app.",
       );
@@ -475,6 +568,82 @@ describe("the Updates panel", () => {
     });
   });
 
+  it("offers a failed check's Try again as its main button, in place of the panel's Check now", async () => {
+    // The panel's Check now beside the error's own retry would be two buttons
+    // doing one thing; the error's leads, and runs the same check.
+    let checks = 0;
+    await withMindsNative(
+      {
+        checkForUpdates: async () => {
+          checks += 1;
+          return ON_STABLE;
+        },
+        peekUpdateChannels: async () => PEEKED,
+      },
+      async () => {
+        const model = updatesModel({
+          updateState: {
+            ...ON_STABLE,
+            status: {
+              type: "error",
+              kind: "other",
+              channel: "stable",
+              message: "Cannot find channel",
+            },
+          },
+        });
+        const tree = renderDeep(renderRoot(SettingsSections, { model }));
+        const notice = byId(tree, "update-check-failure");
+        expect(primaryLabels(notice)).toEqual(["Try again"]);
+        expect(allText(notice)).toContain("Report a bug");
+        expect(
+          collectVnodes(tree).some(
+            (node) => collectText(node).join("").trim() === "Check now",
+          ),
+        ).toBe(false);
+
+        const retry = byId(tree, "update-check-retry") as AnyVnode;
+        (attrsOf(retry).onclick as () => void)();
+        await vi.waitFor(() => expect(checks).toBe(1));
+      },
+    );
+  });
+
+  it("leaves one main button beside a failed check: whichever of the two leads", async () => {
+    await withMindsNative({}, async () => {
+      const staged = { ...ON_STABLE, downloadedVersion: "0.5.0" };
+      const primaries = (model: SettingsModel): string[] =>
+        primaryLabels(renderDeep(renderRoot(SettingsSections, { model })));
+      const afterFailedCheck = (kind: UpdateFailureKind): SettingsModel =>
+        updatesModel({
+          updateState: {
+            ...staged,
+            status: {
+              type: "error",
+              kind,
+              channel: "stable",
+              message: "getaddrinfo ENOTFOUND",
+            },
+          },
+        });
+      expect(primaries(updatesModel({ updateState: staged }))).toEqual([
+        "Restart now",
+      ]);
+
+      // A failure the user cannot act on: its Try again is the way out, so the
+      // panel's own Restart now steps aside rather than outranking the error.
+      expect(primaries(afterFailedCheck("other"))).toEqual(["Try again"]);
+
+      // A failed connection asks the user to look at that first, so the
+      // error's Try again only confirms the ask and is drawn secondary. The
+      // panel keeps its Restart now dark, rather than the screen having no
+      // main button at all.
+      const network = afterFailedCheck("network");
+      expect(primaries(network)).toEqual(["Restart now"]);
+      expect(panelText(network)).toContain("Try again");
+    });
+  });
+
   it("stops offering a check while the download that check started is running", async () => {
     // The check has already answered; what is still running is the transfer it
     // began. A check clicked now is queued behind that transfer in the main
@@ -531,7 +700,9 @@ describe("the Updates panel", () => {
         isUpdateInstalling: true,
       });
       const text = panelText(installing);
-      expect(text).toContain("Installing Imbue Studio 0.5.0. Enter your password when asked; Imbue Studio restarts when it's done.");
+      expect(text).toContain(
+        "Installing Imbue Studio 0.5.0. Enter your password when asked; Imbue Studio restarts when it's done.",
+      );
       expect(text).toContain("Installing...");
       expect(text).not.toContain("Install and restart");
 
@@ -541,12 +712,18 @@ describe("the Updates panel", () => {
       const afterFailedCheck = updatesModel({
         updateState: {
           ...installing.updateState!,
-          status: { type: "error", channel: "stable", message: "feed unreachable" },
+          status: {
+            type: "error",
+            channel: "stable",
+            message: "feed unreachable",
+          },
         },
         isUpdateInstalling: true,
       });
       const laterText = panelText(afterFailedCheck);
-      expect(laterText).toContain("Installing Imbue Studio 0.5.0. Enter your password when asked; Imbue Studio restarts when it's done.");
+      expect(laterText).toContain(
+        "Installing Imbue Studio 0.5.0. Enter your password when asked; Imbue Studio restarts when it's done.",
+      );
       expect(laterText).not.toContain("Update check failed");
     });
   });
@@ -567,7 +744,9 @@ describe("the Updates panel", () => {
         },
       });
       const text = panelText(deb);
-      expect(text).toContain("Imbue Studio 0.5.0 is downloaded. Install it below; you'll be asked for your password.");
+      expect(text).toContain(
+        "Imbue Studio 0.5.0 is downloaded. Install it below; you'll be asked for your password.",
+      );
       expect(text).toContain("Install and restart");
       expect(text).not.toContain("Restart now");
 
@@ -580,7 +759,9 @@ describe("the Updates panel", () => {
           needsPasswordToInstall: false,
         },
       });
-      expect(panelText(appImage)).toContain("Imbue Studio 0.5.0 is downloaded. Install it below.");
+      expect(panelText(appImage)).toContain(
+        "Imbue Studio 0.5.0 is downloaded. Install it below.",
+      );
     });
   });
 });
@@ -892,11 +1073,83 @@ describe("SettingsSections notifications panel", () => {
       style: "cards",
     });
     const panel = renderSections(model);
-    const alert = collectVnodes(panel).find(
-      (vnode) => attrsOf(vnode).role === "alert",
+    const notice = collectVnodes(panel).find(
+      (vnode) => attrsOf(vnode).id === "notification-prefs-error",
     );
-    expect(alert).toBeDefined();
-    expect(allText(alert)).toBe("nope");
+    expect(notice).toBeDefined();
+    const error = attrsOf(notice as AnyVnode).error as {
+      message: string;
+      details: string;
+    };
+    expect(error.message).toBe(
+      "Couldn't save this change. Try again. If this persists, report a bug.",
+    );
+    // The server's own text is kept, behind See details.
+    expect(error.details).toContain("nope");
+  });
+});
+
+describe("SettingsSections master password panel", () => {
+  it("names each account that couldn't be updated and keeps its reason behind See details", async () => {
+    vi.stubGlobal("window", {});
+    const model = new SettingsModel(
+      async () =>
+        jsonResponse({
+          ok: false,
+          results: [
+            { account: "a@b.com", is_ok: true, error: null },
+            {
+              account: "c@d.com",
+              is_ok: false,
+              error: "locked on this device",
+            },
+          ],
+        }),
+      () => {},
+    );
+    model.overview = settingsOverview();
+    model.selectSection("backups");
+    await model.changeMasterPassword("p", "p");
+
+    const notice = collectVnodes(renderSections(model)).find(
+      (vnode) => attrsOf(vnode).id === "master-password-result",
+    ) as AnyVnode;
+    const listText = allText(attrsOf(notice).content);
+
+    expect(listText).toContain("c@d.com: couldn't be updated");
+    expect(listText).toContain(
+      "Some accounts couldn't be updated. Re-run the change to retry them.",
+    );
+    expect(listText).not.toContain("locked on this device");
+    expect(attrsOf(notice).error).toEqual({
+      message:
+        "Some accounts couldn't be updated. Re-run the change to retry them.",
+      details: "c@d.com: locked on this device",
+    });
+    expect(
+      allText(renderDeep(renderRoot(SettingsSections, { model }))),
+    ).toContain("Report a bug");
+  });
+
+  it("lists a change every account took as done, with nothing to report", async () => {
+    vi.stubGlobal("window", {});
+    const model = new SettingsModel(
+      async () =>
+        jsonResponse({
+          ok: true,
+          results: [{ account: "a@b.com", is_ok: true, error: null }],
+        }),
+      () => {},
+    );
+    model.overview = settingsOverview();
+    model.selectSection("backups");
+    await model.changeMasterPassword("p", "p");
+
+    const text = allText(renderDeep(renderRoot(SettingsSections, { model })));
+
+    expect(text).toContain("a@b.com: updated");
+    expect(text).toContain("Master password updated for every account.");
+    expect(text).not.toContain("Report a bug");
   });
 });
 
@@ -911,16 +1164,27 @@ describe("Display panel", () => {
   it("offers every zoom size with the stored one selected", async () => {
     await withMindsNative({}, async () => {
       const tree = renderRoot(SettingsSections, { model: displayModel(125) });
-      const select = collectVnodes(tree).find((vnode) => vnode.tag === "select");
+      const select = collectVnodes(tree).find(
+        (vnode) => vnode.tag === "select",
+      );
       expect(select).toBeDefined();
       expect(attrsOf(select as AnyVnode).id).toBe("display-zoom-select");
       const options = collectVnodes(select as AnyVnode).filter(
         (vnode) => vnode.tag === "option",
       );
       expect(options.map((option) => attrsOf(option).value)).toEqual([
-        "80", "90", "100", "110", "125", "150", "175", "200",
+        "80",
+        "90",
+        "100",
+        "110",
+        "125",
+        "150",
+        "175",
+        "200",
       ]);
-      const selected = options.filter((option) => attrsOf(option).selected === true);
+      const selected = options.filter(
+        (option) => attrsOf(option).selected === true,
+      );
       expect(selected.map((option) => attrsOf(option).value)).toEqual(["125"]);
       expect(collectText(tree).join(" ")).toContain("100% (default)");
     });
@@ -929,8 +1193,12 @@ describe("Display panel", () => {
   it("points at the browser's own zoom when the shell cannot scale windows", async () => {
     await withMindsNative(null, async () => {
       const tree = renderRoot(SettingsSections, { model: displayModel(null) });
-      expect(collectVnodes(tree).find((vnode) => vnode.tag === "select")).toBeUndefined();
-      expect(collectText(tree).join(" ")).toContain("use the browser's own zoom");
+      expect(
+        collectVnodes(tree).find((vnode) => vnode.tag === "select"),
+      ).toBeUndefined();
+      expect(collectText(tree).join(" ")).toContain(
+        "use the browser's own zoom",
+      );
     });
   });
 
@@ -938,7 +1206,9 @@ describe("Display panel", () => {
     await withMindsNative({}, async () => {
       const model = displayModel(100);
       model.displayZoomError = "Unknown display zoom 137";
-      const text = collectText(renderRoot(SettingsSections, { model })).join(" ");
+      const text = collectText(
+        renderDeep(renderRoot(SettingsSections, { model })),
+      ).join(" ");
       expect(text).toContain("Unknown display zoom 137");
     });
   });
@@ -952,11 +1222,15 @@ describe("the Browser cookies panel", () => {
   }
 
   function runButton(model: SettingsModel): AnyVnode | undefined {
-    return collectVnodes(renderRoot(SettingsSections, { model })).find((node) => attrsOf(node).id === "browser-import-run");
+    return collectVnodes(renderRoot(SettingsSections, { model })).find(
+      (node) => attrsOf(node).id === "browser-import-run",
+    );
   }
 
   it("is listed among the sections and offers the import", () => {
-    expect(SETTINGS_SECTIONS.map((section) => section.name)).toContain("browser-import");
+    expect(SETTINGS_SECTIONS.map((section) => section.name)).toContain(
+      "browser-import",
+    );
     const model = browserImportModel();
     expect(panelText(model)).toContain("Import from Chrome");
     expect(attrsOf(runButton(model)!).disabled).toBe(false);

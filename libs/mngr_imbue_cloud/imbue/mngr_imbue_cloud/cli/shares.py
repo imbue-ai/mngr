@@ -283,8 +283,9 @@ def invite_grantee(
     could_not_invite, over_allowance, or too_soon; the connector never says why
     a delivery could not be made. Fails with code ``grants_out_of_date`` when
     the centralized grants table holds no open grant for the subject (push the
-    document, then try once more) and ``not_invitable`` when the grantee has
-    already joined.
+    document, then try once more), ``not_invitable`` when the grantee has
+    already joined, and ``no_workspace_link`` until the workspace's shell has
+    registered an address and a name.
     """
     if (user_id is None) == (email is None):
         fail_with_json("pass exactly one of --user-id and --email", error_class="UsageError", exit_code=2)

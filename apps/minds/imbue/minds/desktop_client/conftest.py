@@ -933,7 +933,7 @@ def make_share_probe_result(
     """A canned ``mngr exec --format json`` result answering the share state probe.
 
     Tests hand this to a :class:`RecordingMngrCaller` so the enable flow's
-    one-exec probe (``probe_share_state_in_agent``) parses a realistic
+    one-exec probe (``read_share_state_from_agent``) parses a realistic
     envelope. The same result is returned for every later call too, which is
     harmless: the write exec only inspects the returncode.
     """

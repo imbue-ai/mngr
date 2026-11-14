@@ -8,6 +8,7 @@ import {
 import type { UiWorkspaceUpdate } from "../../../channel/messages";
 import { AutoUpdatePromptModel } from "../../../models/autoUpdatePrompt";
 import { createEmptyStores } from "../../../models/boot";
+import { recoveryRoute } from "../../../models/create";
 import { ShellState } from "../../shell/shell-state";
 import type { AnyVnode } from "../../../testing";
 import {
@@ -17,12 +18,14 @@ import {
   classTokensOf,
   classesOf,
   collectVnodes,
+  errorMarks,
   jsonResponse,
   publishWorkspaceLiveness,
   renderDeep,
   scheduleWindowAtLocalHour,
   settingsOverview,
   settle,
+  withMindsNative,
 } from "../../../testing";
 import { UpdatesGroup } from "./UpdatesGroup";
 
@@ -174,6 +177,17 @@ function pressableWithLabel(
   );
 }
 
+/** The labels of the pressable buttons drawn as primary under `node`. */
+function primaryLabels(node: unknown): string[] {
+  return collectVnodes(node)
+    .filter(
+      (vnode) =>
+        typeof attrsOf(vnode).onclick === "function" &&
+        classTokensOf(vnode).includes("bg-surface-inverse"),
+    )
+    .map((vnode) => allText(vnode.children).trim());
+}
+
 function press(node: unknown, label: string): void {
   const pressable = pressableWithLabel(node, label);
   if (pressable === undefined) throw new Error(`no "${label}" to press`);
@@ -220,6 +234,44 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   clearAppContextForTests();
+});
+
+describe("the Updates tab's kernel card", () => {
+  it("draws its own restart secondary beside a refusal whose restart of Imbue Studio is the fix", async () => {
+    // Restarting the machine would meet the same lapsed login.
+    await withMindsNative({}, async () => {
+      const { draw } = await harness({
+        respond: (url) =>
+          Promise.resolve(
+            url.endsWith("/kernel-fix")
+              ? jsonResponse({ error: "Unauthorized" }, 401)
+              : jsonResponse({}),
+          ),
+      });
+      republish({
+        [BACKED]: {
+          ...OUT_OF_DATE,
+          is_backup_configured: true,
+          kernel: {
+            status: "VULNERABLE",
+            running_kernel: "6.12.96+deb13-cloud-arm64",
+            fixed_version: "6.12.113-1",
+            is_fix_offered: true,
+            activity: "IDLE",
+            failure: "",
+            is_fix_landed: false,
+          },
+        },
+      });
+      expect(primaryLabels(byId(draw(BACKED), "ws-kernel-card"))).toEqual(["Restart machine"]);
+
+      press(byId(draw(BACKED), "ws-kernel-card"), "Restart machine");
+      press(byId(draw(BACKED), "ws-kernel-card"), "Restart now");
+      await settleAll();
+
+      expect(primaryLabels(byId(draw(BACKED), "ws-kernel-card"))).toEqual(["Restart Imbue Studio"]);
+    });
+  });
 });
 
 describe("the Updates tab's no-backup question", () => {
@@ -308,7 +360,10 @@ describe("the Updates tab's presses", () => {
 
     (answer as unknown as (response: Response) => void)(
       jsonResponse(
-        { error: "An update is already running in this workspace." },
+        {
+          error: "An update is already running in this workspace.",
+          code: "ALREADY_RUNNING",
+        },
         409,
       ),
     );
@@ -326,7 +381,10 @@ describe("the Updates tab's presses", () => {
     const refusal =
       "Sign in to an AI account in this workspace, then try again.";
     const { draw } = await harness({
-      respond: () => Promise.resolve(jsonResponse({ error: refusal }, 409)),
+      respond: () =>
+        Promise.resolve(
+          jsonResponse({ error: refusal, code: "NEEDS_SIGN_IN" }, 409),
+        ),
     });
     press(draw(BACKED), "Update now");
     await settleAll();
@@ -344,17 +402,20 @@ describe("the Updates tab's presses", () => {
     expect(text).not.toContain("so its update can't start");
   });
 
-  it("quotes the machine's own verdict under the refusal", async () => {
-    // The reason a wedged machine gives is the only thing that tells the reader
-    // retrying will not help, so it has to survive all the way onto the tab.
+  it("keeps the machine's own verdict behind See details, with Report a bug for a failure it can't explain", async () => {
+    // The reason a wedged machine gives is what tells a technical reader why,
+    // so it reaches the tab, folded away.
+    const verdict =
+      "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']";
     const { draw } = await harness({
       respond: () =>
         Promise.resolve(
           jsonResponse(
             {
-              error: "Couldn't start the update agent in this workspace.",
-              detail:
-                "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']",
+              error:
+                "Couldn't start the update agent in this workspace. Try again. If this persists, report a bug.",
+              detail: verdict,
+              code: "SPAWN_FAILED",
             },
             502,
           ),
@@ -364,13 +425,91 @@ describe("the Updates tab's presses", () => {
     press(draw(BACKED), "Update now");
     await settleAll();
 
-    const refused = allText(draw(BACKED));
+    const refused = allText(byId(draw(BACKED), "ws-update-error"));
     expect(refused).toContain(
       "Couldn't start the update agent in this workspace.",
     );
-    expect(refused).toContain(
-      "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']",
+    expect(refused).toContain("See details");
+    expect(refused).toContain("Report a bug");
+    expect(refused).not.toContain(verdict);
+  });
+
+  it("offers a too-old workspace its agent and a new workspace, and no bug report", async () => {
+    const { draw, routeSet } = await harness({
+      respond: (url) =>
+        Promise.resolve(
+          url.endsWith("/now")
+            ? jsonResponse(
+                {
+                  error: "This workspace is too old to update itself.",
+                  code: "UNSUPPORTED",
+                },
+                409,
+              )
+            : jsonResponse({}),
+        ),
+    });
+
+    press(draw(BACKED), "Update now");
+    await settleAll();
+
+    const refused = draw(BACKED);
+    const text = allText(byId(refused, "ws-update-error"));
+    expect(text).toContain("This workspace is too old to update itself.");
+    expect(text).not.toContain("Report a bug");
+    // The remedies are the error's buttons, in its row, asking the agent the
+    // one main button on the tab: the tab's own Schedule update would be
+    // refused the same way.
+    expect(text).toMatch(/Ask its agent\s+Create a new workspace/);
+    expect(primaryLabels(refused)).toEqual(["Ask its agent"]);
+    press(refused, "Create a new workspace");
+    expect(routeSet).toHaveBeenCalledWith(
+      "/account/local/create",
+      undefined,
+      undefined,
     );
+  });
+
+  it("offers to start a stopped workspace whose schedule found it not running", async () => {
+    const { draw, routeSet } = await harness({
+      respond: (url) =>
+        Promise.resolve(
+          url.endsWith("/schedule")
+            ? jsonResponse(
+                {
+                  error:
+                    "Couldn't reach this workspace to schedule its update. Make sure it's running, then try again.",
+                  detail: "host is stopped",
+                  code: "NOT_RUNNING",
+                },
+                409,
+              )
+            : jsonResponse({}),
+        ),
+    });
+    press(draw(BACKED), "Schedule update");
+    await settleAll();
+    expect(pressableWithLabel(byId(draw(BACKED), "ws-update-error"), "Start workspace")).toBeUndefined();
+
+    publishWorkspaceLiveness(BACKED, "STOPPED");
+    press(byId(draw(BACKED), "ws-update-error"), "Start workspace");
+
+    expect(routeSet).toHaveBeenLastCalledWith(
+      recoveryRoute(BACKED, "/workspace/x/options?tab=settings&group=updates", "start"),
+    );
+  });
+
+  it("says Imbue Studio didn't respond to a press that got no answer, without a bug report", async () => {
+    const { draw } = await harness({
+      respond: () => Promise.reject(new TypeError("Failed to fetch")),
+    });
+
+    press(draw(BACKED), "Update now");
+    await settleAll();
+
+    const text = allText(byId(draw(BACKED), "ws-update-error"));
+    expect(text).toContain("Imbue Studio didn't respond. Try again in a moment.");
+    expect(text).not.toContain("Report a bug");
   });
 
   it("schedules a press past the no-backup question", async () => {
@@ -463,15 +602,16 @@ describe("the Updates tab's Update now on a stopped workspace", () => {
         {
           error: "Couldn't start this workspace to run the update.",
           detail: "box gone",
+          code: "START_FAILED",
         },
         502,
       ),
     );
     await settleAll();
 
-    expect(allText(byId(draw(BACKED), "ws-update-error"))).toContain(
-      "box gone",
-    );
+    const refused = allText(byId(draw(BACKED), "ws-update-error"));
+    expect(refused).toContain("Couldn't start this workspace to run the update.");
+    expect(refused).toContain("See details");
   });
 });
 
@@ -577,13 +717,105 @@ describe("the Updates tab after an update that never went out", () => {
     expect(allText(backed)).toContain(
       "Couldn't start this workspace to run the update.",
     );
-    expect(allText(backed)).toContain(
+    // The machine's words are folded behind See details, with Report a bug
+    // beside them: a workspace that would not start is not explained.
+    expect(allText(backed)).not.toContain(
       "ERROR: The box behind host-5821 is gone",
+    );
+    expect(allText(byId(backed, "ws-update-not-started-details"))).toContain(
+      "See details",
+    );
+    // Under the details, Try again leads the row, with Report a bug beside it.
+    expect(allText(byId(backed, "ws-update-not-started"))).toMatch(
+      /See details Try again Report a bug$/,
     );
     expect(pressableWithLabel(backed, "Try again")).toBeDefined();
     expect(allText(draw(UNBACKED))).not.toContain(
       "Couldn't start this workspace",
     );
+  });
+
+  it("marks the failure once: the heading carries the mark, the sentence under it sits flush", async () => {
+    const { draw } = await harness();
+    recordFailureOnBacked();
+
+    const block = byId(renderDeep(draw(BACKED)), "update-status");
+    const heading = collectVnodes(block).find((vnode) => vnode.tag === "h3");
+    expect(allText(heading)).toBe("Update didn't start");
+    expect(collectVnodes(heading).filter((vnode) => vnode.tag === "svg")).toHaveLength(1);
+    expect(errorMarks(byId(block, "ws-update-not-started"))).toHaveLength(0);
+  });
+
+  it("leads a stopped workspace's refused schedule with Start workspace, Try again beside it", async () => {
+    // The background check's arm of a stopped workspace is refused NOT_RUNNING
+    // and recorded on the row, which the tab shows as an update that didn't start.
+    const { draw } = await harness();
+    publishWorkspaceLiveness(BACKED, "STOPPED");
+    republish({
+      [BACKED]: {
+        ...OUT_OF_DATE,
+        is_backup_configured: true,
+        dispatch_failure:
+          "Couldn't reach this workspace to schedule its update. Make sure it's running, then try again.",
+        dispatch_failure_detail: "host is stopped",
+        dispatch_failure_code: "NOT_RUNNING",
+      },
+    });
+
+    const row = byId(draw(BACKED), "ws-update-not-started");
+    expect(allText(row)).toMatch(/See details Start workspace Try again$/);
+    const isPrimary = (label: string): boolean =>
+      classTokensOf(pressableWithLabel(row, label) as AnyVnode).includes(
+        "bg-surface-inverse",
+      );
+    expect([isPrimary("Start workspace"), isPrimary("Try again")]).toEqual([true, false]);
+  });
+
+  it("leads a too-old workspace's recorded failure with its remedies, offering no Try again", async () => {
+    // Trying the update again cannot work on a workspace too old to run it.
+    const { draw } = await harness();
+    republish({
+      [BACKED]: {
+        ...OUT_OF_DATE,
+        is_backup_configured: true,
+        dispatch_failure: "This workspace is too old to update itself.",
+        dispatch_failure_detail: "update-self: no update skill",
+        dispatch_failure_code: "UNSUPPORTED",
+      },
+    });
+
+    const tab = draw(BACKED);
+    const row = byId(tab, "ws-update-not-started");
+    expect(allText(row)).toMatch(/See details Ask its agent Create a new workspace$/);
+    expect(primaryLabels(tab)).toEqual(["Ask its agent"]);
+  });
+
+  it("draws a refused press once when the row records the same failure", async () => {
+    const tooOld = "This workspace is too old to update itself.";
+    const { draw } = await harness({
+      respond: (url) =>
+        Promise.resolve(
+          url.endsWith("/now")
+            ? jsonResponse({ error: tooOld, code: "UNSUPPORTED" }, 409)
+            : jsonResponse({}),
+        ),
+    });
+
+    press(draw(BACKED), "Update now");
+    await settleAll();
+    // The dispatch records its refusal on the row, which the next frame carries.
+    republish({
+      [BACKED]: {
+        ...OUT_OF_DATE,
+        is_backup_configured: true,
+        dispatch_failure: tooOld,
+        dispatch_failure_code: "UNSUPPORTED",
+      },
+    });
+
+    const tab = draw(BACKED);
+    expect(byId(tab, "ws-update-error")).toBeUndefined();
+    expect(primaryLabels(tab)).toEqual(["Ask its agent"]);
   });
 
   it("holds the recorded reason back while a new press is out", async () => {
@@ -910,9 +1142,10 @@ describe("the Updates tab's skip question", () => {
     const cancel = pressableWithLabel(draw(BACKED), "Cancel");
     expect(attrsOf(cancel as AnyVnode).disabled).toBe(true);
 
-    const refusal = "This workspace couldn't record the skip.";
+    const refusal =
+      "Couldn't reach this workspace to skip its update. Make sure it's running, then try again.";
     (answer as unknown as (response: Response) => void)(
-      jsonResponse({ error: refusal }, 409),
+      jsonResponse({ error: refusal, code: "SKIP_UNREACHED" }, 502),
     );
     await settleAll();
 
@@ -1119,14 +1352,19 @@ describe("the Updates tab's status block", () => {
     shell.openUpdatesTab(BACKED, {
       failure: {
         isOk: false,
-        error: "Couldn't reach this workspace.",
+        status: 502,
+        error: "Couldn't reach this workspace to start the update. Try again in a moment.",
         detail: "ssh: timeout",
+        code: "UNREACHABLE",
       },
     });
 
-    expect(allText(byId(draw(BACKED), "ws-update-error"))).toBe(
-      "Couldn't reach this workspace. ssh: timeout",
+    const text = allText(byId(draw(BACKED), "ws-update-error"));
+    expect(text).toContain(
+      "Couldn't reach this workspace to start the update. Try again in a moment.",
     );
+    expect(text).toContain("See details");
+    expect(text).not.toContain("ssh: timeout");
   });
 });
 
@@ -1299,10 +1537,40 @@ describe("the Updates tab's automatic updates", () => {
     await settleAll();
 
     const tab = draw(BACKED);
-    expect(allText(byId(tab, "ws-auto-update-error"))).toContain(
-      "Invalid auto-update setting",
+    const refused = allText(byId(tab, "ws-auto-update-error"));
+    expect(refused).toContain(
+      "Couldn't save this workspace's automatic updates. Try again. If this persists, report a bug.",
     );
+    expect(refused).not.toContain("Invalid auto-update setting");
     expect(byId(tab, "ws-update-error")).toBeUndefined();
     expect(allText(byId(tab, "update-status-line"))).toBe(signInLine);
+  });
+
+  it("sends a failed automatic-updates choice again from its Try again", async () => {
+    let isDiskFull = true;
+    const { draw, requests, bodies } = await harness({
+      promptDecision: "declined",
+      respond: (url) =>
+        Promise.resolve(
+          url.endsWith("/auto-update") && isDiskFull
+            ? jsonResponse({ error: "No space left on device" }, 500)
+            : jsonResponse({}),
+        ),
+    });
+    choose(draw(BACKED), "manual");
+    await settleAll();
+    requests.length = 0;
+
+    isDiskFull = false;
+    press(byId(draw(BACKED), "ws-auto-update-error"), "Try again");
+    await settleAll();
+
+    expect(requests).toEqual([`/ui/api/updates/${BACKED}/auto-update`]);
+    expect(bodies[`/ui/api/updates/${BACKED}/auto-update`]).toEqual({
+      mode: "manual",
+      window_start_hour: null,
+      window_end_hour: null,
+    });
+    expect(byId(draw(BACKED), "ws-auto-update-error")).toBeUndefined();
   });
 });

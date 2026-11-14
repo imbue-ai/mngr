@@ -13,27 +13,46 @@ import type {
   PeekedChannel,
   UpdateChannel,
   UpdateState,
+  UpdateStatus,
 } from "../../../electron-bridge";
-import type { SettingsModel, SettingsSection } from "../../../models/settings";
+import type {
+  MasterPasswordResult,
+  SettingsModel,
+  SettingsSection,
+} from "../../../models/settings";
+import { fallbackErrorSentence } from "../../../models/errors";
+import type { ErrorAction } from "../../../models/errors";
 import {
   CHANNEL_COPY,
   DEFAULT_DISPLAY_ZOOM_PERCENT,
+  channelLabelOf,
   DISPLAY_ZOOM_PERCENTS,
 } from "../../../models/settings";
 import { formatRelativeAgo } from "../../../models/backups";
+import {
+  isCheckFailureReportable,
+  updateCheckFailure,
+} from "../../../models/appUpdates";
 import { BROWSER_IMPORT_SUCCESS_MESSAGE } from "../../../models/browserImport";
 import { browserImportFailureNotice } from "../../components/UnreadableChromeProfileNotice";
 import type { NotificationStyle } from "../../../models/notificationsUi";
 import { electronBridge } from "../../../electron-bridge";
 import { Button } from "../../components/Button";
+import { ErrorNotice } from "../../components/ErrorDisplay";
+import { InlineError } from "../../components/errorDesign";
+import { variantBesideErrors } from "../../components/variantBesideErrors";
 import { Modal } from "../../components/Modal";
 import { Notice } from "../../components/Notice";
 import { Spinner } from "../../components/Spinner";
 import { navEntryClass, splitPane } from "../../components/SplitPane";
-import { updateInstallingCopy, updateReadyCopy } from "../../shell/UpdateReadyCard";
+import {
+  updateInstallingCopy,
+  updateReadyCopy,
+} from "../../shell/UpdateReadyCard";
 import { installTermsOf } from "../../shell/update-ready";
 import { thisComputerPanel } from "./ThisComputerSection";
 import { workspaceUpdateSettings } from "./WorkspaceUpdateSettings";
+import { settingsFailureLine } from "../../components/SettingsFailureLine";
 
 interface SectionsAttrs {
   model: SettingsModel;
@@ -240,13 +259,10 @@ function notificationsPanel(model: SettingsModel): m.Children {
     electronBridge.isDesktop && prefs.is_enabled && prefs.style !== "cards"
       ? notificationOsPermissionNotice(model)
       : null,
-    model.notificationPrefsError !== ""
-      ? m(
-          "p",
-          { class: "type-body text-important mt-3", role: "alert" },
-          model.notificationPrefsError,
-        )
-      : null,
+    settingsFailureLine(
+      "notification-prefs-error",
+      model.notificationPrefsFailure,
+    ),
   ]);
 }
 
@@ -314,9 +330,9 @@ function displayPanel(model: SettingsModel): m.Children {
       : null,
     model.displayZoomError !== ""
       ? m(
-          "p",
-          { class: "type-body text-important mt-3", role: "alert" },
-          model.displayZoomError,
+          "div",
+          { class: "mt-3", role: "alert" },
+          m(InlineError, { message: model.displayZoomError }),
         )
       : null,
   ]);
@@ -339,7 +355,11 @@ function browserImportPanel(model: SettingsModel): m.Children {
     ),
     m("div", { class: "flex flex-col gap-2 py-3 border-b border-subtle" }, [
       m("div", { class: "flex items-center justify-between gap-3" }, [
-        m("span", { class: "type-body text-primary" }, "Import from Google Chrome's default profile."),
+        m(
+          "span",
+          { class: "type-body text-primary" },
+          "Import from Google Chrome's default profile.",
+        ),
         m(
           Button,
           {
@@ -355,12 +375,20 @@ function browserImportPanel(model: SettingsModel): m.Children {
         ),
       ]),
       browserImport.isBusy
-        ? m("span", { class: "type-helper text-tertiary", role: "status" }, "This can take a moment.")
+        ? m(
+            "span",
+            { class: "type-helper text-tertiary", role: "status" },
+            "This can take a moment.",
+          )
         : null,
       outcome !== null && outcome.is_success
         ? m(
             "span",
-            { class: "type-helper", role: "status", id: "browser-import-result" },
+            {
+              class: "type-helper",
+              role: "status",
+              id: "browser-import-result",
+            },
             BROWSER_IMPORT_SUCCESS_MESSAGE,
           )
         : null,
@@ -467,26 +495,25 @@ function signInsPanel(model: SettingsModel): m.Children {
         "select",
         {
           id: "sign-in-browser",
-          class: "h-[34px] px-2 rounded-md type-body bg-fill-subtle text-primary",
+          class:
+            "h-[34px] px-2 rounded-md type-body bg-fill-subtle text-primary",
           value: overview.sign_in_browser_id ?? DEFAULT_BROWSER_VALUE,
           onchange: (event: Event) => {
             const value = (event.target as HTMLSelectElement).value;
-            void model.setSignInBrowser(value === DEFAULT_BROWSER_VALUE ? null : value);
+            void model.setSignInBrowser(
+              value === DEFAULT_BROWSER_VALUE ? null : value,
+            );
           },
         },
         [
           m("option", { value: DEFAULT_BROWSER_VALUE }, "Default browser"),
-          ...browsers.map((browser) => m("option", { value: browser.browser_id }, browser.label)),
+          ...browsers.map((browser) =>
+            m("option", { value: browser.browser_id }, browser.label),
+          ),
         ],
       ),
     ]),
-    model.signInBrowserError
-      ? m(
-          "p",
-          { class: "type-helper text-important mt-3", role: "alert" },
-          model.signInBrowserError,
-        )
-      : null,
+    settingsFailureLine("sign-in-browser-error", model.signInBrowserFailure),
   ]);
 }
 
@@ -566,44 +593,65 @@ function masterPasswordPanel(
             )
           : null,
       ]),
-      model.masterPasswordError !== ""
+      model.masterPasswordRefusal !== ""
         ? m(
-            "p",
-            { class: "type-body text-important", role: "alert" },
-            model.masterPasswordError,
+            "div",
+            { role: "alert" },
+            m(InlineError, { message: model.masterPasswordRefusal }),
           )
         : null,
+      settingsFailureLine("master-password-error", model.masterPasswordFailure),
       model.masterPasswordResults !== null
-        ? m(
-            "ul",
-            {
-              class: "type-helper text-secondary list-disc pl-4",
-              "aria-live": "polite",
-            },
-            [
-              ...(model.masterPasswordResults.length === 0
-                ? [m("li", "The master password change failed.")]
-                : model.masterPasswordResults.map((entry) =>
-                    m(
-                      "li",
-                      entry.is_ok
-                        ? `${entry.account}: updated`
-                        : `${entry.account}: FAILED - ${entry.error ?? "unknown error"}`,
-                    ),
-                  )),
-              model.masterPasswordResults.length > 0
-                ? m(
-                    "li",
-                    model.isMasterPasswordAllOk
-                      ? "Master password updated for every account."
-                      : "Re-run the change to retry the failed accounts.",
-                  )
-                : null,
-            ],
+        ? masterPasswordResultList(
+            model.masterPasswordResults,
+            model.isMasterPasswordAllOk,
           )
         : null,
     ]),
   ]);
+}
+
+/** Each account's outcome, one line per account. When any account could not
+ * be updated it is an error, with why behind See details. */
+function masterPasswordResultList(
+  results: readonly MasterPasswordResult[],
+  isAllOk: boolean,
+): m.Children {
+  // An account the change reached reads as done, not in the error's color.
+  const accountLines = results.map((entry) =>
+    entry.is_ok
+      ? m("li", { class: "text-secondary" }, `${entry.account}: updated`)
+      : m("li", `${entry.account}: couldn't be updated`),
+  );
+  if (results.length > 0 && isAllOk) {
+    return m(
+      "ul",
+      {
+        class: "type-helper text-secondary list-disc pl-4",
+        "aria-live": "polite",
+      },
+      [...accountLines, m("li", "Master password updated for every account.")],
+    );
+  }
+  const summary =
+    results.length === 0
+      ? fallbackErrorSentence("Couldn't change the master password")
+      : "Some accounts couldn't be updated. Re-run the change to retry them.";
+  const failureDetails = results
+    .filter((entry) => !entry.is_ok)
+    .map((entry) => `${entry.account}: ${entry.error ?? "no reason given"}`)
+    .join("\n");
+  return m(ErrorNotice, {
+    id: "master-password-result",
+    error: { message: summary, details: failureDetails },
+    content:
+      results.length > 0
+        ? m("ul", { class: "list-disc pl-4 m-0" }, [
+            ...accountLines,
+            m("li", summary),
+          ])
+        : undefined,
+  });
 }
 
 function updateStatusLine(model: SettingsModel): m.Children {
@@ -614,19 +662,20 @@ function updateStatusLine(model: SettingsModel): m.Children {
   // the status a later check publishes may have replaced `update-downloaded`.
   if (model.isUpdateInstalling && state.downloadedVersion != null) {
     const terms = installTermsOf(state);
-    const copy = updateInstallingCopy(state.downloadedVersion, terms.policy, terms.needsPassword);
+    const copy = updateInstallingCopy(
+      state.downloadedVersion,
+      terms.policy,
+      terms.needsPassword,
+    );
     return m(Notice, { variant: "info" }, `${copy.title}. ${copy.detail}.`);
   }
   const status = state.status;
-  if (status.type === "error") {
+  if (status.type === "update-downloaded") {
     return m(
       Notice,
-      { variant: "warn" },
-      `Update check failed: ${status.message}`,
+      { variant: "info" },
+      `Imbue Studio ${status.version} is downloaded. ${installInstruction(state)}`,
     );
-  }
-  if (status.type === "update-downloaded") {
-    return m(Notice, { variant: "info" }, `Imbue Studio ${status.version} is downloaded. ${installInstruction(state)}`);
   }
   return null;
 }
@@ -641,7 +690,9 @@ function updateStatusLine(model: SettingsModel): m.Children {
 function installInstruction(state: UpdateState): string {
   const terms = installTermsOf(state);
   if (terms.policy === "on-quit") return "Restart to install.";
-  return terms.needsPassword ? "Install it below; you'll be asked for your password." : "Install it below.";
+  return terms.needsPassword
+    ? "Install it below; you'll be asked for your password."
+    : "Install it below.";
 }
 
 /** The label of the control that applies a staged update: the same words as the floating card's. */
@@ -653,7 +704,20 @@ function installActionLabel(state: UpdateState): string {
 /** The label of that control while it is held, again the floating card's words. */
 function installingActionLabel(state: UpdateState, version: string): string {
   const terms = installTermsOf(state);
-  return updateInstallingCopy(version, terms.policy, terms.needsPassword).action;
+  return updateInstallingCopy(version, terms.policy, terms.needsPassword)
+    .action;
+}
+
+/** A failed check's buttons: its Try again, which runs the panel's check. */
+function updateCheckFailureActions(model: SettingsModel): ErrorAction[] {
+  return [
+    {
+      id: "update-check-retry",
+      label: "Try again",
+      isBusy: model.isUpdateBusy,
+      onclick: () => void model.checkForUpdatesNow(),
+    },
+  ];
 }
 
 /**
@@ -670,10 +734,21 @@ function updateStandingLine(model: SettingsModel): m.Children {
   const line = (text: string, tone = "text-secondary"): m.Children =>
     m("p", { class: `type-body ${tone} mb-3` }, text);
   if (status.type === "disabled") {
-    return line("Updates are disabled in dev builds.");
+    return disabledUpdatesLine(status, line);
   }
   if (status.type === "error") {
-    return line("Couldn't check for updates.");
+    // Its Try again stands in for the panel's Check now, which is not drawn
+    // beside it.
+    return m(
+      "div",
+      { class: "mb-3" },
+      m(ErrorNotice, {
+        id: "update-check-failure",
+        error: updateCheckFailure(status),
+        actions: updateCheckFailureActions(model),
+        isBugReportOffered: isCheckFailureReportable(status),
+      }),
+    );
   }
   if (status.type === "update-downloaded") {
     return null;
@@ -683,11 +758,51 @@ function updateStandingLine(model: SettingsModel): m.Children {
   }
   if (status.type === "parked") {
     return line(
-      `You're ahead of ${channelLabel(state.channel)} and will get updates when it catches up.`,
+      `You're ahead of ${channelLabelOf(state.channel)} and will get updates when it catches up.`,
       "text-tertiary",
     );
   }
-  return line(`You're up to date with ${channelLabel(state.channel)}.`);
+  return line(`You're up to date with ${channelLabelOf(state.channel)}.`);
+}
+
+/**
+ * Why this copy cannot update itself. A Linux copy run from source (what the
+ * install script sets up) updates by re-running that script, whose command is
+ * shown to copy.
+ */
+function disabledUpdatesLine(
+  status: UpdateStatus,
+  line: (text: string) => m.Children,
+): m.Children {
+  if (status.reason === "appimage-inactive") {
+    return line(
+      "This copy of Imbue Studio can't update itself because it wasn't started from its AppImage file. " +
+        "Start it from the AppImage to get updates.",
+    );
+  }
+  if (status.reason === "source-install") {
+    return m("div", { class: "mb-3" }, [
+      m(
+        "p",
+        { class: "type-body text-secondary" },
+        "This copy of Imbue Studio runs from source and doesn't update itself. " +
+          "To update it, run this command:",
+      ),
+      // Wrapped, so the end of a long command stays on screen; select-all so
+      // one click picks up the whole command to copy.
+      m(
+        "code",
+        {
+          id: "update-source-install-command",
+          class:
+            "block mt-2 type-helper font-mono bg-fill-subtle rounded-md px-2 py-1.5 " +
+            "whitespace-pre-wrap break-all select-all",
+        },
+        status.updateCommand ?? "",
+      ),
+    ]);
+  }
+  return line("Updates are disabled in dev builds.");
 }
 
 /**
@@ -702,20 +817,10 @@ function channelVersionText(peeked: PeekedChannel | undefined): string | null {
     : `Currently on ${peeked.version}.`;
 }
 
-/**
- * A channel's display name, so a sentence never drops the bare `alpha` into prose.
- *
- * CHANNEL_COPY covers every UpdateChannel, but it is an array -- it carries the
- * order the panel lists channels in -- so `find` is still typed as optional.
- */
-function channelLabel(channel: UpdateChannel): string {
-  return CHANNEL_COPY.find((entry) => entry.name === channel)?.label ?? channel;
-}
-
 function channelSwitchDialog(model: SettingsModel): m.Children {
   const pending = model.pendingChannelSwitch;
   if (pending === null || model.updateState === null) return null;
-  const label = channelLabel(pending.channel);
+  const label = channelLabelOf(pending.channel);
   // Read from the staged version rather than the status: the artifact is with
   // the OS installer, so it survives the later checks that overwrite the status
   // that announced it -- and this is the one moment the fact is being weighed.
@@ -934,12 +1039,18 @@ function updatesPanel(model: SettingsModel): m.Children {
       // a desktop user, on the surface built to manage them, that they are
       // somebody else's business -- and the menu bar's "Check for Updates..."
       // lands here from oninit, before the read has resolved.
-      model.updateError !== ""
-        ? m(
-            Notice,
-            { variant: "warn" },
-            `Could not read the update state: ${model.updateError}`,
-          )
+      model.updateError !== null
+        ? m(ErrorNotice, {
+            id: "update-state-error",
+            error: model.updateError,
+            isBugReportOffered: model.updateError.isBugReportOffered,
+            actions: [
+              {
+                label: "Try again",
+                onclick: () => void model.loadUpdateState(),
+              },
+            ],
+          })
         : m(
             "p",
             { class: "type-body text-secondary" },
@@ -974,12 +1085,14 @@ function updatesPanel(model: SettingsModel): m.Children {
           "This build serves the stable channel only.",
         )
       : null,
-    model.updateError !== ""
-      ? m(
-          "p",
-          { class: "type-body text-important mt-3", role: "alert" },
-          model.updateError,
-        )
+    model.updateError !== null
+      ? m("div", { class: "mt-3" }, [
+          m(ErrorNotice, {
+            id: "update-action-error",
+            error: model.updateError,
+            isBugReportOffered: model.updateError.isBugReportOffered,
+          }),
+        ])
       : null,
     m("div", { class: "mt-4 flex items-center gap-3" }, [
       // The floating card carries the same control, but it is dismissible and
@@ -989,27 +1102,42 @@ function updatesPanel(model: SettingsModel): m.Children {
         ? m(
             Button,
             {
-              variant: "primary",
+              variant: variantBesideErrors(
+                "primary",
+                state.status.type === "error"
+                  ? [
+                      {
+                        message: updateCheckFailure(state.status).message,
+                        actions: updateCheckFailureActions(model),
+                      },
+                    ]
+                  : [],
+              ),
               disabled: model.isUpdateInstalling,
-              onclick: () => void model.installUpdateNow(),
+              onclick: () =>
+                void model.installUpdateNow(installActionLabel(state)),
             },
-            model.isUpdateInstalling ? installingActionLabel(state, state.downloadedVersion) : installActionLabel(state),
+            model.isUpdateInstalling
+              ? installingActionLabel(state, state.downloadedVersion)
+              : installActionLabel(state),
           )
         : null,
       // Disabled while the download it already started is running, because a
       // check queued behind that transfer would answer minutes later. The
       // status line above says what is happening, so the button does not
-      // repeat it.
-      m(
-        Button,
-        {
-          variant: "secondary",
-          disabled:
-            model.isUpdateBusy || state.status.type === "update-available",
-          onclick: () => void model.checkForUpdatesNow(),
-        },
-        model.isUpdateBusy ? "Checking..." : "Check now",
-      ),
+      // repeat it. A failed check's error carries the retry instead.
+      state.status.type === "error"
+        ? null
+        : m(
+            Button,
+            {
+              variant: "secondary",
+              disabled:
+                model.isUpdateBusy || state.status.type === "update-available",
+              onclick: () => void model.checkForUpdatesNow(),
+            },
+            model.isUpdateBusy ? "Checking..." : "Check now",
+          ),
       // Most checks change nothing on screen -- up to date and parked both
       // redraw the same strings -- so without this the button is
       // indistinguishable from one that does nothing. Reported by the main
@@ -1065,7 +1193,9 @@ export function SettingsSections(): m.Component<SectionsAttrs> {
               ? notificationsPanel(model)
               : null,
             model.activeSection === "display" ? displayPanel(model) : null,
-            model.activeSection === "browser-import" ? browserImportPanel(model) : null,
+            model.activeSection === "browser-import"
+              ? browserImportPanel(model)
+              : null,
             model.activeSection === "error-reporting"
               ? errorReportingPanel(model)
               : null,

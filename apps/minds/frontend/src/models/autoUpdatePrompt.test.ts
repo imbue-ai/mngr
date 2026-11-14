@@ -169,14 +169,26 @@ describe("answering the auto-update prompt", () => {
     expect(model.triggerFor(false, true)).toBeNull();
   });
 
-  it("keeps the prompt up with the reason when the answer could not be saved", async () => {
+  it("keeps the prompt up, saying the answer wasn't saved, with the route's words behind See details", async () => {
     const { model } = backend(null, true, () =>
-      jsonResponse({ error: "The settings file is read-only." }, 500),
+      jsonResponse({ error: "Could not save your settings: read-only file" }, 500),
     );
     await model.load();
     await model.choose("declined", "user-7");
-    expect(model.error).toBe("The settings file is read-only.");
+    expect(model.failure?.error.message).toBe("Couldn't save your answer. Try again. If this persists, report a bug.");
+    expect(model.failure?.error.details).toContain("read-only file");
+    expect(model.failure?.isExplained).toBe(false);
     expect(model.triggerFor(false, false)).toBe("app-updated");
+  });
+
+  it("says the route's own sentence for an empty window, which needs no bug report", async () => {
+    const { model } = backend(null, true, () =>
+      jsonResponse({ error: "The update window needs a start and end that differ.", reason: "EMPTY_WINDOW" }, 400),
+    );
+    await model.load();
+    await model.choose("accepted", "user-7");
+    expect(model.failure?.error.message).toBe("The update window needs a start and end that differ.");
+    expect(model.failure?.isExplained).toBe(true);
   });
 
   it("reads the recorded answer from the window's account's record", async () => {

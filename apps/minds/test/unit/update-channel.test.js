@@ -352,3 +352,45 @@ test('an unreadable or unparseable feed version is not outside the rollout', () 
     );
   }
 });
+
+test('a check that could not reach the feed, or ran out its deadline, is a network failure', () => {
+  const timedOut = new Error('The stable update check timed out after 60s.');
+  timedOut.code = channels.CHECK_TIMEOUT_CODE;
+  assert.equal(channels.classifyCheckFailure(timedOut), 'network');
+  // Electron's net module, which electron-updater requests through.
+  assert.equal(channels.classifyCheckFailure(new Error('net::ERR_INTERNET_DISCONNECTED')), 'network');
+  assert.equal(channels.classifyCheckFailure(new Error('net::ERR_NAME_NOT_RESOLVED')), 'network');
+  const refused = new Error('connect ECONNREFUSED 127.0.0.1:443');
+  refused.code = 'ECONNREFUSED';
+  assert.equal(channels.classifyCheckFailure(refused), 'network');
+});
+
+test('a feed that answered, or a build with no feed, is not blamed on the connection', () => {
+  // electron-updater's own wrapper for a 404 channel file: an unpublished channel.
+  const missing = new Error('Cannot find channel "beta.yml" update info: HttpError: 404');
+  missing.code = 'ERR_UPDATER_CHANNEL_FILE_NOT_FOUND';
+  assert.equal(channels.classifyCheckFailure(missing), 'other');
+  const serverError = new Error('500 Internal Server Error');
+  serverError.code = 'HTTP_ERROR_500';
+  assert.equal(channels.classifyCheckFailure(serverError), 'other');
+  assert.equal(
+    channels.classifyCheckFailure(new Error("The beta channel needs update_feed_base_url in the tier's client.toml")),
+    'other',
+  );
+});
+
+test('a disabled updater says which install it is, and a source install carries its update command', () => {
+  assert.deepEqual(channels.disabledStatus({ isPackaged: true, platform: 'linux', appPath: '/x' }), {
+    type: 'disabled',
+    reason: 'appimage-inactive',
+  });
+  assert.deepEqual(channels.disabledStatus({ isPackaged: false, platform: 'darwin', appPath: '/x' }), {
+    type: 'disabled',
+    reason: 'dev-build',
+  });
+  assert.deepEqual(channels.disabledStatus({ isPackaged: false, platform: 'linux', appPath: '/home/me/mngr/apps/minds' }), {
+    type: 'disabled',
+    reason: 'source-install',
+    updateCommand: '/home/me/mngr/apps/minds/scripts/install-linux.sh --version latest',
+  });
+});

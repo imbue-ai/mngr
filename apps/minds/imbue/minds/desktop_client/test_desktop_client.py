@@ -1433,7 +1433,7 @@ def test_post_login_overrides_return_to_while_consent_unanswered(tmp_path: Path)
 def test_backup_password_change_requires_auth(tmp_path: Path) -> None:
     client, _ = _create_test_client_with_stores(tmp_path)
     response = client.post("/_chrome/backup-password", json={"new_password": "x", "new_password_confirm": "x"})
-    assert response.status_code == 403
+    assert response.status_code == 401
 
 
 def test_backup_password_change_rejects_mismatched_confirmation(tmp_path: Path) -> None:
@@ -1452,7 +1452,23 @@ def test_backup_password_change_requires_a_signed_in_account(tmp_path: Path) -> 
     _authenticate_client(client, auth_store)
     response = client.post("/_chrome/backup-password", json={"new_password": "x", "new_password_confirm": "x"})
     assert response.status_code == 400
-    assert "Sign in" in response.get_json()["error"]
+    assert response.get_json()["reason"] == "NO_ACCOUNTS"
+
+
+def test_backup_password_change_does_not_ask_to_sign_in_when_the_account_list_could_not_be_read(
+    tmp_path: Path,
+) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    cli.is_auth_list_failing = True
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+
+    response = client.post("/_chrome/backup-password", json={"new_password": "x", "new_password_confirm": "x"})
+
+    assert response.status_code == 503
+    assert response.get_json()["reason"] == "ACCOUNTS_UNREADABLE"
+    assert not bundle_mirror_path(InstallationPaths(data_dir=tmp_path), "user-1").exists()
 
 
 def test_backup_password_change_wraps_the_dek_and_pushes_the_bundle(tmp_path: Path) -> None:
@@ -1601,16 +1617,38 @@ def test_help_assist_refuses_a_workspace_without_the_assist_skill(tmp_path: Path
     client, _ = _create_test_client_with_stores(tmp_path, mngr_caller=caller)
     response = client.post("/help/assist", json={"description": "it broke", "workspace_agent_id": str(AgentId())})
     assert response.status_code == 409
-    assert "agent-assist skill" in response.get_json()["error"]
+    assert response.get_json()["reason"] == "TOO_OLD"
     assert len(caller.calls) == 1
 
 
 def test_help_assist_reports_unreachable_workspace(tmp_path: Path) -> None:
-    """When the launch never reaches the machine (host down), we return 502 rather than guess, and start nothing."""
+    """When the launch never reaches the machine and this app cannot start workspaces, the 502 says so and keeps
+    mngr's account of why."""
     caller = RecordingMngrCaller(result=host_offline_exec_result())
     client, _ = _create_test_client_with_stores(tmp_path, mngr_caller=caller)
     response = client.post("/help/assist", json={"description": "it broke", "workspace_agent_id": str(AgentId())})
     assert response.status_code == 502
+    body = response.get_json()
+    assert body["reason"] == "UNREACHABLE"
+    assert body["detail"]
+    assert len(caller.calls) == 1
+
+
+def test_help_assist_starts_an_unreachable_workspace_and_reports_a_start_that_failed(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """A launch that cannot reach the workspace starts it rather than giving up; a start that fails is its own
+    reason, carrying the start's account, and no second launch is tried."""
+    caller = RecordingMngrCaller(result=host_offline_exec_result())
+    client, _ = _create_test_client_with_stores(
+        tmp_path, mngr_caller=caller, root_concurrency_group=root_concurrency_group
+    )
+    response = client.post("/help/assist", json={"description": "it broke", "workspace_agent_id": str(AgentId())})
+    assert response.status_code == 502
+    body = response.get_json()
+    assert body["reason"] == "START_FAILED"
+    # No discovered workspace here, so the start cannot find what to start.
+    assert "system-services agent" in body["detail"]
     assert len(caller.calls) == 1
 
 
@@ -1717,7 +1755,7 @@ def test_help_assist_tells_the_user_what_a_refusing_machine_said(tmp_path: Path)
 
     assert response.status_code == 502
     body = response.get_json()
-    assert body["error"] == "Couldn't start an agent in this workspace."
+    assert body["reason"] == "SPAWN_FAILED"
     assert body["detail"].startswith("Error: Unknown fields in agent_types.opencode")
     # The unrelated unreachable host is the first thing mngr prints and the last thing to blame.
     assert "outer SSH unreachable" not in body["detail"]

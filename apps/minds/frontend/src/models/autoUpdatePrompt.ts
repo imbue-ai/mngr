@@ -11,7 +11,8 @@ import m from "mithril";
 import { electronBridge } from "../electron-bridge";
 import { putAccountSettings } from "./accountSettings";
 import type { AccountSettingsWrite } from "./accountSettings";
-import type { SettingsOverview } from "./settings";
+import type { SettingsOverview, SettingsRequestFailure } from "./settings";
+import { SETTINGS_TOO_NEW_REASON, outcomeOf, settingsRequestFailure } from "./settings";
 
 export type AutoUpdatePromptDecision = "accepted" | "declined";
 
@@ -41,6 +42,8 @@ export function autoUpdatePromptTriggerFor(
 
 type FetchLike = typeof fetch;
 
+const SAVE_ANSWER_FAILURE = "Couldn't save your answer";
+
 /** What the prompt reads from the settings payload. */
 interface PromptSettings {
   decision: AutoUpdatePromptDecision | null;
@@ -50,7 +53,7 @@ interface PromptSettings {
 
 export class AutoUpdatePromptModel {
   isBusy = false;
-  error = "";
+  failure: SettingsRequestFailure | null = null;
   /** The update window picked in the prompt, starting from the saved one;
    * saved only by turning auto-update on. */
   startHour = 0;
@@ -191,7 +194,7 @@ export class AutoUpdatePromptModel {
    * A refused write keeps the prompt up with the reason. */
   async choose(decision: AutoUpdatePromptDecision, accountId: string): Promise<void> {
     this.isBusy = true;
-    this.error = "";
+    this.failure = null;
     this.redraw();
     try {
       const write: AccountSettingsWrite =
@@ -208,14 +211,12 @@ export class AutoUpdatePromptModel {
         this.decision = decision;
         this.shownTrigger = null;
       } else {
-        const data = (await response.json().catch(() => ({}))) as {
-          error?: string;
-        };
-        this.error =
-          data.error ?? `Could not save your choice (HTTP ${response.status}).`;
+        this.failure = settingsRequestFailure(SAVE_ANSWER_FAILURE, await outcomeOf(response), {
+          explainedReasons: ["EMPTY_WINDOW", SETTINGS_TOO_NEW_REASON],
+        });
       }
     } catch {
-      this.error = "Could not save your choice (network error).";
+      this.failure = settingsRequestFailure(SAVE_ANSWER_FAILURE, { status: 0, body: null });
     }
     this.isBusy = false;
     this.redraw();

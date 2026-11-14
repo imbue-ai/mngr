@@ -649,6 +649,12 @@ class UiWorkspaceUpdate(FrozenModel):
         description="What the machine, mngr, or the host start said about that failure, rendered apart from the "
         "sentence",
     )
+    dispatch_failure_code: str = Field(
+        default="",
+        description="Which failure that was (an UpdateDispatchOutcome or UpdateScheduleOutcome value, or DISPATCH_RAISED; "
+        "e.g. UNSUPPORTED for a workspace too old to update itself), for the surfaces that offer its remedy; '' "
+        "when none is recorded",
+    )
     success_note_version: str = Field(
         default="", description="Version the last successful run landed, for the dismissible row note"
     )

@@ -3,14 +3,24 @@
 // and the share panel's own model, which this load constructs.
 
 import m from "mithril";
-import { errorMessageFromBody, jsonFromText, readResponseBody } from "./errors";
-import type { RequestResult, ResponseBody } from "./errors";
+import {
+  TextResponseBody,
+  errorFromResponse,
+  errorFromSentenceResponse,
+  errorMessageFromBody,
+  isRequestFailureReportable,
+  jsonFromText,
+  readResponseBody,
+  reasonFromBody,
+} from "./errors";
+import type { RequestResult, ResponseBody, UserFacingError } from "./errors";
 import type {
   MachineSizeDimension,
   MachineSizeDraft,
   MachineSizeNumbers,
 } from "./machineSize";
 import { parseMachineSizeNumber } from "./machineSize";
+import { isReconnectNeeded, reconnectError } from "./reconnect";
 import { SharePanelModel } from "./sharePanel";
 import type { SharePanelModelOptions } from "./sharePanel";
 
@@ -28,6 +38,8 @@ export interface WorkspaceOptionsData {
   color: string;
   palette: Record<string, string>;
   is_stale: boolean;
+  /** Whether that error is an expired Imbue Cloud sign-in; false when not stale. */
+  is_provider_signed_out: boolean;
   is_account_owned_provider: boolean;
   /** The account an account-owned machine belongs to; '' when not account-owned or not known. */
   leased_owner_email: string;
@@ -198,6 +210,28 @@ export function machineSizeChangeBody(
   return Object.keys(body).length === 0 ? null : body;
 }
 
+/** Whether the draft fills at least one resizable field and every filled one
+ * is a valid size equal to the current one, i.e. it asks for the size the
+ * machine already has. */
+function isMachineSizeDraftUnchanged(
+  size: WorkspaceMachineSizeData,
+  draft: MachineSizeDraft,
+): boolean {
+  const filled = resizableMachineSizeDimensions(size).filter(
+    (dimension) => draft[dimension].trim() !== "",
+  );
+  return (
+    filled.length > 0 &&
+    filled.every((dimension) => {
+      const value = parseMachineSizeNumber(draft[dimension]);
+      const current = size[dimension];
+      return (
+        value !== null && current !== null && Math.round(current) === value
+      );
+    })
+  );
+}
+
 /** One user's identity record as the connector serves it (email only when verified). */
 export interface IdentityRecord {
   user_id: string;
@@ -240,6 +274,10 @@ export interface MachineSharingResponse {
    * next save or load sends it again), null while the workspace is
    * unpublished, absent from desktops that predate invitations. */
   grants_synced?: boolean | null;
+  /** Set when the share status could not be told apart from "not shared":
+   * UNREADABLE (Imbue Cloud or the accounts could not be read) or
+   * OWNER_SIGNED_OUT. `enabled` is then false but not known. */
+  publication_unknown_reason?: string | null;
   /** What the granter may learn about each open user or email grant, as Imbue
    * Cloud answered it on this operation's push. Null or absent when nothing was
    * pushed (unpublished, a failed push, a desktop or connector that predates
@@ -380,6 +418,21 @@ export async function defaultFetchJson(
   }
 }
 
+/** Our sentence for a resize refusal whose reason the route names; null
+ * for the fallback sentence. */
+function resizeRefusalSentence(reason: string | null): string | null {
+  switch (reason) {
+    case "SIZE_REFUSED":
+      return "This machine couldn't be resized to that size.";
+    case "PLAN_LIMIT":
+      return "Your plan doesn't have room for this size right now. Pick a smaller size.";
+    case "NOT_LINKED":
+      return "Link this workspace to your Imbue Cloud account before resizing its machine.";
+    default:
+      return null;
+  }
+}
+
 /** Load + action state for the Workspace settings panes. */
 export class WorkspaceOptionsModel {
   readonly agentId: string;
@@ -395,8 +448,23 @@ export class WorkspaceOptionsModel {
     "loading";
   /** Whether the read that says if the size can be changed is still in flight (Imbue Cloud). */
   isResizeOfferLoading = false;
-  loadErrorMessage = "";
-  resizeErrorMessage = "";
+  loadError: UserFacingError | null = null;
+  /** The load was refused because this window's login lapsed. */
+  isLoadReconnectNeeded = false;
+  /** Whether `loadError` asks for a bug report: not for a lapsed login or
+   * a load that got no answer. */
+  isLoadErrorReportable = true;
+  /** A resize refused for a reason the user can act on (the draft, another
+   * operation); drawn as plain helper text. */
+  resizeRefusal = "";
+  resizeError: UserFacingError | null = null;
+  /** Whether `resizeError` asks for a bug report: not for a refusal that
+   * says what to do (the plan's limit, a workspace with no account) or a
+   * request that got no answer. */
+  isResizeErrorReportable = true;
+  /** Whether the resize was refused because the workspace has no Imbue Cloud
+   * account linked, which the Account settings fix. */
+  isResizeAccountLinkNeeded = false;
   /** What the last resize did when nothing else on the page says it: a size recorded for a stopped machine's next start; "" when none. */
   resizeNotice = "";
   isResizeBusy = false;
@@ -408,14 +476,31 @@ export class WorkspaceOptionsModel {
   private cancelMachineSizeRefresh: (() => void) | null = null;
   private isDisposed = false;
 
-  renameErrorMessage = "";
+  /** A name refused for a reason the user can fix (empty, taken, invalid). */
+  renameRefusal = "";
+  renameError: UserFacingError | null = null;
+  /** The rename was refused because this window's login lapsed. */
+  isRenameReconnectNeeded = false;
+  /** Whether `renameError` asks for a bug report: not for a lapsed login or
+   * a request that got no answer. */
+  isRenameErrorReportable = true;
   isRenameSaving = false;
-  colorErrorMessage = "";
+  /** A color the route refused for a reason it names (a bad hex, a
+   * workspace it can't reach). */
+  colorRefusal = "";
+  colorError: UserFacingError | null = null;
+  /** Whether `colorError` asks for a bug report: not when no answer came. */
+  isColorErrorReportable = true;
   /** The latest color pick not yet confirmed saved, shown in place of the saved one; null when none. */
   pendingColor: string | null = null;
   lastSavedColor = "";
   private colorPickCount = 0;
-  accountErrorMessage = "";
+  accountError: UserFacingError | null = null;
+  /** The link change was refused because this window's login lapsed. */
+  isAccountReconnectNeeded = false;
+  /** Whether `accountError` asks for a bug report: not for a lapsed login or
+   * a request that got no answer. */
+  isAccountErrorReportable = true;
   isAccountBusy = false;
   destroyErrorMessage = "";
   isDestroyPending = false;
@@ -461,10 +546,12 @@ export class WorkspaceOptionsModel {
     );
     if (!result.ok) {
       this.status = "load_failed";
-      this.loadErrorMessage = errorMessageFromBody(
-        result.body,
-        `HTTP ${result.status}`,
-      );
+      this.isLoadReconnectNeeded = isReconnectNeeded(result);
+      this.isLoadErrorReportable =
+        !this.isLoadReconnectNeeded && isRequestFailureReportable(result);
+      this.loadError = this.isLoadReconnectNeeded
+        ? reconnectError(result)
+        : errorFromResponse("Couldn't load this workspace's settings", result);
       this.redrawImpl();
       return;
     }
@@ -589,6 +676,12 @@ export class WorkspaceOptionsModel {
     }
   }
 
+  private clearResizeError(): void {
+    this.resizeError = null;
+    this.isResizeErrorReportable = true;
+    this.isResizeAccountLinkNeeded = false;
+  }
+
   /**
    * Resize the machine to the draft. Resolves to whether the size was
    * recorded. A local machine that was running is restarted by the app and
@@ -598,16 +691,17 @@ export class WorkspaceOptionsModel {
   async resizeMachine(draft: MachineSizeDraft): Promise<boolean> {
     const size = this.machineSize;
     if (size === null) return false;
-    this.resizeErrorMessage = "";
+    this.resizeRefusal = "";
+    this.clearResizeError();
     this.resizeNotice = "";
     const draftError = machineSizeDraftError(size, draft);
     const body =
       draftError === null ? machineSizeChangeBody(size, draft) : null;
     if (body === null) {
-      this.resizeErrorMessage =
+      this.resizeRefusal =
         draftError ??
-        (isMachineSizePickedFromChoices(size)
-          ? "Pick a different size first."
+        (isMachineSizeDraftUnchanged(size, draft)
+          ? "That's already this machine's size."
           : "Enter a new size as whole numbers of at least 1.");
       this.redrawImpl();
       return false;
@@ -624,10 +718,21 @@ export class WorkspaceOptionsModel {
     );
     this.isResizeBusy = false;
     if (!result.ok) {
-      this.resizeErrorMessage = errorMessageFromBody(
-        result.body,
-        `Resize failed (HTTP ${result.status})`,
-      );
+      const reason = reasonFromBody(result.body);
+      if (reason === "OPERATION_IN_PROGRESS") {
+        this.resizeRefusal = errorMessageFromBody(result.body, "");
+      } else {
+        this.resizeError = errorFromResponse(
+          "Couldn't resize this machine",
+          result,
+          { plainReason: resizeRefusalSentence(reason) },
+        );
+        this.isResizeErrorReportable =
+          reason !== "PLAN_LIMIT" &&
+          reason !== "NOT_LINKED" &&
+          isRequestFailureReportable(result);
+        this.isResizeAccountLinkNeeded = reason === "NOT_LINKED";
+      }
       this.redrawImpl();
       return false;
     }
@@ -655,7 +760,8 @@ export class WorkspaceOptionsModel {
    */
   async restartMachineToApplySize(): Promise<boolean> {
     this.isRestartBusy = true;
-    this.resizeErrorMessage = "";
+    this.resizeRefusal = "";
+    this.clearResizeError();
     this.resizeNotice = "";
     this.redrawImpl();
     const result = await this.fetchJsonImpl(
@@ -668,10 +774,20 @@ export class WorkspaceOptionsModel {
     );
     this.isRestartBusy = false;
     if (!result.ok) {
-      this.resizeErrorMessage = errorMessageFromBody(
-        result.body,
-        `Could not restart the machine (HTTP ${result.status})`,
-      );
+      // A 409 is another operation on this workspace, which the route names.
+      const refusal =
+        result.status === 409 && !(result.body instanceof TextResponseBody)
+          ? errorMessageFromBody(result.body, "")
+          : "";
+      if (refusal !== "") {
+        this.resizeRefusal = refusal;
+      } else {
+        this.resizeError = errorFromResponse(
+          "Couldn't restart this machine",
+          result,
+        );
+        this.isResizeErrorReportable = isRequestFailureReportable(result);
+      }
       this.redrawImpl();
       return false;
     }
@@ -695,12 +811,13 @@ export class WorkspaceOptionsModel {
 
   async rename(newName: string): Promise<boolean> {
     const trimmed = newName.trim();
+    this.renameError = null;
     if (!trimmed) {
-      this.renameErrorMessage = "A workspace name is required.";
+      this.renameRefusal = "A workspace name is required.";
       this.redrawImpl();
       return false;
     }
-    this.renameErrorMessage = "";
+    this.renameRefusal = "";
     this.isRenameSaving = true;
     this.redrawImpl();
     const result = await this.fetchJsonImpl(
@@ -713,10 +830,17 @@ export class WorkspaceOptionsModel {
     );
     this.isRenameSaving = false;
     if (!result.ok) {
-      this.renameErrorMessage = errorMessageFromBody(
-        result.body,
-        `Rename failed (HTTP ${result.status})`,
-      );
+      const refusal = renameRefusalFor(result.status, result.body);
+      if (refusal !== null) {
+        this.renameRefusal = refusal;
+      } else {
+        this.isRenameReconnectNeeded = isReconnectNeeded(result);
+        this.renameError = this.isRenameReconnectNeeded
+          ? reconnectError(result)
+          : errorFromResponse("Couldn't rename this workspace", result);
+        this.isRenameErrorReportable =
+          !this.isRenameReconnectNeeded && isRequestFailureReportable(result);
+      }
       this.redrawImpl();
       return false;
     }
@@ -735,7 +859,8 @@ export class WorkspaceOptionsModel {
    * saved one.
    */
   async pickColor(normalizedHex: string): Promise<void> {
-    this.colorErrorMessage = "";
+    this.colorRefusal = "";
+    this.colorError = null;
     if (this.pendingColor === null && normalizedHex === this.lastSavedColor) {
       this.redrawImpl();
       return;
@@ -756,7 +881,16 @@ export class WorkspaceOptionsModel {
       this.lastSavedColor = normalizedHex;
       if (this.data) this.data = { ...this.data, color: normalizedHex };
     } else {
-      this.colorErrorMessage = colorErrorMessageFor(result.status, result.body);
+      const refusal = colorRefusalFor(result.body);
+      if (refusal !== null) {
+        this.colorRefusal = refusal;
+      } else {
+        this.colorError = errorFromResponse(
+          "Couldn't save this workspace's color",
+          result,
+        );
+        this.isColorErrorReportable = isRequestFailureReportable(result);
+      }
     }
     this.pendingColor = null;
     this.redrawImpl();
@@ -764,7 +898,7 @@ export class WorkspaceOptionsModel {
 
   async setAccount(accountId: string | null): Promise<boolean> {
     this.isAccountBusy = true;
-    this.accountErrorMessage = "";
+    this.accountError = null;
     this.redrawImpl();
     const result = await this.fetchJsonImpl(
       `/api/v1/workspaces/${encodeURIComponent(this.agentId)}`,
@@ -776,10 +910,17 @@ export class WorkspaceOptionsModel {
     );
     this.isAccountBusy = false;
     if (!result.ok) {
-      this.accountErrorMessage = errorMessageFromBody(
-        result.body,
-        `HTTP ${result.status}`,
-      );
+      this.isAccountReconnectNeeded = isReconnectNeeded(result);
+      this.accountError = this.isAccountReconnectNeeded
+        ? reconnectError(result)
+        : errorFromSentenceResponse(
+            accountId === null
+              ? "Couldn't unlink this workspace from its account"
+              : "Couldn't link this workspace to the account",
+            result,
+          );
+      this.isAccountErrorReportable =
+        !this.isAccountReconnectNeeded && isRequestFailureReportable(result);
       this.redrawImpl();
       return false;
     }
@@ -839,14 +980,29 @@ export class WorkspaceOptionsModel {
   }
 }
 
-export function colorErrorMessageFor(
-  status: number,
-  body: ResponseBody,
-): string {
-  const code = errorMessageFromBody(body, "");
-  switch (code) {
+/** The sentence for a name the user can fix: another workspace has it (the
+ * route names it as stored), or the route refused the name field itself. Both
+ * sentences are already plain. */
+function renameRefusalFor(status: number, body: ResponseBody): string | null {
+  if (status === 409)
+    return (
+      errorMessageFromBody(body, "") ||
+      "Another workspace already has this name. *Pick a different name.*"
+    );
+  const isNameField =
+    status === 400 &&
+    body !== null &&
+    !(body instanceof TextResponseBody) &&
+    body.field === "name";
+  return isNameField ? errorMessageFromBody(body, "") || null : null;
+}
+
+/** The sentence for a color the route refused with a code it names; null
+ * for any other failure. */
+function colorRefusalFor(body: ResponseBody): string | null {
+  switch (errorMessageFromBody(body, "")) {
     case "invalid_hex":
-      return "That hex value is not valid. Use #rrggbb or #rgb.";
+      return INVALID_HEX_SENTENCE;
     case "not_primary":
       return "This agent isn't a workspace's primary agent; color can't be set.";
     case "stale_provider":
@@ -854,9 +1010,12 @@ export function colorErrorMessageFor(
     case "host_unreachable":
       return "Could not reach the machine host. Try again in a moment.";
     default:
-      return code || `Save failed (HTTP ${status}).`;
+      return null;
   }
 }
+
+export const INVALID_HEX_SENTENCE =
+  "That hex value is not valid. Use #rrggbb or #rgb.";
 
 /** Lenient hex normalizer, mirroring workspace_color.normalize_workspace_color. */
 export function normalizeWorkspaceColorHex(raw: string): string | null {

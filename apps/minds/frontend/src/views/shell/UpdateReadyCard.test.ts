@@ -1,7 +1,8 @@
 // The downloaded-update offer: what it says, and which control does what.
 
 import { describe, expect, it } from "vitest";
-import { allText, attrsOf, collectVnodes, renderRoot, renderedText } from "../../testing";
+import { allText, attrsOf, collectVnodes, renderDeep, renderRoot, renderedText } from "../../testing";
+import type { AnyVnode } from "../../testing";
 import { UpdateReadyCard, type UpdateReadyCardAttrs } from "./UpdateReadyCard";
 
 /** The card as the plain macOS offer, with `overrides` picking the state under test. */
@@ -22,6 +23,10 @@ function card(overrides: Partial<UpdateReadyCardAttrs> = {}) {
 /** The card's clickable controls, which is every vnode carrying an onclick. */
 function controls(root: unknown) {
   return collectVnodes(root).filter((vnode) => typeof attrsOf(vnode).onclick === "function");
+}
+
+function offersBugReport(root: unknown): boolean {
+  return allText(renderDeep(root)).includes("Report a bug");
 }
 
 /** The held button an installing card shows in place of a live one. */
@@ -87,11 +92,39 @@ describe("the update-ready card", () => {
     const failed = card({
       installPolicy: "on-request",
       needsPassword: true,
-      error: "Installing the update failed: Command failed: pkexec",
+      error: {
+        message: "The update didn't install. It's still downloaded. Try again. If this persists, report a bug.",
+        details: "Installing the update failed: Command failed: pkexec",
+        isBugReportOffered: true,
+      },
     });
 
-    expect(renderedText(failed)).toContain("Installing the update failed: Command failed: pkexec");
-    expect(controls(failed)).toHaveLength(2);
+    // The main process's text is not on the visible line; it goes behind See details.
+    const notice = collectVnodes(failed).find(
+      (vnode) => attrsOf(vnode).id === "update-ready-install-error",
+    ) as AnyVnode;
+    expect(attrsOf(notice).error).toMatchObject({
+      message: "The update didn't install. It's still downloaded. Try again. If this persists, report a bug.",
+      details: "Installing the update failed: Command failed: pkexec",
+    });
+    // The sentence ends "report a bug", so the card carries the button that does it.
+    expect(offersBugReport(failed)).toBe(true);
+  });
+
+  it("offers no report for an install it could not confirm, whose sentence says to wait", () => {
+    const unconfirmed = card({
+      installPolicy: "on-request",
+      needsPassword: false,
+      error: {
+        message:
+          "Imbue Studio couldn't confirm the update started installing. " +
+          "If it hasn't restarted in a minute, press Install and restart to try again.",
+        details: "Installing the update failed: the updater never started installing it",
+        isBugReportOffered: false,
+      },
+    });
+
+    expect(offersBugReport(unconfirmed)).toBe(false);
   });
 
   it("holds the button and says what is happening while the install runs", () => {

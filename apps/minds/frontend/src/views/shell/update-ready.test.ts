@@ -170,7 +170,11 @@ describe("the update-ready card's state", () => {
       let changeCount = 0;
       await installUpdateReady(() => changeCount++);
 
-      expect(updateInstallError()).toBe("Installing the update failed: pkexec");
+      expect(updateInstallError()).toEqual({
+        message: "The update didn't install. It's still downloaded. Try again. If this persists, report a bug.",
+        details: "Installing the update failed: pkexec",
+        isBugReportOffered: true,
+      });
       expect(isUpdateInstalling()).toBe(false);
       // Once as the install starts, once as it settles.
       expect(changeCount).toBe(2);
@@ -211,10 +215,11 @@ describe("the update-ready card's state", () => {
       watchUpdateStatus(() => {});
       await settle();
       await installUpdateReady(() => {});
-      expect(updateInstallError()).toBe("Installing the update failed: pkexec");
+      const failure = updateInstallError();
+      expect(failure?.details).toBe("Installing the update failed: pkexec");
 
       push({ type: "update-downloaded", version: "0.3.14" });
-      expect(updateInstallError()).toBe("Installing the update failed: pkexec");
+      expect(updateInstallError()).toBe(failure);
 
       push({ type: "update-downloaded", version: "0.3.15" });
       expect(updateInstallError()).toBeNull();

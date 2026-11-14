@@ -23,6 +23,8 @@ imports from here except the route registration below, which the blueprint
 calls directly.
 """
 
+import json
+
 from flask import Blueprint
 from flask import Response
 from flask import request
@@ -49,6 +51,7 @@ from imbue.minds.desktop_client.ui_models import UiFolderSyncRow
 from imbue.minds.desktop_client.ui_models import UiFolderSyncToggleRequest
 from imbue.minds.desktop_client.ui_models import UiFolderSyncs
 from imbue.minds.errors import FolderSyncError
+from imbue.minds.errors import FolderSyncRecordMissingError
 from imbue.mngr.primitives import AgentId
 
 
@@ -238,6 +241,11 @@ def _handle_folder_sync_retry(agent_id: str) -> Response:
         return manager
     try:
         manager.retry(agent_id, retry_request.path)
+    except FolderSyncRecordMissingError as e:
+        # The pane offers the sync switch instead of a retry that cannot work.
+        return Response(
+            json.dumps({"error": str(e), "reason": "NO_SYNC_RECORD"}), status=409, mimetype="application/json"
+        )
     except FolderSyncError as e:
         return make_json_error_response(str(e), status_code=400)
     return json_response(build_permissions_payload(agent_id))

@@ -2,16 +2,20 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { UiWorkspaceUpdate, UiWorkspaceUpdatesMessage } from "../channel/messages";
 import {
   UpdatesStore,
+  bulkUpdateRefusal,
   devBuildTargetRef,
   displayVersion,
+  isDispatchFailureReportable,
   isFailureVerdict,
   isRunInFlight,
   isUpdateDispatchable,
   isUpdateOffered,
   scheduleSkipLine,
   plainScheduleTargetRef,
+  recordedDispatchFailure,
   scheduledLine,
   updateActivityNotice,
+  updateActionError,
   updateBadgeFor,
   updateRunOutcome,
 } from "./updates";
@@ -135,6 +139,34 @@ describe("UpdatesStore", () => {
 
     expect(result.isOk).toBe(false);
     expect(result.detail).toBe("Error: Unknown fields in agent_types.opencode");
+  });
+
+  it("names which refusal it was, so a too-old workspace can be offered its remedies", async () => {
+    const store = new UpdatesStore();
+    store.applyUpdatesMessage(message({ "agent-a": OUT_OF_DATE_UPDATE }));
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({ error: "This workspace is too old to update itself.", code: "UNSUPPORTED" }),
+          { status: 409 },
+        ),
+      ),
+    );
+
+    const result = await store.updateNow("agent-a");
+
+    expect(result.code).toBe("UNSUPPORTED");
+    expect(result.status).toBe(409);
+  });
+
+  it("says Imbue Studio didn't respond to a press that got no answer, without blaming the internet", async () => {
+    const store = new UpdatesStore();
+    store.applyUpdatesMessage(message({ "agent-a": OUT_OF_DATE_UPDATE }));
+    vi.stubGlobal("fetch", () => Promise.reject(new TypeError("Failed to fetch")));
+
+    const result = await store.updateNow("agent-a");
+
+    expect(result).toMatchObject({ isOk: false, status: 0, error: "Imbue Studio didn't respond. Try again in a moment." });
   });
 
   it("hands the optimistic lock over to the pushed state once a run is really in flight", async () => {
@@ -266,7 +298,12 @@ describe("a stopped machine's update state", () => {
     const store = storeWith(
       { "agent-a": "STOPPED", "agent-b": "STOPPED" },
       {
-        "agent-a": { ...OUT_OF_DATE_UPDATE, dispatch_failure: "Couldn't start this workspace.", verdict: "STUCK" },
+        "agent-a": {
+          ...OUT_OF_DATE_UPDATE,
+          dispatch_failure: "Couldn't start this workspace.",
+          dispatch_failure_code: "NOT_RUNNING",
+          verdict: "STUCK",
+        },
         "agent-b": { ...OUT_OF_DATE_UPDATE, availability: "NEEDS_RECREATION", is_scheduled: true },
       },
     );
@@ -276,6 +313,8 @@ describe("a stopped machine's update state", () => {
       tooltip: "Couldn't start this workspace.",
     });
     expect(store.publishedFor("agent-a")?.verdict).toBeUndefined();
+    // The code decides whether the failure asks for a bug report and which remedies it offers.
+    expect(recordedDispatchFailure(store.publishedFor("agent-a")!, false).code).toBe("NOT_RUNNING");
     expect(updateBadgeFor(store.publishedFor("agent-b"), false)?.state).toBe("needs-recreation");
     expect(store.publishedFor("agent-b")?.is_scheduled).toBeUndefined();
   });
@@ -582,6 +621,33 @@ describe("displayVersion", () => {
   });
 });
 
+describe("a refused bulk update", () => {
+  it("names the action that failed and keeps the route's words for the details", () => {
+    const refusal = bulkUpdateRefusal("schedule", {
+      isOk: false,
+      status: 500,
+      error: "HTTP 500",
+      detail: "",
+      code: "",
+    });
+
+    expect(refusal.isReconnectNeeded).toBe(false);
+    expect(refusal.error.message).toBe("Couldn't schedule these updates. Try again. If this persists, report a bug.");
+    expect(refusal.error.details).toContain("HTTP 500");
+    expect(bulkUpdateRefusal("now", { isOk: false, status: 503, error: "Updates are not available", detail: "", code: "" }).error.message).toBe(
+      "Couldn't start these updates. Try again. If this persists, report a bug.",
+    );
+  });
+
+  it("asks for a restart when this window's own login with the app has lapsed", () => {
+    const refusal = bulkUpdateRefusal("now", { isOk: false, status: 401, error: "Not authenticated", detail: "", code: "" });
+
+    expect(refusal.isReconnectNeeded).toBe(true);
+    expect(refusal.error.message).toBe("Imbue Studio needs to restart to reconnect this window.");
+    expect(refusal.error.details).toContain("Not authenticated");
+  });
+});
+
 describe("auto-update's quiet surfaces", () => {
   it("says nothing about a behind machine auto-update will arm itself, on the row or the titlebar", () => {
     // Behind and not armed yet: the next sweep arms it, and saying "Update
@@ -810,12 +876,48 @@ describe("the kernel fix action", () => {
 
     expect(refused).toEqual({
       isOk: false,
+      status: 409,
       error: "A chat is still working.",
       detail: "",
+      code: "",
       isForceOffered: true,
       runningChats: ["chat-one"],
     });
     expect(bodies).toEqual([JSON.stringify({ force: false })]);
+  });
+
+  it("shows a refusal the route worded as its own sentence, asking for no report", async () => {
+    const store = new UpdatesStore();
+    const inFlight = "An update is running in this workspace. Restart the machine once it finishes.";
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({ error: inFlight, code: "UPDATE_IN_FLIGHT", is_force_offered: false, running_chats: [] }),
+          { status: 409 },
+        ),
+      ),
+    );
+
+    const error = updateActionError(await store.applyKernelFix("agent-a"), "Couldn't restart this machine");
+
+    expect(error.message).toBe(inFlight);
+    expect(isDispatchFailureReportable(error.code)).toBe(false);
+  });
+
+  it("shows nothing but the status and the route's words when the route sent no detail", async () => {
+    const store = new UpdatesStore();
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(
+        new Response(JSON.stringify({ error: "No space left on device" }), { status: 500 }),
+      ),
+    );
+
+    const error = updateActionError(
+      await store.setAutoUpdateOverride("agent-a", null),
+      "Couldn't save the auto-update setting",
+    );
+
+    expect(error.detail).toBe("HTTP 500\nNo space left on device");
   });
 
   it("sends the go-ahead past the chats as a forced press", async () => {

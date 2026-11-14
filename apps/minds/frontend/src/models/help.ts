@@ -6,9 +6,15 @@
 // open_help channel message stages a pending launch here (via
 // setPendingHelpLaunch) before the shell routes to /help.
 
-import { defaultFetch, startAssistChat } from "./assistChat";
-import type { FetchLike } from "./assistChat";
-import { refusalDetailFromBody, routeSentenceFromBody } from "./errors";
+import {
+  assistChatError,
+  assistChatFailureReason,
+  defaultFetch,
+  startAssistChat,
+} from "./assistChat";
+import type { AssistChatFailureReason, FetchLike } from "./assistChat";
+import { bugReportTextFor } from "./errors";
+import type { UserFacingError } from "./errors";
 
 export interface HelpLaunchContext {
   workspaceAgentId: string;
@@ -161,9 +167,9 @@ export class HelpModel {
   isTranscriptIncluded = true;
   statusMessage: string | null = null;
   isStatusError = false;
-  agentErrorMessage = "";
-  /** The refusing machine's own words, shown under `agentErrorMessage`. */
-  agentErrorDetail = "";
+  /** Why the agent could not be started; set in the agent_error phase. */
+  agentError: UserFacingError | null = null;
+  agentErrorReason: AssistChatFailureReason | null = null;
   sentEventId: string | null = null;
   isAttachedDetailsOpen = false;
   isReportIdCopied = false;
@@ -283,11 +289,27 @@ export class HelpModel {
     return clipboard.writeText(text);
   }
 
+  /** Back to the form as a report, carrying the failed start with it. */
   backToReportFromError(): void {
+    if (this.agentError !== null) {
+      const failure = bugReportTextFor(this.agentError);
+      this.launch = {
+        ...this.launch,
+        errorDetails: this.launch.errorDetails
+          ? `${this.launch.errorDetails}\n\n${failure}`
+          : failure,
+      };
+    }
     this.phase = "form";
     this.mode = "report";
     this.isSubmitBusy = false;
     this.redraw();
+  }
+
+  /** Try the same agent start again from its error. */
+  async retryAgentHelp(): Promise<void> {
+    if (this.isSubmitBusy) return;
+    await this.submitAgentHelp(this.description.trim());
   }
 
   async submit(): Promise<void> {
@@ -325,17 +347,10 @@ export class HelpModel {
     if (outcome.ok) {
       // The chat exists and its tab already auto-opened in the workspace.
       this.close();
-    } else if (outcome.status === 0) {
-      this.phase = "agent_error";
-      this.agentErrorMessage = "Network error starting the agent.";
-      this.agentErrorDetail = "";
     } else {
       this.phase = "agent_error";
-      this.agentErrorMessage = routeSentenceFromBody(
-        outcome.body,
-        "Could not start an agent.",
-      );
-      this.agentErrorDetail = refusalDetailFromBody(outcome.body);
+      this.agentError = assistChatError(outcome);
+      this.agentErrorReason = assistChatFailureReason(outcome);
     }
     this.redraw();
   }

@@ -36,9 +36,24 @@ export interface UpdateStatus {
   feedVersion?: string | null;
   version?: string;
   message?: string;
+  /** On an `error`: a check that could not reach the feed (or ran out its
+   * deadline), a download of `version` that failed after a check found it, or
+   * anything else. Optional: a main process from before it lacks it. */
+  kind?: UpdateFailureKind;
+  /** On `disabled`: which install cannot update itself. */
+  reason?: UpdateDisabledReason;
+  /** On a `source-install` `disabled`: the command that updates this copy. */
+  updateCommand?: string;
   /** ISO-8601, carried on every status a settled check publishes. */
   lastCheckedAt?: string | null;
 }
+
+export type UpdateFailureKind = "network" | "download" | "other";
+
+export type UpdateDisabledReason =
+  | "source-install"
+  | "dev-build"
+  | "appimage-inactive";
 
 export interface PeekedChannel {
   /** What this channel serves right now; null when it is unreachable. */
@@ -220,6 +235,22 @@ export interface LaunchVersionChange {
 /** Why the main process could not install the staged update, or null when it is quitting into it. */
 export interface InstallUpdateOutcome {
   error: string | null;
+  /** "no-signal" when the install neither started nor reported an error, so
+   * it may still be under way; optional for a main process from before it. */
+  kind?: InstallFailureKind;
+}
+
+export type InstallFailureKind = "failed" | "no-signal";
+
+/** A staged update that did not install; `message` is the main process's own text. */
+export class InstallUpdateError extends Error {
+  readonly kind: InstallFailureKind;
+
+  constructor(message: string, kind: InstallFailureKind) {
+    super(message);
+    this.name = "InstallUpdateError";
+    this.kind = kind;
+  }
 }
 
 /** A workspace window to open in a desktop window of its own beside this one
@@ -437,14 +468,15 @@ export const electronBridge = {
     return (await native()?.checkForUpdates?.()) ?? null;
   },
   /**
-   * Rejects with the main process's own sentence when the install did not go
-   * through. Resolves only when the app is staying up after a successful
-   * install -- the quit was cancelled at the running-workspaces prompt; when
+   * Rejects with an InstallUpdateError when the install did not go through.
+   * Resolves only when the app is staying up after a successful install --
+   * the quit was cancelled at the running-workspaces prompt; when
    * the quit goes ahead the app exits and the call never settles.
    */
   async installUpdate(): Promise<void> {
     const outcome = await native()?.installUpdate?.();
-    if (outcome && outcome.error !== null) throw new Error(outcome.error);
+    if (outcome && outcome.error !== null)
+      throw new InstallUpdateError(outcome.error, outcome.kind ?? "failed");
   },
   onUpdateStatus(callback: (status: UpdateStatus) => void): void {
     native()?.onUpdateStatus?.(callback);

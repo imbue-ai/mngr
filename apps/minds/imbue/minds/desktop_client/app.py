@@ -45,7 +45,9 @@ from imbue.minds.desktop_client.api_transport import agent_label_from_environ
 from imbue.minds.desktop_client.api_transport import is_local_trusted_environ
 from imbue.minds.desktop_client.api_v1 import create_api_v1_blueprint
 from imbue.minds.desktop_client.assist_chat import ASSIST_SKILL_NAME
+from imbue.minds.desktop_client.assist_chat import AssistChatOutcome
 from imbue.minds.desktop_client.assist_chat import build_assist_chat_message
+from imbue.minds.desktop_client.assist_chat import launch_assist_chat_starting_its_workspace
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -146,7 +148,6 @@ from imbue.minds.desktop_client.settings.storage import load_settings_context
 from imbue.minds.desktop_client.sharing_handler import delete_share_for_host
 from imbue.minds.desktop_client.sign_in_browser import InstalledSignInBrowsers
 from imbue.minds.desktop_client.sign_in_browser import SignInBrowsersInterface
-from imbue.minds.desktop_client.skill_chat import SkillChatLaunchOutcome
 from imbue.minds.desktop_client.skill_chat import generate_chat_name
 from imbue.minds.desktop_client.skill_chat import launch_skill_chat
 from imbue.minds.desktop_client.state import DesktopClientState
@@ -476,10 +477,11 @@ def _handle_backup_password_change() -> Response:
     pushes the new bundle (plus any pending secrets) to the connector; clearing
     the password deletes the server bundle and scrubs the synced secrets.
     Workspace repositories are never touched. The response carries per-account
-    results for the Settings page to render inline.
+    results for the Settings page to render inline. A lapsed login answers 401,
+    which the Settings page reads as this window needing to reconnect.
     """
     if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+        return make_response(status_code=401, content='{"error":"Not authenticated"}', media_type="application/json")
     body = request.get_json(silent=True, force=True)
     if not isinstance(body, dict):
         return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
@@ -499,10 +501,26 @@ def _handle_backup_password_change() -> Response:
             status_code=400, content='{"error": "The two passwords do not match."}', media_type="application/json"
         )
     accounts = session_store.list_accounts()
+    if not accounts and session_store.is_last_identity_read_failed:
+        return make_response(
+            status_code=503,
+            content=json.dumps(
+                {
+                    "error": "Couldn't check which accounts are signed in. Try again in a moment.",
+                    "reason": "ACCOUNTS_UNREADABLE",
+                }
+            ),
+            media_type="application/json",
+        )
     if not accounts:
         return make_response(
             status_code=400,
-            content='{"error": "Sign in to an account first -- the master password protects synced account data."}',
+            content=json.dumps(
+                {
+                    "error": "Sign in to an account first -- the master password protects synced account data.",
+                    "reason": "NO_ACCOUNTS",
+                }
+            ),
             media_type="application/json",
         )
     record_store = session_store.record_store
@@ -744,10 +762,14 @@ def _handle_help_report() -> Response:
     )
 
 
-# Shown when the launch's exec never reached the machine, so nothing was started there.
-_MACHINE_UNREACHABLE_ERROR: Final[str] = (
-    "Couldn't reach this workspace to start an agent. It may be starting up or unavailable."
-)
+# What a failed assist launch says, by why it failed. The help page draws its own sentence from the
+# ``reason``; this one rides along for the details and a bug report.
+_ASSIST_FAILURE_MESSAGE_BY_OUTCOME: Final[dict[AssistChatOutcome, str]] = {
+    AssistChatOutcome.TOO_OLD: "This workspace can't start a helper agent yet. Update it, then try again.",
+    AssistChatOutcome.START_FAILED: "Couldn't start this workspace.",
+    AssistChatOutcome.UNREACHABLE: "Couldn't reach this workspace to start an agent.",
+    AssistChatOutcome.SPAWN_FAILED: "Couldn't start an agent in this workspace.",
+}
 
 
 def _handle_help_assist() -> Response:
@@ -755,78 +777,74 @@ def _handle_help_assist() -> Response:
 
     Only valid when the help flow was opened from a loaded workspace: the body carries that
     workspace's agent id and the user's description. One ``mngr exec`` into the workspace checks for the
-    ``/assist`` skill (409 if it lacks it, an older default workspace template; 502 if the exec cannot reach the
-    workspace) -- so we never spawn a chat that could only hang -- and then asks that workspace's chat app for a new
-    chat seeded with ``/assist <description>`` (through the template's ``message_chat.py --create``; a bare
-    ``mngr create`` on a template without it); the workspace's desktop opens its window. The chat runs on the
-    workspace's own default account, and a workspace with none signed in refuses the create in its own words,
-    which rides back in the 502 below. The call blocks until the create finishes so the get-help modal can hold
-    its "starting..." state until the chat exists, then returns 200 on success or 502 if the spawn failed.
+    ``/assist`` skill (409 if it lacks it, an older default workspace template) -- so we never spawn a chat
+    that could only hang -- and then asks that workspace's chat app for a new chat seeded with
+    ``/assist <description>`` (through the template's ``message_chat.py --create``; a bare ``mngr create`` on a
+    template without it); the workspace's desktop opens its window. A launch that cannot reach the workspace
+    starts it and launches again, as an update's dispatch does. The chat runs on the workspace's own default
+    account, and a workspace with none signed in refuses the create in its own words, which rides back in the
+    502 below. The call blocks until the create finishes so the get-help modal can hold its "starting..." state
+    until the chat exists, then returns 200 on success, or 409/502 with a ``reason`` naming the failure.
     """
     body = request.get_json(silent=True, force=True)
     if not isinstance(body, dict):
-        return make_response(
-            status_code=400, content='{"error": "Request body must be a JSON object"}', media_type="application/json"
+        return make_json_error_response(
+            "Couldn't start an agent in this workspace. Try again. If this persists, report a bug.", 400
         )
     description = str(body.get("description", "")).strip()
     if not description:
-        return make_response(
-            status_code=400, content='{"error": "A description is required"}', media_type="application/json"
-        )
+        return make_json_error_response("Describe what the agent should help with, then try again.", 400)
     workspace_agent_id_raw = str(body.get("workspace_agent_id", "")).strip()
     if not workspace_agent_id_raw:
-        return make_response(
-            status_code=400,
-            content='{"error": "Agent help is only available inside a workspace"}',
-            media_type="application/json",
+        return make_json_error_response(
+            "An agent can only help from inside a workspace. Open one, then try again.", 400
         )
     try:
         workspace_agent_id = AgentId(workspace_agent_id_raw)
     except ValueError:
-        return make_response(
-            status_code=400, content='{"error": "Invalid workspace_agent_id"}', media_type="application/json"
+        return make_json_error_response(
+            "Imbue Studio can't tell which workspace this is. Try again. If this persists, report a bug.", 400
         )
 
     state = get_state()
     mngr_caller = state.mngr_caller or get_default_mngr_caller()
-
-    # An unsupported or unreachable workspace gets a clear error the modal turns into a "report a
-    # bug instead" screen rather than a dead spinner. The launch blocks until the create finishes,
-    # so the modal keeps its "starting..." state until the chat exists rather than dismissing into
-    # a blank gap; the cheroot WSGI pool (50 threads) absorbs the blocking call.
-    launch = launch_skill_chat(
-        mngr_caller,
-        build_agent_address(workspace_agent_id, state.backend_resolver),
-        skill_name=ASSIST_SKILL_NAME,
-        chat_name=generate_chat_name(ASSIST_SKILL_NAME),
-        message=build_assist_chat_message(description),
+    root_concurrency_group = state.root_concurrency_group
+    # The launch blocks until the create finishes (and a stopped workspace has started), so the
+    # modal keeps its "starting..." state until the chat exists rather than dismissing into a blank
+    # gap; the server's thread pool absorbs the blocking call.
+    launch = launch_assist_chat_starting_its_workspace(
+        launch_chat=lambda: launch_skill_chat(
+            mngr_caller,
+            build_agent_address(workspace_agent_id, state.backend_resolver),
+            skill_name=ASSIST_SKILL_NAME,
+            chat_name=generate_chat_name(ASSIST_SKILL_NAME),
+            message=build_assist_chat_message(description),
+        ),
+        start_workspace=(
+            None
+            if root_concurrency_group is None
+            else lambda: perform_mind_host_action(
+                workspace_agent_id,
+                MindHostAction.START,
+                state.backend_resolver,
+                state.mngr_binary,
+                state.mngr_host_dir,
+                root_concurrency_group,
+                ui_publisher=state.ui_publisher,
+                health_tracker=state.system_interface_health_tracker,
+            )
+        ),
     )
-    match launch.outcome:
-        case SkillChatLaunchOutcome.STARTED:
-            return make_response(status_code=200, content=json.dumps({"ok": True}), media_type="application/json")
-        case SkillChatLaunchOutcome.UNSUPPORTED:
-            return make_response(
-                status_code=409,
-                content=json.dumps(
-                    {"error": "This workspace doesn't have the agent-assist skill, so an agent can't help here yet."}
-                ),
-                media_type="application/json",
-            )
-        case SkillChatLaunchOutcome.UNREACHABLE:
-            return make_response(
-                status_code=502,
-                content=json.dumps({"error": _MACHINE_UNREACHABLE_ERROR}),
-                media_type="application/json",
-            )
-        case SkillChatLaunchOutcome.SPAWN_FAILED:
-            # The same wall that stops an /assist chat stops every other agent
-            # here, so the machine's own refusal rides along when there was one.
-            body: dict[str, object] = {"error": "Couldn't start an agent in this workspace."}
-            if launch.failure_detail:
-                body["detail"] = launch.failure_detail
-            return make_response(status_code=502, content=json.dumps(body), media_type="application/json")
-        case _ as unreachable:
-            assert_never(unreachable)
+    if launch.outcome is AssistChatOutcome.STARTED:
+        return make_response(status_code=200, content=json.dumps({"ok": True}), media_type="application/json")
+    response_body: dict[str, object] = {
+        "error": _ASSIST_FAILURE_MESSAGE_BY_OUTCOME[launch.outcome],
+        "reason": launch.outcome.value,
+    }
+    if launch.failure_detail:
+        response_body["detail"] = launch.failure_detail
+    status_code = 409 if launch.outcome is AssistChatOutcome.TOO_OLD else 502
+    return make_response(status_code=status_code, content=json.dumps(response_body), media_type="application/json")
 
 
 def _build_ui_accounts_message(session_store: MultiAccountSessionStore | None) -> UiAccountsMessage:

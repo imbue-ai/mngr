@@ -80,6 +80,7 @@ from imbue.minds.desktop_client.mngr_command import extract_exec_failure_detail
 from imbue.minds.desktop_client.mngr_command import extract_exec_stdout
 from imbue.minds.desktop_client.mngr_command import run_mngr_to_completion
 from imbue.minds.errors import FolderSyncError
+from imbue.minds.errors import FolderSyncRecordMissingError
 from imbue.minds.errors import FolderSyncStoreError
 from imbue.minds.errors import MngrCommandError
 from imbue.mngr.primitives import AgentId
@@ -461,7 +462,7 @@ def _build_folder_sync_spec(
     """
     local_path = _expand_home(raw_local_path.strip(), home_dir)
     if not local_path.startswith("/"):
-        raise FolderSyncError(f"A folder to sync must be given as an absolute path: {raw_local_path}")
+        raise FolderSyncError("Pick a folder on this computer to sync.")
     resolved = Path(local_path)
     if not resolved.exists():
         raise FolderSyncError(f"There is nothing at {local_path} on this computer.")
@@ -879,13 +880,13 @@ class FolderSyncManager(MutableModel):
             if activity == FolderSyncActivity.ACTIVE:
                 return (
                     f"{other_path} is already synced with this workspace, and one folder is inside the "
-                    "other. Two syncs whose folders overlap would land on top of each other on the "
-                    "machine. Turn that one off first."
+                    "other. Two syncs whose folders overlap would land on top of each other in the "
+                    "workspace. Turn that one off first."
                 )
             return (
                 f"{other_path} is not syncing, but this workspace still holds a copy of it, and one "
-                "folder is inside the other. The two copies would land on top of each other on the "
-                "machine. Remove that copy first."
+                "folder is inside the other. The two copies would land on top of each other in the "
+                "workspace. Remove that copy first."
             )
         return None
 
@@ -984,12 +985,14 @@ class FolderSyncManager(MutableModel):
         that, said once: what was applied is forgotten, so the next pass has
         something to do.
 
-        Raises :class:`FolderSyncError` when nothing is known about the folder.
+        Raises :class:`FolderSyncRecordMissingError` when nothing is known about the folder.
         """
         key = _SyncKey(agent_id=agent_id, local_path=local_path)
         spec = self._known_spec_for(key) or self._spec_for_forgotten(agent_id, local_path)
         if spec is None:
-            raise FolderSyncError(f"Imbue Studio has no record of syncing {local_path}, so there is nothing to retry.")
+            raise FolderSyncRecordMissingError(
+                "This folder isn't set up to sync any more. Turn syncing on for it again."
+            )
         with self._lock:
             self._applied_by_key.pop(key, None)
             self._runs_by_key.pop(key, None)
@@ -1086,7 +1089,7 @@ class FolderSyncManager(MutableModel):
         """
         record = self._record_for(agent_id, local_path)
         if record is None:
-            raise FolderSyncError(f"{local_path} has no copy on this workspace's machine.")
+            raise FolderSyncError(f"{local_path} has no copy in this workspace.")
         if self.desired_activity_for(agent_id, local_path) == FolderSyncActivity.ACTIVE:
             raise FolderSyncError(f"{local_path} is still syncing; turn syncing off before deleting its copy.")
         self._set_desired(self._spec_for_record(record), FolderSyncActivity.DISCARDED)

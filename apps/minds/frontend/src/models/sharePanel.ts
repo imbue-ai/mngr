@@ -40,8 +40,14 @@ import type {
   VisitingAgentsResponse,
 } from "./workspaceOptions";
 import { RESOLVE_USER_URL, defaultFetchJson } from "./workspaceOptions";
-import { errorMessageFromBody } from "./errors";
-import type { RequestResult } from "./errors";
+import type { RequestOutcome, RequestResult, ResponseBody } from "./errors";
+import { TextResponseBody, reasonFromBody, responseDetails } from "./errors";
+import type { ShareFailure, SharingOperation } from "./shareFailures";
+import {
+  shareFailureFrom,
+  unknownPublicationFailure,
+  unreadableGrantListFailure,
+} from "./shareFailures";
 
 // Mirrors share_grant_validation.py, which the grants route runs over the same
 // entries.
@@ -69,28 +75,15 @@ function publicationMutationKey(coordinate: string): MutationKey {
   return [SHARING_QUERY_SCOPE, coordinate, "publication"];
 }
 
-/** A sharing route that answered with a failure, in its own words. */
+/** A sharing route that answered with a failure; the panel words its own
+ * sentence from the outcome. */
 export class SharingRequestError extends Error {
-  /** The in-app page that fixes a refusal with a structured code (the
-   * shared-workspaces page for a full share quota); "" otherwise. */
-  readonly remedyPath: string;
+  readonly outcome: RequestOutcome;
 
-  constructor(message: string, remedyPath = "") {
-    super(message);
-    this.remedyPath = remedyPath;
+  constructor(outcome: RequestOutcome) {
+    super(responseDetails(outcome));
+    this.outcome = outcome;
   }
-}
-
-/** The page a publish refusal points at, read from its body: the connector's
- * quota_exceeded refusal names the shared-workspaces page, where a leaked
- * share holding the slot is removed. */
-export function remedyPathFromBody(body: unknown): string {
-  if (body === null || typeof body !== "object") return "";
-  const record = body as Record<string, unknown>;
-  const path = record["shared_workspaces_path"];
-  return record["code"] === "quota_exceeded" && typeof path === "string"
-    ? path
-    : "";
 }
 
 /** One throw of the switch, as its mutation remembers it: the token by which
@@ -123,19 +116,17 @@ const INVITE_REFUSAL_MESSAGES: Record<string, string> = {
   grants_out_of_date:
     "The permissions have not reached Imbue Cloud yet. Try again in a moment.",
   not_invitable: "This person has already joined.",
-  not_published: "Publish this workspace before inviting anyone.",
+  not_published: "Turn on sharing before inviting anyone.",
+  no_workspace_link:
+    "This workspace's link isn't ready yet. Invite again in a minute.",
 };
 
-const INVITE_FAILURE_MESSAGE = "Could not invite";
 /** What the panel says when the route refuses: the workspace has no address to
  * send yet, whether because sharing is off or because it is still coming up.
  * Which of the two it is names an internal state, so the panel says neither. */
 const MOBILE_LINK_NO_ACCESS_POINT_MESSAGE =
-  "This workspace does not have a secure access point yet. If you've just " +
-  "enabled sharing and web access, please wait a few minutes before trying " +
-  "again.";
-
-const MOBILE_LINK_FAILURE_MESSAGE = "Could not send the email";
+  "This workspace's link isn't ready yet. If you've just turned on sharing, " +
+  "try again in a few minutes.";
 
 /** What the panel's mobile-link control is doing, as a single typed value so
  * exactly one of "idle", "in flight", "sent" and "refused" is ever on screen. */
@@ -145,7 +136,7 @@ export type MobileLinkState =
   /** Shown until the panel is loaded again, so the confirmation outlives the
    * redraw that follows the send. */
   | { readonly state: "sent"; readonly recipientEmail: string }
-  | { readonly state: "refused"; readonly message: string };
+  | { readonly state: "refused"; readonly failure: ShareFailure };
 /** What the visiting-agents section is doing about an invite: exactly one of
  * nothing, minting, holding a minted code, and refused is ever on screen. A
  * code carries the scope of the pane it was minted on (`target`), so only
@@ -161,17 +152,11 @@ export type VisitingAgentInviteState =
   | {
       readonly state: "refused";
       readonly target: string;
-      readonly message: string;
+      readonly failure: ShareFailure;
     };
 
 /** How far the visiting-agent list has got. */
 export type VisitingAgentsLoadState = "idle" | "loading" | "ready" | "failed";
-
-const VISITING_AGENT_INVITE_FAILURE_MESSAGE = "Could not create the invitation";
-const VISITING_AGENT_REVOKE_FAILURE_MESSAGE =
-  "Could not revoke the agent's access";
-const VISITING_AGENTS_LOAD_FAILURE_MESSAGE =
-  "Could not read the visiting agents";
 
 /** What a grant can be typed as, in the order the add row offers them. */
 export const GRANT_ADD_KINDS = ["email", "email_domain"] as const;
@@ -203,7 +188,10 @@ export type GrantStatus =
   | {
       readonly state: "failed";
       readonly failedOperation: GrantOperation;
-      readonly failureMessage: string;
+      readonly failure: ShareFailure;
+      /** Refused for the entry itself: sending it again is refused again, so
+       * the row offers Remove rather than Retry. */
+      readonly isRefused: boolean;
     };
 
 /** A row's name for itself, minted from the grantee it was created for. */
@@ -213,11 +201,7 @@ export type PublishWrite =
   | { readonly state: "idle" }
   | { readonly state: "publishing" }
   | { readonly state: "unpublishing" }
-  | {
-      readonly state: "failed";
-      readonly message: string;
-      readonly remedyPath: string;
-    };
+  | { readonly state: "failed"; readonly failure: ShareFailure };
 
 /** The workspace gateway's own bring-up report while the link is not live. */
 const GATEWAY_STATES = ["up", "retrying", "halted"] as const;
@@ -278,7 +262,7 @@ export type InviteState =
   | { readonly state: "inviting" }
   /** Said on the row at the moment of refusal, and never again after the
    * next invite or load (spec O5). */
-  | { readonly state: "refused"; readonly message: string };
+  | { readonly state: "refused"; readonly failure: ShareFailure };
 
 /** The one thing a grant's invitation status indicator shows, as a single typed value so exactly one
  * state is ever on screen (never a status and a stale button at once). The first invitation is
@@ -295,7 +279,7 @@ export type InvitationStatusIndicator =
   | { readonly kind: "could_not_invite"; readonly canReinvite: boolean }
   | {
       readonly kind: "refused";
-      readonly message: string;
+      readonly failure: ShareFailure;
       readonly canReinvite: boolean;
     }
   | {
@@ -315,8 +299,6 @@ interface GrantRefusal {
 /** The scope a refusal names for the workspace-level lists (share_grant_validation.py). */
 const WORKSPACE_GRANT_SCOPE = "workspace";
 
-const GRANT_SAVE_FAILURE_MESSAGE = "Could not save";
-
 export interface SharePanelModelOptions {
   hostId: string;
   /** The workspace id keying the sharing API; hostId is the legacy fallback. */
@@ -325,6 +307,10 @@ export interface SharePanelModelOptions {
   granterEmail: string;
   wholeService: string;
   appServices: string[];
+  /** The workspace's liveness (RUNNING, STOPPED...) as the workspaces list
+   * reports it, read when a failure is worded: a stopped workspace is offered
+   * a start. */
+  workspaceLiveness?: () => string;
   /** The apps the workspace calls system apps: targets like any other, but not
    * meant to be shared by default, so the nav keeps them under a closed group. */
   systemServices?: string[];
@@ -352,9 +338,13 @@ interface PendingRemoval {
   idx: number;
 }
 
+/** Why the panel's last load left something unknown. */
+type LoadProblem =
+  | { readonly kind: "request"; readonly outcome: RequestOutcome }
+  | { readonly kind: "grants_unknown" };
+
 export class SharePanelModel {
   loadStatus: ShareLoadStatus = "idle";
-  loadErrorMessage: string | null = null;
   machineUrl: string | null = null;
   isLive = false;
   isCertIssued = false;
@@ -367,6 +357,8 @@ export class SharePanelModel {
   /** The domain the share lived at before this session's load moved it to the
    * tier's current address; null when the share did not move. */
   migratedDomainFrom: string | null = null;
+  /** The link never answered within the readiness wait. */
+  isLinkDeadlinePassed = false;
   currentTarget: string;
   /** Merged from every sharing response and every resolved address. */
   identities: Record<string, IdentityRecord> = {};
@@ -436,13 +428,20 @@ export class SharePanelModel {
   // read on demand: listing them costs an exec into the workspace.
   private visitingAgents: VisitingAgentEntry[] = [];
   private visitingAgentsLoad: VisitingAgentsLoadState = "idle";
-  private visitingAgentsError: string | null = null;
+  private visitingAgentsFailure: ShareFailure | null = null;
   private visitingAgentInvite: VisitingAgentInviteState = { state: "idle" };
   private readonly revokingVisitingAgentIds = new Set<string>();
-  private visitingAgentRevokeError: string | null = null;
+  private visitingAgentRevokeProblem: ShareFailure | null = null;
   // A person is auto-invited once, when their grant first settles and the document has reached
   // Imbue Cloud; a later re-invite is the granter's own doing.
   private readonly autoInvitedKeys = new Set<GrantKey>();
+  private loadProblem: LoadProblem | null = null;
+  // Why the newest document could not say whether the workspace is shared;
+  // null when it could.
+  private publicationUnknownReason: string | null = null;
+  // A load moved the share to a new address but the workspace did not get
+  // it: the share is on, though no document could be read.
+  private isAddressMoveBroken = false;
   // Outcome reads are numbered as sent, like status requests, so an older
   // answer cannot overwrite a newer one.
   private outcomesRequestCount = 0;
@@ -505,16 +504,16 @@ export class SharePanelModel {
     return this.visitingAgentsLoad;
   }
 
-  get visitingAgentsLoadError(): string | null {
-    return this.visitingAgentsError;
+  get visitingAgentsLoadFailure(): ShareFailure | null {
+    return this.visitingAgentsFailure;
   }
 
   get visitingAgentInviteState(): VisitingAgentInviteState {
     return this.visitingAgentInvite;
   }
 
-  get visitingAgentRevokeErrorMessage(): string | null {
-    return this.visitingAgentRevokeError;
+  get visitingAgentRevokeFailure(): ShareFailure | null {
+    return this.visitingAgentRevokeProblem;
   }
 
   isRevokingVisitingAgent(agentId: string): boolean {
@@ -534,7 +533,7 @@ export class SharePanelModel {
 
   async reloadVisitingAgents(): Promise<void> {
     this.visitingAgentsLoad = "loading";
-    this.visitingAgentsError = null;
+    this.visitingAgentsFailure = null;
     this.redraw();
     const result = await this.fetchJson(`${this.shareApiBase()}/agents`);
     if (this.isDisposed) return;
@@ -543,9 +542,10 @@ export class SharePanelModel {
       this.visitingAgentsLoad = "ready";
     } else {
       this.visitingAgentsLoad = "failed";
-      this.visitingAgentsError = errorMessageFromBody(
-        result.body,
-        VISITING_AGENTS_LOAD_FAILURE_MESSAGE,
+      this.visitingAgentsFailure = shareFailureFrom(
+        "agents_load",
+        result,
+        this.failureContext(),
       );
     }
     this.redraw();
@@ -581,9 +581,10 @@ export class SharePanelModel {
       this.visitingAgentInvite = {
         state: "refused",
         target,
-        message: errorMessageFromBody(
-          result.body,
-          VISITING_AGENT_INVITE_FAILURE_MESSAGE,
+        failure: shareFailureFrom(
+          "agent_invite",
+          result,
+          this.failureContext(),
         ),
       };
     }
@@ -599,7 +600,7 @@ export class SharePanelModel {
   async revokeVisitingAgent(agentId: string): Promise<void> {
     if (this.revokingVisitingAgentIds.has(agentId)) return;
     this.revokingVisitingAgentIds.add(agentId);
-    this.visitingAgentRevokeError = null;
+    this.visitingAgentRevokeProblem = null;
     this.redraw();
     const result = await this.fetchJson(
       `${this.shareApiBase()}/agents/${encodeURIComponent(agentId)}`,
@@ -607,14 +608,17 @@ export class SharePanelModel {
     );
     if (this.isDisposed) return;
     this.revokingVisitingAgentIds.delete(agentId);
-    if (result.ok) {
+    // An agent the workspace no longer knows has no access left, which is
+    // what the revoke asked for.
+    if (result.ok || reasonFromBody(result.body) === "AGENT_GONE") {
       this.visitingAgents = this.visitingAgents.filter(
         (agent) => agent.agent_id !== agentId,
       );
     } else {
-      this.visitingAgentRevokeError = errorMessageFromBody(
-        result.body,
-        VISITING_AGENT_REVOKE_FAILURE_MESSAGE,
+      this.visitingAgentRevokeProblem = shareFailureFrom(
+        "agent_revoke",
+        result,
+        this.failureContext(),
       );
     }
     this.redraw();
@@ -632,20 +636,68 @@ export class SharePanelModel {
     const { status, variables, error } = latest.state;
     if (status === "pending")
       return { state: variables === true ? "publishing" : "unpublishing" };
-    if (status === "error")
+    if (status === "error") {
+      const operation: SharingOperation =
+        variables === true ? "publish" : "unpublish";
+      const outcome =
+        error instanceof SharingRequestError
+          ? error.outcome
+          : { status: 0, body: null };
       return {
         state: "failed",
-        message: error?.message ?? "Could not change sharing",
-        remedyPath:
-          error instanceof SharingRequestError ? error.remedyPath : "",
+        failure: shareFailureFrom(operation, outcome, this.failureContext()),
       };
+    }
     return { state: "idle" };
+  }
+
+  /** What the panel says about its last load: the read that failed, the
+   * grant list it could not read, or a publication it could not tell. */
+  get loadFailure(): ShareFailure | null {
+    const problem = this.loadProblem;
+    if (problem?.kind === "request")
+      return shareFailureFrom("load", problem.outcome, this.failureContext());
+    if (this.publicationUnknownReason !== null && !this.isPublishWriteInFlight)
+      return unknownPublicationFailure(this.publicationUnknownReason);
+    if (problem?.kind === "grants_unknown")
+      return unreadableGrantListFailure(
+        this.isPublished,
+        this.failureContext(),
+      );
+    return null;
+  }
+
+  /** Whether the workspace is stopped (or on its way there) by the workspaces
+   * list's reading. */
+  get isWorkspaceStopped(): boolean {
+    const liveness = this.options.workspaceLiveness?.() ?? "";
+    return liveness === "STOPPED" || liveness === "STOPPING";
+  }
+
+  /** Whether the grant list on screen is the workspace's own, so an empty one
+   * means nobody. */
+  get isGrantListKnown(): boolean {
+    return this.isGrantsListKnown;
+  }
+
+  private failureContext(): { isWorkspaceStopped: boolean } {
+    return { isWorkspaceStopped: this.isWorkspaceStopped };
+  }
+
+  /** Whether a link for the published workspace is being set up: not while
+   * a failed address move waits on Restart sharing, which nothing else retries. */
+  get isLinkBeingSetUp(): boolean {
+    return this.isPublished && !this.isLive && !this.isAddressMoveBroken;
   }
 
   /** Whether there is anything to draw the switch from: a document read or
    * shown from the cache, or a toggle whose direction is known. */
   get isPublicationKnown(): boolean {
-    return this.isPublishWriteInFlight || this.adoptedStatusSequence !== null;
+    if (this.isPublishWriteInFlight || this.isAddressMoveBroken) return true;
+    return (
+      this.adoptedStatusSequence !== null &&
+      this.publicationUnknownReason === null
+    );
   }
 
   /** Whether a document has arrived to draw the target pane from.
@@ -690,6 +742,11 @@ export class SharePanelModel {
 
   get wholeService(): string {
     return this.options.wholeService;
+  }
+
+  /** The workspace this panel shares, by its stable id. */
+  get workspaceAgentId(): string {
+    return this.options.agentId ?? this.options.hostId;
   }
 
   get appTargets(): string[] {
@@ -807,7 +864,7 @@ export class SharePanelModel {
     if (invite.state === "inviting") return { kind: "inviting" };
     const canReinvite = this.canInvite(target, grant);
     if (invite.state === "refused")
-      return { kind: "refused", message: invite.message, canReinvite };
+      return { kind: "refused", failure: invite.failure, canReinvite };
     const outcome = this.outcomeFor(target, grant);
     if (outcome === null) return { kind: "none" };
     if (outcome.kind === "joined")
@@ -870,8 +927,8 @@ export class SharePanelModel {
     return [
       { label: "Creating link", isDone: this.machineUrl !== null },
       { label: "Setting up encryption", isDone: this.isCertIssued },
-      { label: "Connecting to the relay", isDone: this.isTunnelConnected },
-      { label: "Verifying end to end", isDone: this.isLive },
+      { label: "Connecting this workspace", isDone: this.isTunnelConnected },
+      { label: "Checking the link works", isDone: this.isLive },
     ];
   }
 
@@ -904,6 +961,30 @@ export class SharePanelModel {
   /** Take the workspace's address away, keeping every grant it was admitting on. */
   async unpublish(): Promise<void> {
     await span("share_panel.unpublish", () => this.throwSwitch(false));
+  }
+
+  /** Turn sharing off and on again: what brings up a link that never came
+   * up, or one a moved address left behind. Stops at a failed turn-off. */
+  async republish(): Promise<void> {
+    await this.unpublish();
+    if (this.publishWrite.state === "failed") return;
+    this.isAddressMoveBroken = false;
+    await this.publish();
+  }
+
+  /** Throw the switch again the way the toggle that failed threw it. A read
+   * that failed alongside (the view hides it behind an unreachable
+   * workspace's toggle) is read again once the toggle goes through. */
+  async retryPublication(): Promise<void> {
+    const latest = this.latestPublicationMutation();
+    if (latest?.state.status !== "error") return;
+    if (latest.state.variables === true) await this.publish();
+    else await this.unpublish();
+    if (
+      this.publishWrite.state !== "failed" &&
+      this.loadStatus === "load_failed"
+    )
+      await this.load();
   }
 
   /** The toggle runs in the shared ledger, where every panel on this workspace
@@ -990,7 +1071,7 @@ export class SharePanelModel {
    */
   async load(): Promise<void> {
     await span("share_panel.load", async () => {
-      this.loadErrorMessage = null;
+      this.loadProblem = null;
       // A refusal is said once, at the moment it happened (spec O5).
       for (const [key, state] of this.inviteStateByKey)
         if (state.state === "refused") this.inviteStateByKey.delete(key);
@@ -1006,12 +1087,22 @@ export class SharePanelModel {
       const sequence = this.nextStatusSequence();
       const query = this.statusQuery.getCurrentQuery();
       const documentsBefore = query.state.dataUpdateCount;
+      const staleFailures = this.failedPublicationsFromEarlierPanels();
       const result = await this.statusQuery.refetch({ cancelRefetch: false });
       if (this.isDisposed) return;
       if (result.isError) {
         this.loadStatus = "load_failed";
-        this.loadErrorMessage =
-          "Could not load sharing status: " + result.error.message;
+        const outcome =
+          result.error instanceof SharingRequestError
+            ? result.error.outcome
+            : { status: 0, body: null };
+        this.loadProblem = { kind: "request", outcome };
+        // The move created the new share before the write into the workspace
+        // failed, so the share is on even though nothing could be read.
+        if (reasonFromBody(outcome.body) === "ADDRESS_MOVE_FAILED") {
+          this.isAddressMoveBroken = true;
+          this.isPublishedByDocument = true;
+        }
         this.redraw();
         return;
       }
@@ -1022,7 +1113,25 @@ export class SharePanelModel {
         query.state.dataUpdateCount === documentsBefore
       )
         return;
+      // A toggle that failed in a panel since closed no longer describes the
+      // workspace once a fresh read says where the switch stands. This panel's
+      // own failure stays, through the reads it runs in the background, until
+      // the user acts on it.
+      const mutationCache = this.queryClient.getMutationCache();
+      for (const mutation of staleFailures) mutationCache.remove(mutation);
       this.adoptLoadedDocument(result.data, sequence);
+    });
+  }
+
+  private failedPublicationsFromEarlierPanels(): Mutation[] {
+    return this.queryClient.getMutationCache().findAll({
+      mutationKey: this.publicationMutationKey,
+      exact: true,
+      status: "error",
+      predicate: (mutation) => {
+        const attempt = mutation.state.context;
+        return !isPublicationAttempt(attempt) || attempt.owner !== this;
+      },
     });
   }
 
@@ -1031,21 +1140,21 @@ export class SharePanelModel {
     data: MachineSharingResponse,
     sequence: StatusSequence,
   ): void {
-    if (data.grants === null) {
-      // A failed read of the workspace, not an empty policy.
-      this.loadStatus = "load_failed";
-      this.loadErrorMessage =
-        "Everyone granted access to this workspace still has it, but the list of who that is " +
-        "could not be loaded, so it cannot be edited right now.";
-    } else {
-      this.loadStatus = "ready";
-    }
     const isProvisioningElsewhere = this.isProvisioningInProgress;
     if (!this.adoptStatusDocument(data, sequence)) {
       this.redraw();
       return;
     }
-    if (data.grants === null) this.isGrantsListKnown = false;
+    // A null list is a failed read of the workspace, not an empty policy. A
+    // cached document drawn first may say otherwise; the fresh one decides.
+    if (data.grants === null) {
+      this.loadStatus = "load_failed";
+      this.loadProblem = { kind: "grants_unknown" };
+      this.isGrantsListKnown = false;
+    } else {
+      this.loadStatus = "ready";
+      this.loadProblem = null;
+    }
     this.adoptOrReadOutcomes(data);
     this.maybeAutoInviteGrantedPeople();
     const migratedDomainFrom = data.migrated_domain_from ?? null;
@@ -1205,18 +1314,27 @@ export class SharePanelModel {
           });
         return { state: "idle" };
       }
+      const sentence = INVITE_REFUSAL_MESSAGES[body.outcome];
       return {
         state: "refused",
-        message:
-          INVITE_REFUSAL_MESSAGES[body.outcome] ?? INVITE_FAILURE_MESSAGE,
+        failure:
+          sentence === undefined
+            ? shareFailureFrom(
+                "invite",
+                { status: result.status, body: { ...body } },
+                this.failureContext(),
+              )
+            : plainShareFailure(sentence),
       };
     }
     const code = refusalCodeOf(result.body);
-    const message =
-      code !== null && INVITE_REFUSAL_MESSAGES[code] !== undefined
-        ? INVITE_REFUSAL_MESSAGES[code]
-        : errorMessageFromBody(result.body, INVITE_FAILURE_MESSAGE);
-    return { state: "refused", message };
+    return {
+      state: "refused",
+      failure:
+        code !== null
+          ? plainShareFailure(INVITE_REFUSAL_MESSAGES[code], result)
+          : shareFailureFrom("invite", result, this.failureContext()),
+    };
   }
 
   /** What the mobile-link control is doing. */
@@ -1246,7 +1364,11 @@ export class SharePanelModel {
       { method: "POST", headers: { "Content-Type": "application/json" } },
     );
     if (this.isDisposed) return;
-    this.mobileLink = adoptMobileLinkAnswer(result, this.granterEmail);
+    this.mobileLink = adoptMobileLinkAnswer(
+      result,
+      this.granterEmail,
+      this.failureContext(),
+    );
     this.redraw();
   }
 
@@ -1333,6 +1455,7 @@ export class SharePanelModel {
    */
   private beginProvisioningWait(): void {
     this.isLive = false;
+    this.isLinkDeadlinePassed = false;
     this.migratedDomainFrom = null;
     this.isCertIssued = false;
     this.isTunnelConnected = false;
@@ -1399,8 +1522,11 @@ export class SharePanelModel {
         this.readinessTimerId = null;
         const elapsed = this.nowMs() - this.pollStartedAtMs;
         if (elapsed > READINESS_DEADLINE_MS) {
-          // Stop warning at the deadline rather than pretending failure forever.
-          this.markLive();
+          // A link that never answered is said to be not answering, never shown
+          // as ready; a wait for an app's label just stops.
+          if (this.isAwaitingLink) this.isLinkDeadlinePassed = true;
+          this.stopReadinessPolling();
+          this.redraw();
           return;
         }
         const result = await this.fetchJson(`${this.shareApiBase()}/readiness`);
@@ -1639,18 +1765,19 @@ export class SharePanelModel {
       if (refusals !== null && this.applyRefusals(refusals) > 0) {
         this.enqueueGrantsWrite();
       } else {
-        // A refusal body names entries, not a sentence for the row, so only a
-        // plain failure's own words are worth reporting.
-        const failureMessage =
+        // A refusal naming no row this panel can mark is not the entry's own
+        // fault, so the rows it carried can be tried again.
+        const failure =
           refusals === null
-            ? errorMessageFromBody(result.body, GRANT_SAVE_FAILURE_MESSAGE)
-            : GRANT_SAVE_FAILURE_MESSAGE;
+            ? shareFailureFrom("save", result, this.failureContext())
+            : plainShareFailure("Couldn't save this change.", result);
         this.markCarriedRows(carriedRows, {
           state: "failed",
           failedOperation: "add",
-          failureMessage,
+          failure,
+          isRefused: false,
         });
-        this.restoreRemovals(carriedRemovals, failureMessage);
+        this.restoreRemovals(carriedRemovals, failure);
       }
       this.redraw();
     });
@@ -1698,7 +1825,7 @@ export class SharePanelModel {
 
   private restoreRemovals(
     carried: Map<string, PendingRemoval[]>,
-    failureMessage: string,
+    failure: ShareFailure,
   ): void {
     for (const [target, removals] of carried) {
       const grants = this.mutableGrants(target);
@@ -1707,7 +1834,8 @@ export class SharePanelModel {
         removal.grant.status = {
           state: "failed",
           failedOperation: "remove",
-          failureMessage,
+          failure,
+          isRefused: false,
         };
         grants.splice(Math.min(removal.idx, grants.length), 0, removal.grant);
       }
@@ -1746,7 +1874,8 @@ export class SharePanelModel {
       grant.status = {
         state: "failed",
         failedOperation: "add",
-        failureMessage: refusal.message,
+        failure: plainShareFailure(refusal.message),
+        isRefused: true,
       };
       markedCount += 1;
     }
@@ -1789,6 +1918,8 @@ export class SharePanelModel {
   private adoptPublication(data: MachineSharingResponse): void {
     this.isPublishedByDocument = Boolean(data.enabled);
     this.machineUrl = data.url ?? null;
+    this.publicationUnknownReason = data.publication_unknown_reason ?? null;
+    this.isAddressMoveBroken = false;
   }
 
   /** The newest throw of this workspace's switch, from any panel, answered or
@@ -1839,10 +1970,7 @@ export class SharePanelModel {
 
   private async readStatusDocument(): Promise<MachineSharingResponse> {
     const result = await this.fetchJson(this.shareApiBase());
-    if (!result.ok)
-      throw new SharingRequestError(
-        errorMessageFromBody(result.body, `HTTP ${result.status}`),
-      );
+    if (!result.ok) throw new SharingRequestError(result);
     return result.body as MachineSharingResponse;
   }
 
@@ -1852,11 +1980,7 @@ export class SharePanelModel {
     const result = await this.fetchJson(this.shareApiBase(), {
       method: isPublishing ? "PUT" : "DELETE",
     });
-    if (!result.ok)
-      throw new SharingRequestError(
-        errorMessageFromBody(result.body, `HTTP ${result.status}`),
-        remedyPathFromBody(result.body),
-      );
+    if (!result.ok) throw new SharingRequestError(result);
     return result.body as MachineSharingResponse;
   }
 
@@ -2149,6 +2273,7 @@ function outcomesByKey(
 function adoptMobileLinkAnswer(
   result: RequestResult,
   granterEmail: string,
+  context: { isWorkspaceStopped: boolean },
 ): MobileLinkState {
   if (result.ok) {
     const body = result.body as MobileAccessLinkResponse;
@@ -2157,38 +2282,65 @@ function adoptMobileLinkAnswer(
         state: "sent",
         recipientEmail: body.recipient_email || granterEmail,
       };
-    return { state: "refused", message: MOBILE_LINK_FAILURE_MESSAGE };
+    return {
+      state: "refused",
+      failure: shareFailureFrom(
+        "mobile_link",
+        { status: result.status, body: { ...body } },
+        context,
+      ),
+    };
   }
   // Every refusal this route makes is one of the two 409s, and both mean the
   // same thing to a reader: there is no address to send yet.
   if (result.status === 409)
-    return { state: "refused", message: MOBILE_LINK_NO_ACCESS_POINT_MESSAGE };
+    return {
+      state: "refused",
+      failure: plainShareFailure(MOBILE_LINK_NO_ACCESS_POINT_MESSAGE, result),
+    };
   return {
     state: "refused",
-    message: errorMessageFromBody(result.body, MOBILE_LINK_FAILURE_MESSAGE),
+    failure: shareFailureFrom("mobile_link", result, context),
+  };
+}
+
+/** A failure whose sentence explains itself, with whatever the route said
+ * behind "See details". */
+function plainShareFailure(
+  message: string,
+  outcome: RequestOutcome | null = null,
+): ShareFailure {
+  return {
+    error: {
+      message,
+      details: outcome === null ? "" : responseDetails(outcome),
+    },
+    remedies: [],
+    isBugReportOffered: false,
   };
 }
 
 /** The ``error`` code of a refusal body, whatever route answered it, or null. */
-function errorCodeOf(body: unknown): string | null {
-  if (body === null || typeof body !== "object") return null;
-  const code = (body as { error?: unknown }).error;
+function errorCodeOf(body: ResponseBody): string | null {
+  if (body === null || body instanceof TextResponseBody) return null;
+  const code = body["error"];
   return typeof code === "string" && code !== "" ? code : null;
 }
 
 /** The refusal code of an invite the desktop answered with 409, or null. */
-function refusalCodeOf(body: unknown): string | null {
+function refusalCodeOf(body: ResponseBody): string | null {
   const code = errorCodeOf(body);
   return code !== null && code in INVITE_REFUSAL_MESSAGES ? code : null;
 }
 
 function grantRefusalsFrom(
   status: number,
-  body: unknown,
+  body: ResponseBody,
 ): GrantRefusal[] | null {
-  if (status !== 400 || body === null || typeof body !== "object") return null;
-  const record = body as { error?: unknown; refusals?: unknown };
-  if (record.error !== "grant_refused" || !Array.isArray(record.refusals))
+  if (status !== 400 || body === null || body instanceof TextResponseBody)
     return null;
-  return record.refusals as GrantRefusal[];
+  const refusals = body["refusals"];
+  if (body["error"] !== "grant_refused" || !Array.isArray(refusals))
+    return null;
+  return refusals as GrantRefusal[];
 }

@@ -1353,6 +1353,14 @@ class MachineSharingResponse(FrozenModel):
         default_factory=dict,
         description="Identity record per granted user id the desktop knows (absent ids render as the bare id)",
     )
+    publication_unknown_reason: str | None = Field(
+        default=None,
+        description=(
+            "Set when the share status could not be read (UNREADABLE) or the account that owns the workspace "
+            "is not signed in here (OWNER_SIGNED_OUT): ``enabled`` is then false but not known, and clients "
+            "must not draw the workspace as unshared"
+        ),
+    )
     grants_synced: bool | None = Field(
         default=None,
         description=(

@@ -64,6 +64,9 @@ def test_expect_success_raises_typed_quota_error_with_server_message() -> None:
         {
             "error": "Quota exceeded: this account allows 5 buckets and 5 are already in use.",
             "error_class": "ImbueCloudQuotaExceededError",
+            "code": "quota_exceeded",
+            "limit": 5,
+            "current": 5,
         },
         indent=2,
     )
@@ -72,6 +75,8 @@ def test_expect_success_raises_typed_quota_error_with_server_message() -> None:
         cli._expect_success(result, "bucket create")
     assert "allows 5 buckets" in str(exc_info.value)
     assert "bucket create" in str(exc_info.value)
+    # The cap and its use ride the error, so a caller can say them in its own words.
+    assert (exc_info.value.limit, exc_info.value.current) == (5.0, 5.0)
 
 
 def test_expect_success_raises_the_typed_plan_refusal_carrying_the_connectors_reason() -> None:

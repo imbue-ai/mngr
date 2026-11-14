@@ -487,7 +487,7 @@ def test_a_relative_folder_never_reaches_a_subprocess(
     tmp_path: Path,
     folder_sync_manager: FolderSyncManager,
 ) -> None:
-    with pytest.raises(FolderSyncError, match="absolute path"):
+    with pytest.raises(FolderSyncError, match="Pick a folder on this computer"):
         folder_sync_manager.start(
             agent_id=_AGENT_ID,
             raw_local_path="notes",

@@ -11,6 +11,13 @@ import type {
   UiWorkspaceUpdatesMessage,
   UpdateVerdict,
 } from "../channel/messages";
+import {
+  NO_RESPONSE_SENTENCE,
+  errorFromResponse,
+  isRequestFailureReportable,
+} from "./errors";
+import type { UserFacingError } from "./errors";
+import { isReconnectNeeded, reconnectError } from "./reconnect";
 
 /** The state for a machine the backend has said nothing about. Never "up to
  * date": silence is not a positive read. */
@@ -213,16 +220,86 @@ export function updateRunOutcome(update: UiWorkspaceUpdate | null): UpdateRunOut
   return "none";
 }
 
+/** Why an update did not go out: our sentence, what the machine, mngr, or
+ * the host start said, and which outcome it was ("" when none is named). */
+export interface UpdateDispatchError {
+  message: string;
+  detail: string;
+  code: string;
+}
+
 /** Why the last update asked for never went out, for a surface to show in
  * place of its own answer to a press, which is lost if the surface closed
  * while it waited. Empty while a new press is out: that press is the newer
  * question, and the old answer beside its spinner would read as its reply. */
-export function recordedDispatchFailure(
-  update: UiWorkspaceUpdate,
-  isUpdating: boolean,
-): { message: string; detail: string } {
-  if (isUpdating) return { message: "", detail: "" };
-  return { message: update.dispatch_failure ?? "", detail: update.dispatch_failure_detail ?? "" };
+export function recordedDispatchFailure(update: UiWorkspaceUpdate, isUpdating: boolean): UpdateDispatchError {
+  if (isUpdating) return { message: "", detail: "", code: "" };
+  return {
+    message: update.dispatch_failure ?? "",
+    detail: update.dispatch_failure_detail ?? "",
+    code: update.dispatch_failure_code ?? "",
+  };
+}
+
+/** The outcome code for a workspace too old to run the update itself. */
+export const TOO_OLD_DISPATCH_CODE = "UNSUPPORTED";
+
+/** The code a press that got no answer from Imbue Studio is shown with. */
+export const NO_RESPONSE_DISPATCH_CODE = "NO_RESPONSE";
+
+/** The code a press refused for this window's lapsed login is shown with: its
+ * remedy is restarting Imbue Studio. */
+export const RECONNECT_DISPATCH_CODE = "RECONNECT";
+
+/** The code a schedule refused because the workspace was not running. */
+export const NOT_RUNNING_SCHEDULE_CODE = "NOT_RUNNING";
+
+// Failures whose sentence names its own next step (wait, sign in, start the
+// workspace, try again in a moment, use the buttons beside it), so they offer
+// no bug report.
+const SELF_EXPLAINED_DISPATCH_CODES: ReadonlySet<string> = new Set([
+  "ALREADY_RUNNING",
+  "UPDATE_IN_FLIGHT",
+  "NEEDS_SIGN_IN",
+  TOO_OLD_DISPATCH_CODE,
+  "UNREACHABLE",
+  "UNCONFIRMED",
+  "NO_CRON",
+  NOT_RUNNING_SCHEDULE_CODE,
+  "DECISION_PENDING",
+  "INVALID_REF",
+  "NOTHING_TO_UPDATE",
+  "CANCEL_UNREACHED",
+  "SKIP_UNREACHED",
+  "EMPTY_WINDOW",
+  NO_RESPONSE_DISPATCH_CODE,
+  RECONNECT_DISPATCH_CODE,
+]);
+
+/** Whether a failed dispatch asks for a bug report. */
+export function isDispatchFailureReportable(code: string): boolean {
+  return !SELF_EXPLAINED_DISPATCH_CODES.has(code);
+}
+
+/**
+ * What a refused update press tells the user. A refusal the route marked with
+ * a code is worded by the route, with what the machine said behind "See
+ * details"; anything else (a lapsed login, no answer, a refusal with no
+ * sentence of ours) gets the app's sentence naming `whatFailed`, with the
+ * route's response behind "See details".
+ */
+export function updateActionError(result: UpdateActionResult, whatFailed: string): UpdateDispatchError {
+  if (result.code !== "") return { message: result.error, detail: result.detail, code: result.code };
+  if (result.status === 0)
+    return { message: NO_RESPONSE_SENTENCE, detail: "", code: NO_RESPONSE_DISPATCH_CODE };
+  const outcome = { status: result.status, body: { error: result.error, detail: result.detail } };
+  if (isReconnectNeeded(outcome)) {
+    const error = reconnectError(outcome);
+    return { message: error.message, detail: error.details, code: RECONNECT_DISPATCH_CODE };
+  }
+  // The press that failed is still on its surface to press again.
+  const error = errorFromResponse(whatFailed, outcome);
+  return { message: error.message, detail: error.details, code: "" };
 }
 
 /** The Updates tab's line about a run in flight, and whether it is still waiting. */
@@ -658,6 +735,7 @@ function updateShownWhileStopped(update: UiWorkspaceUpdate): UiWorkspaceUpdate |
     is_backup_configured: update.is_backup_configured,
     dispatch_failure: update.dispatch_failure,
     dispatch_failure_detail: update.dispatch_failure_detail,
+    dispatch_failure_code: update.dispatch_failure_code,
   };
 }
 
@@ -896,16 +974,39 @@ export class UpdatesStore {
 
 export interface UpdateActionResult {
   isOk: boolean;
+  /** The response's status; 0 when no response arrived. */
+  status: number;
   error: string;
   /** Verbatim output from the machine, mngr, or the host start, when any had
    * something to say (a config the machine's own mngr will not parse, say).
-   * Rendered apart from `error`, which stays a sentence: these are their words,
-   * not ours. */
+   * Kept behind "See details", apart from `error`, which stays a sentence:
+   * these are their words, not ours. */
   detail: string;
+  /** Which dispatch outcome a refusal was ("" when the route named none). */
+  code: string;
   /** A refusal a repeated press may go past, once the reader has said so. */
   isForceOffered?: boolean;
   /** The chats the refusal names as in the way, by agent name. */
   runningChats?: string[];
+}
+
+/** What a refused bulk press tells the user, and whether its remedy is
+ * restarting the app (this window's own login with it lapsed). */
+export function bulkUpdateRefusal(
+  kind: "now" | "schedule",
+  result: UpdateActionResult,
+): { error: UserFacingError; isReconnectNeeded: boolean; isBugReportOffered: boolean } {
+  const outcome = { status: result.status, body: { error: result.error, detail: result.detail } };
+  if (isReconnectNeeded(outcome))
+    return { error: reconnectError(outcome), isReconnectNeeded: true, isBugReportOffered: false };
+  return {
+    error: errorFromResponse(
+      kind === "now" ? "Couldn't start these updates" : "Couldn't schedule these updates",
+      outcome,
+    ),
+    isReconnectNeeded: false,
+    isBugReportOffered: isRequestFailureReportable(outcome),
+  };
 }
 
 async function postUpdateAction(url: string, body: Record<string, unknown>): Promise<UpdateActionResult> {
@@ -918,19 +1019,22 @@ async function postUpdateAction(url: string, body: Record<string, unknown>): Pro
       body: JSON.stringify(body),
     });
   } catch {
-    return { isOk: false, error: "The request failed (network error).", detail: "" };
+    return { isOk: false, status: 0, error: NO_RESPONSE_SENTENCE, detail: "", code: "" };
   }
-  if (response.ok) return { isOk: true, error: "", detail: "" };
+  if (response.ok) return { isOk: true, status: response.status, error: "", detail: "", code: "" };
   const payload = (await response.json().catch(() => null)) as {
     error?: string;
     detail?: string;
+    code?: string;
     is_force_offered?: boolean;
     running_chats?: string[];
   } | null;
   return {
     isOk: false,
+    status: response.status,
     error: payload?.error ?? `HTTP ${response.status}`,
     detail: payload?.detail ?? "",
+    code: payload?.code ?? "",
     isForceOffered: payload?.is_force_offered === true,
     runningChats: Array.isArray(payload?.running_chats) ? payload.running_chats.map(String) : [],
   };

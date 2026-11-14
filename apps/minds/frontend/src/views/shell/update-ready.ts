@@ -10,6 +10,9 @@ import {
   type UpdateState,
   type UpdateStatus,
 } from "../../electron-bridge";
+import { installFailure } from "../../models/appUpdates";
+import type { AppUpdateFailure } from "../../models/appUpdates";
+import { updateReadyCopy } from "./UpdateReadyCard";
 
 /** How the offer gets applied, which decides what the card promises. */
 export interface UpdateInstallTerms {
@@ -32,7 +35,7 @@ export function installTermsOf(state: UpdateState): UpdateInstallTerms {
 let readyVersion: string | null = null;
 let dismissedVersion: string | null = null;
 let installTerms: UpdateInstallTerms = INSTALL_ON_QUIT;
-let installError: string | null = null;
+let installError: AppUpdateFailure | null = null;
 let isInstalling = false;
 let isRegistered = false;
 
@@ -117,7 +120,10 @@ export async function installUpdateReady(onChange: () => void): Promise<void> {
   try {
     await electronBridge.installUpdate();
   } catch (error: unknown) {
-    installError = error instanceof Error ? error.message : String(error);
+    installError = installFailure(
+      error,
+      updateReadyCopy(installTerms.policy, installTerms.needsPassword).action,
+    );
   }
   isInstalling = false;
   onChange();
@@ -129,7 +135,7 @@ export function isUpdateInstalling(): boolean {
 }
 
 /** Why the last install from the card did not go through, or null. */
-export function updateInstallError(): string | null {
+export function updateInstallError(): AppUpdateFailure | null {
   return installError;
 }
 

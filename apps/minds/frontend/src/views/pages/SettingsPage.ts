@@ -6,7 +6,7 @@
 import m from "mithril";
 import { getAppContext } from "../../app-context";
 import { SettingsModel } from "../../models/settings";
-import { Notice } from "../components/Notice";
+import { ErrorNotice, restartAppActions } from "../components/ErrorDisplay";
 import { Spinner } from "../components/Spinner";
 import { SettingsSections } from "./settings/SettingsSections";
 
@@ -76,12 +76,20 @@ export function SettingsPage(): m.Component {
         ),
         model.overview !== null || !isPayloadNeeded
           ? m(SettingsSections, { model })
-          : model.isLoadFailed
-            ? m(
-                Notice,
-                { variant: "error" },
-                "Settings could not be loaded. Refresh to try again.",
-              )
+          : model.loadFailure !== null
+            ? m(ErrorNotice, {
+                id: "settings-load-error",
+                error: model.loadFailure.error,
+                actions: model.loadFailure.isReconnectNeeded
+                  ? restartAppActions()
+                  : [
+                      {
+                        label: "Try again",
+                        onclick: () => void model.load(),
+                      },
+                    ],
+                isBugReportOffered: model.loadFailure.isBugReportOffered,
+              })
             : m(
                 "div",
                 { class: "flex items-center gap-2 type-helper text-tertiary" },

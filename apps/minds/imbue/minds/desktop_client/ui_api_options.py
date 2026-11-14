@@ -36,6 +36,7 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
 from imbue.minds.desktop_client.connections.primitives import IMBUE_CLOUD_PROVIDER_NAME_PREFIX
 from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
+from imbue.minds.desktop_client.imbue_cloud_cli import IMBUE_CLOUD_AUTH_ERROR_CLASS
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.machine_size import ImbueCloudMachineQuotaUsage
@@ -114,6 +115,9 @@ class WorkspaceOptionsData(FrozenModel):
     color: str = Field(description="Stored color hex, or the default for label-less workspaces")
     palette: dict[str, str] = Field(description="Pickable palette swatches, name -> hex")
     is_stale: bool = Field(description="Whether the owning provider's last discovery poll errored")
+    is_provider_signed_out: bool = Field(
+        description="Whether that error is an expired Imbue Cloud sign-in, which signing in again fixes"
+    )
     is_account_owned_provider: bool = Field(
         description="Whether the workspace runs on an account-owned provider (the account's imbue_cloud instance or "
         "one of its connections), which fixes the account link"
@@ -344,8 +348,12 @@ def _handle_workspace_options_data(agent_id: str) -> Response:
     if not name:
         name = _recorded_workspace_name(session_store, agent_id)
 
-    errored_provider_names = {str(provider) for provider in backend_resolver.get_provider_errors()}
-    is_stale = info is not None and info.provider_name is not None and info.provider_name in errored_provider_names
+    error_by_provider_name = {
+        str(provider): error for provider, error in backend_resolver.get_provider_errors().items()
+    }
+    provider_error = (
+        error_by_provider_name.get(info.provider_name) if info is not None and info.provider_name is not None else None
+    )
     is_account_owned_provider = info is not None and is_account_synced_provider(
         str(info.provider_name or ""), get_state().connection_store
     )
@@ -367,7 +375,8 @@ def _handle_workspace_options_data(agent_id: str) -> Response:
         name=name,
         color=stored_color if stored_color is not None else DEFAULT_WORKSPACE_COLOR,
         palette=dict(WORKSPACE_PALETTE),
-        is_stale=is_stale,
+        is_stale=provider_error is not None,
+        is_provider_signed_out=provider_error is not None and provider_error.type_name == IMBUE_CLOUD_AUTH_ERROR_CLASS,
         is_account_owned_provider=is_account_owned_provider,
         leased_owner_email=_leased_owner_email(
             current_account, info.provider_name, accounts, get_state().connection_store

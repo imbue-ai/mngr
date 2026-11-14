@@ -131,6 +131,45 @@ describe("Studio settings' custom settings row", () => {
       window_end_hour: null,
     });
     expect(model.workspaceResettingId).toBeNull();
-    expect(allText(byId(draw(), "update-settings-custom"))).toContain("Settings storage is not configured");
+    const row = allText(byId(draw(), "update-settings-custom"));
+    expect(row).toContain(
+      "Couldn't put this workspace back on Studio settings. Try again. If this persists, report a bug.",
+    );
+    expect(row).toContain("See details");
+    expect(row).not.toContain("Settings storage is not configured");
+  });
+});
+
+describe("Studio settings' automatic updates switch", () => {
+  it("says the change wasn't saved, with the route's words behind See details, and leaves the switch as it was", async () => {
+    let writes = 0;
+    const { draw, model } = setup(() => {
+      writes += 1;
+      return Promise.resolve(jsonResponse({ error: "Could not save your settings: read-only file" }, 500));
+    });
+    const isEnabledBefore = model.overview?.is_auto_update_enabled;
+
+    await model.setAutoUpdateEnabled("local", true);
+
+    const failure = allText(byId(draw(), "auto-update-error-app"));
+    expect(failure).toContain("Couldn't save this change. Try again. If this persists, report a bug.");
+    expect(failure).toContain("Report a bug");
+    expect(failure).not.toContain("read-only file");
+    expect(model.overview?.is_auto_update_enabled).toBe(isEnabledBefore);
+
+    // Its Try again sends the same change again.
+    pressIn(byId(draw(), "auto-update-error-app") as AnyVnode, "Try again");
+    await settle();
+    expect(writes).toBe(2);
+  });
+
+  it("says Imbue Studio didn't respond when the change never got an answer", async () => {
+    const { draw, model } = setup(() => Promise.reject(new TypeError("Failed to fetch")));
+
+    await model.setAutoUpdateEnabled("local", true);
+
+    const failure = allText(byId(draw(), "auto-update-error-app"));
+    expect(failure).toContain("Couldn't save this change — Imbue Studio didn't respond. Try again in a moment.");
+    expect(failure).not.toContain("Report a bug");
   });
 });

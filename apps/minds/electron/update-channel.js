@@ -199,7 +199,61 @@ function isAlreadyStaged({ isUpdateAvailable, feedVersion }, downloadedVersion) 
   return Boolean(isUpdateAvailable) && downloadedVersion != null && feedVersion === downloadedVersion;
 }
 
+/** The `code` the updater stamps on a check it abandoned at its deadline. */
+const CHECK_TIMEOUT_CODE = 'ERR_UPDATE_CHECK_TIMEOUT';
+
+// Node's socket-level failures. Electron's `net` module, which electron-updater
+// requests through, reports its own as a `net::ERR_*` message instead.
+const NETWORK_ERROR_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ETIMEDOUT',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+]);
+
+/**
+ * What kind of failure a check (or the re-check before a download) threw:
+ * 'network' when the feed could not be reached at all or the check ran out its
+ * deadline, the one case the panel can blame on the connection; 'other' for
+ * everything else (an unpublished channel, a feed answering an error, a build
+ * with no feed configured).
+ */
+function classifyCheckFailure(err) {
+  const code = err && typeof err === 'object' ? err.code : undefined;
+  if (code === CHECK_TIMEOUT_CODE || NETWORK_ERROR_CODES.has(code)) {
+    return 'network';
+  }
+  const message = String((err && err.message) || err || '');
+  return message.includes('net::ERR_') || message === 'Request timed out' ? 'network' : 'other';
+}
+
+/**
+ * The `disabled` status for an install whose updater cannot run, saying which
+ * case it is: a Linux copy run from source (what the install script sets up),
+ * any other unpackaged dev run, or a packaged AppImage started without its
+ * file. A source install carries the command that updates it.
+ */
+function disabledStatus({ isPackaged, platform, appPath }) {
+  if (isPackaged) {
+    return { type: 'disabled', reason: 'appimage-inactive' };
+  }
+  if (platform === 'linux') {
+    return {
+      type: 'disabled',
+      reason: 'source-install',
+      updateCommand: `${path.join(appPath, 'scripts', 'install-linux.sh')} --version latest`,
+    };
+  }
+  return { type: 'disabled', reason: 'dev-build' };
+}
+
 module.exports = {
+  CHECK_TIMEOUT_CODE,
+  classifyCheckFailure,
+  disabledStatus,
   isAlreadyStaged,
   isOutsideRollout,
   normalizeChannel,

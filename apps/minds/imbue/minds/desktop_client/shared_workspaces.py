@@ -35,7 +35,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.share_materials_injection import clear_share_publication_from_agent
 from imbue.minds.desktop_client.sharing_handler import LISTED_SHARE_STATES
-from imbue.minds.desktop_client.sharing_handler import SharingError
+from imbue.minds.desktop_client.sharing_handler import connector_failure_error
 from imbue.minds.desktop_client.sharing_handler import describe_connector_failure
 from imbue.minds.desktop_client.sharing_handler import unpublish_workspace
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
@@ -163,7 +163,7 @@ def list_account_shared_workspaces(
     try:
         shares = cli.list_shares(account=account_email)
     except ImbueCloudCliError as exc:
-        raise SharingError(f"Could not list this account's shares: {describe_connector_failure(exc)}") from exc
+        raise connector_failure_error("Could not list this account's shares", exc) from exc
     records = session_store.record_store.list_records(user_id) if session_store.record_store is not None else []
     return build_shared_workspace_rows(
         shares,
@@ -219,13 +219,13 @@ def _delete_share_at_connector(
     try:
         share = cli.get_share_status(account=account_email, host_id=host_id)
     except ImbueCloudCliError as exc:
-        raise SharingError(f"Could not read this share's status: {describe_connector_failure(exc)}") from exc
+        raise connector_failure_error("Could not read this share's status", exc) from exc
     if share is None or share.state not in LISTED_SHARE_STATES:
         return
     try:
         cli.delete_share(account=account_email, host_id=host_id)
     except ImbueCloudCliError as exc:
-        raise SharingError(f"Could not remove this share: {describe_connector_failure(exc)}") from exc
+        raise connector_failure_error("Could not remove this share", exc) from exc
     if forward_identity is not None and share.workspace_id is not None:
         forward_identity.mark_unshared(share.workspace_id)
         forward_identity.request_sync()

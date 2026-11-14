@@ -1212,7 +1212,7 @@ def test_the_row_is_scheduled_exactly_as_the_workspaces_file_says(tmp_path: Path
         9 * 60,
         3 * 60,
     )
-    assert state.last_skip_reason == "Another update flow was working in this workspace during the last update window."
+    assert state.last_skip_reason == "An agent was already updating this workspace during the last update window."
 
     store.record_schedule(agent_id, schedule=None, last_dispatch=None, is_signed_in=None)
 

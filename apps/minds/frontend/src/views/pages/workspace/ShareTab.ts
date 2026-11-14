@@ -3,15 +3,38 @@
 // write: every control stays live while the model saves behind it.
 
 import m from "mithril";
+import { getAppContext } from "../../../app-context";
+import { AskAgentModel } from "../../../models/assistChat";
+import { recoveryRoute } from "../../../models/create";
+import type { ErrorAction, UserFacingError } from "../../../models/errors";
+import { fallbackErrorSentence, plainErrorText } from "../../../models/errors";
+import { showErrorDialog } from "../../../models/errorDialog";
+import type { ShareFailure, ShareRemedy } from "../../../models/shareFailures";
+import {
+  LINK_NOT_ANSWERING_ASSIST_DESCRIPTION,
+  UNREADABLE_SHARING_LIST_ASSIST_DESCRIPTION,
+} from "../../../models/shareFailures";
+import { webLogin } from "../../../models/webLogin";
 import { shareTargetIconMarkup } from "../../components/appIcon";
 import { Button } from "../../components/Button";
 import { Collapsible } from "../../components/Collapsible";
 import { FormLabel, Select, TextInput } from "../../components/FormControls";
 import { Icon16 } from "../../components/Icon";
+import { ErrorNotice } from "../../components/ErrorDisplay";
+import {
+  errorMark,
+  InlineError,
+  markedLine,
+  richErrorText,
+} from "../../components/errorDesign";
+import { remedyActions } from "../../components/errorRemedies";
+import {
+  AskAgentFailure,
+  askAgentActions,
+} from "../../components/AskAgentButton";
 import { CopyField } from "../../components/Layout";
 import { Modal } from "../../components/Modal";
 import { Notice } from "../../components/Notice";
-import { routeLinkAttrs } from "../../components/route-link";
 import { Skeleton, SkeletonRegion } from "../../components/Skeleton";
 import { Spinner } from "../../components/Spinner";
 import type {
@@ -75,6 +98,10 @@ const ADD_OFF_TOOLTIP = "Permissions cannot be granted while sharing is off";
 const ADD_UNKNOWN_TOOLTIP =
   "Permissions cannot be granted until the sharing status has loaded";
 
+const STATUS_UNCHECKED_TOOLTIP = "Sharing status couldn't be checked.";
+
+const LIST_UNREAD_LINE = "The list of who has access couldn't be read.";
+
 // The control is drawn only on the whole workspace's pane, because the message
 // carries that link and no app's. It is drawn whether or not sharing is on, so
 // a reader learns the feature exists and what switch turns it on.
@@ -92,7 +119,6 @@ const VISITING_AGENT_COPY_LABEL = "Copy the instructions";
 const VISITING_AGENT_DONE_LABEL = "Done";
 const VISITING_AGENT_REVOKE_LABEL = "Revoke";
 const VISITING_AGENTS_EMPTY = "No agents have been invited.";
-const VISITING_AGENTS_RETRY_LABEL = "Try again";
 const VISITING_AGENT_INSTRUCTIONS_LEAD =
   "Paste these instructions to the agent. The code works once and expires in fifteen minutes.";
 
@@ -160,6 +186,9 @@ export interface ShareTabAttrs {
 
 interface ShareTabLocalState {
   isConfirmOpen: boolean;
+  /** Each "Ask the agent to fix it" button's state, by the id of the notice
+   * it sits on, made on first use. */
+  askAgentByNotice: Map<string, AskAgentModel>;
   /** Whether the app pane's inherited-permissions group is expanded. */
   isInheritedOpen: boolean;
   /** Whether the nav's System group is expanded; null until the reader toggles
@@ -182,6 +211,7 @@ type ScheduleHandle = ReturnType<SharePanelModel["schedule"]>;
 export function ShareTab(): m.Component<ShareTabAttrs> {
   const local: ShareTabLocalState = {
     isConfirmOpen: false,
+    askAgentByNotice: new Map(),
     isInheritedOpen: false,
     isSystemOpen: null,
     copied: null,
@@ -215,6 +245,12 @@ function renderPublishWidget(
   local: ShareTabLocalState,
 ): m.Children {
   const publishWrite = share.publishWrite;
+  const publishFailure =
+    publishWrite.state === "failed" ? publishWrite.failure : null;
+  // A workspace that can't be reached fails both the publish and the read
+  // behind it, for one reason: the publish failure says so alone.
+  const loadFailure =
+    publishFailure?.isWorkspaceUnreachable === true ? null : share.loadFailure;
   return m(
     "section",
     { id: "ws-share-publish", class: "shrink-0 flex flex-col gap-2" },
@@ -232,36 +268,18 @@ function renderPublishWidget(
         ]),
       ]),
       m("p", { class: "type-body text-secondary" }, SHARING_SENTENCE),
-      share.isPublished && !share.isLive ? renderProvisioning(share) : null,
-      publishWrite.state === "failed"
-        ? m(
-            "p",
-            {
-              id: "ws-share-publish-error",
-              class: "type-helper text-important",
-            },
-            [
-              publishWrite.message,
-              publishWrite.remedyPath !== ""
-                ? [
-                    " ",
-                    m(
-                      "a",
-                      {
-                        id: "ws-share-publish-remedy",
-                        class: "underline",
-                        ...routeLinkAttrs(publishWrite.remedyPath),
-                      },
-                      "Review shared workspaces",
-                    ),
-                  ]
-                : null,
-            ],
-          )
-        : null,
-      share.loadErrorMessage === null
+      share.isLinkBeingSetUp ? renderProvisioning(share, local) : null,
+      publishFailure === null
         ? null
-        : m(Notice, { variant: "warn" }, share.loadErrorMessage),
+        : renderShareFailure(
+            share,
+            local,
+            "ws-share-publish-error",
+            publishFailure,
+          ),
+      loadFailure === null
+        ? null
+        : renderShareFailure(share, local, "ws-share-load-error", loadFailure),
       share.migratedDomainFrom === null
         ? null
         : m(
@@ -351,7 +369,33 @@ function renderConfirmDialog(
   );
 }
 
-function renderProvisioning(share: SharePanelModel): m.Children {
+function renderProvisioning(
+  share: SharePanelModel,
+  local: ShareTabLocalState,
+): m.Children {
+  if (share.isLinkDeadlinePassed)
+    return m(
+      "div",
+      { id: "ws-share-provisioning", class: "flex flex-col gap-2" },
+      [
+        m(ErrorNotice, {
+          id: "ws-share-link-not-answering",
+          error: { message: "This link still isn't answering.", details: "" },
+          actions: [
+            republishAction(share, "Try again"),
+            ...shareAskAgentActions(
+              share,
+              local,
+              "ws-share-link-not-answering",
+              LINK_NOT_ANSWERING_ASSIST_DESCRIPTION,
+            ),
+          ],
+          isBugReportOffered: true,
+          workspaceAgentId: share.workspaceAgentId,
+          footer: askAgentFailure(share, local, "ws-share-link-not-answering"),
+        }),
+      ],
+    );
   return m(
     "div",
     { id: "ws-share-provisioning", class: "flex flex-col gap-2" },
@@ -372,19 +416,19 @@ function renderProvisioning(share: SharePanelModel): m.Children {
 }
 
 function renderGatewayTrouble(share: SharePanelModel): m.Children {
-  // Gateway errors often end in their own period; do not add a second one.
-  const gatewayError = share.gatewayError?.replace(/\.\s*$/, "") ?? null;
+  const gatewayError = share.gatewayError ?? "";
   if (share.isProvisioningHalted) {
-    return m(
-      "p",
-      { id: "ws-share-gateway-trouble", class: "type-helper text-important" },
-      [
-        gatewayError
-          ? `The workspace could not set up its certificate or tunnel: ${gatewayError}. `
-          : "The workspace could not set up its certificate or tunnel. ",
-        "Turn sharing off and on again to retry.",
-      ],
-    );
+    return m(ErrorNotice, {
+      id: "ws-share-gateway-trouble",
+      error: {
+        message: fallbackErrorSentence(
+          "This workspace couldn't finish setting up its link",
+        ),
+        details: gatewayError,
+      },
+      actions: [republishAction(share, "Try again")],
+      isBugReportOffered: true,
+    });
   }
   if (share.gatewayState !== "retrying" || share.gatewayFailedAttemptCount < 1)
     return null;
@@ -394,18 +438,244 @@ function renderGatewayTrouble(share: SharePanelModel): m.Children {
         minute: "2-digit",
       })
     : null;
-  return m(
-    "p",
-    { id: "ws-share-gateway-trouble", class: "type-helper text-warning" },
-    [
-      gatewayError
-        ? `The last attempt failed: ${gatewayError}. `
-        : "The last attempt failed. ",
-      nextRetry
-        ? `The workspace retries at ${nextRetry}.`
-        : "The workspace will retry shortly.",
-    ],
-  );
+  // It retries on its own, so there is nothing to press and nothing to report.
+  return m(ErrorNotice, {
+    id: "ws-share-gateway-trouble",
+    error: {
+      message: nextRetry
+        ? `Setting up the link hit a problem. The workspace tries again at ${nextRetry}.`
+        : "Setting up the link hit a problem. The workspace tries again shortly.",
+      details: gatewayError,
+    },
+    tone: "warn",
+    isBugReportOffered: false,
+  });
+}
+
+/** Turn sharing off and on again, which brings a link up afresh. */
+function republishAction(share: SharePanelModel, label: string): ErrorAction {
+  return { label, onclick: () => void share.republish() };
+}
+
+/** The buttons a share failure offers, in the order it names them. */
+function shareRemedyActions(
+  share: SharePanelModel,
+  local: ShareTabLocalState,
+  noticeId: string,
+  remedies: readonly ShareRemedy[],
+  remedyPath = "",
+  onAskAgentFailed?: (
+    error: UserFacingError,
+    isBugReportOffered: boolean,
+  ) => void,
+): ErrorAction[] {
+  const agentId = share.workspaceAgentId;
+  const actions: ErrorAction[] = [];
+  for (const remedy of remedies) {
+    switch (remedy) {
+      case "retry":
+        actions.push({
+          label: "Try again",
+          onclick: () => void share.load(),
+        });
+        break;
+      case "retry_publication":
+        actions.push({
+          label: "Try again",
+          onclick: () => void share.retryPublication(),
+        });
+        break;
+      case "reload_visiting_agents":
+        actions.push({
+          label: "Try again",
+          onclick: () => void share.reloadVisitingAgents(),
+        });
+        break;
+      case "start_workspace":
+        actions.push({
+          label: "Start workspace",
+          // Recovery starts it and comes back here.
+          onclick: () =>
+            m.route.set(recoveryRoute(agentId, m.route.get() ?? "", "start")),
+        });
+        break;
+      case "update_workspace":
+        actions.push({
+          label: "Update workspace",
+          onclick: () => getAppContext().shell.openUpdatesTab(agentId),
+        });
+        break;
+      case "sign_in":
+        actions.push({
+          label: "Sign in",
+          onclick: () => void webLogin.start(),
+        });
+        break;
+      case "open_account_settings":
+        actions.push({
+          label: "Open account settings",
+          onclick: () =>
+            m.route.set(
+              `/workspace/${encodeURIComponent(agentId)}/options?tab=settings&group=account`,
+            ),
+        });
+        break;
+      case "restart_sharing":
+        actions.push(republishAction(share, "Restart sharing"));
+        break;
+      case "review_shared_workspaces":
+        if (remedyPath !== "")
+          actions.push({
+            label: "Review shared workspaces",
+            onclick: () => m.route.set(remedyPath),
+          });
+        break;
+      case "RESTART_APP":
+      case "UPDATE_APP":
+      case "ASK_AGENT":
+        actions.push(
+          ...remedyActions(remedy, {
+            askAgent: () =>
+              shareAskAgentActions(
+                share,
+                local,
+                noticeId,
+                UNREADABLE_SHARING_LIST_ASSIST_DESCRIPTION,
+                onAskAgentFailed,
+              ),
+          }),
+        );
+        break;
+    }
+  }
+  return actions;
+}
+
+/** "Ask the agent to fix it" on the notice `noticeId`, keeping its state per
+ * notice. `onFailed` shows a failed start where no notice draws it (a dialog
+ * that closed as the button was pressed); a notice draws it in its footer
+ * (askAgentFailure). */
+function shareAskAgentActions(
+  share: SharePanelModel,
+  local: ShareTabLocalState,
+  noticeId: string,
+  description: string,
+  onFailed?: (error: UserFacingError, isBugReportOffered: boolean) => void,
+): ErrorAction[] {
+  const model = askAgentModel(local, noticeId);
+  const workspaceAgentId = share.workspaceAgentId;
+  const actions = askAgentActions({
+    id: askAgentButtonId(noticeId),
+    model,
+    workspaceAgentId,
+    description,
+    label: "Ask the agent to fix it",
+  });
+  if (onFailed === undefined) return actions;
+  return actions.map((action) => ({
+    ...action,
+    onclick: () =>
+      void model.start({ workspaceAgentId, description }).then(() => {
+        if (model.error !== null)
+          onFailed(model.error, model.isFailureReportable);
+      }),
+  }));
+}
+
+function askAgentButtonId(noticeId: string): string {
+  return `${noticeId}-ask-agent`;
+}
+
+/** Why the agent asked for on the notice `noticeId` could not be started. */
+function askAgentFailure(
+  share: SharePanelModel,
+  local: ShareTabLocalState,
+  noticeId: string,
+): m.Children {
+  return m(AskAgentFailure, {
+    id: askAgentButtonId(noticeId),
+    model: askAgentModel(local, noticeId),
+    workspaceAgentId: share.workspaceAgentId,
+    isBoxed: false,
+  });
+}
+
+function askAgentModel(
+  local: ShareTabLocalState,
+  noticeId: string,
+): AskAgentModel {
+  let model = local.askAgentByNotice.get(noticeId);
+  if (model === undefined) {
+    model = new AskAgentModel({
+      onStarted: (agentId) => getAppContext().shell.enterWorkspace(agentId),
+    });
+    local.askAgentByNotice.set(noticeId, model);
+  }
+  return model;
+}
+
+/** A share failure in place: our sentence, the buttons that fit it, Report a
+ * bug when it asks for one, and the route's account behind See details. */
+function renderShareFailure(
+  share: SharePanelModel,
+  local: ShareTabLocalState,
+  id: string,
+  failure: ShareFailure,
+): m.Children {
+  return m("div", { class: "flex flex-col" }, [
+    m(ErrorNotice, {
+      id,
+      error: failure.error,
+      actions: shareRemedyActions(
+        share,
+        local,
+        id,
+        failure.remedies,
+        failure.remedyPath,
+      ),
+      isBugReportOffered: failure.isBugReportOffered,
+      workspaceAgentId: share.workspaceAgentId,
+      footer: failure.remedies.includes("ASK_AGENT")
+        ? askAgentFailure(share, local, id)
+        : null,
+    }),
+  ]);
+}
+
+/** The key a card's error dialog's buttons keep their state under. */
+const SHARE_FAILURE_DIALOG_ID = "ws-share-failure-dialog";
+
+/** A failure shown in a card too small for it, opened in the error dialog. */
+function openShareFailureDialog(
+  share: SharePanelModel,
+  local: ShareTabLocalState,
+  failure: ShareFailure,
+): void {
+  // The dialog closes as its button is pressed, so a failed agent start
+  // comes back as a dialog of its own, offering a report as AskAgentFailure
+  // does.
+  const showAskAgentFailure = (
+    error: UserFacingError,
+    isBugReportOffered: boolean,
+  ): void =>
+    showErrorDialog({
+      error,
+      isBugReportOffered,
+      workspaceAgentId: share.workspaceAgentId,
+    });
+  showErrorDialog({
+    error: failure.error,
+    actions: shareRemedyActions(
+      share,
+      local,
+      SHARE_FAILURE_DIALOG_ID,
+      failure.remedies,
+      failure.remedyPath,
+      showAskAgentFailure,
+    ),
+    isBugReportOffered: failure.isBugReportOffered,
+    workspaceAgentId: share.workspaceAgentId,
+  });
 }
 
 function renderTargetNav(
@@ -584,7 +854,7 @@ function renderTargetPane(
         : `Permissions below apply only to the ${targetTitle(share, target)} app.`,
     ),
     share.isPublished ? renderLinkSection(share, local) : null,
-    isWhole ? renderMobileLinkControl(share) : null,
+    isWhole ? renderMobileLinkControl(share, local) : null,
     renderAddRow(share),
     share.isGrantsSyncPending
       ? m(
@@ -593,7 +863,7 @@ function renderTargetPane(
           m(Notice, { variant: "warn" }, SYNC_PENDING_NOTICE),
         )
       : null,
-    share.isPublished || !hasAnyGrant(share)
+    share.isPublished || !share.isPublicationKnown || !hasAnyGrant(share)
       ? null
       : m(
           "div",
@@ -607,6 +877,17 @@ function renderTargetPane(
     renderGrantList(share, local),
     renderVisitingAgentsSection(share, local, target),
   ];
+}
+
+/** Why the add row (and the mobile-link button) cannot be used, for its
+ * tooltip. */
+function unavailableTooltip(share: SharePanelModel): string {
+  if (!share.isPublicationKnown)
+    return share.isCheckingPublication
+      ? ADD_UNKNOWN_TOOLTIP
+      : STATUS_UNCHECKED_TOOLTIP;
+  if (!share.isPublished) return ADD_OFF_TOOLTIP;
+  return LIST_UNREAD_LINE;
 }
 
 /**
@@ -666,9 +947,7 @@ function renderAddRow(share: SharePanelModel): m.Children {
     ? {}
     : {
         "aria-disabled": "true",
-        "data-tooltip": share.isPublicationKnown
-          ? ADD_OFF_TOOLTIP
-          : ADD_UNKNOWN_TOOLTIP,
+        "data-tooltip": unavailableTooltip(share),
       };
   return m("section", { id: "ws-share-add", class: "mt-6 shrink-0" }, [
     m(FormLabel, { target: "ws-share-add-value" }, "Grant permission to"),
@@ -734,12 +1013,9 @@ function renderAddRow(share: SharePanelModel): m.Children {
     row.refusalMessage === null
       ? null
       : m(
-          "p",
-          {
-            id: "ws-share-refusal",
-            class: "mt-1.5 type-helper text-important",
-          },
-          row.refusalMessage,
+          "div",
+          { id: "ws-share-refusal", class: "mt-1.5" },
+          m(InlineError, { message: row.refusalMessage }),
         ),
   ]);
 }
@@ -768,7 +1044,20 @@ function renderGrantList(
   const grants = share.grantsFor(share.currentTarget);
   const inherited =
     share.currentTarget === share.wholeService ? [] : share.inheritedGrants();
-  if (grants.length === 0 && inherited.length === 0)
+  if (grants.length === 0 && inherited.length === 0) {
+    // An unread list is not an empty one; with no document at all the pane
+    // says so, and with an unreadable list the notice above already does.
+    if (!share.isGrantListKnown)
+      return share.isSharingDocumentKnown
+        ? null
+        : m(
+            "p",
+            {
+              id: "ws-share-list-unread",
+              class: "mt-6 shrink-0 type-body text-tertiary",
+            },
+            LIST_UNREAD_LINE,
+          );
     return m(
       "p",
       {
@@ -780,6 +1069,7 @@ function renderGrantList(
       },
       "Nobody has been granted access yet.",
     );
+  }
   return m(
     "div",
     {
@@ -793,7 +1083,7 @@ function renderGrantList(
       ...(inherited.length === 0
         ? []
         : [renderInheritedGroup(share, local, inherited)]),
-      ...grants.map((grant) => renderGrantRow(share, grant)),
+      ...grants.map((grant) => renderGrantRow(share, local, grant)),
     ],
   );
 }
@@ -838,7 +1128,7 @@ function renderInheritedGroup(
         "ml-3 flex flex-col gap-1.5 border-l-2 border-strong pl-[10px]",
       summary: inheritedSummary(inherited.length),
     },
-    inherited.map((grant) => renderGrantRow(share, grant, false)),
+    inherited.map((grant) => renderGrantRow(share, local, grant, false)),
   );
 }
 
@@ -858,6 +1148,7 @@ function inheritedSummary(count: number): string {
  */
 function renderGrantRow(
   share: SharePanelModel,
+  local: ShareTabLocalState,
   grant: Grant,
   isOwned: boolean = true,
 ): m.Children {
@@ -937,8 +1228,8 @@ function renderGrantRow(
             // inherited row lines up with the pane's own rows below it.
             m("span", { class: "h-6 w-6 shrink-0" }),
       ]),
-      renderGrantDetails(share, grant, access, invitation),
-      renderInvitationRefusal(grant, invitation),
+      renderGrantDetails(share, local, grant, access, invitation),
+      renderInvitationRefusal(share, local, grant, invitation),
     ],
   );
 }
@@ -946,7 +1237,7 @@ function renderGrantRow(
 /** A row's surface: its kind's while sharing is on, and one flat grey for every
  * kind while it is off. */
 function rowSurfaceClass(share: SharePanelModel, isDomain: boolean): string {
-  if (!share.isPublished) return ROW_INACTIVE_CLASS;
+  if (share.isPublicationKnown && !share.isPublished) return ROW_INACTIVE_CLASS;
   return isDomain ? ROW_DOMAIN_CLASS : ROW_PERSON_CLASS;
 }
 
@@ -954,11 +1245,12 @@ function rowSurfaceClass(share: SharePanelModel, isDomain: boolean): string {
  * the card's own save state while it has one. */
 function renderGrantDetails(
   share: SharePanelModel,
+  local: ShareTabLocalState,
   grant: Grant,
   access: WorkspaceAccess | null,
   invitation: InvitationStatusIndicator,
 ): m.Children {
-  const pieces = grantDetailPieces(share, grant, access, invitation);
+  const pieces = grantDetailPieces(share, local, grant, access, invitation);
   if (pieces.length === 0) return null;
   // Each dot is bound to the fact after it, so a wrap never strands one at the
   // end of a line.
@@ -984,6 +1276,7 @@ function renderGrantDetails(
 
 function grantDetailPieces(
   share: SharePanelModel,
+  local: ShareTabLocalState,
   grant: Grant,
   access: WorkspaceAccess | null,
   invitation: InvitationStatusIndicator,
@@ -996,13 +1289,36 @@ function grantDetailPieces(
         SAVING_LABEL,
       ]),
     ];
-  if (status.state === "failed")
+  if (status.state === "failed") {
+    // A refused entry says why in its own words and is refused again if sent
+    // again, so the way out is to take it off; any other failure can be retried.
+    const label = status.isRefused
+      ? status.failure.error.message
+      : status.failedOperation === "add"
+        ? "Couldn't add"
+        : "Couldn't remove — still has access";
     return [
-      m("span", { class: "text-important" }, status.failureMessage),
-      textButton("Retry", () =>
-        share.retryGrant(share.currentTarget, grant.key),
+      m(
+        "span",
+        {
+          "data-grant-failure": grant.key,
+          class: "inline-flex items-baseline gap-[0.33em] text-important",
+          // A tooltip is a plain attribute: it carries the sentence, not its
+          // markup.
+          "data-tooltip": plainErrorText(status.failure.error.message),
+        },
+        [errorMark("1em"), label],
       ),
-    ];
+      seeFailureDetailsButton(share, local, status.failure),
+      status.isRefused
+        ? textButton("Remove", () =>
+            share.removeGrant(share.currentTarget, grant.key),
+          )
+        : textButton("Retry", () =>
+            share.retryGrant(share.currentTarget, grant.key),
+          ),
+    ].filter((piece) => piece !== null);
+  }
   const grantee = grant.grantee;
   // Nobody is told about a domain grant; the card admits people the granter
   // has never named.
@@ -1073,17 +1389,49 @@ function isReinviteOffered(state: InvitationStatusIndicator): boolean {
 /** A refusal is written as a sentence, so it gets a line of its own, where it
  * wraps rather than being cut short. */
 function renderInvitationRefusal(
+  share: SharePanelModel,
+  local: ShareTabLocalState,
   grant: Grant,
   state: InvitationStatusIndicator,
 ): m.Children {
   if (state.kind !== "refused") return null;
   return m(
-    "p",
-    {
-      "data-invite-refusal": grant.key,
-      class: CARD_DETAIL_CLASS + " text-important",
-    },
-    state.message,
+    "div",
+    { "data-invite-refusal": grant.key, class: CARD_DETAIL_CLASS },
+    markedLine(
+      { size: "helper", isInline: true },
+      withSeeDetails(
+        richErrorText(state.failure.error.message),
+        seeFailureDetailsButton(share, local, state.failure),
+      ),
+    ),
+  );
+}
+
+/** A sentence, then its "See details" when it has one. */
+function withSeeDetails(
+  sentence: m.Children,
+  seeDetails: m.Children,
+): m.Children {
+  return seeDetails === null ? sentence : [sentence, " ", seeDetails];
+}
+
+/** "See details" in a card, opening the failure whole in the error dialog,
+ * with its details and buttons; null when the sentence is all there is. */
+function seeFailureDetailsButton(
+  share: SharePanelModel,
+  local: ShareTabLocalState,
+  failure: ShareFailure,
+): m.Children {
+  const hasMore =
+    failure.error.details !== "" ||
+    failure.remedies.length > 0 ||
+    failure.isBugReportOffered;
+  if (!hasMore) return null;
+  return textButton(
+    "See details",
+    () => openShareFailureDialog(share, local, failure),
+    { "data-failure-details": "" },
   );
 }
 
@@ -1238,10 +1586,7 @@ function renderLinkSection(
       "div",
       { class: "mt-1.5 flex items-center gap-2" },
       url === null
-        ? m("div", { class: LINK_BOX_CLASS }, [
-            m(Spinner, { size: "sm", extra: "shrink-0" }),
-            "Preparing the link",
-          ])
+        ? renderLinkWait(share, local, target)
         : [
             m(CopyField, {
               value: url,
@@ -1283,16 +1628,74 @@ function renderLinkSection(
   ]);
 }
 
+/** What stands in the link's place while there is none to show: the wait
+ * while the link is being set up, and otherwise why there is none. */
+function renderLinkWait(
+  share: SharePanelModel,
+  local: ShareTabLocalState,
+  target: string,
+): m.Children {
+  if (share.isAwaitingLink || target === share.wholeService) {
+    if (share.isLinkDeadlinePassed)
+      return m(
+        "div",
+        { class: LINK_BOX_CLASS },
+        "The link isn't answering yet",
+      );
+    return m("div", { class: LINK_BOX_CLASS }, [
+      m(Spinner, { size: "sm", extra: "shrink-0" }),
+      "Preparing the link",
+    ]);
+  }
+  // An app registers its address when it first starts, so nothing here is
+  // under way: say what brings the link.
+  if (share.isWorkspaceStopped)
+    return m(
+      "div",
+      { id: "ws-share-app-no-link", class: "flex flex-col items-start gap-2" },
+      [
+        m(
+          "p",
+          { class: "type-body text-secondary" },
+          "Start this workspace to get this app's link.",
+        ),
+        ...shareRemedyActions(share, local, "ws-share-app-no-link", [
+          "start_workspace",
+        ]).map((action) =>
+          m(
+            Button,
+            { variant: "secondary", onclick: action.onclick },
+            action.label,
+          ),
+        ),
+      ],
+    );
+  return m(
+    "p",
+    { id: "ws-share-app-no-link", class: "type-body text-secondary" },
+    "This app gets its link the first time it starts. Open it in this workspace, then come back.",
+  );
+}
+
 /** The control that emails the signed-in account this workspace's link, and
  * the one line of status it leaves behind. */
-function renderMobileLinkControl(share: SharePanelModel): m.Children {
+function renderMobileLinkControl(
+  share: SharePanelModel,
+  local: ShareTabLocalState,
+): m.Children {
   // Dimmed the way the add row dims, so a control that cannot be pressed is
-  // legible as one without the reader having to hover for the tooltip.
+  // legible as one without the reader having to hover for the tooltip. The
+  // tooltip says why only when it is not this panel's own send in flight.
+  const offTooltip = !share.isPublicationKnown
+    ? STATUS_UNCHECKED_TOOLTIP
+    : share.isPublished
+      ? null
+      : MOBILE_LINK_OFF_TOOLTIP;
   const offAttrs = share.canSendMobileAccessLink
     ? {}
     : {
         "aria-disabled": "true",
-        "data-tooltip": MOBILE_LINK_OFF_TOOLTIP,
+        ...(offTooltip === null ? {} : { "data-tooltip": offTooltip }),
         extra: "opacity-40",
       };
   return m("div", { id: "ws-share-mobile-link", class: "mt-4 shrink-0" }, [
@@ -1306,11 +1709,15 @@ function renderMobileLinkControl(share: SharePanelModel): m.Children {
       },
       [m(Icon16, { name: "mail" }), MOBILE_LINK_LABEL],
     ),
-    renderMobileLinkStatus(share.mobileLinkState),
+    renderMobileLinkStatus(share, local, share.mobileLinkState),
   ]);
 }
 
-function renderMobileLinkStatus(state: MobileLinkState): m.Children {
+function renderMobileLinkStatus(
+  share: SharePanelModel,
+  local: ShareTabLocalState,
+  state: MobileLinkState,
+): m.Children {
   switch (state.state) {
     case "idle":
       return null;
@@ -1327,10 +1734,11 @@ function renderMobileLinkStatus(state: MobileLinkState): m.Children {
         `Sent to ${state.recipientEmail}`,
       );
     case "refused":
-      return m(
-        "p",
-        { class: "mt-1.5 type-helper text-important" },
-        state.message,
+      return renderShareFailure(
+        share,
+        local,
+        "ws-share-mobile-link-error",
+        state.failure,
       );
   }
 }
@@ -1386,11 +1794,12 @@ function renderVisitingAgentsSection(
           ? VISITING_AGENTS_WORKSPACE_SENTENCE
           : VISITING_AGENTS_APP_SENTENCE,
       ),
-      m("div", { class: "mt-3 flex items-center gap-2" }, [
+      m("div", { class: "mt-3 flex flex-col gap-2" }, [
         m(
           Button,
           {
             id: "ws-share-agents-invite",
+            extra: "self-start",
             variant: "secondary",
             "aria-disabled":
               inviteState.state === "minting" ? "true" : undefined,
@@ -1404,20 +1813,18 @@ function renderVisitingAgentsSection(
           ],
         ),
         inviteState.state === "refused" && inviteState.target === target
-          ? m(
-              "p",
-              {
-                id: "ws-share-agents-invite-error",
-                class: "type-helper text-important",
-              },
-              inviteState.message,
+          ? renderShareFailure(
+              share,
+              local,
+              "ws-share-agents-invite-error",
+              inviteState.failure,
             )
           : null,
       ]),
       inviteState.state === "minted" && inviteState.target === target
         ? renderVisitingAgentInstructions(share, local, inviteState)
         : null,
-      renderVisitingAgentList(share, isWhole),
+      renderVisitingAgentList(share, local, isWhole),
     ],
   );
 }
@@ -1488,6 +1895,7 @@ function renderVisitingAgentInstructions(
 
 function renderVisitingAgentList(
   share: SharePanelModel,
+  local: ShareTabLocalState,
   isWhole: boolean,
 ): m.Children {
   const loadState = share.visitingAgentsLoadState;
@@ -1504,31 +1912,12 @@ function renderVisitingAgentList(
       ],
     );
   }
-  if (loadState === "failed") {
-    // The read runs in the workspace, so a stopped one fails it; the control is
-    // how the list comes back once the workspace runs again.
+  const loadFailure = share.visitingAgentsLoadFailure;
+  if (loadState === "failed" && loadFailure !== null) {
     return m(
       "div",
-      {
-        id: "ws-share-agents-error",
-        class: "mt-3 flex items-center gap-2",
-      },
-      [
-        m(
-          "p",
-          { class: "min-w-0 type-helper text-important" },
-          share.visitingAgentsLoadError ?? "",
-        ),
-        m(
-          Button,
-          {
-            id: "ws-share-agents-retry",
-            variant: "secondary",
-            onclick: () => void share.reloadVisitingAgents(),
-          },
-          VISITING_AGENTS_RETRY_LABEL,
-        ),
-      ],
+      { class: "mt-3" },
+      renderShareFailure(share, local, "ws-share-agents-error", loadFailure),
     );
   }
   // The whole-workspace pane lists every agent; an app pane only those scoped to that app.
@@ -1537,7 +1926,7 @@ function renderVisitingAgentList(
       isWhole ||
       (Array.isArray(agent.scope) && agent.scope.includes(share.currentTarget)),
   );
-  const revokeError = share.visitingAgentRevokeErrorMessage;
+  const revokeFailure = share.visitingAgentRevokeFailure;
   return m(
     "div",
     { id: "ws-share-agents-list", class: "mt-3 flex flex-col gap-2" },
@@ -1545,15 +1934,13 @@ function renderVisitingAgentList(
       agents.length === 0
         ? m("p", { class: "type-helper text-tertiary" }, VISITING_AGENTS_EMPTY)
         : agents.map((agent) => renderVisitingAgentRow(share, agent)),
-      revokeError === null
+      revokeFailure === null
         ? null
-        : m(
-            "p",
-            {
-              id: "ws-share-agents-revoke-error",
-              class: "type-helper text-important",
-            },
-            revokeError,
+        : renderShareFailure(
+            share,
+            local,
+            "ws-share-agents-revoke-error",
+            revokeFailure,
           ),
     ],
   );

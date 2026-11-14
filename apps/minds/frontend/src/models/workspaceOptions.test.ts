@@ -6,10 +6,10 @@ import {
   errorMessageFromBody,
   reasonFromBody,
 } from "./errors";
-import type { RequestResult } from "./errors";
+import type { RequestResult, ResponseBody } from "./errors";
 import {
+  INVALID_HEX_SENTENCE,
   WorkspaceOptionsModel,
-  colorErrorMessageFor,
   defaultFetchJson,
   formatPendingMachineSize,
   machineSizeChangeBody,
@@ -131,6 +131,8 @@ describe("defaultFetchJson", () => {
 
 const OWNER = "owner@example.com";
 
+type FetchResult = RequestResult;
+
 interface RecordedRequest {
   url: string;
   method: string;
@@ -177,6 +179,7 @@ describe("WorkspaceOptionsModel", () => {
             color: "#0b292b",
             palette: { confusion: "#0b292b" },
             is_stale: false,
+            is_provider_signed_out: false,
             is_account_owned_provider: false,
             leased_owner_email: "",
             has_account: true,
@@ -228,22 +231,82 @@ describe("WorkspaceOptionsModel", () => {
     expect(model.share?.wholeService).toBe("system_interface");
   });
 
-  it("rename requires a non-empty name and surfaces server errors", async () => {
-    const stub = makeFetchStub(() => ({
-      ok: false,
-      status: 409,
-      body: { error: "name taken" },
-    }));
+  it("tells a load the window's login lapsed on apart from one that failed", async () => {
+    const answers = [
+      { ok: false, status: 401, body: { error: "Not authenticated" } },
+      { ok: false, status: 404, body: { error: "Unknown workspace" } },
+      {
+        ok: false,
+        status: 0,
+        body: { error: "Could not reach the app server." },
+      },
+    ];
+    const stub = makeFetchStub(() => answers.shift() as FetchResult);
+    const model = new WorkspaceOptionsModel("agent-" + "d".repeat(32), {
+      fetchJson: stub.fetchJson,
+      redraw: () => undefined,
+    });
+
+    await model.load();
+    expect(model.isLoadReconnectNeeded).toBe(true);
+    expect(model.loadError?.message).toBe(
+      "Imbue Studio needs to restart to reconnect this window.",
+    );
+    expect(model.isLoadErrorReportable).toBe(false);
+
+    await model.load();
+    expect(model.isLoadReconnectNeeded).toBe(false);
+    expect(model.loadError?.message).toBe(
+      "Couldn't load this workspace's settings. Try again. If this persists, report a bug.",
+    );
+    expect(model.loadError?.details).toContain("Unknown workspace");
+    expect(model.isLoadErrorReportable).toBe(true);
+
+    // The sentence already says to try again in a moment: no report asked for.
+    await model.load();
+    expect(model.loadError?.message).toBe(
+      "Imbue Studio didn't respond. Try again in a moment.",
+    );
+    expect(model.isLoadErrorReportable).toBe(false);
+  });
+
+  it("rename names a fixable refusal plainly and keeps a failure's output behind the details", async () => {
+    const answers = [
+      {
+        ok: false,
+        status: 409,
+        body: {
+          error:
+            "A workspace named 'new-name' already exists. Pick a different name.",
+        },
+      },
+      {
+        ok: false,
+        status: 502,
+        body: { error: "Failed to rename workspace host: mngr: boom" },
+      },
+    ];
+    const stub = makeFetchStub(() => answers.shift() as FetchResult);
     const model = new WorkspaceOptionsModel("agent-" + "c".repeat(32), {
       fetchJson: stub.fetchJson,
       redraw: () => undefined,
     });
 
     expect(await model.rename("   ")).toBe(false);
-    expect(model.renameErrorMessage).toContain("required");
+    expect(model.renameRefusal).toContain("required");
 
     expect(await model.rename("new-name")).toBe(false);
-    expect(model.renameErrorMessage).toBe("name taken");
+    expect(model.renameRefusal).toBe(
+      "A workspace named 'new-name' already exists. Pick a different name.",
+    );
+    expect(model.renameError).toBeNull();
+
+    expect(await model.rename("new-name")).toBe(false);
+    expect(model.renameRefusal).toBe("");
+    expect(model.renameError?.message).toBe(
+      "Couldn't rename this workspace. Try again. If this persists, report a bug.",
+    );
+    expect(model.renameError?.details).toContain("mngr: boom");
   });
 
   it("reverts a color pick to the saved color when the save is refused", async () => {
@@ -264,7 +327,78 @@ describe("WorkspaceOptionsModel", () => {
 
     expect(model.pendingColor).toBeNull();
     expect(model.lastSavedColor).toBe("#0b292b");
-    expect(model.colorErrorMessage).toContain("hex value is not valid");
+    expect(model.colorRefusal).toBe(INVALID_HEX_SENTENCE);
+    expect(model.colorError).toBeNull();
+  });
+
+  it("names a coded color refusal plainly and gives any other failure the fallback with its details", async () => {
+    const answers: FetchResult[] = [
+      { ok: false, status: 502, body: { error: "host_unreachable" } },
+      { ok: false, status: 500, body: { error: "mngr label: boom" } },
+      { ok: false, status: 0, body: { error: "Failed to fetch" } },
+    ];
+    const stub = makeFetchStub(() => answers.shift() as FetchResult);
+    const model = new WorkspaceOptionsModel("agent-" + "e".repeat(32), {
+      fetchJson: stub.fetchJson,
+      redraw: () => undefined,
+    });
+
+    await model.pickColor("#111111");
+    expect(model.colorRefusal).toBe(
+      "Could not reach the machine host. Try again in a moment.",
+    );
+    expect(model.colorError).toBeNull();
+
+    await model.pickColor("#222222");
+    expect(model.colorRefusal).toBe("");
+    expect(model.colorError?.message).toBe(
+      "Couldn't save this workspace's color. Try again. If this persists, report a bug.",
+    );
+    expect(model.colorError?.details).toContain("mngr label: boom");
+    expect(model.isColorErrorReportable).toBe(true);
+
+    await model.pickColor("#333333");
+    expect(model.colorError?.message).toBe(
+      "Imbue Studio didn't respond. Try again in a moment.",
+    );
+    expect(model.isColorErrorReportable).toBe(false);
+  });
+
+  it("shows the route's own sentence for a refused account link, and the restart sentence for a lapsed login", async () => {
+    const answers: FetchResult[] = [
+      {
+        ok: false,
+        status: 409,
+        body: { error: "This workspace is already linked to another account." },
+      },
+      { ok: false, status: 401, body: { error: "Unauthorized" } },
+      { ok: false, status: 500, body: null },
+    ];
+    const stub = makeFetchStub(() => answers.shift() as FetchResult);
+    const model = new WorkspaceOptionsModel("agent-" + "f".repeat(32), {
+      fetchJson: stub.fetchJson,
+      redraw: () => undefined,
+    });
+
+    expect(await model.setAccount("account-1")).toBe(false);
+    expect(model.accountError?.message).toBe(
+      "This workspace is already linked to another account.",
+    );
+    expect(model.isAccountReconnectNeeded).toBe(false);
+    expect(model.isAccountErrorReportable).toBe(true);
+
+    expect(await model.setAccount(null)).toBe(false);
+    expect(model.accountError?.message).toBe(
+      "Imbue Studio needs to restart to reconnect this window.",
+    );
+    expect(model.isAccountReconnectNeeded).toBe(true);
+    expect(model.isAccountErrorReportable).toBe(false);
+
+    expect(await model.setAccount(null)).toBe(false);
+    expect(model.accountError?.message).toBe(
+      "Couldn't unlink this workspace from its account. Try again. If this persists, report a bug.",
+    );
+    expect(model.isAccountReconnectNeeded).toBe(false);
   });
 
   describe("color picks during a slow save", () => {
@@ -313,7 +447,8 @@ describe("WorkspaceOptionsModel", () => {
       await reply({ ok: true, status: 200, body: {} });
       expect(model.lastSavedColor).toBe("#333333");
       expect(model.pendingColor).toBeNull();
-      expect(model.colorErrorMessage).toBe("");
+      expect(model.colorRefusal).toBe("");
+      expect(model.colorError).toBeNull();
     });
 
     it("does not report a superseded pick's failure", async () => {
@@ -328,12 +463,14 @@ describe("WorkspaceOptionsModel", () => {
       });
 
       expect(sentColors).toEqual(["#111111", "#222222"]);
-      expect(model.colorErrorMessage).toBe("");
+      expect(model.colorRefusal).toBe("");
+      expect(model.colorError).toBeNull();
       expect(model.pendingColor).toBe("#222222");
 
       await reply({ ok: true, status: 200, body: {} });
       expect(model.lastSavedColor).toBe("#222222");
-      expect(model.colorErrorMessage).toBe("");
+      expect(model.colorRefusal).toBe("");
+      expect(model.colorError).toBeNull();
     });
 
     it("sends nothing when the pick is the already saved color", async () => {
@@ -369,13 +506,6 @@ describe("pure helpers", () => {
     expect(normalizeWorkspaceColorHex("a1b2c3")).toBe("#a1b2c3");
     expect(normalizeWorkspaceColorHex("#a1b2c3ff")).toBeNull();
     expect(normalizeWorkspaceColorHex("nope")).toBeNull();
-  });
-
-  it("maps color error codes to their messages", () => {
-    expect(colorErrorMessageFor(422, { error: "stale_provider" })).toContain(
-      "unreachable",
-    );
-    expect(colorErrorMessageFor(500, {})).toBe("Save failed (HTTP 500).");
   });
 });
 
@@ -642,8 +772,6 @@ describe("WorkspaceOptionsModel machine size load", () => {
   });
 });
 
-type FetchResult = RequestResult;
-
 /** A model holding `size` (none while it is still to be read), whose requests
  * are recorded and answered by `respond`, and whose re-reads of a restarting
  * machine are collected in `scheduled` for the test to fire, rather than timed. */
@@ -728,7 +856,8 @@ describe("WorkspaceOptionsModel machine resize", () => {
     expect(model.isRestartDispatched).toBe(true);
     expect(model.isRestartInProgress).toBe(true);
     expect(model.machineSize?.memory_gb).toBe(16);
-    expect(model.resizeErrorMessage).toBe("");
+    expect(model.resizeError).toBeNull();
+    expect(model.resizeRefusal).toBe("");
   });
 
   it("says the size waits for the next start when the machine was stopped", async () => {
@@ -747,14 +876,11 @@ describe("WorkspaceOptionsModel machine resize", () => {
     expect(model.resizeNotice).toContain("next starts");
   });
 
-  it("keeps the provider's refusal as the error and sends nothing for an unchanged size", async () => {
+  it("sends nothing for an unchanged or invalid size, and says which", async () => {
     const { model, requests } = machineSizeModel(resizable, () => ({
-      ok: false,
-      status: 502,
-      body: {
-        error:
-          "The machine's provider refused the new size: docker has only 4 CPUs",
-      },
+      ok: true,
+      status: 200,
+      body: {},
     }));
 
     expect(
@@ -764,17 +890,71 @@ describe("WorkspaceOptionsModel machine resize", () => {
         disk_gb: "",
       }),
     ).toBe(false);
-    expect(requests).toEqual([]);
-    expect(model.resizeErrorMessage).toContain("whole numbers");
+    expect(model.resizeRefusal).toBe("That's already this machine's size.");
 
     expect(
       await model.resizeMachine({
-        cpu_count: "64",
+        cpu_count: "0",
         memory_gb: "8",
         disk_gb: "",
       }),
     ).toBe(false);
-    expect(model.resizeErrorMessage).toContain("docker has only 4 CPUs");
+    expect(model.resizeRefusal).toContain("whole numbers");
+
+    // A draft with every field cleared asks for a size; it is not the current one.
+    expect(
+      await model.resizeMachine({ cpu_count: "", memory_gb: "", disk_gb: "" }),
+    ).toBe(false);
+    expect(model.resizeRefusal).toContain("whole numbers");
+    expect(requests).toEqual([]);
+  });
+
+  it("keeps the provider's refusal behind the details and another operation's sentence as it is", async () => {
+    const answers = [
+      {
+        ok: false,
+        status: 502,
+        body: {
+          error: "This machine couldn't be resized to that size.",
+          reason: "SIZE_REFUSED",
+          detail: "ERROR: docker has only 4 CPUs",
+        },
+      },
+      {
+        ok: false,
+        status: 409,
+        body: {
+          error:
+            "A restore is already in progress for this workspace. Wait for it to finish before starting another operation.",
+          reason: "OPERATION_IN_PROGRESS",
+        },
+      },
+      {
+        ok: false,
+        status: 503,
+        body: { error: "Could not start the recovery worker" },
+      },
+    ];
+    const { model } = machineSizeModel(
+      resizable,
+      () => answers.shift() as FetchResult,
+    );
+    const draft = { cpu_count: "64", memory_gb: "8", disk_gb: "" };
+
+    expect(await model.resizeMachine(draft)).toBe(false);
+    expect(model.resizeError?.message).toBe(
+      "This machine couldn't be resized to that size.",
+    );
+    expect(model.resizeError?.details).toContain("docker has only 4 CPUs");
+
+    expect(await model.resizeMachine(draft)).toBe(false);
+    expect(model.resizeError).toBeNull();
+    expect(model.resizeRefusal).toContain("A restore is already in progress");
+
+    expect(await model.resizeMachine(draft)).toBe(false);
+    expect(model.resizeError?.message).toBe(
+      "Couldn't resize this machine. Try again. If this persists, report a bug.",
+    );
   });
 });
 
@@ -947,6 +1127,25 @@ describe("an Imbue Cloud machine sized from the plan's choices", () => {
     expect(model.resizeNotice).toBe("");
   });
 
+  it("says a picked size the machine already has is its size, without sending anything", async () => {
+    const { model, requests } = machineSizeModel(cloud, () => ({
+      ok: true,
+      status: 200,
+      body: {},
+    }));
+
+    expect(
+      await model.resizeMachine({
+        cpu_count: "",
+        memory_gb: "8",
+        disk_gb: "28",
+      }),
+    ).toBe(false);
+
+    expect(requests).toEqual([]);
+    expect(model.resizeRefusal).toBe("That's already this machine's size.");
+  });
+
   it("explains a size off the list without sending anything", async () => {
     const { model, requests } = machineSizeModel(cloud, () => ({
       ok: true,
@@ -963,16 +1162,17 @@ describe("an Imbue Cloud machine sized from the plan's choices", () => {
     ).toBe(false);
 
     expect(requests).toEqual([]);
-    expect(model.resizeErrorMessage).toContain("up to 32 GB");
+    expect(model.resizeRefusal).toContain("up to 32 GB");
   });
 
-  it("keeps the quota refusal as the error", async () => {
+  it("says the plan has no room for a size its quota refused, with the quota behind the details and no bug report", async () => {
     const { model } = machineSizeModel(cloud, () => ({
       ok: false,
       status: 409,
       body: {
-        error:
-          "Your plan cannot hold this size right now: active machine units limit is 16",
+        error: "Your plan cannot hold this size right now.",
+        reason: "PLAN_LIMIT",
+        detail: "active machine units limit is 16",
       },
     }));
 
@@ -983,9 +1183,42 @@ describe("an Imbue Cloud machine sized from the plan's choices", () => {
         disk_gb: "28",
       }),
     ).toBe(false);
-    expect(model.resizeErrorMessage).toContain(
+    expect(model.resizeError?.message).toBe(
+      "Your plan doesn't have room for this size right now. Pick a smaller size.",
+    );
+    expect(model.resizeError?.details).toContain(
       "active machine units limit is 16",
     );
+    expect(model.isResizeErrorReportable).toBe(false);
+    expect(model.isResizeAccountLinkNeeded).toBe(false);
+  });
+
+  it("asks for the account link a resize was refused for, and lets a later refusal ask for a bug report again", async () => {
+    let body: ResponseBody = {
+      error: "This workspace is not linked to a signed-in Imbue Cloud account.",
+      reason: "NOT_LINKED",
+    };
+    const { model } = machineSizeModel(cloud, () => ({
+      ok: false,
+      status: 409,
+      body,
+    }));
+    const draft = { cpu_count: "", memory_gb: "32", disk_gb: "28" };
+
+    await model.resizeMachine(draft);
+    expect(model.resizeError?.message).toBe(
+      "Link this workspace to your Imbue Cloud account before resizing its machine.",
+    );
+    expect(model.isResizeAccountLinkNeeded).toBe(true);
+    expect(model.isResizeErrorReportable).toBe(false);
+
+    body = { error: "Internal Server Error" };
+    await model.resizeMachine(draft);
+    expect(model.resizeError?.message).toBe(
+      "Couldn't resize this machine. Try again. If this persists, report a bug.",
+    );
+    expect(model.isResizeAccountLinkNeeded).toBe(false);
+    expect(model.isResizeErrorReportable).toBe(true);
   });
 
   it("restarts the machine through the host restart, reports it, and re-reads the size", async () => {
@@ -1015,9 +1248,7 @@ describe("an Imbue Cloud machine sized from the plan's choices", () => {
       body: { error: "A backup restore is running." },
     }));
     expect(await refused.model.restartMachineToApplySize()).toBe(false);
-    expect(refused.model.resizeErrorMessage).toBe(
-      "A backup restore is running.",
-    );
+    expect(refused.model.resizeRefusal).toBe("A backup restore is running.");
   });
 
   it("keeps the restart in progress, re-reading until the app reports it over", async () => {

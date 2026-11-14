@@ -617,7 +617,7 @@ def _set_master_password_via_ui(page: Page, origin: str, new_password: str) -> N
     page.click("#backup-change-password-btn")
 
     def change_reported() -> bool | None:
-        error_element = page.query_selector(f'{panel_scope} p[role="alert"]')
+        error_element = page.query_selector(f'{panel_scope} [role="alert"]')
         error_text = error_element.inner_text() if error_element is not None else ""
         if error_text.strip():
             raise AssertionError(f"Master password change surfaced an error: {error_text.strip()}")
@@ -625,9 +625,7 @@ def _set_master_password_via_ui(page: Page, origin: str, new_password: str) -> N
         if results is None:
             return None
         results_text = results.inner_text()
-        # Failure shapes: "<account>: FAILED - ...", "The master password
-        # change failed.", "Re-run the change to retry the failed accounts."
-        assert "failed" not in results_text.lower(), f"Master password change reported a failure: {results_text}"
+        assert "couldn't" not in results_text.lower(), f"Master password change reported a failure: {results_text}"
         return True
 
     _wait_until("the master password change to report success", 120, change_reported)

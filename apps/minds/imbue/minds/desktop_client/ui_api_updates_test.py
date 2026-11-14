@@ -93,6 +93,7 @@ def _armed(override_ref: str = "") -> MngrCallResult:
 _TOO_OLD = update_command_answer("TOO_OLD_TO_UPDATE", "This workspace predates the update-self skill.")
 # A command that never reached the machine because its host is down: what a stopped machine answers first.
 _HOST_OFFLINE = host_offline_exec_result()
+_UNREACHED_MESSAGE = "Couldn't reach this workspace to start the update. Try again in a moment."
 _HOST_OFFLINE_DETAIL = "Host 'host-1' is offline and automatic starting is disabled."
 
 
@@ -373,7 +374,11 @@ def test_a_machine_too_old_for_the_skill_is_refused_with_an_explanation_and_noth
     response = _post(client, f"/ui/api/updates/{agent_id}/now")
 
     assert response.status_code == 409
-    assert response.get_json() == {"error": DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[UpdateDispatchOutcome.UNSUPPORTED]}
+    # The code is what the surfaces offer the case's two remedies by.
+    assert response.get_json() == {
+        "error": DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[UpdateDispatchOutcome.UNSUPPORTED],
+        "code": "UNSUPPORTED",
+    }
 
 
 @pytest.mark.witnesses("workspace-updates.needs-sign-in", partial="the Update now answer and row")
@@ -387,7 +392,10 @@ def test_an_update_now_refused_for_sign_in_answers_409_and_marks_the_row_for_sig
     response = _post(client, f"/ui/api/updates/{agent_id}/now")
 
     assert response.status_code == 409
-    assert response.get_json() == {"error": DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[UpdateDispatchOutcome.NEEDS_SIGN_IN]}
+    assert response.get_json() == {
+        "error": DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[UpdateDispatchOutcome.NEEDS_SIGN_IN],
+        "code": "NEEDS_SIGN_IN",
+    }
     published = _published(app, agent_id)
     assert published.needs_sign_in is True
     assert published.dispatch_failure == ""
@@ -710,6 +718,7 @@ def test_a_schedule_the_workspace_did_not_arm_says_why_and_never_starts_it(
     assert response.get_json() == {
         "error": SCHEDULE_REFUSAL_MESSAGE_BY_OUTCOME[expected_outcome],
         "detail": expected_detail,
+        "code": expected_outcome.value,
     }
     assert _published(app, agent_id).is_scheduled is False
     assert _host_actions(tmp_path) == []
@@ -749,14 +758,22 @@ def test_cancelling_a_schedule_the_workspace_answered_takes_it_off_the_row(
 
 @pytest.mark.witnesses("workspace-updates.cancel-needs-the-workspace")
 @pytest.mark.parametrize(
-    ("route", "message"),
+    ("route", "message", "code"),
     (
-        ("schedule/cancel", "Couldn't reach this workspace to cancel its scheduled update."),
-        ("skip", "Couldn't reach this workspace to skip its update."),
+        (
+            "schedule/cancel",
+            "Couldn't reach this workspace to cancel its scheduled update. Make sure it's running, then try again.",
+            "CANCEL_UNREACHED",
+        ),
+        (
+            "skip",
+            "Couldn't reach this workspace to skip its update. Make sure it's running, then try again.",
+            "SKIP_UNREACHED",
+        ),
     ),
 )
 def test_a_cancel_or_skip_that_cannot_reach_the_workspace_says_so_and_leaves_the_row_scheduled(
-    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId, route: str, message: str
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId, route: str, message: str, code: str
 ) -> None:
     """The file is still armed in the workspace, so its cron will still start the run."""
     caller = ScriptedMngrCaller(results=(_armed(), _HOST_OFFLINE))
@@ -775,6 +792,7 @@ def test_a_cancel_or_skip_that_cannot_reach_the_workspace_says_so_and_leaves_the
     assert response.get_json() == {
         "error": message,
         "detail": _HOST_OFFLINE_DETAIL,
+        "code": code,
     }
     published = _published(app, agent_id)
     assert published.is_scheduled is True
@@ -888,6 +906,9 @@ def test_the_sign_in_route_answers_whether_the_workspace_opened_its_chat(
     response = _post(client, f"/ui/api/updates/{agent_id}/sign-in")
 
     assert response.status_code == expected_status
+    if expected_status != 200:
+        # Nothing names why the chat did not open, so the SPA offers a bug report.
+        assert response.get_json()["code"] == "SIGN_IN_CHAT_FAILED"
     calls = _recording_caller(app).calls
     assert len(calls) == 1
     assert calls[0][:3] == ["exec", "--agent", str(agent_id)]
@@ -1039,6 +1060,7 @@ def test_a_machine_waiting_on_a_decision_is_not_sent_a_fresh_run(
     response = _post(client, f"/ui/api/updates/{agent_id}/{route}", {"target_ref": "minds-v0.4.1"})
 
     assert response.status_code == 409
+    assert response.get_json()["code"] == "DECISION_PENDING"
     assert caller.calls == []
     assert _published(app, agent_id).is_decision_pending
 
@@ -1056,7 +1078,10 @@ def test_a_machine_with_an_update_running_is_not_scheduled_another(
     response = _post(client, f"/ui/api/updates/{agent_id}/schedule")
 
     assert response.status_code == 409
-    assert response.get_json() == {"error": DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[UpdateDispatchOutcome.ALREADY_RUNNING]}
+    assert response.get_json() == {
+        "error": DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[UpdateDispatchOutcome.ALREADY_RUNNING],
+        "code": "ALREADY_RUNNING",
+    }
     assert caller.calls == []
     assert _published(app, agent_id).is_scheduled is False
 
@@ -1137,7 +1162,7 @@ class _OneMachineOfflineMngrCaller(RecordingMngrCaller):
             "now",
             CREATED_UPDATE_COMMAND_RESULT,
             lambda state: state.activity is UpdateActivity.RUNNING,
-            "Couldn't reach this workspace to start the update.",
+            _UNREACHED_MESSAGE,
         ),
         (
             "schedule",
@@ -1240,7 +1265,10 @@ def test_a_dispatch_that_raises_leaves_no_run_locked_behind_it(
     assert state.activity is UpdateActivity.IDLE
     assert state.is_run_in_flight is False
     # The request that raised carries no sentence of ours, so the row is where the reader learns of it.
-    assert state.dispatch_failure == "Something went wrong starting the update in this workspace."
+    assert (
+        state.dispatch_failure
+        == "Something went wrong starting the update. Try again. If this persists, report a bug."
+    )
 
 
 def test_a_second_dispatch_loses_while_the_first_is_still_starting_the_machine(
@@ -1458,9 +1486,10 @@ def test_a_machine_that_refuses_the_agent_has_its_own_words_shown_and_the_run_sl
     response = _post(client, f"/ui/api/updates/{agent_id}/now")
 
     assert response.status_code == 502
-    assert response.get_json() == {"error": "Couldn't start the update agent in this workspace.", "detail": refusal}
+    spawn_failed_message = DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[UpdateDispatchOutcome.SPAWN_FAILED]
+    assert response.get_json() == {"error": spawn_failed_message, "detail": refusal, "code": "SPAWN_FAILED"}
     published = _published(app, agent_id)
-    assert published.dispatch_failure == "Couldn't start the update agent in this workspace."
+    assert published.dispatch_failure == spawn_failed_message
     assert published.dispatch_failure_detail == refusal
     assert published.activity is UpdateActivity.IDLE
     # Refused again on its merits, not as an update already in flight.
@@ -1470,7 +1499,7 @@ def test_a_machine_that_refuses_the_agent_has_its_own_words_shown_and_the_run_sl
 def _press_update_now_and_fail_to_reach(client: FlaskClient, app: Flask, agent_id: AgentId) -> None:
     """Press Update now on a machine the command cannot reach even once started, and check the row recorded why."""
     assert _post(client, f"/ui/api/updates/{agent_id}/now").status_code == 502
-    assert _published(app, agent_id).dispatch_failure == "Couldn't reach this workspace to start the update."
+    assert _published(app, agent_id).dispatch_failure == _UNREACHED_MESSAGE
 
 
 @pytest.mark.witnesses("workspace-updates.unsent-update-is-reported", partial="the published row, not its rendering")
@@ -1493,7 +1522,7 @@ def test_an_update_that_could_not_reach_the_machine_is_published_for_an_updates_
     assert _post(client, f"/ui/api/updates/{agent_id}/now").status_code == 502
 
     published = _published(app, agent_id)
-    assert published.dispatch_failure == "Couldn't reach this workspace to start the update."
+    assert published.dispatch_failure == _UNREACHED_MESSAGE
     assert published.dispatch_failure_detail == "Could not reach host host-1234: connection refused"
     assert published.activity is UpdateActivity.IDLE
 
@@ -1542,9 +1571,15 @@ def test_an_update_whose_machine_would_not_start_publishes_the_starts_own_diagno
     response = _post(client, f"/ui/api/updates/{agent_id}/now")
 
     assert response.status_code == 502
-    assert response.get_json()["error"] == "Couldn't start this workspace to run the update."
+    assert (
+        response.get_json()["error"]
+        == "Couldn't start this workspace to run the update. Try again. If this persists, report a bug."
+    )
     published = _published(app, agent_id)
-    assert published.dispatch_failure == "Couldn't start this workspace to run the update."
+    assert (
+        published.dispatch_failure
+        == "Couldn't start this workspace to run the update. Try again. If this persists, report a bug."
+    )
     assert "ERROR: The box behind host-5821 is gone" in published.dispatch_failure_detail
     assert published.activity is UpdateActivity.IDLE
 
@@ -1773,11 +1808,31 @@ def test_an_empty_custom_window_is_refused_with_what_to_change(
         {"mode": "custom_window", "window_start_hour": 3, "window_end_hour": 3},
     )
 
-    assert (response.status_code, response.get_json()["error"]) == (
+    assert (response.status_code, response.get_json()["error"], response.get_json()["code"]) == (
         400,
-        "The update window needs a start and end that differ",
+        "The update window needs a start and end that differ.",
+        "EMPTY_WINDOW",
     )
     assert minds_config.get_workspace_auto_update_overrides() == {}
+
+
+def test_an_auto_update_setting_the_config_file_cannot_take_answers_json(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
+) -> None:
+    """Not the plain-text catch-all: the tab shows its own sentence with this behind See details."""
+    minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
+    minds_config.data_dir.mkdir(parents=True)
+    (minds_config.data_dir / "config.toml").write_text("this is [not toml")
+    client, _app = _build_client(
+        tmp_path, root_concurrency_group, mngr_result=CREATED_UPDATE_COMMAND_RESULT, minds_config=minds_config
+    )
+
+    response = _post(client, f"/ui/api/updates/{agent_id}/auto-update", {"mode": "manual"})
+
+    assert response.status_code == 500
+    assert response.mimetype == "application/json"
+    assert "Could not save the auto-update setting" in response.get_json()["error"]
+    assert "code" not in response.get_json()
 
 
 # The kernel-fix route
@@ -1806,6 +1861,7 @@ def test_a_kernel_fix_is_refused_where_none_is_offered(
     assert response.status_code == 409
     body = json.loads(response.data)
     assert body["is_force_offered"] is False
+    assert body["code"] == "NOT_OFFERED"
     assert "no kernel update" in body["error"]
 
 

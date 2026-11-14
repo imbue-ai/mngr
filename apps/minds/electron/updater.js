@@ -162,7 +162,11 @@ function publishOutcome(channel, outcome) {
 function withTimeout(promise, timeoutMs, description) {
   let timer = null;
   const deadline = new Promise((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error(`${description} timed out after ${timeoutMs / 1000}s.`)), timeoutMs);
+    timer = setTimeout(() => {
+      const error = new Error(`${description} timed out after ${timeoutMs / 1000}s.`);
+      error.code = channels.CHECK_TIMEOUT_CODE;
+      reject(error);
+    }, timeoutMs);
   });
   return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
 }
@@ -239,10 +243,15 @@ async function check() {
   }
 }
 
+/** The `disabled` status for this install, naming which of the cases it is. */
+function disabledStatus() {
+  return channels.disabledStatus({ isPackaged: app.isPackaged, platform: process.platform, appPath: app.getAppPath() });
+}
+
 async function runCheck() {
   if (!isUpdaterUsable()) {
     const channel = storedChannel().channel;
-    setStatus({ type: 'disabled' });
+    setStatus(disabledStatus());
     return { channel, status: 'disabled' };
   }
   const run = async () => {
@@ -270,7 +279,7 @@ async function runCheck() {
       // separates a feed that is down from an updater that stopped running.
       // A feed we cannot reach is an error, never "up to date": reporting it as
       // success is how a channel that has quietly 404'd looks healthy.
-      setStatus({ type: 'error', channel, message, lastCheckedAt: stampCheck() });
+      setStatus({ type: 'error', kind: channels.classifyCheckFailure(err), channel, message, lastCheckedAt: stampCheck() });
       return { channel, status: 'error', message };
     }
   };
@@ -296,6 +305,9 @@ function startDownload(channel) {
   // The task must not reject: `inFlight` would be a rejected promise with no
   // handler until the next serialize() call.
   void serialize(async () => {
+    // Set once the re-check has passed, so a failure after it is reported as
+    // the download's rather than as a check that could not be done.
+    let downloadingVersion = null;
     try {
       if (storedChannel().channel !== channel) {
         console.log(`[update] Dropping the ${channel} download: the channel changed`);
@@ -312,10 +324,16 @@ function startDownload(channel) {
       if (!outcome.isUpdateAvailable) {
         return;
       }
+      downloadingVersion = outcome.feedVersion;
       await downloadAndOffer(outcome.feedVersion);
     } catch (err) {
       const message = String((err && err.message) || err);
-      setStatus({ type: 'error', channel, message });
+      if (downloadingVersion !== null) {
+        console.error(`[update] Downloading ${downloadingVersion} failed: ${message}`);
+        setStatus({ type: 'error', kind: 'download', channel, version: downloadingVersion, message });
+        return;
+      }
+      setStatus({ type: 'error', kind: channels.classifyCheckFailure(err), channel, message });
     }
   });
 }
@@ -510,7 +528,7 @@ function init({ onStatus } = {}) {
   if (!isUpdaterUsable()) {
     const reason = app.isPackaged ? 'the updater is inactive for this install' : 'dev build -- not packaged';
     console.log(`[update] Skipping auto-update (${reason})`);
-    setStatus({ type: 'disabled' });
+    setStatus(disabledStatus());
     return;
   }
   // Startup is the only moment a fallback is news: setChannel asserts the
@@ -547,7 +565,7 @@ function init({ onStatus } = {}) {
 function reportRejectedCheck(err) {
   const message = String((err && err.message) || err);
   console.error(`[update] Check failed: ${message}`);
-  setStatus({ type: 'error', message });
+  setStatus({ type: 'error', kind: channels.classifyCheckFailure(err), message });
   return message;
 }
 

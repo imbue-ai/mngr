@@ -15,7 +15,7 @@ import {
 import type { UiWorkspacePermissions } from "../../../generated/ui";
 import type { RequestResult } from "../../../models/errors";
 import { OPTIONS_TABS, WorkspaceOptionsModel, toOptionsTab } from "../../../models/workspaceOptions";
-import { ADD_SHARED_PATH_ROW_KEY, PermissionsModel } from "../../../models/workspacePermissions";
+import { ADD_SHARED_PATH_ROW_KEY, PermissionsModel, isPathSyncOn } from "../../../models/workspacePermissions";
 import { classifyRoute } from "../../shell/classify";
 import { PermissionsTab } from "./PermissionsTab";
 import { OptionsPanel } from "./OptionsPanel";
@@ -24,7 +24,7 @@ import { forgetFailedServiceMarks } from "../../components/ServiceMark";
 import { IMPLICIT_PERMISSIONS_HINT_ATTR } from "../../components/ImplicitPermissionsHint";
 import { Spinner } from "../../components/Spinner";
 import type { AnyVnode } from "../../../testing";
-import { allText, attrsOf, classesOf, collectText, collectVnodes, withAttr } from "../../../testing";
+import { allText, attrsOf, classesOf, collectText, collectVnodes, errorMarks, renderDeep, withAttr } from "../../../testing";
 
 const AGENT_ID = "agent-" + "c".repeat(8);
 
@@ -1479,6 +1479,62 @@ describe("PermissionsTab shared paths", () => {
     );
     expect(allText(believedOn.root)).toContain("Not running");
     believedOn.remove();
+  });
+
+  it("swaps Try again for the sync switch when the app no longer holds the folder's sync", async () => {
+    const failed = await renderLocalFiles(
+      permissionsView({
+        shared_paths: [
+          sharedPath({ sync: pathSync({ state: "FAILED", activity: "ACTIVE", message: "machine is asleep" }) }),
+        ],
+      }),
+      {
+        respond: (url) =>
+          url.endsWith("/folder-syncs/retry")
+            ? Promise.resolve({
+                ok: false,
+                status: 409,
+                body: {
+                  error: "This folder isn't set up to sync any more. Turn syncing on for it again.",
+                  reason: "NO_SYNC_RECORD",
+                },
+              })
+            : null,
+      },
+    );
+    const retry = withAttr(failed.root, "data-sync-retry-path")[0];
+    (attrsOf(retry).onclick as () => void)();
+    await settle();
+
+    const after = failed.rerender();
+    expect(withAttr(after, "data-sync-retry-path")).toHaveLength(0);
+    expect(allText(after)).toContain("This folder isn't set up to sync any more. Turn syncing on for it again.");
+    expect(allText(after)).not.toContain("Could not start syncing again");
+    expect(isPathSyncOn((failed.model.data?.shared_paths ?? [])[0])).toBe(false);
+    failed.remove();
+  });
+
+  it("marks the pane's error line, so its refusal reads as a failure rather than red prose", async () => {
+    const failed = await renderLocalFiles(
+      permissionsView({
+        shared_paths: [
+          sharedPath({ sync: pathSync({ state: "FAILED", activity: "ACTIVE", message: "machine is asleep" }) }),
+        ],
+      }),
+      {
+        respond: (url) =>
+          url.endsWith("/folder-syncs/retry")
+            ? Promise.resolve({ ok: false, status: 503, body: { error: "the workspace is asleep" } })
+            : null,
+      },
+    );
+    (attrsOf(withAttr(failed.root, "data-sync-retry-path")[0]).onclick as () => void)();
+    await settle();
+
+    const line = collectVnodes(failed.rerender()).find((vnode) => attrsOf(vnode).id === "ws-perm-error");
+    expect(allText(line)).toContain("Could not start syncing again: the workspace is asleep");
+    expect(errorMarks(renderDeep(line))).toHaveLength(1);
+    failed.remove();
   });
 
   it("offers to try a failed sync again, and says why it failed", async () => {

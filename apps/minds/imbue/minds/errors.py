@@ -454,6 +454,12 @@ class FolderSyncError(MindError):
     ...
 
 
+class FolderSyncRecordMissingError(FolderSyncError):
+    """Raised when a folder is asked about that Imbue Studio no longer syncs, or never did."""
+
+    ...
+
+
 class FolderSyncStoreError(MindError):
     """Raised when the record of which folders to keep synced cannot be written."""
 

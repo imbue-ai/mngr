@@ -33,6 +33,7 @@ import tomllib
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
+from enum import auto
 from typing import Any
 from typing import Final
 
@@ -40,6 +41,7 @@ import httpx2
 from loguru import logger
 from pydantic import Field
 
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.profiling import get_profiler
 from imbue.imbue_common.pure import pure
@@ -73,10 +75,11 @@ from imbue.minds.desktop_client.share_grant_validation import validate_grants_do
 from imbue.minds.desktop_client.share_materials_injection import ShareAgentProbe
 from imbue.minds.desktop_client.share_materials_injection import ShareGatewayStatus
 from imbue.minds.desktop_client.share_materials_injection import ShareGatewayStatusCache
+from imbue.minds.desktop_client.share_materials_injection import ShareGrantsUnreadableError
 from imbue.minds.desktop_client.share_materials_injection import ShareInjectionError
+from imbue.minds.desktop_client.share_materials_injection import ShareStateUnreadError
 from imbue.minds.desktop_client.share_materials_injection import build_share_env_text
 from imbue.minds.desktop_client.share_materials_injection import clear_share_publication_from_agent
-from imbue.minds.desktop_client.share_materials_injection import probe_share_state_in_agent
 from imbue.minds.desktop_client.share_materials_injection import provision_share_files_in_agent
 from imbue.minds.desktop_client.share_materials_injection import read_share_gateway_status_from_agent
 from imbue.minds.desktop_client.share_materials_injection import read_share_state_from_agent
@@ -121,9 +124,7 @@ _UNVERIFIED_EMAIL_SIGNAL: Final[str] = "Email not verified"
 # supported workspaces predate the share gateway -- i.e. after the first
 # post-v0.3.11 release is deployed and old workspaces have run update-self.
 _PRE_GATEWAY_WORKSPACE_MESSAGE: Final[str] = (
-    "This workspace's template is too old to support sharing. "
-    'Ask the workspace to update itself (send it "update yourself", which runs '
-    "the update-self skill), then publish it again."
+    "This workspace's template predates the share gateway, so nothing in it would bring a share up."
 )
 
 
@@ -135,26 +136,85 @@ def describe_connector_failure(exc: Exception) -> str:
     The two failures a user can resolve get a plain sentence instead; anything
     else keeps the plugin's message, which still beats pointing at a log file.
     """
-    if isinstance(exc, ImbueCloudEmailNotVerifiedCliError):
-        return "Imbue Cloud has not verified this account's email address. Verify it, then retry."
-    detail = str(exc)
-    if any(signal in detail for signal in _EXPIRED_SESSION_SIGNALS):
-        return "Your Imbue Cloud session has expired. You may need to log out and log in again."
-    if _UNVERIFIED_EMAIL_SIGNAL in detail:
-        return "Imbue Cloud has not verified this account's email address. Verify it, then retry."
-    return detail
+    match _account_failure_reason(exc):
+        case SharingFailureReason.EMAIL_NOT_VERIFIED:
+            return "Imbue Cloud has not verified this account's email address. Verify it, then retry."
+        case SharingFailureReason.SIGN_IN_EXPIRED:
+            return "Your Imbue Cloud session has expired. You may need to log out and log in again."
+        case _:
+            return str(exc)
+
+
+class SharingFailureReason(UpperCaseStrEnum):
+    """Why a sharing operation failed, as the share panel tells the user about it."""
+
+    # The app has no Imbue Cloud tooling or config to share with.
+    UNAVAILABLE = auto()
+    # The workspace's machine is known to neither discovery nor the records.
+    WORKSPACE_UNKNOWN = auto()
+    # The list of signed-in accounts could not be read.
+    ACCOUNTS_UNREADABLE = auto()
+    # Nobody is signed in to Imbue Cloud.
+    NOT_SIGNED_IN = auto()
+    # The account that owns the workspace is not signed in here.
+    OWNER_SIGNED_OUT = auto()
+    # Someone is signed in, but the workspace is linked to no account.
+    NOT_LINKED = auto()
+    SIGN_IN_EXPIRED = auto()
+    EMAIL_NOT_VERIFIED = auto()
+    WAITLISTED = auto()
+    SHARE_LIMIT_REACHED = auto()
+    # Imbue Cloud failed or refused in a way no other reason names.
+    CONNECTOR_FAILED = auto()
+    # The check inside the workspace could not run (stopped, or not answering).
+    WORKSPACE_UNREACHABLE = auto()
+    # The check ran and found a workspace that predates sharing.
+    WORKSPACE_TOO_OLD = auto()
+    # The workspace's list of who it is shared with cannot be read back.
+    GRANTS_UNREADABLE = auto()
+    # Writing the share's files into the workspace failed.
+    WRITE_FAILED = auto()
+    # The share moved to a new address, but the workspace did not get it.
+    ADDRESS_MOVE_FAILED = auto()
+    # An invitation needs a published workspace.
+    NOT_PUBLISHED = auto()
+    # The grants document names entries that must not be granted.
+    GRANTS_REFUSED = auto()
+    # The workspace's template predates visiting agents.
+    AGENTS_UNSUPPORTED = auto()
+    # The workspace refused to invite an agent to what was asked (an app agents cannot be invited to).
+    AGENT_INVITE_REFUSED = auto()
+    # The visiting agent to revoke is not known to the workspace any more.
+    AGENT_GONE = auto()
+    # The workspace is published, but its share was never set up inside it.
+    SHARE_NOT_SET_UP = auto()
 
 
 class SharingError(RuntimeError):
-    """Raised on a soft sharing failure; carries a single user-presentable message."""
+    """Raised on a soft sharing failure.
+
+    The message is the full account of what failed (shown behind the share
+    panel's "See details"); ``reason`` is what the panel words its own
+    sentence from.
+    """
+
+    def __init__(self, message: str, reason: SharingFailureReason) -> None:
+        self.reason = reason
+        super().__init__(message)
 
 
 class ShareQuotaExceededError(SharingError):
-    """Raised when the connector refused to publish because the account's share quota is full.
+    """Raised when Imbue Cloud refuses a share because the account's plan allows no more shared workspaces.
 
     Kept apart from the other soft failures so the routes can answer with a
     structured code: the fix is on the shared-workspaces page, not a retry.
+    ``limit`` and ``current`` are None when the refusal did not count them.
     """
+
+    def __init__(self, message: str, limit: int | None, current: int | None) -> None:
+        self.limit = limit
+        self.current = current
+        super().__init__(message, SharingFailureReason.SHARE_LIMIT_REACHED)
 
 
 class GrantsRefusedError(SharingError):
@@ -162,7 +222,7 @@ class GrantsRefusedError(SharingError):
 
     def __init__(self, refusals: Sequence[GrantRefusal]) -> None:
         self.refusals = tuple(refusals)
-        super().__init__(" ".join(refusal.message for refusal in refusals))
+        super().__init__(" ".join(refusal.message for refusal in refusals), SharingFailureReason.GRANTS_REFUSED)
 
 
 class ShareMaterialsWriteError(SharingError):
@@ -171,6 +231,58 @@ class ShareMaterialsWriteError(SharingError):
     The connector side has already moved on (domain minted, relay token
     rotated) while the workspace still holds whatever it had before.
     """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, SharingFailureReason.WRITE_FAILED)
+
+
+class PublicationUnknownReason(UpperCaseStrEnum):
+    """Why a workspace's sharing status could not be told, which is neither shared nor unshared."""
+
+    # Imbue Cloud, or the list of signed-in accounts, could not be read.
+    UNREADABLE = auto()
+    # The account that owns the workspace is not signed in here.
+    OWNER_SIGNED_OUT = auto()
+
+
+class SharePublicationRead(FrozenModel):
+    """What the connector says about a workspace's share: active, none, or not known."""
+
+    share: ShareCliInfo | None = Field(description="The active share; None when there is none or it is not known")
+    unknown_reason: PublicationUnknownReason | None = Field(
+        description="Why the publication is not known; None when the share (or its absence) was read"
+    )
+
+
+def connector_failure_error(context: str, exc: ImbueCloudCliError) -> SharingError:
+    """The sharing error for a failed connector call, its reason read off the plugin's failure.
+
+    ``context`` says which call failed; the plugin's own text follows it in the
+    message, for the panel's details.
+    """
+    message = f"{context}: {exc}"
+    if isinstance(exc, ImbueCloudQuotaExceededCliError):
+        # A waitlisted account is refused with the quota shape and a zero cap.
+        if exc.limit == 0:
+            return SharingError(message, SharingFailureReason.WAITLISTED)
+        return ShareQuotaExceededError(
+            message,
+            limit=None if exc.limit is None else int(exc.limit),
+            current=None if exc.current is None else int(exc.current),
+        )
+    return SharingError(message, _account_failure_reason(exc) or SharingFailureReason.CONNECTOR_FAILED)
+
+
+def _account_failure_reason(exc: Exception) -> SharingFailureReason | None:
+    """The account problem a connector failure names that the user can resolve, or None."""
+    if isinstance(exc, ImbueCloudEmailNotVerifiedCliError):
+        return SharingFailureReason.EMAIL_NOT_VERIFIED
+    detail = str(exc)
+    if any(signal in detail for signal in _EXPIRED_SESSION_SIGNALS):
+        return SharingFailureReason.SIGN_IN_EXPIRED
+    if _UNVERIFIED_EMAIL_SIGNAL in detail:
+        return SharingFailureReason.EMAIL_NOT_VERIFIED
+    return None
 
 
 def resolve_account_email_for_workspace(
@@ -182,17 +294,41 @@ def resolve_account_email_for_workspace(
     Raises :class:`SharingError` if no signed-in account is associated
     with the workspace -- without an account the plugin can't make
     authenticated calls to the connector and there's nothing useful for
-    the route to do.
+    the route to do. Its reason tells apart an account list that could not
+    be read, an owner who is signed out, nobody signed in, and a workspace
+    linked to no account.
     """
     if session_store is None:
-        raise SharingError("Session store unavailable; sign in to publish this workspace.")
-    account = session_store.get_account_for_workspace(str(agent_id))
-    if account is None:
         raise SharingError(
-            f"Workspace {agent_id} is not associated with any signed-in account; "
-            "associate one from the workspace settings page first."
+            "Session store unavailable; sign in to publish this workspace.", SharingFailureReason.UNAVAILABLE
         )
-    return str(account.email)
+    account = session_store.get_account_for_workspace(str(agent_id))
+    if account is not None:
+        return str(account.email)
+    record_store = session_store.record_store
+    owner = record_store.find_active_record(str(agent_id)) if record_store is not None else None
+    if owner is not None:
+        # The ownership lookup read the account list; its outcome says whether
+        # the owner is signed out or the list simply could not be read.
+        if session_store.is_last_identity_read_failed:
+            raise SharingError(
+                "Could not read the signed-in accounts to find this workspace's owner.",
+                SharingFailureReason.ACCOUNTS_UNREADABLE,
+            )
+        raise SharingError(
+            f"Workspace {agent_id} belongs to an account that is not signed in here.",
+            SharingFailureReason.OWNER_SIGNED_OUT,
+        )
+    is_anyone_signed_in = session_store.is_any_signed_in()
+    if session_store.is_last_identity_read_failed:
+        raise SharingError("Could not read the signed-in accounts.", SharingFailureReason.ACCOUNTS_UNREADABLE)
+    if not is_anyone_signed_in:
+        raise SharingError("Nobody is signed in to Imbue Cloud.", SharingFailureReason.NOT_SIGNED_IN)
+    raise SharingError(
+        f"Workspace {agent_id} is not associated with any signed-in account; "
+        "associate one from the workspace settings page first.",
+        SharingFailureReason.NOT_LINKED,
+    )
 
 
 def resolve_agent_for_host(
@@ -216,7 +352,7 @@ def resolve_agent_for_host(
             for record in records:
                 if record.host_id == host_id and record.state == RECORD_STATE_ACTIVE and record.agent_id:
                     return AgentId(record.agent_id)
-    raise SharingError(f"No workspace is known for machine '{host_id}'.")
+    raise SharingError(f"No workspace is known for machine '{host_id}'.", SharingFailureReason.WORKSPACE_UNKNOWN)
 
 
 def split_relay_endpoint(endpoint: str) -> tuple[str, int] | None:
@@ -492,7 +628,10 @@ def require_client_env_config() -> ClientEnvConfig:
     """
     config = get_state().client_env_config
     if config is None:
-        raise SharingError("Client environment config is unavailable; cannot determine the connector URL.")
+        raise SharingError(
+            "Client environment config is unavailable; cannot determine the connector URL.",
+            SharingFailureReason.UNAVAILABLE,
+        )
     return config
 
 
@@ -523,7 +662,7 @@ def publish_workspace(host_id: str, backend_resolver: BackendResolverInterface) 
     state = get_state()
     cli: ImbueCloudCli | None = state.imbue_cloud_cli
     if cli is None:
-        raise SharingError("imbue_cloud CLI is not configured on this app.")
+        raise SharingError("imbue_cloud CLI is not configured on this app.", SharingFailureReason.UNAVAILABLE)
     session_store = state.session_store
     agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
     account_email = resolve_account_email_for_workspace(session_store, agent_id)
@@ -560,7 +699,7 @@ def publish_workspace_with_grants(
     state = get_state()
     cli: ImbueCloudCli | None = state.imbue_cloud_cli
     if cli is None:
-        raise SharingError("imbue_cloud CLI is not configured on this app.")
+        raise SharingError("imbue_cloud CLI is not configured on this app.", SharingFailureReason.UNAVAILABLE)
     session_store = state.session_store
     agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
     return _publish_workspace_with_cli(
@@ -594,7 +733,7 @@ def save_grants(
     state = get_state()
     cli: ImbueCloudCli | None = state.imbue_cloud_cli
     if cli is None:
-        raise SharingError("imbue_cloud CLI is not configured on this app.")
+        raise SharingError("imbue_cloud CLI is not configured on this app.", SharingFailureReason.UNAVAILABLE)
     session_store = state.session_store
     agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
     return _save_grants_with_cli(
@@ -657,12 +796,7 @@ def _publish_workspace_with_cli(
         # One exec answers everything the flow needs from the workspace: whether
         # the template ships the share gateway, whether share.env is present, and
         # the current grants document.
-        try:
-            probe = probe_share_state_in_agent(agent_address, cli.mngr_caller)
-        except ShareInjectionError as exc:
-            raise SharingError(str(exc)) from exc
-        if not probe.has_gateway:
-            raise SharingError(_PRE_GATEWAY_WORKSPACE_MESSAGE)
+        probe = _probe_workspace_that_can_share(agent_address, cli)
         stored_grants = _readable_grants_document(probe.grants_toml_text)
 
         # What this publish writes, if anything. With no document given the
@@ -745,12 +879,7 @@ def _save_grants_with_cli(
         # One read answers everything this save needs of the workspace: whether the
         # gateway is there to read what it writes, and which of the entries being
         # saved are new (only those face the rules).
-        try:
-            probe = probe_share_state_in_agent(agent_address, cli.mngr_caller)
-        except ShareInjectionError as exc:
-            raise SharingError(str(exc)) from exc
-        if not probe.has_gateway:
-            raise SharingError(_PRE_GATEWAY_WORKSPACE_MESSAGE)
+        probe = _probe_workspace_that_can_share(agent_address, cli)
         stored_grants = _readable_grants_document(probe.grants_toml_text) or SharingGrantsDocument()
         refusals = validate_grants_document(grants, account_email, stored_grants)
         if refusals:
@@ -779,13 +908,31 @@ def _save_grants_with_cli(
         )
 
 
+def _probe_share_state(agent_address: str, cli: ImbueCloudCli) -> ShareAgentProbe:
+    """The workspace's share state; raises :class:`SharingError` when the probe could not run or read the grants."""
+    try:
+        return read_share_state_from_agent(agent_address, cli.mngr_caller)
+    except ShareStateUnreadError as exc:
+        raise SharingError(str(exc), SharingFailureReason.WORKSPACE_UNREACHABLE) from exc
+    except ShareGrantsUnreadableError as exc:
+        raise SharingError(str(exc), SharingFailureReason.GRANTS_UNREADABLE) from exc
+
+
+def _probe_workspace_that_can_share(agent_address: str, cli: ImbueCloudCli) -> ShareAgentProbe:
+    """The share state of a workspace that has the share gateway; refuses one too old to be shared."""
+    probe = _probe_share_state(agent_address, cli)
+    if not probe.has_gateway:
+        raise SharingError(_PRE_GATEWAY_WORKSPACE_MESSAGE, SharingFailureReason.WORKSPACE_TOO_OLD)
+    return probe
+
+
 def _write_grants_document(
     agent_address: str, grants_toml: str, identities_json: str | None, cli: ImbueCloudCli
 ) -> None:
     try:
         provision_share_files_in_agent(agent_address, grants_toml, identities_json, None, cli.mngr_caller)
     except ShareInjectionError as exc:
-        raise SharingError(str(exc)) from exc
+        raise SharingError(str(exc), SharingFailureReason.WRITE_FAILED) from exc
 
 
 def _readable_grants_document(grants_toml_text: str | None) -> SharingGrantsDocument | None:
@@ -829,20 +976,20 @@ def _read_active_share(cli: ImbueCloudCli, account_email: str, host_id: str) -> 
     try:
         share = cli.get_share_status(account=account_email, host_id=host_id)
     except ImbueCloudCliError as exc:
-        raise SharingError(
-            f"Could not read the workspace's sharing status: {describe_connector_failure(exc)}"
-        ) from exc
+        raise connector_failure_error("Could not read the workspace's sharing status", exc) from exc
     return share if share is not None and share.state == "active" else None
 
 
-def _read_active_share_or_none(cli: ImbueCloudCli, account_email: str, host_id: str) -> ShareCliInfo | None:
-    """The machine's connector share when it is active, else None -- a connector failure reads as unshared (logged)."""
+def _read_share_publication_for_account(cli: ImbueCloudCli, account_email: str, host_id: str) -> SharePublicationRead:
+    """The machine's active connector share, no share, or (a connector failure, logged) unknown."""
     try:
         share = cli.get_share_status(account=account_email, host_id=host_id)
     except ImbueCloudCliError as exc:
         logger.warning("Failed to read share status for {}: {}", host_id, exc)
-        return None
-    return share if share is not None and share.state == "active" else None
+        return SharePublicationRead(share=None, unknown_reason=PublicationUnknownReason.UNREADABLE)
+    if share is None or share.state != "active":
+        return SharePublicationRead(share=None, unknown_reason=None)
+    return SharePublicationRead(share=share, unknown_reason=None)
 
 
 def _create_share_and_write_materials(
@@ -877,12 +1024,13 @@ def _create_share_and_write_materials(
             preferred_region=preferred_region,
             workspace_id=str(agent_id),
         )
-    except ImbueCloudQuotaExceededCliError as exc:
-        raise ShareQuotaExceededError(f"Could not publish this workspace: {describe_connector_failure(exc)}") from exc
     except ImbueCloudCliError as exc:
-        raise SharingError(f"Could not publish this workspace: {describe_connector_failure(exc)}") from exc
+        raise connector_failure_error("Could not publish this workspace", exc) from exc
     if share.relay_token is None:
-        raise SharingError("The workspace was published but the connector did not return a relay token.")
+        raise SharingError(
+            "The workspace was published but the connector did not return a relay token.",
+            SharingFailureReason.CONNECTOR_FAILED,
+        )
 
     share_env_text = build_share_env_text(
         workspace_domain=share.workspace_domain,
@@ -933,7 +1081,7 @@ def migrate_stale_share(
     workspace cannot take the move; the panel then shows it with a retry.
     """
     if not probe.has_gateway:
-        raise SharingError(_PRE_GATEWAY_WORKSPACE_MESSAGE)
+        raise SharingError(_PRE_GATEWAY_WORKSPACE_MESSAGE, SharingFailureReason.WORKSPACE_TOO_OLD)
     # The move rewrites share.env alone and leaves the document exactly as it
     # is, so a document nothing can parse costs the move nothing; it is read
     # for the push that answers what the panel shows of its grantees.
@@ -956,7 +1104,8 @@ def migrate_stale_share(
         # plain read) will not inject again: only a re-publish does.
         raise SharingError(
             "Sharing was moved to a new address, but this workspace did not receive the new share materials, so "
-            f"its shared links stay down until publishing is turned off and on again for it: {exc}"
+            f"its shared links stay down until publishing is turned off and on again for it: {exc}",
+            SharingFailureReason.ADDRESS_MOVE_FAILED,
         ) from exc
     logger.info("Moved sharing for {} from {} to {}", host_id, stale_share.workspace_domain, share.workspace_domain)
     _mark_shared_on_forward(agent_id, forward_identity, owner_account)
@@ -1120,7 +1269,9 @@ def get_sharing(
     every load pushes). A share the connector flags ``needs_reshare`` (active on
     a content domain the tier moved away from) is repaired here, on the read,
     so opening the share panel is what moves it; that read raises
-    :class:`SharingError` when the move fails.
+    :class:`SharingError` when the move fails. ``publication_unknown_reason``
+    is set when the share could not be told apart from no share (see
+    :func:`read_share_publication`); ``enabled`` is then false but not known.
     """
     with get_profiler().span("sharing.get_sharing", host_id=host_id) as span:
         # Discovery is concurrently updated, so the coordinate can be unresolvable;
@@ -1131,26 +1282,46 @@ def get_sharing(
             agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
         except SharingError as exc:
             logger.debug("Sharing grants read: {}", exc)
-            return _unknown_grants_document(host_id, None, {})
+            return _with_publication_unknown_reason(
+                _unknown_grants_document(host_id, None, {}), _publication_unknown_reason_for(exc.reason)
+            )
         if cli is None:
-            return _unknown_grants_document(host_id, None, {})
+            return _with_publication_unknown_reason(
+                _unknown_grants_document(host_id, None, {}), PublicationUnknownReason.UNREADABLE
+            )
         service_labels = resolve_share_target_labels(backend_resolver, agent_id)
         agent_address = build_agent_address(agent_id, backend_resolver)
-        account_email = _account_email_or_none(session_store, agent_id)
+        account_email: str | None = None
+        publication_without_account = SharePublicationRead(share=None, unknown_reason=None)
+        try:
+            account_email = resolve_account_email_for_workspace(session_store, agent_id)
+        except SharingError as exc:
+            logger.debug("No account to ask Imbue Cloud about {} with: {}", agent_id, exc)
+            publication_without_account = SharePublicationRead(
+                share=None, unknown_reason=_publication_unknown_reason_for(exc.reason)
+            )
         try:
             probe = read_share_state_from_agent(agent_address, cli.mngr_caller)
         except ShareInjectionError as exc:
             logger.debug("Sharing grants read: {}", exc)
-            share_without_grants = (
-                _read_active_share_or_none(cli, account_email, host_id) if account_email is not None else None
+            publication_without_grants = (
+                _read_share_publication_for_account(cli, account_email, host_id)
+                if account_email is not None
+                else publication_without_account
             )
-            return _unknown_grants_document(host_id, share_without_grants, service_labels)
+            return _with_publication_unknown_reason(
+                _unknown_grants_document(host_id, publication_without_grants.share, service_labels),
+                publication_without_grants.unknown_reason,
+            )
         # A document nothing can parse reads back as an empty one; ``grants: null``
         # is reserved for a read that never landed, above.
         grants = _readable_grants_document(probe.grants_toml_text) or SharingGrantsDocument()
         if account_email is None:
             # Without a signed-in account there is nothing to ask the connector with.
-            return _share_status_document(host_id, None, grants, service_labels, {}, None, None)
+            return _with_publication_unknown_reason(
+                _share_status_document(host_id, None, grants, service_labels, {}, None, None),
+                publication_without_account.unknown_reason,
+            )
         # Materials present means the workspace believes itself published, so the
         # push says what the share is. Without them the status read does, since a
         # share can be active on the connector with the materials gone (a publish
@@ -1158,18 +1329,26 @@ def get_sharing(
         # gets its document pushed.
         if probe.has_share_env:
             sync = _sync_grants_with_connector(cli, account_email, host_id, grants)
-            share = _share_after_sync(sync, lambda: _read_active_share_or_none(cli, account_email, host_id))
+            publication = (
+                SharePublicationRead(share=sync.share, unknown_reason=None)
+                if sync.is_share_known
+                else _read_share_publication_for_account(cli, account_email, host_id)
+            )
         else:
-            share = _read_active_share_or_none(cli, account_email, host_id)
+            publication = _read_share_publication_for_account(cli, account_email, host_id)
             sync = (
                 _sync_grants_with_connector(cli, account_email, host_id, grants)
-                if share is not None
+                if publication.share is not None
                 else _NOTHING_PUSHED
             )
+        share = publication.share
         span.add_args(is_published=share is not None)
         if share is not None and share.needs_reshare:
             if client_env_config is None:
-                raise SharingError("Client environment config is unavailable; cannot move sharing to its new address.")
+                raise SharingError(
+                    "Client environment config is unavailable; cannot move sharing to its new address.",
+                    SharingFailureReason.UNAVAILABLE,
+                )
             return migrate_stale_share(
                 host_id,
                 agent_id,
@@ -1189,18 +1368,18 @@ def get_sharing(
             identity_cache,
             lambda: _resolve_grant_identities(_granted_user_ids(grants), identity_cache, cli, account_email),
         )
-        return _share_status_document(
-            host_id, share, grants, service_labels, identities, sync.is_synced, sync.outcomes
+        return _with_publication_unknown_reason(
+            _share_status_document(host_id, share, grants, service_labels, identities, sync.is_synced, sync.outcomes),
+            publication.unknown_reason,
         )
 
 
-def _account_email_or_none(session_store: MultiAccountSessionStore | None, agent_id: AgentId) -> str | None:
-    """The owning account's email, or None (identity lookups are skipped) when no signed-in account owns the workspace."""
-    try:
-        return resolve_account_email_for_workspace(session_store, agent_id)
-    except SharingError as exc:
-        logger.debug("Skipping grantee identity lookups for {}: {}", agent_id, exc)
-        return None
+def _with_publication_unknown_reason(
+    document: dict[str, Any], unknown_reason: PublicationUnknownReason | None
+) -> dict[str, Any]:
+    """The sharing document, saying why its publication is not known (None when it is): an unknown share is not drawn as unshared."""
+    document["publication_unknown_reason"] = unknown_reason
+    return document
 
 
 def _unknown_grants_document(
@@ -1258,15 +1437,43 @@ def get_active_share(
     Reads only the connector-side share status -- no exec into the workspace --
     so polling callers (the readiness probe) stay cheap on remote hosts.
     """
+    return read_share_publication(host_id, backend_resolver, cli, session_store).share
+
+
+def read_share_publication(
+    host_id: str,
+    backend_resolver: BackendResolverInterface,
+    cli: ImbueCloudCli | None,
+    session_store: MultiAccountSessionStore | None,
+) -> SharePublicationRead:
+    """The machine's active connector share, no share, or why neither could be told.
+
+    A workspace linked to no account, or with nobody signed in, has no share
+    anyone here could have made, so it reads as unshared; an owner who is
+    signed out, an account list or a connector that could not be read, leave
+    the share unknown.
+    """
     if cli is None:
-        return None
+        return SharePublicationRead(share=None, unknown_reason=PublicationUnknownReason.UNREADABLE)
     try:
         agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
         account_email = resolve_account_email_for_workspace(session_store, agent_id)
     except SharingError as exc:
         logger.debug("Sharing status: {}", exc)
-        return None
-    return _read_active_share_or_none(cli, account_email, host_id)
+        return SharePublicationRead(share=None, unknown_reason=_publication_unknown_reason_for(exc.reason))
+    return _read_share_publication_for_account(cli, account_email, host_id)
+
+
+@pure
+def _publication_unknown_reason_for(reason: SharingFailureReason) -> PublicationUnknownReason | None:
+    """What a failure to find the share's account leaves the publication as: unknown, or (None) plainly unshared."""
+    match reason:
+        case SharingFailureReason.NOT_LINKED | SharingFailureReason.NOT_SIGNED_IN:
+            return None
+        case SharingFailureReason.OWNER_SIGNED_OUT:
+            return PublicationUnknownReason.OWNER_SIGNED_OUT
+        case _:
+            return PublicationUnknownReason.UNREADABLE
 
 
 def get_share_gateway_status_cached(
@@ -1313,7 +1520,7 @@ def unpublish_workspace(
     account, or a connector error.
     """
     if cli is None:
-        raise SharingError("imbue_cloud CLI is not configured.")
+        raise SharingError("imbue_cloud CLI is not configured.", SharingFailureReason.UNAVAILABLE)
     agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
     account_email = resolve_account_email_for_workspace(session_store, agent_id)
     clear_share_publication_from_agent(build_agent_address(agent_id, backend_resolver), cli.mngr_caller)
@@ -1322,14 +1529,12 @@ def unpublish_workspace(
     try:
         existing = cli.get_share_status(account=account_email, host_id=host_id)
     except ImbueCloudCliError as exc:
-        raise SharingError(
-            f"Could not read the workspace's sharing status: {describe_connector_failure(exc)}"
-        ) from exc
+        raise connector_failure_error("Could not read the workspace's sharing status", exc) from exc
     if existing is not None and existing.state in LISTED_SHARE_STATES:
         try:
             cli.delete_share(account=account_email, host_id=host_id)
         except ImbueCloudCliError as exc:
-            raise SharingError(f"Could not unpublish this workspace: {describe_connector_failure(exc)}") from exc
+            raise connector_failure_error("Could not unpublish this workspace", exc) from exc
     # Only now does a sync pass agree that the workspace is unshared: a pass
     # that listed the share before the delete would re-add the entry
     # `mark_unshared` removed and leave it there until the next tick.
@@ -1366,10 +1571,7 @@ def _workspace_display_name(backend_resolver: BackendResolverInterface, agent_id
 
 def _push_current_document(cli: ImbueCloudCli, account_email: str, host_id: str, agent_address: str) -> None:
     """Push the document the workspace holds right now, so an invitation refused as out of date can be tried again."""
-    try:
-        probe = probe_share_state_in_agent(agent_address, cli.mngr_caller)
-    except ShareInjectionError as exc:
-        raise SharingError(str(exc)) from exc
+    probe = _probe_share_state(agent_address, cli)
     _sync_grants_with_connector(
         cli, account_email, host_id, _readable_grants_document(probe.grants_toml_text) or SharingGrantsDocument()
     )
@@ -1412,13 +1614,16 @@ def invite_grantee_for_workspace(
         state = get_state()
         cli: ImbueCloudCli | None = state.imbue_cloud_cli
         if cli is None:
-            raise SharingError("imbue_cloud CLI is not configured on this app.")
+            raise SharingError("imbue_cloud CLI is not configured on this app.", SharingFailureReason.UNAVAILABLE)
         session_store = state.session_store
         agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
         account_email = resolve_account_email_for_workspace(session_store, agent_id)
         share = _read_active_share(cli, account_email, host_id)
         if share is None:
-            raise SharingError("Publish this workspace before inviting anyone: the invitation carries its link.")
+            raise SharingError(
+                "Publish this workspace before inviting anyone: the invitation carries its link.",
+                SharingFailureReason.NOT_PUBLISHED,
+            )
         target = app if app else WHOLE_MACHINE_SERVICE
         label = resolve_share_target_labels(backend_resolver, agent_id).get(target)
         attempt = _InvitationAttempt(
@@ -1448,9 +1653,9 @@ def _invite_with_one_retry(cli: ImbueCloudCli, attempt: _InvitationAttempt, agen
         except ImbueCloudShareRefusedCliError:
             raise
         except ImbueCloudCliError as retry_exc:
-            raise SharingError(f"Could not invite: {describe_connector_failure(retry_exc)}") from retry_exc
+            raise connector_failure_error("Could not invite", retry_exc) from retry_exc
     except ImbueCloudCliError as exc:
-        raise SharingError(f"Could not invite: {describe_connector_failure(exc)}") from exc
+        raise connector_failure_error("Could not invite", exc) from exc
 
 
 def _invite_through_cli(cli: ImbueCloudCli, attempt: _InvitationAttempt) -> InvitationCliResult:
@@ -1486,7 +1691,7 @@ def send_mobile_access_link_for_workspace(
     state = get_state()
     cli: ImbueCloudCli | None = state.imbue_cloud_cli
     if cli is None:
-        raise SharingError("imbue_cloud CLI is not configured on this app.")
+        raise SharingError("imbue_cloud CLI is not configured on this app.", SharingFailureReason.UNAVAILABLE)
     agent_id = resolve_agent_for_host(backend_resolver, host_id, state.session_store)
     account_email = resolve_account_email_for_workspace(state.session_store, agent_id)
     share = _read_active_share(cli, account_email, host_id)
@@ -1502,7 +1707,7 @@ def send_mobile_access_link_for_workspace(
     except ImbueCloudShareRefusedCliError:
         raise
     except ImbueCloudCliError as exc:
-        raise SharingError(f"Could not email the link: {describe_connector_failure(exc)}") from exc
+        raise connector_failure_error("Could not email the link", exc) from exc
 
 
 def list_invitation_outcomes_for_workspace(
@@ -1512,7 +1717,7 @@ def list_invitation_outcomes_for_workspace(
     state = get_state()
     cli: ImbueCloudCli | None = state.imbue_cloud_cli
     if cli is None:
-        raise SharingError("imbue_cloud CLI is not configured on this app.")
+        raise SharingError("imbue_cloud CLI is not configured on this app.", SharingFailureReason.UNAVAILABLE)
     session_store = state.session_store
     agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
     account_email = resolve_account_email_for_workspace(session_store, agent_id)
@@ -1525,7 +1730,7 @@ def list_invitation_outcomes_for_workspace(
             return []
         raise
     except ImbueCloudCliError as exc:
-        raise SharingError(f"Could not read the invitation outcomes: {describe_connector_failure(exc)}") from exc
+        raise connector_failure_error("Could not read the invitation outcomes", exc) from exc
 
 
 def probe_share_readiness(http_client: httpx2.Client, probe_host: str) -> bool:

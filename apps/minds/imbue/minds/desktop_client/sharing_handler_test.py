@@ -25,23 +25,29 @@ from imbue.minds.desktop_client.identity_records import now_utc
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import InvitationOutcomeCliEntry
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import UserIdentityCliInfo
-from imbue.minds.desktop_client.share_materials_injection import probe_share_state_in_agent
+from imbue.minds.desktop_client.share_materials_injection import read_share_state_from_agent
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
 from imbue.minds.desktop_client.share_materials_injection import render_share_identities_json
 from imbue.minds.desktop_client.sharing_handler import GrantsRefusedError
+from imbue.minds.desktop_client.sharing_handler import PublicationUnknownReason
+from imbue.minds.desktop_client.sharing_handler import ShareQuotaExceededError
 from imbue.minds.desktop_client.sharing_handler import SharingError
+from imbue.minds.desktop_client.sharing_handler import SharingFailureReason
 from imbue.minds.desktop_client.sharing_handler import _parse_grants_toml
 from imbue.minds.desktop_client.sharing_handler import _publish_workspace_with_cli
 from imbue.minds.desktop_client.sharing_handler import _resolve_grant_identities
 from imbue.minds.desktop_client.sharing_handler import _save_grants_with_cli
+from imbue.minds.desktop_client.sharing_handler import connector_failure_error
 from imbue.minds.desktop_client.sharing_handler import describe_connector_failure
 from imbue.minds.desktop_client.sharing_handler import get_sharing
 from imbue.minds.desktop_client.sharing_handler import migrate_stale_share
 from imbue.minds.desktop_client.sharing_handler import pick_lowest_latency_relay_region
 from imbue.minds.desktop_client.sharing_handler import probe_share_readiness
+from imbue.minds.desktop_client.sharing_handler import resolve_account_email_for_workspace
 from imbue.minds.desktop_client.sharing_handler import resolve_agent_for_host
 from imbue.minds.desktop_client.sharing_handler import split_relay_endpoint
 from imbue.minds.desktop_client.sharing_handler import unpublish_workspace
@@ -326,6 +332,38 @@ def test_get_sharing_reports_unknown_grants_when_an_unpublished_workspace_cannot
     assert document["grants"] is None
 
 
+def test_get_sharing_does_not_draw_a_share_it_could_not_read_as_off(tmp_path: Path) -> None:
+    caller = RecordingMngrCaller(result=make_share_probe_result())
+    host_id, resolver, (cli, store) = _unpublished_workspace_for_test(tmp_path, caller)
+    cli.is_share_lookup_failing = True
+
+    document = get_sharing(host_id, resolver, cli, store, None, None, None)
+
+    assert document["enabled"] is False
+    assert document["publication_unknown_reason"] == PublicationUnknownReason.UNREADABLE
+
+
+def test_get_sharing_says_the_owner_is_signed_out_rather_than_that_the_workspace_is_unshared(tmp_path: Path) -> None:
+    caller = RecordingMngrCaller(result=make_share_probe_result())
+    host_id, resolver, (cli, store) = _unpublished_workspace_for_test(tmp_path, caller)
+    cli.auth_signout(account="owner@example.com")
+    store.invalidate_identity_cache()
+
+    document = get_sharing(host_id, resolver, cli, store, None, None, None)
+
+    assert document["publication_unknown_reason"] == PublicationUnknownReason.OWNER_SIGNED_OUT
+
+
+def test_get_sharing_reads_an_unshared_workspace_as_known(tmp_path: Path) -> None:
+    caller = RecordingMngrCaller(result=make_share_probe_result())
+    host_id, resolver, (cli, store) = _unpublished_workspace_for_test(tmp_path, caller)
+
+    document = get_sharing(host_id, resolver, cli, store, None, None, None)
+
+    assert document["enabled"] is False
+    assert document["publication_unknown_reason"] is None
+
+
 def test_get_sharing_of_a_published_workspace_pushes_once_and_carries_what_the_push_answered(tmp_path: Path) -> None:
     # One exec and one connector call: the push answers the share, the outcomes,
     # and the grantees' records, which the cache keeps for the reads that push nothing.
@@ -385,6 +423,80 @@ def test_get_sharing_reports_a_share_the_connector_no_longer_holds_as_unpublishe
     assert document["enabled"] is False
     assert document["grants_synced"] is None
     assert cli.pushed_grants_documents == []
+
+
+def _account_refusal_reason(store: Any, agent_id: AgentId) -> SharingFailureReason:
+    with pytest.raises(SharingError) as exc_info:
+        resolve_account_email_for_workspace(store, agent_id)
+    return exc_info.value.reason
+
+
+def test_resolve_account_email_tells_apart_why_no_account_owns_the_workspace(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    store = make_session_store_for_test(tmp_path, cli=cli)
+    unlinked = AgentId.generate()
+
+    # Nobody signed in: signing in is the remedy.
+    assert _account_refusal_reason(store, unlinked) == SharingFailureReason.NOT_SIGNED_IN
+
+    # Someone signed in, but the workspace is linked to nobody.
+    cli.add_account(user_id="user-linker-1", email="linker@example.com")
+    store.invalidate_identity_cache()
+    assert _account_refusal_reason(store, unlinked) == SharingFailureReason.NOT_LINKED
+
+    # The list of accounts could not be read: nothing can be said about the link.
+    cli.is_auth_list_failing = True
+    store.invalidate_identity_cache()
+    assert _account_refusal_reason(store, unlinked) == SharingFailureReason.ACCOUNTS_UNREADABLE
+
+
+def test_resolve_account_email_names_a_signed_out_owner(tmp_path: Path) -> None:
+    caller = RecordingMngrCaller(result=make_share_probe_result())
+    host_id, resolver, (cli, store) = _unpublished_workspace_for_test(tmp_path, caller)
+    agent_id = resolve_agent_for_host(resolver, host_id, store)
+    assert resolve_account_email_for_workspace(store, agent_id) == "owner@example.com"
+
+    cli.auth_signout(account="owner@example.com")
+    store.invalidate_identity_cache()
+
+    assert _account_refusal_reason(store, agent_id) == SharingFailureReason.OWNER_SIGNED_OUT
+
+
+def _quota_refusal(limit: float | None, current: float | None) -> ImbueCloudQuotaExceededCliError:
+    refusal = ImbueCloudQuotaExceededCliError("shares create: refused")
+    refusal.limit = limit
+    refusal.current = current
+    return refusal
+
+
+def test_connector_failure_error_reads_a_plan_refusal_as_the_waitlist_or_the_share_limit() -> None:
+    waitlisted = connector_failure_error("Could not publish this workspace", _quota_refusal(0, 0))
+    capped = connector_failure_error("Could not publish this workspace", _quota_refusal(3, 3))
+    # A refusal whose body carried no numbers is not a zero cap: the panel words it without them.
+    uncounted = connector_failure_error("Could not publish this workspace", _quota_refusal(None, None))
+
+    assert waitlisted.reason == SharingFailureReason.WAITLISTED
+    # Freeing a slot does nothing for a waitlisted account, so it is not the quota refusal the routes link from.
+    assert not isinstance(waitlisted, ShareQuotaExceededError)
+    assert isinstance(uncounted, ShareQuotaExceededError)
+    assert (uncounted.reason, uncounted.limit, uncounted.current) == (
+        SharingFailureReason.SHARE_LIMIT_REACHED,
+        None,
+        None,
+    )
+    assert isinstance(capped, ShareQuotaExceededError)
+    assert (capped.limit, capped.current) == (3, 3)
+    # The connector's own words stay in the message, for the details.
+    assert "shares create: refused" in str(capped)
+
+
+def test_connector_failure_error_reads_an_expired_session_as_a_sign_in_to_renew() -> None:
+    failure = connector_failure_error(
+        "Could not publish this workspace",
+        ImbueCloudCliError("Refresh rejected by connector: Session missing in db or has expired"),
+    )
+
+    assert failure.reason == SharingFailureReason.SIGN_IN_EXPIRED
 
 
 def test_unpublish_workspace_drops_the_forward_identity_entry_and_requests_a_sync(tmp_path: Path) -> None:
@@ -516,7 +628,7 @@ def _migrate_for_test(host_id: str, agent_id: AgentId, cli: ImbueCloudCli) -> di
         agent_id,
         str(agent_id),
         _stale_share(host_id),
-        probe_share_state_in_agent(str(agent_id), caller),
+        read_share_state_from_agent(str(agent_id), caller),
         cli,
         "owner@example.com",
         _client_env_config(),
@@ -584,8 +696,10 @@ def test_migrate_stale_share_refuses_a_pre_share_gateway_workspace() -> None:
     assert isinstance(caller, RecordingMngrCaller)
     caller.result = make_share_probe_result(is_gateway_present=False, is_share_env_present=True)
 
-    with pytest.raises(SharingError, match="update itself"):
+    with pytest.raises(SharingError) as exc_info:
         _migrate_for_test("host-" + "d" * 32, AgentId("agent-" + "c" * 32), cli)
+
+    assert exc_info.value.reason == SharingFailureReason.WORKSPACE_TOO_OLD
 
     assert cli.create_share_calls == []
 
@@ -608,6 +722,7 @@ def test_migrate_stale_share_names_the_recovery_when_the_write_fails_after_the_s
         _migrate_for_test("host-" + "d" * 32, AgentId("agent-" + "c" * 32), cli)
 
     assert len(cli.create_share_calls) == 1
+    assert exc_info.value.reason == SharingFailureReason.ADDRESS_MOVE_FAILED
     assert "exec died" in str(exc_info.value)
 
 
@@ -763,19 +878,36 @@ def test_publish_workspace_falls_back_to_the_connector_origin_without_a_reported
 @pytest.mark.parametrize("is_cloud_row", [True, False])
 def test_publish_workspace_refuses_a_pre_share_gateway_workspace(is_cloud_row: bool) -> None:
     # A workspace created from a template older than the share gateway has
-    # nothing watching share.env: the publish is refused up front with the
-    # update-self pointer instead of provisioning a share that can never come
-    # up. The probe is the first exec, so a failing exec refuses immediately.
+    # nothing watching share.env: the publish is refused up front as too old
+    # instead of provisioning a share that can never come up.
     cli = make_fake_imbue_cloud_cli()
     caller = cli.mngr_caller
     assert isinstance(caller, RecordingMngrCaller)
-    caller.result = MngrCallResult(returncode=1, stderr="test -d failed")
+    caller.result = make_share_probe_result(is_gateway_present=False, is_share_env_present=False)
     agent_id = AgentId("agent-" + "c" * 32)
     host_id = "host-" + "d" * 32
 
-    with pytest.raises(SharingError, match="update itself"):
+    with pytest.raises(SharingError) as exc_info:
         _publish_for_test(host_id, agent_id, cli, is_cloud_row=is_cloud_row)
 
+    assert exc_info.value.reason == SharingFailureReason.WORKSPACE_TOO_OLD
+    assert cli.shares_by_account == {}
+    assert len([call for call in caller.calls if call and call[0] == "exec"]) == 1
+
+
+def test_publish_workspace_refuses_a_workspace_it_cannot_reach_as_unreachable_not_too_old() -> None:
+    # The probe does not start the workspace, so a stopped one never answers
+    # it. That is a workspace to start, not one to update.
+    cli = make_fake_imbue_cloud_cli()
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    caller.result = MngrCallResult(returncode=1, stderr="agent is stopped")
+
+    with pytest.raises(SharingError) as exc_info:
+        _publish_for_test("host-" + "d" * 32, AgentId("agent-" + "c" * 32), cli, is_cloud_row=False)
+
+    assert exc_info.value.reason == SharingFailureReason.WORKSPACE_UNREACHABLE
+    assert "agent is stopped" in str(exc_info.value)
     # Nothing was provisioned: no connector share, no injection past the probe.
     assert cli.shares_by_account == {}
     exec_calls = [call for call in caller.calls if call and call[0] == "exec"]
@@ -914,8 +1046,10 @@ def test_save_grants_refuses_a_pre_share_gateway_workspace() -> None:
     assert isinstance(caller, RecordingMngrCaller)
     caller.result = make_share_probe_result(is_gateway_present=False, is_share_env_present=False)
 
-    with pytest.raises(SharingError, match="update itself"):
+    with pytest.raises(SharingError) as exc_info:
         _save_grants_for_test("host-" + "d" * 32, AgentId("agent-" + "c" * 32), SharingGrantsDocument(), cli)
+
+    assert exc_info.value.reason == SharingFailureReason.WORKSPACE_TOO_OLD
 
     assert len([call for call in caller.calls if call and call[0] == "exec"]) == 1
 

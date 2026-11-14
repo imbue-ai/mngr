@@ -126,7 +126,11 @@ export const WorkspaceOptionsPage: m.ClosureComponent = () => {
       appliedTarget = null;
     }
     if (model === null) {
-      model = new WorkspaceOptionsModel(agentId);
+      model = new WorkspaceOptionsModel(agentId, {
+        shareOverrides: {
+          workspaceLiveness: () => getAppContext().stores.workspaces.entryByAnyId(agentId)?.liveness ?? "",
+        },
+      });
       void model.load();
     }
     if (permissions === null) {

@@ -108,6 +108,21 @@ def test_list_account_shares_404s_for_an_account_not_signed_in_here(tmp_path: Pa
     response = client.get(_SHARES_URL)
 
     assert response.status_code == 404
+    assert json.loads(response.data)["reason"] == "NOT_SIGNED_IN"
+
+
+def test_list_account_shares_answers_a_connector_failure_with_its_reason_and_its_words(tmp_path: Path) -> None:
+    """The page words its own sentence from the reason; the connector's words are kept for its details."""
+    cli = make_fake_imbue_cloud_cli()
+    client, _store = _signed_in_client(tmp_path, StaticBackendResolver(url_by_agent_and_service={}), cli)
+    cli.is_share_lookup_failing = True
+
+    response = client.get(_SHARES_URL)
+
+    assert response.status_code == 502
+    body = json.loads(response.data)
+    assert body["reason"] == "CONNECTOR_FAILED"
+    assert "fake transient share listing failure" in body["error"]
 
 
 def test_account_shares_routes_require_authentication(tmp_path: Path) -> None:

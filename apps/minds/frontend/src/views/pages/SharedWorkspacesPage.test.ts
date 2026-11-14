@@ -54,6 +54,7 @@ function mountPage(accounts: UiAccountEntry[]): {
   vnode: m.Vnode;
   stores: ReturnType<typeof createEmptyStores>;
   render: () => AnyVnode;
+  renderShallow: () => AnyVnode;
 } {
   vi.spyOn(m, "redraw").mockImplementation(() => undefined);
   const stores = createEmptyStores();
@@ -70,6 +71,7 @@ function mountPage(accounts: UiAccountEntry[]): {
     vnode,
     stores,
     render: () => renderDeep((component.view as (v: m.Vnode) => AnyVnode).call(vnode.state, vnode)) as AnyVnode,
+    renderShallow: () => (component.view as (v: m.Vnode) => AnyVnode).call(vnode.state, vnode),
   };
 }
 
@@ -104,6 +106,43 @@ describe("SharedWorkspacesPage", () => {
 
     stores.accounts.applyAccountsMessage(accountsMessage([ALICE]));
     component.onupdate?.call(vnode.state, vnode as m.VnodeDOM);
+    await settle();
+
+    expect(allText(render())).toContain("alpha");
+  });
+
+  it("says why an account's shares could not be read, with a Try again that reads them again", async () => {
+    let isFailing = true;
+    vi.stubGlobal("fetch", (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === accountSharesUrl(ALICE.user_id) && !isFailing)
+        return Promise.resolve(jsonResponse({ account_id: ALICE.user_id, email: ALICE.email, rows: [row(ALICE)] }));
+      return Promise.resolve(
+        jsonResponse({ error: "Could not list this account's shares: boom", reason: "CONNECTOR_FAILED" }, 502),
+      );
+    });
+    const { render, renderShallow } = mountPage([ALICE]);
+    await settle();
+
+    const notice = collectVnodes(renderShallow()).find(
+      (node) =>
+        node.attrs?.id === `shared-workspaces-load-error-${ALICE.user_id}` && node.attrs.error !== undefined,
+    );
+    if (notice === undefined) throw new Error("the failure was not drawn");
+    const attrs = notice.attrs as {
+      error: { message: string; details: string };
+      actions: { label: string; onclick: () => void }[];
+      isBugReportOffered: boolean;
+    };
+    expect(attrs.error.message).toBe(
+      "Couldn't read this account's shared workspaces from Imbue Cloud. Try again. If this persists, report a bug.",
+    );
+    expect(attrs.error.details).toContain("boom");
+    expect(attrs.isBugReportOffered).toBe(true);
+    expect(attrs.actions.map((action) => action.label)).toEqual(["Try again"]);
+
+    isFailing = false;
+    attrs.actions[0].onclick();
     await settle();
 
     expect(allText(render())).toContain("alpha");

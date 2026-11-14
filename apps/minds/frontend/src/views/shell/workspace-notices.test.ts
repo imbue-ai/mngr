@@ -67,7 +67,7 @@ describe("the titlebar status for the workspace on screen", () => {
     const openUpdatesTab = vi.spyOn(shell, "openUpdatesTab").mockImplementation(() => undefined);
     const dismissOutcome = vi
       .spyOn(shell.stores.updates, "dismissOutcome")
-      .mockResolvedValue({ isOk: true, error: "", detail: "" });
+      .mockResolvedValue({ isOk: true, status: 200, error: "", detail: "", code: "" });
 
     titlebarStatusFor(shell, NOTED)?.onClick();
     expect(openWorkspaceChat).toHaveBeenCalledWith(NOTED, CHAT);

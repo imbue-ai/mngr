@@ -40,7 +40,8 @@ import type {
   UiWorkspacePermissions,
 } from "../generated/ui";
 import type { FetchJson } from "./workspaceOptions";
-import { errorMessageFromBody } from "./errors";
+import { errorMessageFromBody, reasonFromBody } from "./errors";
+import type { ResponseBody } from "./errors";
 import { defaultFetchJson } from "./workspaceOptions";
 import {
   forgetWarmedPermissionsOverview,
@@ -250,6 +251,11 @@ export function folderSyncStateLabel(state: FolderSyncState): string {
 export const FOLDER_SYNC_CONFLICTS = Object.keys(
   FOLDER_SYNC_CONFLICT_LABELS,
 ) as FolderSyncConflict[];
+
+/** Whether a refused retry says the app holds no sync for the folder any more. */
+function isSyncRecordMissing(body: ResponseBody): boolean {
+  return reasonFromBody(body) === "NO_SYNC_RECORD";
+}
 
 /** Whether a row's switch reads as on.
  *
@@ -737,14 +743,48 @@ export class PermissionsModel {
    * to retry would set the machine's copy aside and fetch it again for nothing.
    */
   async retrySync(row: UiSharedPath): Promise<void> {
+    const rowKey = folderSyncRetryRowKey(row.path);
+    if (this.busyRowKeys.has(rowKey)) return;
+    this.busyRowKeys.add(rowKey);
+    this.errorMessage = "";
+    this.redrawImpl();
     const body: UiFolderSyncRetryRequest = { path: row.path };
-    await this.writeFlip(
-      folderSyncRetryRowKey(row.path),
-      "retry",
-      body,
-      "Could not start syncing again: ",
-      this.folderSyncBase(),
-    );
+    try {
+      const result = await this.enqueueWrite(() =>
+        this.fetchJsonImpl(`${this.folderSyncBase()}/retry`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+      );
+      if (result.ok) {
+        this.data = result.body as UiWorkspacePermissions;
+        this.status = "ready";
+      } else if (isSyncRecordMissing(result.body)) {
+        // Nothing is left to retry: drop the row's sync so it offers the
+        // switch, the one control that can bring it back.
+        this.errorMessage = errorMessageFromBody(result.body, "");
+        this.forgetRowSync(row.path);
+      } else {
+        this.errorMessage =
+          "Could not start syncing again: " +
+          errorMessageFromBody(result.body, `HTTP ${result.status}`);
+      }
+    } finally {
+      this.busyRowKeys.delete(rowKey);
+      this.redrawImpl();
+    }
+  }
+
+  private forgetRowSync(path: string): void {
+    const current = this.data;
+    if (current === null) return;
+    this.data = {
+      ...current,
+      shared_paths: (current.shared_paths ?? []).map((shared) =>
+        shared.path === path ? { ...shared, sync: null } : shared,
+      ),
+    };
   }
 
   /** Delete the copy the machine kept when this folder's sync was turned off.

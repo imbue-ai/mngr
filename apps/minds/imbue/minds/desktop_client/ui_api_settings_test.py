@@ -229,7 +229,41 @@ def test_sign_in_browser_write_refuses_a_browser_that_is_not_installed(tmp_path:
     response = client.post("/ui/api/settings/sign-in-browser", json={"browser_id": "/Applications/Evil.app"})
 
     assert response.status_code == 400
+    assert json.loads(response.data)["reason"] == "BROWSER_NOT_INSTALLED"
     assert minds_config.get_sign_in_browser_id() is None
+
+
+def test_a_sign_in_browser_write_answers_json_when_the_config_file_cannot_be_written(tmp_path: Path) -> None:
+    """A config file the write cannot go through answers a JSON 500 the settings page can read, not the
+    plain-text catch-all."""
+    minds_config = MindsConfig(data_dir=tmp_path / "config")
+    minds_config.data_dir.mkdir(parents=True)
+    (minds_config.data_dir / "config.toml").write_text("this is [not toml")
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path,
+        is_authenticated=True,
+        minds_config=minds_config,
+        sign_in_browsers=RecordingSignInBrowsers(browsers=(_FIREFOX,)),
+    )
+
+    response = client.post("/ui/api/settings/sign-in-browser", json={"browser_id": "/Applications/Firefox.app"})
+
+    assert response.status_code == 500
+    assert response.mimetype == "application/json"
+    assert "Failed to parse" in json.loads(response.data)["error"]
+
+
+def test_an_account_settings_write_that_cannot_be_saved_answers_json(tmp_path: Path) -> None:
+    """The window, the switch and the one-time offer show their own sentence, with this behind See details."""
+    client, _minds_config, _settings_store = _build_settings_client(tmp_path)
+    # A directory where the record's file goes: the write cannot land, whoever runs the test.
+    (tmp_path / "config" / "account_documents" / "settings" / "local.json").mkdir(parents=True)
+
+    response = client.put("/ui/api/settings/local", json={"auto_update_workspaces": True})
+
+    assert response.status_code == 500
+    assert response.mimetype == "application/json"
+    assert json.loads(response.data)["error"].startswith("Could not save your settings:")
 
 
 def test_a_chosen_sign_in_browser_that_was_removed_reads_as_the_default(tmp_path: Path) -> None:
@@ -329,7 +363,9 @@ def test_a_record_written_by_a_newer_app_refuses_writes_with_409_but_still_serve
     assert served.status_code == 200
     assert json.loads(served.data)["auto_update_workspaces"] is True
     assert refused.status_code == 409
-    assert "newer version" in json.loads(refused.data)["error"]
+    refusal = json.loads(refused.data)
+    assert "newer version" in refusal["error"]
+    assert refusal["reason"] == "SETTINGS_TOO_NEW"
 
 
 def test_account_settings_routes_refuse_a_path_that_is_not_an_account_id(tmp_path: Path) -> None:

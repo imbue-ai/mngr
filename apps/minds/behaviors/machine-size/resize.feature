@@ -40,10 +40,11 @@ Feature: Changing a resizable machine's size
     And the pending size is noted as applying when the machine restarts, with a "Restart now" that restarts the machine, saying the restart backs up the machine's disks first
 
   @imbue-cloud-quota-refusal-is-explained
-  Scenario: A size the account's quota cannot hold is explained in the connector's terms
+  Scenario: A size the account's quota cannot hold is explained, with the connector's terms behind See details
     Given a running Imbue Cloud workspace offered the sizes its plan allows
     When the recorded size is refused by the account's quota
-    Then the page says the plan cannot hold this size right now, quoting the quota that refused it
+    Then the page says the plan doesn't have room for this size right now and to pick a smaller size
+    And the quota that refused it is behind See details, with no Report a bug
     And no restart is dispatched
 
   @no-resize-while-the-machine-transitions
@@ -92,13 +93,13 @@ Feature: Changing a resizable machine's size
     Given a running docker workspace recorded at 4 CPUs and 8 GB of memory
     When the user presses "Apply and restart" with the fields unchanged
     Then no resize is sent
-    And the page asks for a new size
+    And the page says that is already the machine's size
 
   @provider-refusal-is-quoted
-  Scenario: A size the provider refuses is reported in the provider's own words
+  Scenario: A size the provider refuses is reported, its own words kept behind See details
     Given a running docker workspace on a machine with 4 CPUs
     When the user types 64 as its CPUs and presses "Apply and restart"
-    Then the page shows the provider's refusal
+    Then the page says the machine couldn't be resized to that size, with the provider's refusal behind See details
     And no restart is dispatched
 
   @unresizable-machines-refuse

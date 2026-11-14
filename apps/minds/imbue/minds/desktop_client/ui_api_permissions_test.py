@@ -1581,6 +1581,27 @@ def test_turning_sync_on_answers_with_the_row_carrying_its_sync(
     manager.stop_all()
 
 
+def test_retrying_a_folder_with_no_sync_on_record_says_to_turn_syncing_on_again(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    shared = tmp_path / "notes"
+    shared.mkdir()
+    manager = _folder_sync_manager(tmp_path, root_concurrency_group, agent_id)
+    _seed_shared_path_grant(tmp_path, latchkey, host_id, str(shared))
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, folder_sync_manager=manager)
+
+    response = client.post(f"/ui/api/workspaces/{agent_id}/folder-syncs/retry", json={"path": str(shared)})
+
+    assert response.status_code == 409
+    body = json.loads(response.data)
+    # The pane swaps the row's retry for the sync switch on this reason.
+    assert body["reason"] == "NO_SYNC_RECORD"
+    assert str(shared) not in body["error"]
+
+
 def test_turning_sync_off_clears_it_from_the_row(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,

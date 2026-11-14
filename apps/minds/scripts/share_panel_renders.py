@@ -147,9 +147,9 @@ _MARKER_TURN_MS: Final[int] = 300
 _PANE_SCROLLER: Final[str] = 'nav[aria-label="Share targets"] + div'
 
 SAVING_TEXT: Final[str] = "Securely granting access"
-# A refused write is reported in the workspace's own words, so the words the stub
-# refuses with are the ones a failed row will be waited for.
-FAILED_TEXT: Final[str] = "The workspace could not be reached"
+# What the stub's failed write answers with; the row keeps it behind "See details".
+FAILED_WRITE_ERROR: Final[str] = "The workspace could not be reached"
+FAILED_ROW_TEXT: Final[str] = "Couldn't add"
 
 
 class GrantsReply(UpperCaseStrEnum):
@@ -157,7 +157,7 @@ class GrantsReply(UpperCaseStrEnum):
 
     # Store what was sent and answer with the status document, as the route does.
     ECHO = auto()
-    # Refuse with a 500, which marks every row the write carried "Could not save".
+    # Refuse with a 500, which marks every row the write carried "Couldn't add".
     SERVER_ERROR = auto()
     # Answer nothing, which leaves every row the write carries saying it is granting.
     HANG = auto()
@@ -203,6 +203,7 @@ def _options_payload(labels: Mapping[str, str]) -> str:
         color="#7c9885",
         palette={"sage": "#7c9885"},
         is_stale=False,
+        is_provider_signed_out=False,
         is_account_owned_provider=False,
         has_account=True,
         account_email=GRANTER_EMAIL,
@@ -313,7 +314,7 @@ class ShareRouteStubs(MutableModel):
         if reply == GrantsReply.HANG:
             return
         if reply == GrantsReply.SERVER_ERROR:
-            _fulfill(route, json.dumps({"error": FAILED_TEXT}), status=500)
+            _fulfill(route, json.dumps({"error": FAILED_WRITE_ERROR}), status=500)
             return
         body = json.loads(route.request.post_data or "{}")
         stored = SharingGrantsDocument.model_validate(body["grants"])
@@ -390,7 +391,7 @@ def _drive_provisioning(page: Page) -> None:
     # The third step is under way once the readiness poll has answered, which
     # the model asks for two seconds after the publish lands.
     page.wait_for_function(
-        "() => (document.querySelector('#ws-share-provisioning')?.textContent ?? '').includes('Connecting to the relay')",
+        "() => (document.querySelector('#ws-share-provisioning')?.textContent ?? '').includes('Connecting this workspace')",
         timeout=20000,
     )
     _add_grant(page, "bob@example.org")
@@ -410,9 +411,9 @@ def _drive_published(page: Page) -> None:
     _add_grant(page, "bob@example.org")
     _wait_for_row(page, BOB_ROW, SAVING_TEXT, is_present=False)
     _add_grant(page, "dan@example.org")
-    _wait_for_row(page, DAN_ROW, FAILED_TEXT)
+    _wait_for_row(page, DAN_ROW, FAILED_ROW_TEXT)
     _add_grant(page, "erin@example.org")
-    _wait_for_row(page, ERIN_ROW, FAILED_TEXT)
+    _wait_for_row(page, ERIN_ROW, FAILED_ROW_TEXT)
     page.click(f'[data-grant-row="{DAN_ROW}"] button:has-text("Retry")')
     _wait_for_row(page, DAN_ROW, SAVING_TEXT)
     # The Retry click scrolled the column down to dan's row; the mock draws the

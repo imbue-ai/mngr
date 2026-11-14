@@ -23,7 +23,7 @@ import {
 import { onboardingProgress } from "../../models/onboarding";
 import { showErrorDialog, titledError } from "../../models/errorDialog";
 import { errorFromException, errorFromResponse, fallbackErrorSentence } from "../../models/errors";
-import type { ErrorAction, RequestOutcome } from "../../models/errors";
+import type { RequestOutcome } from "../../models/errors";
 import { defaultFetchJson } from "../../models/workspaceOptions";
 import { webLogin } from "../../models/webLogin";
 import type { UiAccountEntry, UiWorkspaceEntry } from "../../channel/messages";
@@ -56,10 +56,13 @@ import {
 } from "./create/CloudAccountsModal";
 import { Button, ButtonLink } from "../components/Button";
 import { Card } from "../components/Card";
-import { ErrorNotice, updateAppActions } from "../components/ErrorDisplay";
+import { ErrorNotice, restartAppActions, updateAppActions } from "../components/ErrorDisplay";
 import { Icon16 } from "../components/Icon";
 import { PageContainer } from "../components/Layout";
 import { Notice } from "../components/Notice";
+import { variantBesideErrors } from "../components/variantBesideErrors";
+import { alertWithDetailsInLog } from "../../models/errors";
+import type { ErrorAction, UserFacingError } from "../../models/errors";
 import { routeLinkAttrs } from "../components/route-link";
 import {
   backupsControlFor,
@@ -82,6 +85,7 @@ import { accountSwitcherRows } from "../shell/AccountSwitcher";
 import { StatusBadge } from "../components/StatusBadge";
 import type { UpdateBadge, UpdateBadgeTone } from "../../models/updates";
 import {
+  bulkUpdateRefusal,
   displayVersion,
   isBadgeOpeningRunChat,
   updateBadgeFor,
@@ -130,6 +134,8 @@ interface LandingState {
   dismissedNoteKeys: Set<string>;
   /** Which bulk press is held for the go-ahead-without-backups confirmation. */
   bulkNoBackupConfirm: "now" | "schedule" | null;
+  /** Why the last bulk press was refused, drawn under the bulk buttons. */
+  bulkError: { error: UserFacingError; actions: ErrorAction[]; isBugReportOffered: boolean } | null;
   /** The add-connection modal, and the create-form defaults it reads its region tables from (fetched on first open). */
   connectionModal: CloudAccountsModalState;
   formDefaults: CreateFormDefaults | null;
@@ -271,6 +277,7 @@ export const LandingPage: m.ClosureComponent = () => {
     isExtrasFailed: false,
     dismissedNoteKeys: new Set(),
     bulkNoBackupConfirm: null,
+    bulkError: null,
     connectionModal: new CloudAccountsModalState(),
     formDefaults: null,
   };
@@ -709,6 +716,7 @@ export const LandingPage: m.ClosureComponent = () => {
     // Cleared on every press: a prompt left standing from the other bulk
     // action would offer to proceed with the wrong one.
     state.bulkNoBackupConfirm = null;
+    state.bulkError = null;
     if (
       !isNoBackupConfirmed &&
       agentIds.some((agentId) => updates.needsNoBackupConfirmation(agentId))
@@ -722,7 +730,16 @@ export const LandingPage: m.ClosureComponent = () => {
         : updates.scheduleAllUpdates(agentIds);
     void call.then((result) => {
       if (!result.isOk) {
-        window.alert(result.error);
+        const { error, isReconnectNeeded, isBugReportOffered } = bulkUpdateRefusal(kind, result);
+        const refusal = {
+          error,
+          actions: isReconnectNeeded ? restartAppActions() : [],
+          isBugReportOffered,
+        };
+        // The line lives in the bulk strip, which is gone once fewer than two
+        // workspaces are left to update.
+        if (updates.updatableAgentIds().length < 2) alertWithDetailsInLog(refusal.error);
+        else state.bulkError = refusal;
       }
       m.redraw();
     });
@@ -742,7 +759,17 @@ export const LandingPage: m.ClosureComponent = () => {
           m(
             Button,
             {
-              variant: "primary",
+              variant: variantBesideErrors(
+                "primary",
+                state.bulkError === null
+                  ? []
+                  : [
+                      {
+                        message: state.bulkError.error.message,
+                        actions: state.bulkError.actions,
+                      },
+                    ],
+              ),
               onclick: () => runBulkAction("schedule", false),
             },
             "Schedule all updates",
@@ -765,8 +792,8 @@ export const LandingPage: m.ClosureComponent = () => {
               m(
                 "span",
                 { class: "type-helper" },
-                "Some of these workspaces have no backups: their updates keep every version in git " +
-                  "and offer a rollback, but there's no full workspace restore to fall back on.",
+                "Some of these workspaces have no backups. Their updates keep a history of your files and can be " +
+                  "rolled back afterwards, but there's no full copy of those workspaces to restore from. Go ahead?",
               ),
               m("div", { class: "flex items-center gap-2" }, [
                 m(
@@ -792,6 +819,16 @@ export const LandingPage: m.ClosureComponent = () => {
               ]),
             ],
           )
+        : null,
+      state.bulkError !== null
+        ? m("div", { class: "pt-2" }, [
+            m(ErrorNotice, {
+              id: "landing-bulk-updates-error",
+              error: state.bulkError.error,
+              actions: state.bulkError.actions,
+              isBugReportOffered: state.bulkError.isBugReportOffered,
+            }),
+          ])
         : null,
     ]);
   }

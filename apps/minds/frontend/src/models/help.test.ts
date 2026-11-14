@@ -184,72 +184,159 @@ describe("HelpModel", () => {
     expect(model.phase).toBe("sent");
   });
 
-  it("swaps to the agent-error phase when the assist spawn fails", async () => {
+  it("swaps to the agent-error phase with our sentence and carries the failure into the report", async () => {
     setPendingHelpLaunch({
       workspaceAgentId: "agent-1",
       isAssistAvailable: true,
     });
+    const calls: Array<{ url: string; body: unknown }> = [];
     const model = new HelpModel({
       storage: memoryStorage(),
-      fetcher: () =>
-        Promise.resolve(jsonResponse({ error: "no assist skill" }, 409)),
+      fetcher: (url, init) => {
+        calls.push({ url, body: JSON.parse(String(init?.body)) });
+        if (url === "/help/assist")
+          return Promise.resolve(
+            jsonResponse(
+              {
+                error: "Couldn't start an agent in this workspace.",
+                reason: "SPAWN_FAILED",
+                detail: "Error: Unknown fields in agent_types.opencode",
+              },
+              502,
+            ),
+          );
+        return Promise.resolve(jsonResponse({ ok: true, event_id: "abc" }));
+      },
     });
     model.description = "help me";
 
     await model.submit();
 
     expect(model.phase).toBe("agent_error");
-    expect(model.agentErrorMessage).toBe("no assist skill");
-    expect(model.agentErrorDetail).toBe("");
+    expect(model.agentError?.message).toBe(
+      "Couldn't start an agent in this workspace. Try again. If this persists, report a bug.",
+    );
+    // The workspace's verdict is kept, behind See details.
+    expect(model.agentError?.details).toContain(
+      "Error: Unknown fields in agent_types.opencode",
+    );
+
     model.backToReportFromError();
     expect(model.phase).toBe("form");
     expect(model.mode).toBe("report");
-  });
-
-  it("keeps a plain-text assist failure's text out of the reason", async () => {
-    setPendingHelpLaunch({
-      workspaceAgentId: "agent-1",
-      isAssistAvailable: true,
-    });
-    const model = new HelpModel({
-      storage: memoryStorage(),
-      fetcher: () =>
-        Promise.resolve(new Response("Bad Gateway", { status: 502 })),
-    });
-    model.description = "help me";
-
     await model.submit();
-
-    expect(model.phase).toBe("agent_error");
-    expect(model.agentErrorMessage).toBe("Could not start an agent.");
-    expect(model.agentErrorDetail).toBe("");
+    const report = calls[1].body as { error_details: string };
+    expect(calls[1].url).toBe("/help/report");
+    expect(report.error_details).toContain("Unknown fields in agent_types");
   });
 
-  it("keeps the refusing machine's own verdict", async () => {
-    setPendingHelpLaunch({
-      workspaceAgentId: "agent-1",
-      isAssistAvailable: true,
-    });
-    const model = new HelpModel({
-      storage: memoryStorage(),
-      fetcher: () =>
+  it("names a workspace too old for a helper and a request that got no answer apart from the fallback", async () => {
+    const answers: Array<() => Promise<Response>> = [
+      () =>
         Promise.resolve(
-          jsonResponse(
-            {
-              error: "Couldn't start an agent in this workspace.",
-              detail: "Error: Unknown fields in agent_types.opencode",
-            },
-            502,
-          ),
+          jsonResponse({ error: "too old", reason: "TOO_OLD" }, 409),
         ),
+      () => Promise.reject(new TypeError("Failed to fetch")),
+    ];
+    setPendingHelpLaunch({
+      workspaceAgentId: "agent-1",
+      isAssistAvailable: true,
+    });
+    const model = new HelpModel({
+      storage: memoryStorage(),
+      fetcher: () => (answers.shift() as () => Promise<Response>)(),
     });
     model.description = "help me";
 
     await model.submit();
-
-    expect(model.agentErrorDetail).toBe(
-      "Error: Unknown fields in agent_types.opencode",
+    expect(model.agentErrorReason).toBe("TOO_OLD");
+    expect(model.agentError?.message).toBe(
+      "This workspace can't start a helper agent yet. *Update it, then try again.*",
     );
+
+    await model.retryAgentHelp();
+    expect(model.agentErrorReason).toBeNull();
+    expect(model.agentError?.message).toBe(
+      "Imbue Studio didn't respond. Try again in a moment.",
+    );
+  });
+
+  it("shows only a refusal's own sentence, keeping any other text it answered behind See details", async () => {
+    const answers: Array<() => Response> = [
+      () =>
+        new Response("<title>405 Method Not Allowed</title>", {
+          status: 405,
+          headers: { "Content-Type": "text/html" },
+        }),
+      () => jsonResponse({ detail: "workspace_agent_id is malformed" }, 400),
+      () =>
+        jsonResponse(
+          { error: "Describe what the agent should help with, then try again." },
+          400,
+        ),
+    ];
+    setPendingHelpLaunch({
+      workspaceAgentId: "agent-1",
+      isAssistAvailable: true,
+    });
+    const model = new HelpModel({
+      storage: memoryStorage(),
+      fetcher: () => Promise.resolve((answers.shift() as () => Response)()),
+    });
+    model.description = "help me";
+    const fallback =
+      "Couldn't start an agent in this workspace. Try again. If this persists, report a bug.";
+
+    await model.submit();
+    expect(model.agentError?.message).toBe(fallback);
+    expect(model.agentError?.details).toContain("405 Method Not Allowed");
+
+    await model.retryAgentHelp();
+    expect(model.agentError?.message).toBe(fallback);
+    expect(model.agentError?.details).toContain(
+      "workspace_agent_id is malformed",
+    );
+
+    await model.retryAgentHelp();
+    expect(model.agentError?.message).toBe(
+      "Describe what the agent should help with, then try again.",
+    );
+  });
+
+  it("starts the agent on Try again after a failed start", async () => {
+    setPendingHelpLaunch({
+      workspaceAgentId: "agent-1",
+      isAssistAvailable: true,
+    });
+    const answers = [
+      jsonResponse(
+        { error: "x", reason: "START_FAILED", detail: "quota" },
+        502,
+      ),
+      jsonResponse({ ok: true }),
+    ];
+    const sent: unknown[] = [];
+    let closed = false;
+    const model = new HelpModel({
+      storage: memoryStorage(),
+      fetcher: (_url, init) => {
+        sent.push(JSON.parse(String(init?.body)));
+        return Promise.resolve(answers.shift() as Response);
+      },
+      onClose: () => {
+        closed = true;
+      },
+    });
+    model.description = "help me";
+
+    await model.submit();
+    expect(model.agentError?.message).toBe(
+      "Couldn't start this workspace. Try again. If this persists, report a bug.",
+    );
+    await model.retryAgentHelp();
+
+    expect(closed).toBe(true);
+    expect(sent).toEqual([sent[0], sent[0]]);
   });
 
   it("closes on a successful assist spawn", async () => {

@@ -21,12 +21,32 @@ import type {
   UpdateState,
   UpdateStatus,
 } from "../electron-bridge";
+import type { AppUpdateFailure } from "./appUpdates";
+import {
+  channelReadFailure,
+  channelSwitchFailure,
+  checkRequestFailure,
+  installFailure,
+  updateStateLoadFailure,
+} from "./appUpdates";
 import { putAccountSettings } from "./accountSettings";
 import type { AccountSettings } from "./accountSettings";
 import type { AutoUpdatePromptDecision } from "./autoUpdatePrompt";
 import { BrowserImportModel } from "./browserImport";
+import {
+  errorFromException,
+  errorFromResponse,
+  errorMessageFromBody,
+  reasonFromBody,
+  isRequestFailureReportable,
+  readResponseBody,
+  responseDetails,
+} from "./errors";
+import type { RequestOutcome, UserFacingError } from "./errors";
+import { isReconnectNeeded, reconnectError } from "./reconnect";
 import type { NotificationPrefs, NotificationStyle } from "./notificationsUi";
-import type { UpdatesStore } from "./updates";
+import type { UpdateDispatchError, UpdatesStore } from "./updates";
+import { updateActionError } from "./updates";
 import {
   DEFAULT_NOTIFICATION_PREFS,
   applyNotificationPrefs,
@@ -97,7 +117,9 @@ export const SETTINGS_SECTIONS: {
 
 /** The zoom sizes the Display panel offers; mirrors ZOOM_PERCENTS in
  * electron/display-zoom.js, which is what the main process accepts. */
-export const DISPLAY_ZOOM_PERCENTS: number[] = [80, 90, 100, 110, 125, 150, 175, 200];
+export const DISPLAY_ZOOM_PERCENTS: number[] = [
+  80, 90, 100, 110, 125, 150, 175, 200,
+];
 
 export const DEFAULT_DISPLAY_ZOOM_PERCENT = 100;
 
@@ -130,6 +152,11 @@ export const CHANNEL_COPY: {
   },
 ];
 
+/** A channel's display name, so a sentence never drops the bare `alpha` into prose. */
+export function channelLabelOf(channel: UpdateChannel): string {
+  return CHANNEL_COPY.find((entry) => entry.name === channel)?.label ?? channel;
+}
+
 // electronBridge.onUpdateStatus has no unregister, so the preload callback is
 // registered ONCE at module scope and forwards to whichever model last loaded;
 // SettingsPage is re-created on every visit to the page.
@@ -152,6 +179,99 @@ export interface MasterPasswordResult {
 
 type FetchLike = typeof fetch;
 
+/** A refused or unanswered settings request, as the panel beside it shows it. */
+export interface SettingsRequestFailure {
+  error: UserFacingError;
+  /** This window's login with Imbue Studio lapsed: only a restart helps. */
+  isReconnectNeeded: boolean;
+  /** The route's own sentence, which explains itself and needs no report. */
+  isExplained: boolean;
+  isBugReportOffered: boolean;
+  /** Sends the same change again, for a failure a second try can clear (not
+   * a refusal the route explained, nor a lapsed login); absent otherwise. */
+  retry?: () => void;
+}
+
+/** `failure`, with `retry` as its Try again where a second try can clear it. */
+function retryable(
+  failure: SettingsRequestFailure,
+  retry: () => void,
+): SettingsRequestFailure {
+  return failure.isExplained || failure.isReconnectNeeded
+    ? failure
+    : { ...failure, retry };
+}
+
+export async function outcomeOf(response: Response): Promise<RequestOutcome> {
+  return { status: response.status, body: await readResponseBody(response) };
+}
+
+/**
+ * What a failed settings request tells the user: the restart sentence for a
+ * lapsed login; the route's own sentence for a refusal it marked with a reason
+ * the panel knows; else `noResponseSentence` or the fallback naming
+ * `whatFailed`. The response always goes into the details.
+ */
+export function settingsRequestFailure(
+  whatFailed: string,
+  outcome: RequestOutcome,
+  options: {
+    explainedReasons?: readonly string[];
+    noResponseSentence?: string;
+  } = {},
+): SettingsRequestFailure {
+  if (isReconnectNeeded(outcome)) {
+    return {
+      error: reconnectError(outcome),
+      isReconnectNeeded: true,
+      isExplained: false,
+      isBugReportOffered: false,
+    };
+  }
+  const reason = reasonFromBody(outcome.body);
+  const routeSentence = errorMessageFromBody(outcome.body, "");
+  if (
+    reason !== null &&
+    routeSentence &&
+    (options.explainedReasons ?? []).includes(reason)
+  ) {
+    return {
+      error: { message: routeSentence, details: responseDetails(outcome) },
+      isReconnectNeeded: false,
+      isExplained: true,
+      isBugReportOffered: false,
+    };
+  }
+  const plainReason =
+    outcome.status === 0 ? (options.noResponseSentence ?? null) : null;
+  return {
+    // Every settings request can be sent again: by its Try again, or by the
+    // same press or change.
+    error: errorFromResponse(whatFailed, outcome, { plainReason }),
+    isReconnectNeeded: false,
+    isExplained: false,
+    isBugReportOffered: isRequestFailureReportable(outcome),
+  };
+}
+
+/** The account-settings route's refusal of a record a newer Imbue Studio
+ * saved: only that version can change it. */
+export const SETTINGS_TOO_NEW_REASON = "SETTINGS_TOO_NEW";
+
+/** A change to a setting that Imbue Studio on this computer saves. */
+function settingWriteFailure(
+  outcome: RequestOutcome,
+  explainedReasons: readonly string[] = [],
+): SettingsRequestFailure {
+  return settingsRequestFailure("Couldn't save this change", outcome, {
+    explainedReasons: [SETTINGS_TOO_NEW_REASON, ...explainedReasons],
+    noResponseSentence:
+      "Couldn't save this change — Imbue Studio didn't respond. Try again in a moment.",
+  });
+}
+
+const NO_RESPONSE: RequestOutcome = { status: 0, body: null };
+
 /** What an If-Match-guarded write of an install-keyed flag came back with. */
 type InstallFlagWriteOutcome =
   | { kind: "ok"; version: string }
@@ -160,7 +280,7 @@ type InstallFlagWriteOutcome =
 
 export class SettingsModel {
   overview: SettingsOverview | null = null;
-  isLoadFailed = false;
+  loadFailure: SettingsRequestFailure | null = null;
   activeSection: SettingsSection = "notifications";
 
   // Release channels (desktop only)
@@ -174,7 +294,7 @@ export class SettingsModel {
   isUpdateBusy = false;
   /** An install from the panel is running and the app has not quit yet. */
   isUpdateInstalling = false;
-  updateError = "";
+  updateError: AppUpdateFailure | null = null;
 
   // Display zoom (desktop only)
   /** The stored zoom percent; null in the browser build, where the panel
@@ -182,14 +302,17 @@ export class SettingsModel {
   displayZoomPercent: number | null = null;
   displayZoomError = "";
   errorReportingError = "";
-  updateWindowError = "";
-  autoUpdateError = "";
+  updateWindowFailure: SettingsRequestFailure | null = null;
+  autoUpdateFailure: SettingsRequestFailure | null = null;
   isAutoUpdateBusy = false;
   /** The workspace being put back on Studio's auto-update setting, and why the last one could not be. */
   workspaceResettingId: string | null = null;
-  workspaceResetError = "";
-  signInBrowserError = "";
-  notificationPrefsError = "";
+  workspaceResetFailure: {
+    agentId: string;
+    error: UpdateDispatchError;
+  } | null = null;
+  signInBrowserFailure: SettingsRequestFailure | null = null;
+  notificationPrefsFailure: SettingsRequestFailure | null = null;
   remoteExecutionError = "";
   /** The big warning is up: the user asked to let agents run commands here and has not yet confirmed. */
   isRemoteExecutionWarningOpen = false;
@@ -207,7 +330,9 @@ export class SettingsModel {
    * flight. */
   testNotificationResult = "";
   isTestNotificationBusy = false;
-  masterPasswordError = "";
+  /** The two fields differ, or the route refused for a reason of its own. */
+  masterPasswordRefusal = "";
+  masterPasswordFailure: SettingsRequestFailure | null = null;
   masterPasswordResults: MasterPasswordResult[] | null = null;
   isMasterPasswordAllOk = false;
   isMasterPasswordBusy = false;
@@ -229,27 +354,56 @@ export class SettingsModel {
     this.browserImport = new BrowserImportModel(fetchImpl, redraw);
   }
 
+  get isLoadFailed(): boolean {
+    return this.loadFailure !== null;
+  }
+
   /** The account whose account-keyed values the overview resolves for;
    * remembered from load() so internal rebase reloads stay on it. */
   private accountId = "local";
 
   async load(accountId?: string): Promise<void> {
     if (accountId !== undefined) this.accountId = accountId;
-    this.isLoadFailed = false;
+    this.loadFailure = null;
+    let response: Response;
     try {
-      const response = await this.fetchImpl(
+      response = await this.fetchImpl(
         `/ui/api/settings?account=${encodeURIComponent(this.accountId)}`,
         {
           credentials: "same-origin",
         },
       );
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    } catch {
+      this.loadFailure = settingsRequestFailure(
+        "Couldn't load your settings",
+        NO_RESPONSE,
+      );
+      this.redraw();
+      return;
+    }
+    if (!response.ok) {
+      this.loadFailure = settingsRequestFailure(
+        "Couldn't load your settings",
+        await outcomeOf(response),
+      );
+      this.redraw();
+      return;
+    }
+    try {
       this.overview = (await response.json()) as SettingsOverview;
       // Keep the app-wide applied prefs (which gate notification arrivals)
       // in step with what this window just learned; a no-op when absent.
       applyNotificationPrefs(this.overview.notification_prefs);
-    } catch {
-      this.isLoadFailed = true;
+    } catch (error) {
+      this.loadFailure = {
+        error: errorFromException(
+          "Couldn't load your settings",
+          error,
+        ),
+        isReconnectNeeded: false,
+        isExplained: false,
+        isBugReportOffered: true,
+      };
     }
     this.redraw();
   }
@@ -408,29 +562,34 @@ export class SettingsModel {
    * a refused write keeps the current choice and shows why. */
   async setSignInBrowser(browserId: string | null): Promise<void> {
     if (this.overview === null) return;
-    this.signInBrowserError = "";
+    this.signInBrowserFailure = null;
     try {
-      const response = await this.fetchImpl("/ui/api/settings/sign-in-browser", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ browser_id: browserId }),
-      });
+      const response = await this.fetchImpl(
+        "/ui/api/settings/sign-in-browser",
+        {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ browser_id: browserId }),
+        },
+      );
       if (response.ok) {
         const latest = this.overview;
         if (latest === null) return;
         this.overview = { ...latest, sign_in_browser_id: browserId };
       } else {
-        const data = (await response.json().catch(() => ({}))) as {
-          error?: string;
-        };
-        this.signInBrowserError =
-          data.error ??
-          `Could not change the sign-in browser (HTTP ${response.status}).`;
+        this.signInBrowserFailure = retryable(
+          settingWriteFailure(await outcomeOf(response), [
+            "BROWSER_NOT_INSTALLED",
+          ]),
+          () => void this.setSignInBrowser(browserId),
+        );
       }
     } catch {
-      this.signInBrowserError =
-        "Could not change the sign-in browser (network error).";
+      this.signInBrowserFailure = retryable(
+        settingWriteFailure(NO_RESPONSE),
+        () => void this.setSignInBrowser(browserId),
+      );
     }
     this.redraw();
   }
@@ -445,7 +604,7 @@ export class SettingsModel {
   ): Promise<void> {
     const overview = this.overview;
     if (overview === null) return;
-    this.updateWindowError = "";
+    this.updateWindowFailure = null;
     try {
       const response = await putAccountSettings(this.fetchImpl, accountId, {
         update_window_start_hour: startHour,
@@ -462,28 +621,38 @@ export class SettingsModel {
           update_window_end_hour: endHour,
         };
       } else {
-        const data = (await response.json().catch(() => ({}))) as {
-          error?: string;
-        };
-        this.updateWindowError =
-          data.error ??
-          `Could not change the update window (HTTP ${response.status}).`;
+        this.updateWindowFailure = retryable(
+          settingWriteFailure(await outcomeOf(response), ["EMPTY_WINDOW"]),
+          () => void this.setUpdateWindow(accountId, startHour, endHour),
+        );
       }
     } catch {
-      this.updateWindowError =
-        "Could not change the update window (network error).";
+      this.updateWindowFailure = retryable(
+        settingWriteFailure(NO_RESPONSE),
+        () => void this.setUpdateWindow(accountId, startHour, endHour),
+      );
     }
     this.redraw();
   }
 
   /** Put one workspace back on Studio's auto-update setting; the updates frame that follows drops its row. */
-  async resetWorkspaceAutoUpdate(agentId: string, updates: UpdatesStore): Promise<void> {
+  async resetWorkspaceAutoUpdate(
+    agentId: string,
+    updates: UpdatesStore,
+  ): Promise<void> {
     this.workspaceResettingId = agentId;
-    this.workspaceResetError = "";
+    this.workspaceResetFailure = null;
     this.redraw();
     const result = await updates.setAutoUpdateOverride(agentId, null);
     this.workspaceResettingId = null;
-    if (!result.isOk) this.workspaceResetError = result.error;
+    if (!result.isOk)
+      this.workspaceResetFailure = {
+        agentId,
+        error: updateActionError(
+          result,
+          "Couldn't put this workspace back on Studio settings",
+        ),
+      };
     this.redraw();
   }
 
@@ -492,7 +661,7 @@ export class SettingsModel {
    * window: no If-Match. The switch shows what the backend confirmed. */
   async setAutoUpdateEnabled(accountId: string, isEnabled: boolean): Promise<void> {
     if (this.overview === null) return;
-    this.autoUpdateError = "";
+    this.autoUpdateFailure = null;
     this.isAutoUpdateBusy = true;
     this.redraw();
     try {
@@ -503,19 +672,22 @@ export class SettingsModel {
         const result = (await response.json()) as AccountSettings;
         const latest = this.overview;
         if (latest !== null) {
-          this.overview = { ...latest, is_auto_update_enabled: result.auto_update_workspaces };
+          this.overview = {
+            ...latest,
+            is_auto_update_enabled: result.auto_update_workspaces,
+          };
         }
       } else {
-        const data = (await response.json().catch(() => ({}))) as {
-          error?: string;
-        };
-        this.autoUpdateError =
-          data.error ??
-          `Could not change automatic updates (HTTP ${response.status}).`;
+        this.autoUpdateFailure = retryable(
+          settingWriteFailure(await outcomeOf(response)),
+          () => void this.setAutoUpdateEnabled(accountId, isEnabled),
+        );
       }
     } catch {
-      this.autoUpdateError =
-        "Could not change automatic updates (network error).";
+      this.autoUpdateFailure = retryable(
+        settingWriteFailure(NO_RESPONSE),
+        () => void this.setAutoUpdateEnabled(accountId, isEnabled),
+      );
     }
     this.isAutoUpdateBusy = false;
     this.redraw();
@@ -535,7 +707,7 @@ export class SettingsModel {
   ): Promise<void> {
     const overview = this.overview;
     if (overview === null) return;
-    this.notificationPrefsError = "";
+    this.notificationPrefsFailure = null;
     const current = overview.notification_prefs ?? DEFAULT_NOTIFICATION_PREFS;
     try {
       const styleResponse = await postNotificationStyleWrite(
@@ -551,14 +723,10 @@ export class SettingsModel {
       if (!styleResponse.ok) {
         // Persisted nothing; the unchanged model state stands, and the
         // snapped-back control needs a stated reason.
-        let message = `Could not update notifications (HTTP ${styleResponse.status}).`;
-        try {
-          const data = (await styleResponse.json()) as { error?: string };
-          if (data.error) message = data.error;
-        } catch {
-          // Non-JSON error body: keep the status-based message.
-        }
-        this.notificationPrefsError = message;
+        this.notificationPrefsFailure = retryable(
+          settingWriteFailure(await outcomeOf(styleResponse)),
+          () => void this.setNotificationPrefs(accountId, next),
+        );
         this.redraw();
         return;
       }
@@ -568,12 +736,10 @@ export class SettingsModel {
           notifications_enabled: next.is_enabled,
         });
         if (!enabledResponse.ok) {
-          const data = (await enabledResponse.json().catch(() => ({}))) as {
-            error?: string;
-          };
-          this.notificationPrefsError =
-            data.error ??
-            `Could not update notifications (HTTP ${enabledResponse.status}).`;
+          this.notificationPrefsFailure = retryable(
+            settingWriteFailure(await outcomeOf(enabledResponse)),
+            () => void this.setNotificationPrefs(accountId, next),
+          );
           // The style write landed; reload so the page shows the mixed outcome.
           await this.load();
           return;
@@ -595,8 +761,10 @@ export class SettingsModel {
       applyNotificationPrefs(applied);
     } catch {
       // Network failure: say so rather than snapping the control back silently.
-      this.notificationPrefsError =
-        "Could not update notifications (network error).";
+      this.notificationPrefsFailure = retryable(
+        settingWriteFailure(NO_RESPONSE),
+        () => void this.setNotificationPrefs(accountId, next),
+      );
     }
     this.redraw();
   }
@@ -646,10 +814,11 @@ export class SettingsModel {
     newPassword: string,
     confirmPassword: string,
   ): Promise<void> {
-    this.masterPasswordError = "";
+    this.masterPasswordRefusal = "";
+    this.masterPasswordFailure = null;
     this.masterPasswordResults = null;
     if (newPassword !== confirmPassword) {
-      this.masterPasswordError = "The two passwords do not match.";
+      this.masterPasswordRefusal = "The two passwords do not match.";
       this.redraw();
       return;
     }
@@ -665,20 +834,31 @@ export class SettingsModel {
           new_password_confirm: confirmPassword,
         }),
       });
-      const data = (await response.json().catch(() => ({}))) as {
-        error?: string;
-        ok?: boolean;
-        results?: MasterPasswordResult[];
-      };
+      const outcome = await outcomeOf(response);
       if (response.status !== 200) {
-        this.masterPasswordError =
-          data.error ?? `The change failed (HTTP ${response.status}).`;
+        const failure = settingsRequestFailure(
+          "Couldn't change the master password",
+          outcome,
+          { explainedReasons: ["NO_ACCOUNTS", "ACCOUNTS_UNREADABLE"] },
+        );
+        if (failure.isExplained) {
+          this.masterPasswordRefusal = failure.error.message;
+        } else {
+          this.masterPasswordFailure = failure;
+        }
       } else {
+        const data = (outcome.body ?? {}) as {
+          ok?: boolean;
+          results?: MasterPasswordResult[];
+        };
         this.masterPasswordResults = data.results ?? [];
         this.isMasterPasswordAllOk = data.ok === true;
       }
     } catch {
-      this.masterPasswordError = "The change failed (network error).";
+      this.masterPasswordFailure = settingsRequestFailure(
+        "Couldn't change the master password",
+        NO_RESPONSE,
+      );
     }
     this.isMasterPasswordBusy = false;
     this.redraw();
@@ -691,7 +871,8 @@ export class SettingsModel {
     try {
       this.displayZoomPercent = await electronBridge.getDisplayZoom();
     } catch (error) {
-      this.displayZoomError = error instanceof Error ? error.message : String(error);
+      this.displayZoomError =
+        error instanceof Error ? error.message : String(error);
     }
     this.redraw();
   }
@@ -705,7 +886,8 @@ export class SettingsModel {
       const applied = await electronBridge.setDisplayZoom(percent);
       if (applied !== null) this.displayZoomPercent = applied;
     } catch (error) {
-      this.displayZoomError = error instanceof Error ? error.message : String(error);
+      this.displayZoomError =
+        error instanceof Error ? error.message : String(error);
     }
     this.redraw();
   }
@@ -716,6 +898,7 @@ export class SettingsModel {
   }
 
   async loadUpdateState(): Promise<void> {
+    this.updateError = null;
     // Registered before the first await: a main process that cannot describe
     // its updater must not also cost this session its status listener.
     activeUpdateStatusForwarder = (status) => this.receiveUpdateStatus(status);
@@ -726,7 +909,7 @@ export class SettingsModel {
       // A desktop build whose updater failed to describe itself is not the
       // browser build, and the panel says so rather than showing the browser
       // copy with no version, no channel, and no reason.
-      this.updateError = error instanceof Error ? error.message : String(error);
+      this.updateError = updateStateLoadFailure(error);
       this.redraw();
       return;
     }
@@ -750,7 +933,7 @@ export class SettingsModel {
     try {
       this.peekedChannels = await electronBridge.peekUpdateChannels();
     } catch (error) {
-      this.updateError = error instanceof Error ? error.message : String(error);
+      this.updateError = channelReadFailure(error);
     }
     this.redraw();
   }
@@ -792,13 +975,17 @@ export class SettingsModel {
     if (this.updateState === null || channel === this.updateState.channel)
       return;
     this.isUpdateBusy = true;
-    this.updateError = "";
+    this.updateError = null;
     this.redraw();
     try {
       this.peekedChannels = await electronBridge.peekUpdateChannels();
       const target = this.peekedChannels[channel];
       if (target !== undefined && target.version === null) {
-        this.updateError = `The ${channel} channel is unavailable right now, so Imbue Studio stayed on ${this.updateState.channel}.`;
+        this.updateError = {
+          message: `The ${channelLabelOf(channel)} channel is unavailable right now, so Imbue Studio stayed on ${channelLabelOf(this.updateState.channel)}.`,
+          details: target.error ?? "",
+          isBugReportOffered: false,
+        };
         return;
       }
       if (target !== undefined && target.wouldPark) {
@@ -807,7 +994,7 @@ export class SettingsModel {
       }
       await this.applyChannel(channel);
     } catch (error) {
-      this.updateError = error instanceof Error ? error.message : String(error);
+      this.updateError = this.switchFailure(error);
     } finally {
       this.isUpdateBusy = false;
       this.redraw();
@@ -823,7 +1010,7 @@ export class SettingsModel {
     try {
       await this.applyChannel(pending.channel);
     } catch (error) {
-      this.updateError = error instanceof Error ? error.message : String(error);
+      this.updateError = this.switchFailure(error);
     } finally {
       this.isUpdateBusy = false;
       this.redraw();
@@ -833,6 +1020,13 @@ export class SettingsModel {
   cancelChannelSwitch(): void {
     this.pendingChannelSwitch = null;
     this.redraw();
+  }
+
+  private switchFailure(error: unknown): AppUpdateFailure {
+    return channelSwitchFailure(
+      error,
+      channelLabelOf(this.updateState?.channel ?? "stable"),
+    );
   }
 
   private async applyChannel(channel: UpdateChannel): Promise<void> {
@@ -850,14 +1044,14 @@ export class SettingsModel {
    * rejected install (a cancelled password prompt) with the reason for the
    * panel to show, or a quit cancelled at the running-workspaces prompt.
    */
-  async installUpdateNow(): Promise<void> {
-    this.updateError = "";
+  async installUpdateNow(actionLabel: string): Promise<void> {
+    this.updateError = null;
     this.isUpdateInstalling = true;
     this.redraw();
     try {
       await electronBridge.installUpdate();
     } catch (error) {
-      this.updateError = error instanceof Error ? error.message : String(error);
+      this.updateError = installFailure(error, actionLabel);
     } finally {
       this.isUpdateInstalling = false;
       this.redraw();
@@ -866,7 +1060,7 @@ export class SettingsModel {
 
   async checkForUpdatesNow(): Promise<void> {
     this.isUpdateBusy = true;
-    this.updateError = "";
+    this.updateError = null;
     this.redraw();
     try {
       // `describe()` carries the time the check just settled, so there is
@@ -874,7 +1068,7 @@ export class SettingsModel {
       const next = await electronBridge.checkForUpdates();
       if (next !== null) this.updateState = next;
     } catch (error) {
-      this.updateError = error instanceof Error ? error.message : String(error);
+      this.updateError = checkRequestFailure(error);
     } finally {
       this.isUpdateBusy = false;
       this.redraw();

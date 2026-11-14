@@ -35,10 +35,12 @@ import {
   recordedDispatchFailure,
   skipConfirmationLine,
   skippedVersionText,
+  updateActionError,
   updateChatAgentIdFor,
 } from "../../../models/updates";
 import type {
   UpdateActionResult,
+  UpdateDispatchError,
   UpdateSituation,
   WorkspaceAutoUpdate,
 } from "../../../models/updates";
@@ -46,10 +48,18 @@ import { Button } from "../../components/Button";
 import { Collapsible } from "../../components/Collapsible";
 import { TextInput } from "../../components/FormControls";
 import { SectionHeader } from "../../components/Layout";
-import { machineVerdict } from "../../components/MachineVerdict";
-import { Notice } from "../../components/Notice";
 import { Spinner } from "../../components/Spinner";
+import {
+  updateDispatchErrorNotice,
+  updateDispatchShownError,
+} from "../../components/UpdateDispatchErrorNotice";
+import type { UpdateDispatchErrorOptions } from "../../components/UpdateDispatchErrorNotice";
+import { variantBesideErrors } from "../../components/variantBesideErrors";
+import type { ErrorAction } from "../../../models/errors";
+import { AskAgentModel } from "../../../models/assistChat";
+import { recoveryRoute } from "../../../models/create";
 import { renderUpdateWindowPicker } from "../../components/UpdateWindowPicker";
+import { settingsFailureLine } from "../../components/SettingsFailureLine";
 
 export interface UpdatesGroupAttrs {
   agentId: string;
@@ -67,11 +77,12 @@ interface UpdatesGroupState {
   noBackupHeld: { press: "now" | "schedule"; targetRef: string } | null;
   isSkipConfirmOpen: boolean;
   /** Why the last press failed, in the app's words and the machine's. */
-  error: { message: string; detail: string } | null;
+  error: UpdateDispatchError | null;
   /** An automatic-updates write is out; apart from `pending`, so neither can clear the other's. */
   isAutoUpdateWriting: boolean;
-  /** Why the last automatic-updates write failed, said beside the choices rather than the update. */
-  autoUpdateError: { message: string; detail: string } | null;
+  /** Why the last automatic-updates write failed, said beside the choices
+   * rather than the update, and the write its Try again sends again. */
+  autoUpdateError: { error: UpdateDispatchError; retry: () => void } | null;
   isSecurityDetailsOpen: boolean;
   isSpecificVersionOpen: boolean;
   specificVersion: string;
@@ -81,7 +92,7 @@ interface UpdatesGroupState {
   kernelPrompt: { kind: "confirm" } | { kind: "force"; message: string } | null;
   /** The kernel restart press waiting on its answer; its button spins. */
   isKernelPending: boolean;
-  kernelError: { message: string; detail: string } | null;
+  kernelError: UpdateDispatchError | null;
   isKernelDetailsOpen: boolean;
 }
 
@@ -252,8 +263,8 @@ function noBackupConfirmPrompt(
       m(
         "p",
         { class: "type-helper text-primary" },
-        "This workspace has no backups. The update still keeps every version in git and offers a rollback " +
-          "afterwards, but there's no full workspace restore to fall back on. Go ahead?",
+        "This workspace has no backups. The update keeps a history of your files and can be rolled back " +
+          "afterwards, but there's no full copy of the workspace to restore from. Go ahead?",
       ),
       m("div", { class: "flex flex-wrap items-center gap-2" }, [
         m(
@@ -306,6 +317,17 @@ function skipConfirmPrompt(
   );
 }
 
+/** What failed, per press, for a refusal that carries no sentence of its own. */
+const PRESS_FAILURE: Record<Press, string> = {
+  now: "Couldn't start the update",
+  schedule: "Couldn't schedule the update",
+  "cancel-schedule": "Couldn't cancel the scheduled update",
+  skip: "Couldn't skip this update",
+};
+const SIGN_IN_FAILURE = "Couldn't open a chat in this workspace to sign in";
+const AUTO_UPDATE_FAILURE = "Couldn't save this workspace's automatic updates";
+const KERNEL_FIX_FAILURE = "Couldn't restart this machine onto the fixed kernel";
+
 /** "Turn on auto-updates": green rather than the inverse primary, since yes is the good outcome. */
 const GREEN_BUTTON_CLASS =
   "inline-flex items-center justify-center h-[34px] px-3 rounded-md type-label cursor-pointer " +
@@ -315,6 +337,11 @@ export function UpdatesGroup(): m.Component<UpdatesGroupAttrs> {
   const stateByAgentId = new Map<string, UpdatesGroupState>();
   /** The machine last drawn, and the situation the reader saw there. */
   let shown: { agentId: string; situation: UpdateSituation } | null = null;
+  // "Ask its agent", for a workspace too old to update itself.
+  const askAgent = new AskAgentModel({
+    onStarted: (workspaceAgentId) =>
+      getAppContext().shell.enterWorkspace(workspaceAgentId),
+  });
 
   /** Leaving settles how a run ended: once read here, it has said all it had
    * to. Not if a press on the way out started a new run. */
@@ -346,7 +373,7 @@ export function UpdatesGroup(): m.Component<UpdatesGroupAttrs> {
     local.error =
       arrival.failure === null
         ? null
-        : { message: arrival.failure.error, detail: arrival.failure.detail };
+        : updateActionError(arrival.failure, PRESS_FAILURE.now);
   }
 
   function run(
@@ -361,7 +388,7 @@ export function UpdatesGroup(): m.Component<UpdatesGroupAttrs> {
     void call().then((result) => {
       if (local.pending?.press === press) local.pending = null;
       if (result.isOk) onOk();
-      else local.error = { message: result.error, detail: result.detail };
+      else local.error = updateActionError(result, PRESS_FAILURE[press]);
       m.redraw();
     });
   }
@@ -478,21 +505,19 @@ export function UpdatesGroup(): m.Component<UpdatesGroupAttrs> {
           (action.kind === "schedule" ? (action.targetRef ?? "") : "");
       const workspaceName =
         stores.workspaces.entryByAnyId(agentId)?.name ?? "this workspace";
-      const actionButton = (action: UpdateTabAction): m.Children =>
-        m(
-          Button,
-          {
-            variant: action.variant,
-            id: `ws-update-${action.kind}`,
-            disabled: isBusy,
-            "data-tooltip":
-              action.kind === "create-workspace"
-                ? migrateCommandFor(workspaceName)
-                : undefined,
-            onclick: () => onAction(action),
-          },
-          isPendingFor(action) ? m(Spinner, { size: "sm" }) : action.label,
-        );
+      const tooltipFor = (action: UpdateTabAction): string | undefined =>
+        action.kind === "create-workspace"
+          ? migrateCommandFor(workspaceName)
+          : undefined;
+      // The tab's button as one of an error's actions, for a row it shares with one.
+      const tabErrorAction = (action: UpdateTabAction): ErrorAction => ({
+        id: `ws-update-${action.kind}`,
+        label: action.label,
+        isDisabled: isBusy,
+        isBusy: isPendingFor(action),
+        tooltip: tooltipFor(action),
+        onclick: () => onAction(action),
+      });
 
       const recorded = recordedDispatchFailure(update, isUpdating);
       const signInFailure =
@@ -502,20 +527,73 @@ export function UpdatesGroup(): m.Component<UpdatesGroupAttrs> {
       const error =
         local.error ??
         (signInFailure !== null
-          ? { message: signInFailure.error, detail: signInFailure.detail }
+          ? updateActionError(signInFailure, SIGN_IN_FAILURE)
           : null);
       // A press the workspace just refused for want of a sign-in already says so in its own words.
       const line =
         status.situation === "needs-sign-in" && local.error !== null
           ? local.error.message
           : status.line;
-      const shownError = line === status.line ? error : null;
-      const lineVerdicts = [
-        status.situation === "not-started"
-          ? machineVerdict(recorded.detail)
-          : null,
-        line !== status.line ? machineVerdict(local.error?.detail ?? "") : null,
+      const isNotStartedShown = status.situation === "not-started" && recorded.message !== "";
+      // A refused dispatch is recorded on the row too, where the not-started
+      // line and its follow-up already say it.
+      const isErrorRecorded =
+        isNotStartedShown && error !== null && error.message === recorded.message && error.code === recorded.code;
+      const shownError = line === status.line && !isErrorRecorded ? error : null;
+      // The status heading leads with the error's own mark, so a notice drawn
+      // flush under it, in place of the status line, is not marked again.
+      const isHeadingMarked = status.tone === "error" && status.icon === "alert";
+      const errorOptions = (id: string, shownFailure: UpdateDispatchError): UpdateDispatchErrorOptions => ({
+        id,
+        agentId,
+        error: shownFailure,
+        askAgent,
+        onCreateWorkspace: () => shell.routeToHub("/create"),
+        // Recovery starts it and comes back to this tab.
+        onStartWorkspace: updates.isStopped(agentId)
+          ? () => m.route.set(recoveryRoute(agentId, m.route.get() ?? "", "start"))
+          : undefined,
+      });
+      const isPromptOpen = local.noBackupHeld !== null || local.isSkipConfirmOpen;
+      // An update that didn't start draws the tab's buttons (Try again) in its
+      // follow-up's row, beside the error's own.
+      const areActionsInFollowUp = isNotStartedShown && !isPromptOpen;
+      const notStartedOptions = isNotStartedShown ? errorOptions("ws-update-not-started", recorded) : null;
+      const notStartedSurfaceActions = areActionsInFollowUp ? actions.map(tabErrorAction) : [];
+      const signInRefusalOptions =
+        line !== status.line && local.error !== null ? errorOptions("ws-update-sign-in-refusal", local.error) : null;
+      const shownErrorOptions = shownError === null ? null : errorOptions("ws-update-error", shownError);
+      // A failure the status line would say is said by its error instead, so
+      // the tab never carries a sentence outside the block that explains it.
+      const lineErrors = [
+        notStartedOptions === null
+          ? null
+          : updateDispatchErrorNotice(
+              { ...notStartedOptions, isTitleMarked: isHeadingMarked },
+              notStartedSurfaceActions,
+            ),
+        signInRefusalOptions === null
+          ? null
+          : updateDispatchErrorNotice({ ...signInRefusalOptions, isTitleMarked: isHeadingMarked }),
       ];
+      const isLineInError = notStartedOptions !== null || signInRefusalOptions !== null;
+      const shownErrors = [
+        ...(notStartedOptions === null ? [] : [updateDispatchShownError(notStartedOptions, notStartedSurfaceActions)]),
+        ...(signInRefusalOptions === null ? [] : [updateDispatchShownError(signInRefusalOptions)]),
+        ...(shownErrorOptions === null ? [] : [updateDispatchShownError(shownErrorOptions)]),
+      ];
+      const actionButton = (action: UpdateTabAction): m.Children =>
+        m(
+          Button,
+          {
+            variant: variantBesideErrors(action.variant, shownErrors),
+            id: `ws-update-${action.kind}`,
+            disabled: isBusy,
+            "data-tooltip": tooltipFor(action),
+            onclick: () => onAction(action),
+          },
+          isPendingFor(action) ? m(Spinner, { size: "sm" }) : action.label,
+        );
 
       const controls =
         local.noBackupHeld !== null
@@ -544,7 +622,7 @@ export function UpdatesGroup(): m.Component<UpdatesGroupAttrs> {
                   ),
                 () => (local.isSkipConfirmOpen = false),
               )
-            : actions.length > 0
+            : actions.length > 0 && !areActionsInFollowUp
               ? m(
                   "div",
                   { class: "flex flex-wrap items-center gap-2" },
@@ -568,7 +646,15 @@ export function UpdatesGroup(): m.Component<UpdatesGroupAttrs> {
                 (local.flashKey > 0 ? " update-status-arrive" : ""),
             },
             [
-              ...statusBlockBody(status, line, lineVerdicts, shownError, local),
+              ...statusBlockBody(
+                status,
+                isLineInError ? null : line,
+                lineErrors,
+                shownErrorOptions === null
+                  ? null
+                  : m("div", { class: "mt-3" }, updateDispatchErrorNotice(shownErrorOptions)),
+                local,
+              ),
               controls !== null ? m("div", { class: "mt-4" }, controls) : null,
               isSpecificVersionOffered(update, status)
                 ? specificVersionField(local, update, isUpdating, press)
@@ -579,7 +665,7 @@ export function UpdatesGroup(): m.Component<UpdatesGroupAttrs> {
         kernelCardView(agentId, update, local),
         m("div", { class: "mt-8" }, [
           m(SectionHeader, "Automatic updates"),
-          automaticUpdatesSection(agentId, autoUpdate, local),
+          automaticUpdatesSection(agentId, autoUpdate, local, askAgent),
         ]),
       ]);
     },
@@ -622,7 +708,7 @@ function kernelCardView(agentId: string, update: UiWorkspaceUpdate, local: Updat
           const named = chats.length > 0 ? ` (${chats.join(", ")})` : "";
           local.kernelPrompt = { kind: "force", message: `${result.error}${named} Restart anyway?` };
         } else {
-          local.kernelError = { message: result.error, detail: result.detail };
+          local.kernelError = updateActionError(result, KERNEL_FIX_FAILURE);
         }
       }
       m.redraw();
@@ -630,6 +716,8 @@ function kernelCardView(agentId: string, update: UiWorkspaceUpdate, local: Updat
   };
   const isDetailsOffered = card.state === "offered" || card.state === "failed";
   const prompt = local.kernelPrompt;
+  const errorOptions: UpdateDispatchErrorOptions | null =
+    local.kernelError === null ? null : { id: "ws-kernel-error", agentId, error: local.kernelError };
   const controls: m.Children =
     prompt !== null
       ? m("div", { id: "ws-kernel-confirm", class: "flex flex-col gap-2" }, [
@@ -660,7 +748,7 @@ function kernelCardView(agentId: string, update: UiWorkspaceUpdate, local: Updat
         ? m(
             Button,
             {
-              variant: "primary",
+              variant: variantBesideErrors("primary", errorOptions === null ? [] : [updateDispatchShownError(errorOptions)]),
               id: "ws-kernel-restart",
               disabled: local.isKernelPending,
               onclick: () => (local.kernelPrompt = { kind: "confirm" }),
@@ -700,25 +788,21 @@ function kernelCardView(agentId: string, update: UiWorkspaceUpdate, local: Updat
       isDetailsOffered && prompt === null
         ? m("p", { class: "mt-2 type-helper text-secondary" }, KERNEL_FIX_RESTART_LINE)
         : null,
-      local.kernelError !== null
-        ? m(Notice, { variant: "error", extra: "mt-3", id: "ws-kernel-error" }, [
-            local.kernelError.message,
-            machineVerdict(local.kernelError.detail),
-          ])
-        : null,
+      errorOptions !== null ? m("div", { class: "mt-3" }, updateDispatchErrorNotice(errorOptions)) : null,
       controls !== null ? m("div", { class: "mt-3" }, controls) : null,
     ],
   );
 }
 
-/** The status block's text: its title and versions, its line with the
- * machine's own words under it, then the security card, the costs, the
- * update agent's quote, and any error. */
+/** The status block's text: its title and versions, its line (dropped where
+ * an error below says the same thing) with the machine's own words under it,
+ * then the security card, the costs, the update agent's quote, and any
+ * error. */
 function statusBlockBody(
   status: UpdateTabStatus,
-  line: string,
-  lineVerdicts: m.Children[],
-  shownError: { message: string; detail: string } | null,
+  line: string | null,
+  lineErrors: m.Children[],
+  errorNotice: m.Children,
   local: UpdatesGroupState,
 ): m.Children[] {
   return [
@@ -742,15 +826,17 @@ function statusBlockBody(
       ),
       versionJump(status.versions),
     ]),
-    m(
-      "p",
-      {
-        id: "update-status-line",
-        class: "mt-3 type-body text-primary",
-      },
-      line,
-    ),
-    ...lineVerdicts,
+    line === null
+      ? null
+      : m(
+          "p",
+          {
+            id: "update-status-line",
+            class: "mt-3 type-body text-primary",
+          },
+          line,
+        ),
+    ...lineErrors,
     status.secondaryLine
       ? m(
           "p",
@@ -816,13 +902,7 @@ function statusBlockBody(
           status.quote,
         )
       : null,
-    shownError !== null
-      ? m(
-          Notice,
-          { variant: "error", extra: "mt-3", id: "ws-update-error" },
-          [shownError.message, machineVerdict(shownError.detail)],
-        )
-      : null,
+    errorNotice,
   ];
 }
 
@@ -912,6 +992,7 @@ function automaticUpdatesSection(
   agentId: string,
   autoUpdate: WorkspaceAutoUpdate,
   local: UpdatesGroupState,
+  askAgent: AskAgentModel,
 ): m.Children {
   const { stores, shell } = getAppContext();
   const updates = stores.updates;
@@ -955,7 +1036,7 @@ function automaticUpdatesSection(
             ),
           ],
         ),
-        prompt.error ? m(Notice, { variant: "error" }, prompt.error) : null,
+        settingsFailureLine("ws-auto-update-pitch-error", prompt.failure),
         m("div", { class: "mt-2 flex flex-wrap items-center gap-2" }, [
           m(
             "button",
@@ -1006,7 +1087,10 @@ function automaticUpdatesSection(
       .then((result) => {
         local.isAutoUpdateWriting = false;
         if (!result.isOk)
-          local.autoUpdateError = { message: result.error, detail: result.detail };
+          local.autoUpdateError = {
+            error: updateActionError(result, AUTO_UPDATE_FAILURE),
+            retry: () => write(next, start, end),
+          };
         m.redraw();
       });
   };
@@ -1124,12 +1208,16 @@ function automaticUpdatesSection(
     ),
     local.autoUpdateError !== null
       ? m(
-          Notice,
-          { variant: "error", extra: "mt-2", id: "ws-auto-update-error" },
-          [
-            local.autoUpdateError.message,
-            machineVerdict(local.autoUpdateError.detail),
-          ],
+          "div",
+          { class: "mt-2" },
+          updateDispatchErrorNotice({
+            id: "ws-auto-update-error",
+            agentId,
+            error: local.autoUpdateError.error,
+            askAgent,
+            onCreateWorkspace: () => shell.routeToHub("/create"),
+            onRetry: local.autoUpdateError.retry,
+          }),
         )
       : null,
   ];

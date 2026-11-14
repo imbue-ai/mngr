@@ -5,11 +5,14 @@
 import m from "mithril";
 import {
   errorFromResponse,
+  errorFromSentenceResponse,
+  fallbackErrorSentence,
   isRequestFailureReportable,
   readResponseBody,
+  reasonFromBody,
   routeSentenceFromBody,
 } from "./errors";
-import type { RequestResult, UserFacingError } from "./errors";
+import type { RequestOutcome, RequestResult, UserFacingError } from "./errors";
 
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
@@ -49,6 +52,54 @@ export async function startAssistChat(
   };
 }
 
+/** Why a start failed, as the route names it; null for a refusal that names
+ * none (a bad request) or no answer at all. */
+export type AssistChatFailureReason =
+  "TOO_OLD" | "START_FAILED" | "UNREACHABLE" | "SPAWN_FAILED";
+
+const FAILURE_REASONS: readonly AssistChatFailureReason[] = [
+  "TOO_OLD",
+  "START_FAILED",
+  "UNREACHABLE",
+  "SPAWN_FAILED",
+];
+
+export function assistChatFailureReason(
+  outcome: RequestOutcome,
+): AssistChatFailureReason | null {
+  const reason = reasonFromBody(outcome.body);
+  return FAILURE_REASONS.find((known) => known === reason) ?? null;
+}
+
+const SENTENCE_BY_REASON: Record<AssistChatFailureReason, string> = {
+  TOO_OLD:
+    "This workspace can't start a helper agent yet. *Update it, then try again.*",
+  START_FAILED: fallbackErrorSentence("Couldn't start this workspace"),
+  UNREACHABLE: fallbackErrorSentence(
+    "Couldn't reach this workspace to start an agent",
+  ),
+  SPAWN_FAILED: fallbackErrorSentence(
+    "Couldn't start an agent in this workspace",
+  ),
+};
+
+/** What a failed start tells the user: the sentence for the route's reason;
+ * for any other refusal, the JSON `error` sentence the route wrote for the
+ * user (retrying cannot clear it); else the no-answer sentence or the
+ * fallback. The response goes behind the details. */
+export function assistChatError(outcome: RequestOutcome): UserFacingError {
+  const whatFailed = "Couldn't start an agent in this workspace";
+  const reason = assistChatFailureReason(outcome);
+  if (reason !== null)
+    return errorFromResponse(whatFailed, outcome, {
+      plainReason: SENTENCE_BY_REASON[reason],
+    });
+  const isRefusal = outcome.status >= 400 && outcome.status < 500;
+  return isRefusal
+    ? errorFromSentenceResponse(whatFailed, outcome)
+    : errorFromResponse(whatFailed, outcome);
+}
+
 export interface AskAgentModelOptions {
   fetcher?: FetchLike;
   redraw?: () => void;
@@ -85,22 +136,15 @@ export class AskAgentModel {
     if (outcome.ok) {
       this.options.onStarted(request.workspaceAgentId);
     } else {
-      // A refusal (the workspace has no assist skill, an empty request) is a
-      // sentence the route wrote for the user, and retrying cannot clear it.
-      // A 4xx without one (a proxy's plain-text 404) is an unexplained
-      // failure like any other.
+      // A refusal (too old for a helper, an empty request) can't be cleared
+      // by pressing again. A 4xx without the route's sentence (a proxy's
+      // plain-text 404) is an unexplained failure like any other.
       const isRefusal = outcome.status >= 400 && outcome.status < 500;
-      const refusal = isRefusal
-        ? routeSentenceFromBody(outcome.body, "") || null
-        : null;
-      this.isRefused = refusal !== null;
+      this.isRefused =
+        isRefusal && routeSentenceFromBody(outcome.body, "") !== "";
+      this.error = assistChatError(outcome);
       this.isFailureReportable =
         !this.isRefused && isRequestFailureReportable(outcome);
-      this.error = errorFromResponse(
-        "Couldn't start an agent in this workspace",
-        outcome,
-        { plainReason: refusal },
-      );
     }
     this.redraw();
   }

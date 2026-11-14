@@ -8,6 +8,8 @@ import { getAppContext } from "../../../app-context";
 import { Button } from "../../components/Button";
 import { ColorSwatch } from "../../components/ColorSwatch";
 import { Icon16 } from "../../components/Icon";
+import { ErrorNotice, restartAppActions } from "../../components/ErrorDisplay";
+import { InlineError, richErrorText } from "../../components/errorDesign";
 import type { IconName } from "../../components/icons";
 import { Modal } from "../../components/Modal";
 import { Notice } from "../../components/Notice";
@@ -17,9 +19,11 @@ import { FormLabel, Select, TextInput } from "../../components/FormControls";
 import type {
   SettingsGroup,
   WorkspaceMachineSizeData,
+  WorkspaceOptionsData,
   WorkspaceOptionsModel,
 } from "../../../models/workspaceOptions";
 import {
+  INVALID_HEX_SENTENCE,
   formatPendingMachineSize,
   isMachineSizePickedFromChoices,
   minimumMachineDiskGb,
@@ -154,6 +158,11 @@ function renderGeneralGroup(
   const data = model.data;
   if (data === null) return null;
   const nameValue = local.nameDraft ?? data.name;
+  const saveName = (): void => {
+    void model.rename(nameValue).then((isRenamed) => {
+      if (isRenamed) local.nameDraft = null;
+    });
+  };
   const shownColor = model.pendingColor ?? data.color;
   const colorValue = local.colorDraft ?? shownColor;
   const normalizedDraft = normalizeWorkspaceColorHex(colorValue);
@@ -162,16 +171,9 @@ function renderGeneralGroup(
     !Object.values(data.palette).includes(normalizedDraft);
 
   return m("div", [
+    providerTroubleNotice(data),
     m(SectionHeader, "Name"),
     m("div", { id: "rename-section", class: "mb-8" }, [
-      data.is_stale
-        ? m(
-            Notice,
-            { variant: "warn" },
-            "This workspace is currently unreachable, so it can't be renamed " +
-              "right now. Try again once the workspace reconnects.",
-          )
-        : null,
       m("div", { class: "flex items-center gap-2" }, [
         m(TextInput, {
           id: "workspace-name-input",
@@ -193,11 +195,7 @@ function renderGeneralGroup(
             variant: "secondary",
             id: "rename-save-btn",
             disabled: data.is_stale || model.isRenameSaving,
-            onclick: () => {
-              void model.rename(nameValue).then((isRenamed) => {
-                if (isRenamed) local.nameDraft = null;
-              });
-            },
+            onclick: saveName,
           },
           "Save",
         ),
@@ -205,15 +203,26 @@ function renderGeneralGroup(
           ? m("span", { class: "type-section text-secondary" }, "Saving...")
           : null,
       ]),
-      model.renameErrorMessage
+      model.renameRefusal
         ? m(
-            "p",
-            {
+            "div",
+            { id: "rename-refusal", class: "mt-2", role: "alert" },
+            m(InlineError, { message: model.renameRefusal }),
+          )
+        : null,
+      model.renameError !== null
+        ? m(
+            "div",
+            { class: "mt-2" },
+            m(ErrorNotice, {
               id: "rename-error",
-              class: "type-body text-important mt-2",
-              role: "alert",
-            },
-            model.renameErrorMessage,
+              error: model.renameError,
+              actions: model.isRenameReconnectNeeded
+                ? restartAppActions()
+                : [{ label: "Try again", onclick: saveName }],
+              isBugReportOffered: model.isRenameErrorReportable,
+              workspaceAgentId: model.agentId,
+            }),
           )
         : null,
     ]),
@@ -222,14 +231,6 @@ function renderGeneralGroup(
     // channel round trip (mngr label -> resolver -> publisher -> workspaces message) repaints it.
     m(SectionHeader, "Color"),
     m("div", { id: "color-section", class: "mb-8" }, [
-      data.is_stale
-        ? m(
-            Notice,
-            { variant: "warn" },
-            "This workspace is currently unreachable, so its color can't be changed right now. " +
-              "Try again once the workspace reconnects.",
-          )
-        : null,
       m(
         "div",
         {
@@ -280,15 +281,23 @@ function renderGeneralGroup(
           }),
         ],
       ),
-      model.colorErrorMessage
+      model.colorRefusal
         ? m(
-            "p",
-            {
+            "div",
+            { id: "color-refusal", class: "mt-2", role: "alert" },
+            m(InlineError, { message: model.colorRefusal }),
+          )
+        : null,
+      model.colorError !== null
+        ? m(
+            "div",
+            { class: "mt-2" },
+            m(ErrorNotice, {
               id: "color-error",
-              class: "type-body text-important mt-2",
-              role: "alert",
-            },
-            model.colorErrorMessage,
+              error: model.colorError,
+              isBugReportOffered: model.isColorErrorReportable,
+              workspaceAgentId: model.agentId,
+            }),
           )
         : null,
     ]),
@@ -335,9 +344,9 @@ function renderGeneralGroup(
     ),
     model.destroyErrorMessage
       ? m(
-          "p",
-          { id: "destroy-error", class: "type-body text-important mt-2" },
-          model.destroyErrorMessage,
+          "div",
+          { id: "destroy-error", class: "mt-2" },
+          m(InlineError, { message: model.destroyErrorMessage }),
         )
       : null,
   ]);
@@ -743,19 +752,69 @@ function renderMachineResizeFromChoices(
   ]);
 }
 
+/** Why rename and color are locked: discovery errored for the workspace's
+ * provider. An expired Imbue Cloud sign-in is fixed by signing in again;
+ * anything else only by waiting for discovery to recover. */
+function providerTroubleNotice(data: WorkspaceOptionsData): m.Children {
+  if (!data.is_stale) return null;
+  if (data.is_provider_signed_out) {
+    return m(Notice, { variant: "warn", extra: "mb-6", id: "provider-signed-out" }, [
+      m(
+        "p",
+        { class: "m-0" },
+        richErrorText(
+          "*Sign in to Imbue Cloud again* to rename this workspace or change its color.",
+        ),
+      ),
+      m(
+        Button,
+        { variant: "primary", extra: "mt-2", onclick: () => m.route.set("/accounts") },
+        "Sign in",
+      ),
+    ]);
+  }
+  return m(
+    Notice,
+    { variant: "warn", extra: "mb-6", id: "provider-unchecked" },
+    "Imbue Studio can't check on this workspace right now, so it can't be renamed or recolored. " +
+      "Try again in a moment.",
+  );
+}
+
 /** The last resize's or restart's refusal, under either form. */
 function renderMachineResizeError(model: WorkspaceOptionsModel): m.Children {
-  return model.resizeErrorMessage
-    ? m(
-        "p",
-        {
-          id: "machine-resize-error",
-          class: "type-helper text-important mt-2",
-          role: "alert",
-        },
-        model.resizeErrorMessage,
-      )
-    : null;
+  return [
+    model.resizeRefusal
+      ? m(
+          "div",
+          { id: "machine-resize-refusal", class: "mt-2", role: "alert" },
+          m(InlineError, { message: model.resizeRefusal }),
+        )
+      : null,
+    model.resizeError !== null
+      ? m(
+          "div",
+          { class: "mt-2" },
+          m(ErrorNotice, {
+            id: "machine-resize-error",
+            error: model.resizeError,
+            actions: model.isResizeAccountLinkNeeded
+              ? [
+                  {
+                    label: "Open account settings",
+                    onclick: () =>
+                      m.route.set(
+                        `/workspace/${encodeURIComponent(model.agentId)}/options?tab=settings&group=account`,
+                      ),
+                  },
+                ]
+              : [],
+            isBugReportOffered: model.isResizeErrorReportable,
+            workspaceAgentId: model.agentId,
+          }),
+        )
+      : null,
+  ];
 }
 
 function commitHexDraft(
@@ -766,8 +825,8 @@ function commitHexDraft(
   const normalized = normalizeWorkspaceColorHex(local.colorDraft);
   local.colorDraft = null;
   if (normalized === null) {
-    model.colorErrorMessage =
-      "That hex value is not valid. Use #rrggbb or #rgb.";
+    model.colorRefusal = INVALID_HEX_SENTENCE;
+    model.colorError = null;
     m.redraw();
     return;
   }
@@ -833,15 +892,19 @@ function renderAccountGroup(
               ),
             ]
           : renderAssociatePrompt(model, data.accounts),
-      model.accountErrorMessage
+      model.accountError !== null
         ? m(
-            "p",
-            {
+            "div",
+            { class: "mt-2" },
+            m(ErrorNotice, {
               id: "disassociate-error",
-              class: "type-body text-important mt-2",
-              role: "alert",
-            },
-            model.accountErrorMessage,
+              error: model.accountError,
+              actions: model.isAccountReconnectNeeded
+                ? restartAppActions()
+                : [],
+              isBugReportOffered: model.isAccountErrorReportable,
+              workspaceAgentId: model.agentId,
+            }),
           )
         : null,
     ]),

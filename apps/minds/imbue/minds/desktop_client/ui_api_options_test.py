@@ -34,10 +34,12 @@ from imbue.minds.desktop_client.ui_api_options import accepted_service_icon
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
+from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredHostSize
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
+from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 
 _AGENT_ID = "agent-" + "a" * 32
 _HOST_ID = "host-" + "f" * 32
@@ -52,7 +54,8 @@ class _OptionsSeededResolver(StaticBackendResolver):
     icons_by_agent_id: dict[str, dict[str, str]] = Field(default_factory=dict, frozen=True)
     display_names_by_agent_id: dict[str, dict[str, str]] = Field(default_factory=dict, frozen=True)
     share_kinds_by_agent_id: dict[str, dict[str, ServiceShareKind]] = Field(default_factory=dict, frozen=True)
-    errored_providers: tuple[str, ...] = Field(default=(), frozen=True)
+    # provider name -> the type name of the error its last discovery poll raised
+    error_type_by_provider: dict[str, str] = Field(default_factory=dict, frozen=True)
 
     def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
         return self.display_info_by_agent_id.get(str(agent_id))
@@ -73,7 +76,12 @@ class _OptionsSeededResolver(StaticBackendResolver):
         return dict(self.share_kinds_by_agent_id.get(str(agent_id), {}))
 
     def get_provider_errors(self) -> dict:
-        return {ProviderInstanceName(name): object() for name in self.errored_providers}
+        return {
+            ProviderInstanceName(name): DiscoveryError(
+                type_name=type_name, message="discovery failed", provider_name=ProviderInstanceName(name)
+            )
+            for name, type_name in self.error_type_by_provider.items()
+        }
 
 
 def _seeded_resolver() -> _OptionsSeededResolver:
@@ -235,7 +243,7 @@ def test_options_data_flags_stale_and_leased_workspaces(tmp_path: Path) -> None:
         display_info_by_agent_id={
             _AGENT_ID: AgentDisplayInfo(agent_name="leased", host_id=_HOST_ID, provider_name="imbue_cloud_alice")
         },
-        errored_providers=("imbue_cloud_alice",),
+        error_type_by_provider={"imbue_cloud_alice": "ImbueCloudUnreachableError"},
     )
     client, _app, _auth_store = build_desktop_client_for_test(
         tmp_path, is_authenticated=True, backend_resolver=resolver
@@ -245,11 +253,31 @@ def test_options_data_flags_stale_and_leased_workspaces(tmp_path: Path) -> None:
 
     data = json.loads(response.get_data(as_text=True))
     assert data["is_stale"] is True
+    # Discovery failed for a reason other than a lapsed sign-in.
+    assert data["is_provider_signed_out"] is False
     # No linked account and no signed-in account's provider hosts it: the owner is not known.
     assert data["leased_owner_email"] == ""
     assert data["is_account_owned_provider"] is True
     # No stored color label: the default is reported.
     assert data["color"] == DEFAULT_WORKSPACE_COLOR
+
+
+def test_options_data_tells_an_expired_imbue_cloud_sign_in_apart(tmp_path: Path) -> None:
+    resolver = _OptionsSeededResolver(
+        url_by_agent_and_service={_AGENT_ID: {}},
+        display_info_by_agent_id={
+            _AGENT_ID: AgentDisplayInfo(agent_name="leased", host_id=_HOST_ID, provider_name="imbue_cloud_alice")
+        },
+        error_type_by_provider={"imbue_cloud_alice": ImbueCloudAuthError.__name__},
+    )
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path, is_authenticated=True, backend_resolver=resolver
+    )
+
+    data = json.loads(client.get(f"/ui/api/workspaces/{_AGENT_ID}/options").get_data(as_text=True))
+
+    assert data["is_stale"] is True
+    assert data["is_provider_signed_out"] is True
 
 
 def _leased_machine_options_data(

@@ -5,7 +5,9 @@
 // the workspace, else a plain delete of the share at the connector.
 
 import type { UiAccountEntry } from "../channel/messages";
-import { browserLifecycleDeps, type LifecycleDeps } from "./backups";
+import type { RequestResult } from "./errors";
+import { shareFailureFrom, type ShareFailure } from "./shareFailures";
+import { defaultFetchJson } from "./workspaceOptions";
 
 export type SharedWorkspaceRecordState = "active" | "destroyed" | "missing";
 
@@ -30,42 +32,32 @@ interface AccountSharesPayload {
   rows: SharedWorkspaceRow[];
 }
 
-export interface SharedWorkspacesDeps extends Pick<LifecycleDeps, "getJson" | "redraw"> {
-  /** DELETE returning {status, json} (json null when unparseable): unlike
-   * LifecycleDeps.deleteResource, the body is kept, since the page shows the
-   * route's refusal reason. */
-  deleteJson(url: string): Promise<{ status: number; json: unknown | null }>;
+/** The page's requests, each answering its status (0 when no answer came)
+ * and its body, since the page words a refusal from the route's reason. */
+export interface SharedWorkspacesDeps {
+  getJson(url: string): Promise<RequestResult>;
+  deleteJson(url: string): Promise<RequestResult>;
+  redraw(): void;
 }
 
 export function browserSharedWorkspacesDeps(redraw: () => void): SharedWorkspacesDeps {
-  const lifecycle = browserLifecycleDeps(redraw);
   return {
-    getJson: lifecycle.getJson,
-    async deleteJson(url) {
-      try {
-        const response = await fetch(url, { method: "DELETE", credentials: "same-origin" });
-        let json: unknown | null = null;
-        try {
-          json = (await response.json()) as unknown;
-        } catch {
-          json = null;
-        }
-        return { status: response.status, json };
-      } catch {
-        return { status: 0, json: null };
-      }
-    },
+    getJson: (url) => defaultFetchJson(url),
+    deleteJson: (url) => defaultFetchJson(url, { method: "DELETE" }),
     redraw,
   };
 }
 
+/** The context the page's failures are worded in: it acts on no one workspace. */
+const NO_WORKSPACE_CONTEXT = { isWorkspaceStopped: false };
+
 /** One account's section of the page. `rows` is null while its read is out
- * or after it failed; `isUnavailable` says which. */
+ * or after it failed; `failure` says why it failed. */
 export interface AccountSharesSection {
   accountId: string;
   email: string;
   rows: SharedWorkspaceRow[] | null;
-  isUnavailable: boolean;
+  failure: ShareFailure | null;
 }
 
 export function accountSharesUrl(accountId: string): string {
@@ -75,7 +67,8 @@ export function accountSharesUrl(accountId: string): string {
 export class SharedWorkspacesModel {
   sections: AccountSharesSection[] = [];
   isLoaded = false;
-  errorMessage: string | null = null;
+  /** Why the last removal failed; null when it did not. */
+  removeFailure: ShareFailure | null = null;
   /** The row whose Remove has been armed (inline confirm), by host id. */
   armedHostId: string | null = null;
   removingHostIds = new Set<string>();
@@ -107,7 +100,7 @@ export class SharedWorkspacesModel {
       accountId: account.user_id,
       email: account.email,
       rows: null,
-      isUnavailable: false,
+      failure: null,
     }));
     this.isLoaded = accounts.length === 0;
     this.deps.redraw();
@@ -116,14 +109,22 @@ export class SharedWorkspacesModel {
     this.deps.redraw();
   }
 
+  /** Read one account's section again (its Try again). */
+  async reloadSection(section: AccountSharesSection): Promise<void> {
+    section.rows = null;
+    section.failure = null;
+    this.deps.redraw();
+    await this.loadSection(section);
+  }
+
   private async loadSection(section: AccountSharesSection): Promise<void> {
-    const payload = (await this.deps.getJson(accountSharesUrl(section.accountId))) as AccountSharesPayload | null;
-    if (payload === null) {
-      section.rows = null;
-      section.isUnavailable = true;
+    const outcome = await this.deps.getJson(accountSharesUrl(section.accountId));
+    if (outcome.ok) {
+      section.rows = (outcome.body as AccountSharesPayload).rows;
+      section.failure = null;
     } else {
-      section.rows = payload.rows;
-      section.isUnavailable = false;
+      section.rows = null;
+      section.failure = shareFailureFrom("shares_load", outcome, NO_WORKSPACE_CONTEXT);
     }
     this.deps.redraw();
   }
@@ -144,15 +145,14 @@ export class SharedWorkspacesModel {
   async remove(section: AccountSharesSection, hostId: string): Promise<void> {
     this.armedHostId = null;
     this.removingHostIds.add(hostId);
-    this.errorMessage = null;
+    this.removeFailure = null;
     this.deps.redraw();
-    const result = await this.deps.deleteJson(
+    const outcome = await this.deps.deleteJson(
       `${accountSharesUrl(section.accountId)}/${encodeURIComponent(hostId)}`,
     );
     this.removingHostIds.delete(hostId);
-    if (result.status < 200 || result.status >= 300) {
-      const detail = result.json as { error?: string } | null;
-      this.errorMessage = detail?.error ?? "Could not remove the share; see the logs and try again.";
+    if (!outcome.ok) {
+      this.removeFailure = shareFailureFrom("share_remove", outcome, NO_WORKSPACE_CONTEXT);
       this.deps.redraw();
       return;
     }

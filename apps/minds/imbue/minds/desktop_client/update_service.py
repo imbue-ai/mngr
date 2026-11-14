@@ -142,13 +142,15 @@ DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME: Final[dict[UpdateDispatchOutcome, str]] = {
         "This workspace's machine is restarting for a kernel security update. Try again once it is back."
     ),
     UpdateDispatchOutcome.NEEDS_SIGN_IN: "Sign in to an AI account in this workspace, then try again.",
-    UpdateDispatchOutcome.UNSUPPORTED: (
-        "This workspace is too old to update itself. Ask an agent inside it for help, "
-        "or create a new workspace and migrate your work."
+    # The surfaces offer this case's two remedies as buttons, keyed on the outcome.
+    UpdateDispatchOutcome.UNSUPPORTED: "This workspace is too old to update itself.",
+    UpdateDispatchOutcome.START_FAILED: (
+        "Couldn't start this workspace to run the update. Try again. If this persists, report a bug."
     ),
-    UpdateDispatchOutcome.START_FAILED: "Couldn't start this workspace to run the update.",
-    UpdateDispatchOutcome.UNREACHABLE: "Couldn't reach this workspace to start the update.",
-    UpdateDispatchOutcome.SPAWN_FAILED: "Couldn't start the update agent in this workspace.",
+    UpdateDispatchOutcome.UNREACHABLE: "Couldn't reach this workspace to start the update. Try again in a moment.",
+    UpdateDispatchOutcome.SPAWN_FAILED: (
+        "Couldn't start the update agent in this workspace. Try again. If this persists, report a bug."
+    ),
     UpdateDispatchOutcome.UNCONFIRMED: (
         "Couldn't confirm the update started in this workspace. If it did, it will show here shortly."
     ),
@@ -156,7 +158,8 @@ DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME: Final[dict[UpdateDispatchOutcome, str]] = {
 
 # Recorded for a dispatch that raised rather than returned: no outcome names what went wrong.
 _DISPATCH_RAISED_FAILURE: Final[UpdateDispatchFailure] = UpdateDispatchFailure(
-    message="Something went wrong starting the update in this workspace."
+    message="Something went wrong starting the update. Try again. If this persists, report a bug.",
+    code="DISPATCH_RAISED",
 )
 
 
@@ -198,10 +201,15 @@ SCHEDULE_REFUSAL_MESSAGE_BY_OUTCOME: Final[dict[UpdateScheduleOutcome, str]] = {
     UpdateScheduleOutcome.NO_CRON: "This workspace can't run scheduled updates. Update it now instead.",
     UpdateScheduleOutcome.UNSUPPORTED: DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[UpdateDispatchOutcome.UNSUPPORTED],
     UpdateScheduleOutcome.NOT_RUNNING: (
-        "Couldn't reach this workspace. It has to be running to schedule its update, and during the update window too."
+        "Couldn't reach this workspace to schedule its update. Make sure it's running, then try again. It has to "
+        "be running during the update window too."
     ),
-    UpdateScheduleOutcome.UNREACHABLE: "Couldn't confirm the update was scheduled in this workspace.",
-    UpdateScheduleOutcome.FAILED: "Couldn't schedule the update in this workspace.",
+    UpdateScheduleOutcome.UNREACHABLE: (
+        "Couldn't confirm the update was scheduled in this workspace. Try again in a moment."
+    ),
+    UpdateScheduleOutcome.FAILED: (
+        "Couldn't schedule the update in this workspace. Try again. If this persists, report a bug."
+    ),
 }
 
 
@@ -398,7 +406,9 @@ class WorkspaceUpdateService(MutableModel):
                     self.state_store.release_failed_claim(
                         agent_id,
                         UpdateDispatchFailure(
-                            message=DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[outcome], detail=failure_detail
+                            message=DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[outcome],
+                            detail=failure_detail,
+                            code=outcome.value,
                         ),
                     )
 
@@ -527,7 +537,9 @@ class WorkspaceUpdateService(MutableModel):
         self.state_store.record_skipped_dispatch(
             agent_id,
             UpdateDispatchFailure(
-                message=SCHEDULE_REFUSAL_MESSAGE_BY_OUTCOME[schedule.outcome], detail=schedule.failure_detail
+                message=SCHEDULE_REFUSAL_MESSAGE_BY_OUTCOME[schedule.outcome],
+                detail=schedule.failure_detail,
+                code=schedule.outcome.value,
             ),
         )
         return schedule

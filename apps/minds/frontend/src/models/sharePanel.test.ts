@@ -6,7 +6,7 @@ import {
   settle,
   sharePanelOptions,
 } from "../testing";
-import type { RequestResult } from "./errors";
+import type { RequestResult, ResponseBody } from "./errors";
 import { createAppQueryClient } from "./queryClient";
 import type {
   MachineSharingResponse,
@@ -15,6 +15,7 @@ import type {
   VisitingAgentEntry,
 } from "./workspaceOptions";
 import { RESOLVE_USER_URL } from "./workspaceOptions";
+import { shareFailureFrom } from "./shareFailures";
 import { SharePanelModel } from "./sharePanel";
 import type { Grant, SharePanelModelOptions } from "./sharePanel";
 
@@ -145,7 +146,34 @@ function grantValues(
 
 /** The words a row shows for its failure, or null while it has not failed. */
 function failureMessageOf(grant: Grant): string | null {
-  return grant.status.state === "failed" ? grant.status.failureMessage : null;
+  return grant.status.state === "failed"
+    ? grant.status.failure.error.message
+    : null;
+}
+
+/** A row status that failed with the given sentence. */
+function failedStatus(
+  failedOperation: "add" | "remove",
+  message: string,
+  isRefused = false,
+): unknown {
+  return {
+    state: "failed",
+    failedOperation,
+    failure: expect.objectContaining({
+      error: expect.objectContaining({ message }),
+    }),
+    isRefused,
+  };
+}
+
+/** What a refused invite or mobile-link send says, or null. */
+function refusalMessageOf(
+  state: { state: string } & { failure?: { error: { message: string } } },
+): string | null {
+  return state.state === "refused" && state.failure !== undefined
+    ? state.failure.error.message
+    : null;
 }
 
 /** The labels of the provisioning steps the panel reports as done. */
@@ -256,11 +284,12 @@ describe("SharePanelModel load", () => {
     model.removeGrant(WHOLE, model.grantsFor(WHOLE)[0].key);
     await settle();
     const restored = model.grantsFor(WHOLE)[0];
-    expect(restored.status).toEqual({
-      state: "failed",
-      failedOperation: "remove",
-      failureMessage: "Could not save",
-    });
+    expect(restored.status).toEqual(
+      failedStatus(
+        "remove",
+        "Couldn't save this change. Try again. If this persists, report a bug.",
+      ),
+    );
 
     model.retryGrant(WHOLE, restored.key);
     await settle();
@@ -279,7 +308,10 @@ describe("SharePanelModel load", () => {
     await model.load();
 
     expect(model.loadStatus).toBe("load_failed");
-    expect(model.loadErrorMessage).toContain("could not be loaded");
+    expect(model.loadFailure?.error.message).toContain(
+      "Couldn't read who this workspace is shared with",
+    );
+    expect(model.loadFailure?.remedies).toEqual(["retry"]);
     // Adding against a list nobody has seen would replace it.
     expect(model.canAdd).toBe(false);
 
@@ -465,6 +497,33 @@ describe("SharePanelModel write queue", () => {
 });
 
 describe("SharePanelModel write failures", () => {
+  it("offers a bug report for a change the workspace could not write", async () => {
+    const { model } = makeSharePanel((url, init) => {
+      if (init?.method === "PUT")
+        return {
+          ok: false,
+          status: 502,
+          body: { error: "exec died", reason: "WRITE_FAILED" },
+        };
+      return okResult(sharingResponse());
+    });
+    await model.load();
+
+    model.addGrant(WHOLE, "email", "friend@example.com");
+    await settle();
+
+    const status = model.grantsFor(WHOLE)[0].status;
+    expect(status).toEqual(
+      failedStatus(
+        "add",
+        "Couldn't save this change to the workspace. Try again. If this persists, report a bug.",
+      ),
+    );
+    expect(status.state === "failed" && status.failure.isBugReportOffered).toBe(
+      true,
+    );
+  });
+
   it("marks the rows a failed write carried and saves them again on retry", async () => {
     let isFirstWrite = true;
     const { model, requests } = makeSharePanel((url, init) => {
@@ -487,11 +546,16 @@ describe("SharePanelModel write failures", () => {
     await settle();
 
     const row = model.grantsFor(WHOLE)[0];
-    expect(row.status).toEqual({
-      state: "failed",
-      failedOperation: "add",
-      failureMessage: "boom",
-    });
+    expect(row.status).toEqual(
+      failedStatus(
+        "add",
+        "Couldn't save this change. Try again. If this persists, report a bug.",
+      ),
+    );
+    // The route's own words are kept for the details.
+    expect(
+      row.status.state === "failed" ? row.status.failure.error.details : "",
+    ).toContain("boom");
 
     model.retryGrant(WHOLE, row.key);
     expect(model.grantsFor(WHOLE)[0].status.state).toBe("saving");
@@ -501,12 +565,16 @@ describe("SharePanelModel write failures", () => {
     expect(grantsWrites(requests)).toHaveLength(2);
   });
 
-  it("keeps the reason a failed write gave, on every row it carried", async () => {
+  it("words the reason a failed write gave, on every row it carried", async () => {
     const REASON =
-      "This workspace has no share gateway. Update the template, then publish again.";
+      "This workspace is too old to be shared. *Update it, then try again.*";
     const { model } = makeSharePanel((url, init) => {
       if (init?.method === "PUT")
-        return { ok: false, status: 502, body: { error: REASON } };
+        return {
+          ok: false,
+          status: 502,
+          body: { error: "no share gateway", reason: "WORKSPACE_TOO_OLD" },
+        };
       return okResult(
         sharingResponse({
           grants: grantsDocument({ emails: ["friend@example.com"] }),
@@ -525,7 +593,7 @@ describe("SharePanelModel write failures", () => {
     ]);
   });
 
-  it("reports a write that failed with no reason as one that could not save", async () => {
+  it("reports a write that got no answer as Imbue Studio not responding", async () => {
     const { model } = makeSharePanel((url, init) => {
       if (init?.method === "PUT") return { ok: false, status: 0, body: null };
       return okResult(sharingResponse());
@@ -535,7 +603,9 @@ describe("SharePanelModel write failures", () => {
     model.addGrant(WHOLE, "email", "friend@example.com");
     await settle();
 
-    expect(failureMessageOf(model.grantsFor(WHOLE)[0])).toBe("Could not save");
+    expect(failureMessageOf(model.grantsFor(WHOLE)[0])).toBe(
+      "Imbue Studio didn't respond. Try again in a moment.",
+    );
   });
 
   it("marks the row a refusal names and saves the rest of that write again without it", async () => {
@@ -621,8 +691,9 @@ describe("SharePanelModel write failures", () => {
     model.addGrant(WHOLE, "email", "friend@example.com");
     await settle();
 
-    expect(model.grantsFor(WHOLE)[0].status.state).toBe("failed");
-    expect(failureMessageOf(model.grantsFor(WHOLE)[0])).toBe("Could not save");
+    expect(model.grantsFor(WHOLE)[0].status).toEqual(
+      failedStatus("add", "Couldn't save this change."),
+    );
     expect(grantsWrites(requests)).toHaveLength(1);
   });
 });
@@ -670,8 +741,12 @@ describe("SharePanelModel removing a grant", () => {
       "first@example.com",
       "second@example.com",
     ]);
-    expect(model.grantsFor(WHOLE)[0].status.state).toBe("failed");
-    expect(failureMessageOf(model.grantsFor(WHOLE)[0])).toBe("Could not save");
+    expect(model.grantsFor(WHOLE)[0].status).toEqual(
+      failedStatus(
+        "remove",
+        "Imbue Studio didn't respond. Try again in a moment.",
+      ),
+    );
   });
 
   it("does not let a readback that raced a removal bring the row back", async () => {
@@ -1086,23 +1161,27 @@ describe("SharePanelModel publishing", () => {
     await model.publish();
 
     expect(model.isPublished).toBe(false);
-    expect(model.publishWrite).toEqual({
-      state: "failed",
-      message: expect.stringContaining("the connector refused the share"),
-      remedyPath: "",
+    const write = model.publishWrite;
+    expect(write.state === "failed" ? write.failure.error : null).toEqual({
+      message:
+        "Couldn't turn sharing on. Try again. If this persists, report a bug.",
+      details: expect.stringContaining("the connector refused the share"),
     });
   });
 
-  it("points a full-quota refusal at the shared-workspaces page", async () => {
+  it("says how full the plan is and points at the shared-workspaces page when the share quota is full", async () => {
     const { model } = makeSharePanel((url, init) => {
       if (init?.method === "PUT")
         return {
           ok: false,
           status: 403,
           body: {
-            error: "Shared workspace limit reached (50 of 50).",
+            error: "Could not publish this workspace: Shared workspace limit reached (3 of 3).",
+            reason: "SHARE_LIMIT_REACHED",
             code: "quota_exceeded",
             shared_workspaces_path: "/workspaces/shared",
+            limit: 3,
+            current: 3,
           },
         };
       return okResult(sharingResponse({ enabled: false, url: null }));
@@ -1111,11 +1190,36 @@ describe("SharePanelModel publishing", () => {
 
     await model.publish();
 
-    expect(model.publishWrite).toEqual({
-      state: "failed",
-      message: expect.stringContaining("limit reached"),
-      remedyPath: "/workspaces/shared",
+    const write = model.publishWrite;
+    const failure = write.state === "failed" ? write.failure : null;
+    expect(failure?.error).toEqual({
+      message:
+        "Your plan allows 3 shared workspaces and 3 are shared already. *Turn sharing off for one of them, then try again.*",
+      details: expect.stringContaining("Shared workspace limit reached (3 of 3)"),
     });
+    expect(failure?.remedies).toEqual(["review_shared_workspaces"]);
+    expect(failure?.remedyPath).toBe("/workspaces/shared");
+    expect(failure?.isBugReportOffered).toBe(false);
+  });
+
+  it("gives a waitlisted account its own sentence and no shared-workspaces page", async () => {
+    const { model } = makeSharePanel((url, init) => {
+      if (init?.method === "PUT")
+        return {
+          ok: false,
+          status: 502,
+          body: { error: "Could not publish this workspace: waitlisted", reason: "WAITLISTED" },
+        };
+      return okResult(sharingResponse({ enabled: false, url: null }));
+    });
+    await model.load();
+
+    await model.publish();
+
+    const write = model.publishWrite;
+    const failure = write.state === "failed" ? write.failure : null;
+    expect(failure?.error.message).toContain("Your account is still on the waitlist");
+    expect(failure?.remedies).toEqual([]);
   });
 
   it("keeps every grant when publishing is turned off", async () => {
@@ -1149,10 +1253,11 @@ describe("SharePanelModel publishing", () => {
     await model.unpublish();
 
     expect(model.isPublished).toBe(true);
-    expect(model.publishWrite).toEqual({
-      state: "failed",
-      message: expect.stringContaining("relay unreachable"),
-      remedyPath: "",
+    const write = model.publishWrite;
+    expect(write.state === "failed" ? write.failure.error : null).toEqual({
+      message:
+        "Couldn't turn sharing off. Try again. If this persists, report a bug.",
+      details: expect.stringContaining("relay unreachable"),
     });
   });
 
@@ -1261,26 +1366,28 @@ describe("SharePanelModel provisioning", () => {
       "Creating link",
       "Setting up encryption",
     ]);
-    expect(model.activeProvisioningStep.label).toBe("Connecting to the relay");
+    expect(model.activeProvisioningStep.label).toBe(
+      "Connecting this workspace",
+    );
 
     scheduled.shift()?.();
     await settle();
     expect(stepsDone(model)).toEqual([
       "Creating link",
       "Setting up encryption",
-      "Connecting to the relay",
+      "Connecting this workspace",
     ]);
-    expect(model.activeProvisioningStep.label).toBe("Verifying end to end");
+    expect(model.activeProvisioningStep.label).toBe("Checking the link works");
 
     scheduled.shift()?.();
     await settle();
     expect(stepsDone(model)).toEqual([
       "Creating link",
       "Setting up encryption",
-      "Connecting to the relay",
-      "Verifying end to end",
+      "Connecting this workspace",
+      "Checking the link works",
     ]);
-    expect(model.activeProvisioningStep.label).toBe("Verifying end to end");
+    expect(model.activeProvisioningStep.label).toBe("Checking the link works");
     expect(model.isAwaitingLink).toBe(false);
   });
 
@@ -1910,11 +2017,12 @@ describe("SharePanelModel failed operations", () => {
 
     const restored = model.grantsFor(WHOLE)[0];
     expect(restored.grantee.value).toBe("friend@example.com");
-    expect(restored.status).toEqual({
-      state: "failed",
-      failedOperation: "remove",
-      failureMessage: "Could not save",
-    });
+    expect(restored.status).toEqual(
+      failedStatus(
+        "remove",
+        "Couldn't save this change. Try again. If this persists, report a bug.",
+      ),
+    );
 
     model.addGrant(WHOLE, "email_domain", "acme.example");
     await settle();
@@ -1948,11 +2056,12 @@ describe("SharePanelModel failed operations", () => {
     await settle();
 
     const failed = model.grantsFor(WHOLE)[0];
-    expect(failed.status).toEqual({
-      state: "failed",
-      failedOperation: "add",
-      failureMessage: "Could not save",
-    });
+    expect(failed.status).toEqual(
+      failedStatus(
+        "add",
+        "Couldn't save this change. Try again. If this persists, report a bug.",
+      ),
+    );
 
     model.addGrant(WHOLE, "email_domain", "acme.example");
     await settle();
@@ -1986,7 +2095,11 @@ describe("SharePanelModel status read failures", () => {
     await model.load();
 
     expect(model.loadStatus).toBe("load_failed");
-    expect(model.loadErrorMessage).toContain("relay down");
+    expect(model.loadFailure?.error).toEqual({
+      message:
+        "Couldn't check who this workspace is shared with. Try again. If this persists, report a bug.",
+      details: expect.stringContaining("relay down"),
+    });
     expect(model.canAdd).toBe(false);
     expect(scheduled).toHaveLength(0);
   });
@@ -2354,21 +2467,18 @@ describe("SharePanelModel invitations", () => {
     const friend = rowOf(model, WHOLE, "friend@example.com");
 
     await model.invite(WHOLE, friend.key);
-    expect(model.inviteStateFor(friend.key)).toEqual({
-      state: "refused",
-      message: "You invited this person too recently.",
-    });
+    expect(refusalMessageOf(model.inviteStateFor(friend.key))).toBe(
+      "You invited this person too recently.",
+    );
     expect(model.outcomeFor(WHOLE, friend)).toBeNull();
     // A refusal is no bar to trying again.
     expect(model.canInvite(WHOLE, friend)).toBe(true);
 
     refusal = "over_allowance";
     await model.invite(WHOLE, friend.key);
-    expect(model.inviteStateFor(friend.key)).toEqual({
-      state: "refused",
-      message:
-        "Access granted, but you've reached your invitation email limit for now.",
-    });
+    expect(refusalMessageOf(model.inviteStateFor(friend.key))).toBe(
+      "Access granted, but you've reached your invitation email limit for now.",
+    );
 
     await model.load();
     expect(
@@ -2399,7 +2509,7 @@ describe("SharePanelModel invitations", () => {
     expect(model.outcomeFor(WHOLE, friend)?.kind).toBe("could_not_invite");
   });
 
-  it("reports the desktop's refusal by its code, and any other failure in its own words", async () => {
+  it("reports the desktop's refusal by its code, and words any other failure as its own", async () => {
     let answer: FetchResult = {
       ok: false,
       status: 409,
@@ -2411,10 +2521,20 @@ describe("SharePanelModel invitations", () => {
     const friend = rowOf(model, WHOLE, "friend@example.com");
 
     await model.invite(WHOLE, friend.key);
-    expect(model.inviteStateFor(friend.key)).toEqual({
-      state: "refused",
-      message: "This person has already joined.",
-    });
+    expect(refusalMessageOf(model.inviteStateFor(friend.key))).toBe(
+      "This person has already joined.",
+    );
+
+    // A link that has not reached Imbue Cloud is not a person who joined.
+    answer = {
+      ok: false,
+      status: 409,
+      body: { error: "no_workspace_link", message: "no link yet" },
+    };
+    await model.invite(WHOLE, friend.key);
+    expect(refusalMessageOf(model.inviteStateFor(friend.key))).toBe(
+      "This workspace's link isn't ready yet. Invite again in a minute.",
+    );
 
     answer = {
       ok: false,
@@ -2422,10 +2542,9 @@ describe("SharePanelModel invitations", () => {
       body: { error: "Could not invite: the connector is unreachable" },
     };
     await model.invite(WHOLE, friend.key);
-    expect(model.inviteStateFor(friend.key)).toEqual({
-      state: "refused",
-      message: "Could not invite: the connector is unreachable",
-    });
+    expect(refusalMessageOf(model.inviteStateFor(friend.key))).toBe(
+      "Couldn't send the invitation. Try again. If this persists, report a bug.",
+    );
   });
 
   it("loads again a moment after a document that did not reach Imbue Cloud, so it is sent again", async () => {
@@ -2623,7 +2742,11 @@ describe("SharePanelModel invitations", () => {
 
     expect(model.invitationStatusIndicator(WHOLE, friend)).toEqual({
       kind: "refused",
-      message: "You invited this person too recently.",
+      failure: expect.objectContaining({
+        error: expect.objectContaining({
+          message: "You invited this person too recently.",
+        }),
+      }),
       canReinvite: true,
     });
   });
@@ -2844,17 +2967,15 @@ describe("SharePanelModel mobile access link", () => {
 
     await model.sendMobileAccessLink();
 
-    expect(model.mobileLinkState).toEqual({
-      state: "refused",
-      message: "Could not send the email",
-    });
+    expect(refusalMessageOf(model.mobileLinkState)).toBe(
+      "Couldn't send the email. Try again. If this persists, report a bug.",
+    );
   });
 
   it("says the same thing for either refusal, naming no internal state", async () => {
     const noAccessPoint =
-      "This workspace does not have a secure access point yet. If you've " +
-      "just enabled sharing and web access, please wait a few minutes " +
-      "before trying again.";
+      "This workspace's link isn't ready yet. If you've just turned on " +
+      "sharing, try again in a few minutes.";
     for (const error of ["no_workspace_link", "not_published"]) {
       const { model } = linkablePanel(() => ({
         ok: false,
@@ -2865,10 +2986,7 @@ describe("SharePanelModel mobile access link", () => {
 
       await model.sendMobileAccessLink();
 
-      expect(model.mobileLinkState).toEqual({
-        state: "refused",
-        message: noAccessPoint,
-      });
+      expect(refusalMessageOf(model.mobileLinkState)).toBe(noAccessPoint);
     }
   });
 
@@ -2899,6 +3017,371 @@ describe("SharePanelModel mobile access link", () => {
     await model.load();
 
     expect(model.mobileLinkState).toEqual({ state: "idle" });
+  });
+});
+
+describe("SharePanelModel failures it can tell apart", () => {
+  it("says a link that never answered is not answering, rather than showing it as ready", async () => {
+    const scheduled: (() => void)[] = [];
+    let nowMs = 0;
+    const { model, requests } = makeSharePanel(
+      (url, init) => {
+        if (url.endsWith("/readiness")) return okResult({ ready: false });
+        if (init?.method === "PUT") return okResult(sharingResponse());
+        if (init?.method === "DELETE")
+          return okResult(sharingResponse({ enabled: false, url: null }));
+        return okResult(sharingResponse({ enabled: false, url: null }));
+      },
+      {
+        setTimer: (callback: () => void) => {
+          scheduled.push(callback);
+          return scheduled.length;
+        },
+        monotonicNowMs: () => nowMs,
+      },
+    );
+    await model.load();
+    await model.publish();
+
+    nowMs = 5 * 60_000 + 1;
+    scheduled.shift()?.();
+    await settle();
+
+    expect(model.isLive).toBe(false);
+    expect(model.isLinkDeadlinePassed).toBe(true);
+    expect(scheduled).toHaveLength(0);
+
+    // Try again turns sharing off and on, which starts a fresh wait.
+    await model.republish();
+    const writes = requests
+      .map((request) => request.method)
+      .filter((method) => method !== "GET");
+    expect(writes.slice(-2)).toEqual(["DELETE", "PUT"]);
+    expect(model.isLinkDeadlinePassed).toBe(false);
+    expect(model.isAwaitingLink).toBe(true);
+  });
+
+  it("draws a share whose address move failed as on, and fixes it by turning sharing off and on", async () => {
+    let isMoveBroken = true;
+    const { model, requests } = makeSharePanel((url, init) => {
+      if (init?.method === "DELETE")
+        return okResult(sharingResponse({ enabled: false, url: null }));
+      if (init?.method === "PUT") return okResult(sharingResponse());
+      if (isMoveBroken)
+        return {
+          ok: false,
+          status: 502,
+          body: {
+            error: "Failed to write share files",
+            reason: "ADDRESS_MOVE_FAILED",
+          },
+        };
+      return okResult(sharingResponse());
+    });
+
+    await model.load();
+
+    expect(model.isPublicationKnown).toBe(true);
+    expect(model.isPublished).toBe(true);
+    expect(model.loadFailure?.remedies).toEqual(["restart_sharing"]);
+    expect(model.loadFailure?.error.details).toContain(
+      "Failed to write share files",
+    );
+
+    isMoveBroken = false;
+    await model.republish();
+
+    expect(
+      requests
+        .map((request) => request.method)
+        .filter((method) => method !== "GET")
+        .slice(-2),
+    ).toEqual(["DELETE", "PUT"]);
+    expect(model.isPublished).toBe(true);
+  });
+
+  it("does not draw a workspace whose share could not be read as unshared", async () => {
+    const { model } = makeSharePanel(() =>
+      okResult(
+        sharingResponse({
+          enabled: false,
+          url: null,
+          publication_unknown_reason: "UNREADABLE",
+        }),
+      ),
+    );
+
+    await model.load();
+
+    expect(model.isPublicationKnown).toBe(false);
+    expect(model.loadFailure?.error.message).toBe(
+      "Couldn't check whether this workspace is shared. Try again. If this persists, report a bug.",
+    );
+    expect(model.loadFailure?.remedies).toEqual(["retry"]);
+    expect(model.loadFailure?.isBugReportOffered).toBe(true);
+  });
+
+  it("asks for the owner's sign-in when the owner is signed out", async () => {
+    const { model } = makeSharePanel(() =>
+      okResult(
+        sharingResponse({
+          enabled: false,
+          url: null,
+          publication_unknown_reason: "OWNER_SIGNED_OUT",
+        }),
+      ),
+    );
+
+    await model.load();
+
+    expect(model.loadFailure?.remedies).toEqual(["sign_in"]);
+  });
+
+  it("offers a start, not an update, when a stopped workspace could not be reached to share it", async () => {
+    let liveness = "STOPPED";
+    const { model } = makeSharePanel(
+      (url, init) => {
+        if (init?.method === "PUT")
+          return {
+            ok: false,
+            status: 502,
+            body: { error: "exec failed", reason: "WORKSPACE_UNREACHABLE" },
+          };
+        return okResult(sharingResponse({ enabled: false, url: null }));
+      },
+      { workspaceLiveness: () => liveness },
+    );
+    await model.load();
+
+    await model.publish();
+
+    const failure = (): {
+      message: string;
+      remedies: readonly string[];
+    } | null => {
+      const write = model.publishWrite;
+      return write.state === "failed"
+        ? {
+            message: write.failure.error.message,
+            remedies: write.failure.remedies,
+          }
+        : null;
+    };
+    expect(failure()).toEqual({
+      message: "This workspace is stopped. *Start it, then try again.*",
+      remedies: ["start_workspace"],
+    });
+    liveness = "RUNNING";
+    expect(failure()).toEqual({
+      message:
+        "Couldn't reach this workspace to set up sharing. *Make sure it's running, then try again.*",
+      remedies: ["retry_publication"],
+    });
+  });
+
+  it("names what a running workspace couldn't be reached for", () => {
+    const unreachable = {
+      status: 502,
+      body: { error: "exec failed", reason: "WORKSPACE_UNREACHABLE" },
+    };
+    const running = { isWorkspaceStopped: false };
+
+    expect(
+      (["publish", "save", "invite"] as const).map(
+        (operation) =>
+          shareFailureFrom(operation, unreachable, running).error.message,
+      ),
+    ).toEqual([
+      "Couldn't reach this workspace to set up sharing. *Make sure it's running, then try again.*",
+      "Couldn't reach this workspace to save this change. *Make sure it's running, then try again.*",
+      "Couldn't reach this workspace to send the invitation. *Make sure it's running, then try again.*",
+    ]);
+  });
+
+  it("reads the workspace again once Try again reaches it after it couldn't be reached", async () => {
+    let isReachable = false;
+    const { model } = makeSharePanel(
+      (_url, init) => {
+        if (init?.method === "PUT")
+          return isReachable
+            ? okResult(sharingResponse())
+            : {
+                ok: false,
+                status: 502,
+                body: { error: "exec failed", reason: "WORKSPACE_UNREACHABLE" },
+              };
+        return okResult(
+          sharingResponse({
+            enabled: isReachable,
+            grants: isReachable ? grantsDocument({ emails: ["kim@example.com"] }) : null,
+          }),
+        );
+      },
+      { workspaceLiveness: () => "RUNNING" },
+    );
+    await model.load();
+    await model.publish();
+    expect(model.loadFailure).not.toBeNull();
+
+    isReachable = true;
+    await model.retryPublication();
+
+    expect(model.publishWrite.state).toBe("idle");
+    expect(model.loadFailure).toBeNull();
+    expect(grantValues(model)).toEqual(["kim@example.com"]);
+  });
+
+  it("lets the read after a start clear what the stopped workspace's read could not say", async () => {
+    // A panel opened after the workspace started draws the cached document
+    // from while it was stopped (no grant list) before the fresh read answers
+    // with one; the fresh read is what the panel must end on.
+    const queryClient = createAppQueryClient();
+    const whileStopped = makeSharePanel(
+      (url, init) =>
+        init?.method === "PUT"
+          ? {
+              ok: false,
+              status: 502,
+              body: { error: "exec failed", reason: "WORKSPACE_UNREACHABLE" },
+            }
+          : okResult(sharingResponse({ enabled: false, url: null, grants: null })),
+      { queryClient, workspaceLiveness: () => "STOPPED" },
+    );
+    await whileStopped.model.load();
+    await whileStopped.model.publish();
+    expect(whileStopped.model.publishWrite.state).toBe("failed");
+    whileStopped.model.dispose();
+
+    const read = deferred();
+    const { model } = makeSharePanel(() => read.promise, {
+      queryClient,
+      workspaceLiveness: () => "RUNNING",
+    });
+    const loading = model.load();
+    expect(model.loadFailure).not.toBeNull();
+    expect(model.publishWrite.state).toBe("failed");
+
+    read.resolve(
+      okResult(
+        sharingResponse({
+          enabled: false,
+          url: null,
+          grants: grantsDocument({ emails: ["kim@example.com"] }),
+        }),
+      ),
+    );
+    await loading;
+
+    expect(model.loadFailure).toBeNull();
+    expect(model.isGrantListKnown).toBe(true);
+    expect(grantValues(model)).toEqual(["kim@example.com"]);
+    expect(model.publishWrite.state).toBe("idle");
+  });
+
+  it("keeps this panel's own failed toggle through the reads it runs afterwards", async () => {
+    // The panel re-reads on its own (a grants-sync retry, a target change
+    // after a failed load); none of those is the user acting on the failure,
+    // so its notice and Try again stay.
+    const { model } = makeSharePanel((_url, init) =>
+      init?.method === "PUT"
+        ? { ok: false, status: 502, body: { error: "upstream", reason: "CONNECTOR_FAILED" } }
+        : okResult(sharingResponse({ enabled: false, url: null })),
+    );
+    await model.load();
+    await model.publish();
+
+    await model.load();
+
+    expect(model.publishWrite.state).toBe("failed");
+  });
+
+  it.each([
+    { direction: "on", method: "PUT", isPublishing: true },
+    { direction: "off", method: "DELETE", isPublishing: false },
+  ])(
+    "throws the switch $direction again the way the failed toggle threw it",
+    async ({ method, isPublishing }) => {
+      let isConnectorDown = true;
+      const { model, requests } = makeSharePanel((_url, init) => {
+        if (init?.method === method && isConnectorDown)
+          return { ok: false, status: 502, body: { error: "upstream", reason: "CONNECTOR_FAILED" } };
+        const isOn = init?.method === undefined ? !isPublishing : init.method === "PUT";
+        return okResult(sharingResponse({ enabled: isOn, url: null }));
+      });
+      await model.load();
+      if (isPublishing) await model.publish();
+      else await model.unpublish();
+      const write = model.publishWrite;
+      expect(write.state === "failed" ? write.failure.remedies : null).toEqual([
+        "retry_publication",
+      ]);
+
+      isConnectorDown = false;
+      await model.retryPublication();
+
+      expect(requests.filter((request) => request.method === method)).toHaveLength(2);
+      expect(model.publishWrite.state).toBe("idle");
+      expect(model.isPublished).toBe(isPublishing);
+    },
+  );
+
+  it("asks a stopped workspace to be started to read its grant list", async () => {
+    const { model } = makeSharePanel(
+      () => okResult(sharingResponse({ grants: null })),
+      { workspaceLiveness: () => "STOPPED" },
+    );
+
+    await model.load();
+
+    expect(model.loadFailure?.error.message).toBe(
+      "Start this workspace to see and edit who it's shared with.",
+    );
+    expect(model.loadFailure?.remedies).toEqual(["start_workspace"]);
+  });
+
+  it("marks a refused entry as one to remove rather than retry", async () => {
+    const { model } = makeSharePanel((url, init) => {
+      if (init?.method === "PUT") return refusalResult("example.net");
+      return okResult(sharingResponse());
+    });
+    await model.load();
+
+    model.addGrant(WHOLE, "email_domain", "example.net");
+    await settle();
+
+    expect(model.grantsFor(WHOLE)[0].status).toEqual(
+      failedStatus(
+        "add",
+        "example.net cannot be granted permissions because it is a public email provider.",
+        true,
+      ),
+    );
+  });
+
+  it("names the plan's numbers when the share limit refuses a publish", async () => {
+    const { model } = makeSharePanel((url, init) => {
+      if (init?.method === "PUT")
+        return {
+          ok: false,
+          status: 502,
+          body: {
+            error:
+              "shares create: user already has 3 shared workspaces (max 3)",
+            reason: "SHARE_LIMIT_REACHED",
+            limit: 3,
+            current: 3,
+          },
+        };
+      return okResult(sharingResponse({ enabled: false, url: null }));
+    });
+    await model.load();
+
+    await model.publish();
+
+    const write = model.publishWrite;
+    expect(write.state === "failed" ? write.failure.error.message : null).toBe(
+      "Your plan allows 3 shared workspaces and 3 are shared already. *Turn sharing off for one of them, then try again.*",
+    );
   });
 });
 
@@ -2963,7 +3446,7 @@ describe("SharePanelModel visiting agents", () => {
     ).toHaveLength(1);
   });
 
-  it("reports a failed read in the route's words", async () => {
+  it("says a failed read in our words, with the route's behind the details", async () => {
     const { model } = agentsPanel(() => ({
       ok: false,
       status: 502,
@@ -2971,7 +3454,47 @@ describe("SharePanelModel visiting agents", () => {
     }));
     await model.reloadVisitingAgents();
     expect(model.visitingAgentsLoadState).toBe("failed");
-    expect(model.visitingAgentsLoadError).toBe("Could not run agent-access");
+    const failure = model.visitingAgentsLoadFailure;
+    expect(failure?.error).toEqual({
+      message:
+        "Couldn't load the agents invited to this workspace. Try again. If this persists, report a bug.",
+      details: expect.stringContaining("Could not run agent-access"),
+    });
+    expect(failure?.isBugReportOffered).toBe(true);
+  });
+
+  it("asks for a start when the read failed on a stopped workspace", async () => {
+    const { model } = makeSharePanel(
+      (url) =>
+        url.endsWith(AGENTS_SUFFIX)
+          ? { ok: false, status: 502, body: { error: "Could not run agent-access" } }
+          : okResult(sharingResponse({ enabled: true, grants_synced: true })),
+      { workspaceLiveness: () => "STOPPED" },
+    );
+    await model.reloadVisitingAgents();
+    const failure = model.visitingAgentsLoadFailure;
+    expect(failure?.error.message).toBe(
+      "Start this workspace to see the agents invited to it.",
+    );
+    expect(failure?.remedies).toEqual(["start_workspace"]);
+    expect(failure?.isBugReportOffered).toBe(false);
+  });
+
+  it("says a workspace too old for visiting agents needs an update", async () => {
+    const { model } = agentsPanel(() => ({
+      ok: false,
+      status: 409,
+      body: {
+        error: "This workspace predates visiting agents; update it",
+        reason: "AGENTS_UNSUPPORTED",
+      },
+    }));
+    await model.reloadVisitingAgents();
+    const failure = model.visitingAgentsLoadFailure;
+    expect(failure?.error.message).toBe(
+      "This workspace is too old to invite agents into. *Update it, then try again.*",
+    );
+    expect(failure?.remedies).toEqual(["update_workspace"]);
   });
 
   it("mints an invite scoped to the target and holds the instructions", async () => {
@@ -3039,39 +3562,82 @@ describe("SharePanelModel visiting agents", () => {
     ).toHaveLength(2);
   });
 
-  it("reports a refused invite in the route's words", async () => {
+  it("says why an invite was refused, with the route's words behind the details", async () => {
+    let body: ResponseBody = {
+      error: "This workspace is not associated with a signed-in account, so nobody can invite an agent",
+      reason: "NOT_LINKED",
+    };
+    let status = 409;
     const { model } = agentsPanel((url) =>
       url.endsWith(INVITES_SUFFIX)
-        ? { ok: false, status: 409, body: { error: "no account" } }
+        ? { ok: false, status, body }
         : okResult({ agents: [] }),
     );
+
     await model.inviteVisitingAgent(model.wholeService);
-    expect(model.visitingAgentInviteState).toEqual({
-      state: "refused",
-      target: model.wholeService,
-      message: "no account",
+    const linked = model.visitingAgentInviteState;
+    expect(linked.state === "refused" ? linked.target : null).toBe(
+      model.wholeService,
+    );
+    expect(linked.state === "refused" ? linked.failure : null).toMatchObject({
+      error: {
+        message:
+          "Link this workspace to your Imbue Cloud account before inviting agents into it.",
+        details: expect.stringContaining("not associated with a signed-in account"),
+      },
+      remedies: ["open_account_settings"],
+      isBugReportOffered: false,
+    });
+
+    body = { error: "The workspace is published, but its share is not set up", reason: "SHARE_NOT_SET_UP" };
+    status = 502;
+    await model.inviteVisitingAgent(model.wholeService);
+    const unset = model.visitingAgentInviteState;
+    expect(unset.state === "refused" ? unset.failure.remedies : null).toEqual([
+      "restart_sharing",
+    ]);
+
+    body = { error: "agent-access in agent-x is broken: boom" };
+    await model.inviteVisitingAgent(model.wholeService);
+    const unexplained = model.visitingAgentInviteState;
+    expect(unexplained.state === "refused" ? unexplained.failure : null).toMatchObject({
+      error: {
+        message: "Couldn't create the invitation. Try again. If this persists, report a bug.",
+      },
+      isBugReportOffered: true,
     });
   });
 
   it("revokes an agent and drops it from the list, or keeps it with the refusal", async () => {
     const kept = agentEntry({ agent_id: "va-" + "2".repeat(32), name: "Ada" });
+    const gone = agentEntry({ agent_id: "va-" + "3".repeat(32), name: "Bo" });
     const { model, requests } = agentsPanel((url, init) => {
       if (url.endsWith(AGENTS_SUFFIX))
-        return okResult({ agents: [agentEntry(), kept] });
+        return okResult({ agents: [agentEntry(), kept, gone] });
       if (init?.method === "DELETE" && url.endsWith(kept.agent_id))
-        return { ok: false, status: 404, body: { error: "no agent" } };
+        return { ok: false, status: 502, body: { error: "Could not run agent-access" } };
+      if (init?.method === "DELETE" && url.endsWith(gone.agent_id))
+        return { ok: false, status: 404, body: { error: "no agent", reason: "AGENT_GONE" } };
       return okResult({ revoked: agentEntry().agent_id });
     });
     await model.ensureVisitingAgentsLoaded();
 
     await model.revokeVisitingAgent(agentEntry().agent_id);
-    expect(model.visitingAgentList.map((agent) => agent.name)).toEqual(["Ada"]);
+    expect(model.visitingAgentList.map((agent) => agent.name)).toEqual(["Ada", "Bo"]);
     expect(
       requests.find((request) => request.method === "DELETE")?.url,
     ).toContain(`/agents/${agentEntry().agent_id}`);
 
+    // An agent the workspace no longer knows has no access left: that is the revoke done.
+    await model.revokeVisitingAgent(gone.agent_id);
+    expect(model.visitingAgentList.map((agent) => agent.name)).toEqual(["Ada"]);
+    expect(model.visitingAgentRevokeFailure).toBeNull();
+
     await model.revokeVisitingAgent(kept.agent_id);
     expect(model.visitingAgentList.map((agent) => agent.name)).toEqual(["Ada"]);
-    expect(model.visitingAgentRevokeErrorMessage).toBe("no agent");
+    expect(model.visitingAgentRevokeFailure?.error).toEqual({
+      message: "Couldn't revoke this agent's access. Try again. If this persists, report a bug.",
+      details: expect.stringContaining("Could not run agent-access"),
+    });
   });
 });

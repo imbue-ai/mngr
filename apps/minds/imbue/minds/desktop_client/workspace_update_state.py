@@ -371,6 +371,7 @@ def _compose(
         last_dispatch_target_ref=dispatch.target_ref if dispatch is not None else "",
         dispatch_failure=run.dispatch_failure.message if run.dispatch_failure is not None else "",
         dispatch_failure_detail=run.dispatch_failure.detail if run.dispatch_failure is not None else "",
+        dispatch_failure_code=run.dispatch_failure.code if run.dispatch_failure is not None else "",
         kernel=_compose_kernel(detected, kernel),
     )
 

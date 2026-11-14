@@ -5,14 +5,21 @@ import {
   allText,
   attrsOf,
   classTokensOf,
+  classesOf,
   collectVnodes,
+  errorMarks,
   renderDeep,
   renderRoot,
   settle,
   sharePanelOptions,
   withAttr,
+  withMindsNative,
 } from "../../../testing";
-import type { RequestResult, ResponseBody } from "../../../models/errors";
+import type {
+  ErrorAction,
+  RequestResult,
+  ResponseBody,
+} from "../../../models/errors";
 import { createAppQueryClient } from "../../../models/queryClient";
 import type {
   MachineSharingResponse,
@@ -21,6 +28,11 @@ import type {
 import { RESOLVE_USER_URL } from "../../../models/workspaceOptions";
 import type { Grant, SharePanelModelOptions } from "../../../models/sharePanel";
 import { GRANT_ADD_KINDS, SharePanelModel } from "../../../models/sharePanel";
+import { errorDialogs } from "../../../models/errorDialog";
+import {
+  NO_RESPONSE_SENTENCE,
+  fallbackErrorSentence,
+} from "../../../models/errors";
 import { Modal } from "../../components/Modal";
 import { Skeleton, SkeletonRegion } from "../../components/Skeleton";
 import { Spinner } from "../../components/Spinner";
@@ -116,6 +128,17 @@ function grantRows(root: unknown): AnyVnode[] {
   return collectVnodes(root).filter(
     (vnode) => attrsOf(vnode)["data-grant-row"] !== undefined,
   );
+}
+
+/** The error an error display with this id was handed, or undefined. */
+function errorOf(
+  root: unknown,
+  id: string,
+): { message: string; details: string } | undefined {
+  const display = byId(root, id);
+  return display === undefined
+    ? undefined
+    : (attrsOf(display).error as { message: string; details: string });
 }
 
 function rowByText(root: unknown, text: string): AnyVnode {
@@ -270,7 +293,11 @@ describe("ShareTab publish widget", () => {
     expect(attrsOf(placeholder)["aria-label"]).toBe("Sharing status unknown");
     expect(allText(byId(widget, "ws-share-publish-word"))).toBe("");
     expect(allText(widget)).not.toMatch(/\b(Checking|Unknown)\b/);
-    expect(allText(widget)).toContain("relay down");
+    expect(errorOf(widget, "ws-share-load-error")).toEqual({
+      message:
+        "Couldn't check who this workspace is shared with. Try again. If this persists, report a bug.",
+      details: expect.stringContaining("relay down"),
+    });
     expect(collectVnodes(widget).some((vnode) => vnode.tag === Spinner)).toBe(
       false,
     );
@@ -302,22 +329,34 @@ describe("ShareTab publish widget", () => {
     return share;
   }
 
-  it("links a full-quota refusal to the shared-workspaces page, and an ordinary one to nothing", async () => {
+  it("offers the shared-workspaces page for a full share quota, and nothing more for a waitlisted account", async () => {
     const quota = await refusingPanel(403, {
-      error: "Shared workspace limit reached (50 of 50).",
+      error: "Could not publish this workspace: Shared workspace limit reached (3 of 3).",
+      reason: "SHARE_LIMIT_REACHED",
       code: "quota_exceeded",
       shared_workspaces_path: "/workspaces/shared",
+      limit: 3,
+      current: 3,
     });
-    const quotaError = byId(renderTab(quota), "ws-share-publish-error");
-    expect(allText(quotaError)).toContain("limit reached");
-    const remedy = byId(quotaError, "ws-share-publish-remedy") as AnyVnode;
-    expect(attrsOf(remedy).href).toBe("/workspaces/shared");
-    expect(allText(remedy)).toBe("Review shared workspaces");
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    const quotaError = attrsOf(byId(renderTab(quota), "ws-share-publish-error") as AnyVnode);
+    expect(quotaError.error).toEqual({
+      message:
+        "Your plan allows 3 shared workspaces and 3 are shared already. *Turn sharing off for one of them, then try again.*",
+      details: expect.stringContaining("Shared workspace limit reached (3 of 3)"),
+    });
+    const actions = quotaError.actions as { label: string; onclick: () => void }[];
+    expect(actions.map((action) => action.label)).toEqual(["Review shared workspaces"]);
+    actions[0].onclick();
+    expect(routeSet).toHaveBeenCalledWith("/workspaces/shared");
 
-    const plain = await refusingPanel(502, { error: "relay down" });
-    const plainError = byId(renderTab(plain), "ws-share-publish-error");
-    expect(allText(plainError)).toContain("relay down");
-    expect(byId(plainError, "ws-share-publish-remedy")).toBeUndefined();
+    const waitlisted = await refusingPanel(502, {
+      error: "Could not publish this workspace: waitlisted",
+      reason: "WAITLISTED",
+    });
+    const waitlistedError = attrsOf(byId(renderTab(waitlisted), "ws-share-publish-error") as AnyVnode);
+    expect((waitlistedError.error as { message: string }).message).toContain("still on the waitlist");
+    expect(waitlistedError.actions).toEqual([]);
   });
 
   it("spins the wait in the switch's knob while a toggle is in flight, without dimming it", async () => {
@@ -409,10 +448,10 @@ describe("ShareTab publish widget", () => {
       "Generating a secure link. This takes a while because we want to " +
         "protect you from bad actors on the internet.",
     );
-    expect(allText(block)).toContain("Connecting to the relay");
+    expect(allText(block)).toContain("Connecting this workspace");
     expect(allText(block)).not.toContain("Creating link");
     expect(allText(block)).not.toContain("Setting up encryption");
-    expect(allText(block)).not.toContain("Verifying end to end");
+    expect(allText(block)).not.toContain("Checking the link works");
     expect(allText(block)).toContain(
       "People can be added while the link is being prepared.",
     );
@@ -790,7 +829,9 @@ describe("ShareTab loading skeleton", () => {
     await share.load();
 
     expect(skeletonOf(share)).toBeUndefined();
-    expect(allText(renderTab(share))).toContain("relay down");
+    expect(errorOf(renderTab(share), "ws-share-load-error")?.details).toContain(
+      "relay down",
+    );
   });
 });
 
@@ -888,8 +929,13 @@ describe("ShareTab mobile access link", () => {
     pressMobileLink(renderTab(share));
     await settle();
 
-    expect(allText(byId(renderTab(share), "ws-share-mobile-link"))).toContain(
-      "Could not send the email",
+    expect(
+      errorOf(
+        byId(renderTab(share), "ws-share-mobile-link"),
+        "ws-share-mobile-link-error",
+      )?.message,
+    ).toBe(
+      "Couldn't send the email. Try again. If this persists, report a bug.",
     );
   });
 });
@@ -988,7 +1034,7 @@ describe("ShareTab add row", () => {
     chooseKind(renderTab(share), "email_domain");
     pressAdd(renderTab(share));
 
-    expect(allText(byId(renderTab(share), "ws-share-refusal"))).toBe(
+    expect(allText(renderDeep(byId(renderTab(share), "ws-share-refusal")))).toBe(
       "gmail.com cannot be granted permissions because it is a public email provider.",
     );
     expect(share.grantsFor(WHOLE)).toHaveLength(0);
@@ -1212,7 +1258,7 @@ describe("ShareTab grant list", () => {
     await settle();
 
     const row = rowByText(renderTab(share), "erin@example.org");
-    expect(allText(row)).toContain("Could not save");
+    expect(allText(row)).toContain("Couldn't add");
     expect(allText(row)).toContain("Retry");
   });
 
@@ -1672,7 +1718,7 @@ describe("ShareTab while the link is being prepared", () => {
     const root = renderTab(share);
 
     expect(allText(byId(root, "ws-share-provisioning"))).toContain(
-      "Connecting to the relay",
+      "Connecting this workspace",
     );
     expect(allText(rowByText(root, "bob@example.org"))).toContain(
       "Securely granting access",
@@ -1746,10 +1792,10 @@ describe("ShareTab row states together", () => {
     const failed = rowByText(root, "erin@example.org");
     const saving = rowByText(root, "dan@example.org");
 
-    expect(allText(failed)).toContain("Could not save");
+    expect(allText(failed)).toContain("Couldn't add");
     expect(allText(failed)).toContain("Retry");
     expect(allText(saving)).toContain("Securely granting access");
-    expect(allText(saving)).not.toContain("Could not save");
+    expect(allText(saving)).not.toContain("Couldn't add");
   });
 
   it("fades the highlight off a row once its moment has passed", async () => {
@@ -1930,17 +1976,30 @@ describe("ShareTab provisioning trouble", () => {
     return share;
   }
 
-  it("says a halted bring-up only publishing again can clear", async () => {
+  it("says a halted bring-up couldn't finish, with a Try again that turns sharing off and on and a bug report", async () => {
     const share = await stuckPanel();
     share.gatewayState = "halted";
     share.gatewayError = "the certificate order was refused.";
+    const republish = vi.spyOn(share, "republish").mockResolvedValue();
 
-    const trouble = byId(renderTab(share), "ws-share-gateway-trouble");
+    const trouble = byId(
+      renderTab(share),
+      "ws-share-gateway-trouble",
+    ) as AnyVnode;
 
-    expect(allText(trouble)).toContain("the certificate order was refused");
-    expect(allText(trouble)).toContain(
-      "Turn sharing off and on again to retry",
-    );
+    expect(attrsOf(trouble).error).toEqual({
+      message:
+        "This workspace couldn't finish setting up its link. Try again. If this persists, report a bug.",
+      details: "the certificate order was refused.",
+    });
+    expect(attrsOf(trouble).isBugReportOffered).toBe(true);
+    const [tryAgain] = attrsOf(trouble).actions as {
+      label: string;
+      onclick: () => void;
+    }[];
+    expect(tryAgain.label).toBe("Try again");
+    tryAgain.onclick();
+    expect(republish).toHaveBeenCalledOnce();
   });
 
   it("says when a failed attempt will be tried again", async () => {
@@ -1949,10 +2008,18 @@ describe("ShareTab provisioning trouble", () => {
     share.gatewayFailedAttemptCount = 2;
     share.gatewayError = "the relay refused the tunnel";
 
-    const trouble = byId(renderTab(share), "ws-share-gateway-trouble");
+    const trouble = byId(
+      renderTab(share),
+      "ws-share-gateway-trouble",
+    ) as AnyVnode;
 
-    expect(allText(trouble)).toContain("The last attempt failed");
-    expect(allText(trouble)).toContain("the relay refused the tunnel");
+    expect(attrsOf(trouble).error).toEqual({
+      message:
+        "Setting up the link hit a problem. The workspace tries again shortly.",
+      details: "the relay refused the tunnel",
+    });
+    // It clears on its own: nothing to report.
+    expect(attrsOf(trouble).isBugReportOffered).toBe(false);
   });
 
   it("says nothing about trouble while the bring-up is going well", async () => {
@@ -2271,6 +2338,29 @@ describe("ShareTab invitations", () => {
     expect(allText(inviteControl(details))).toBe("Invite again");
   });
 
+  it("marks the refusal as the error it is, the way the tab's other refusals are marked", async () => {
+    const { share } = await invitationPanel({
+      respondToInvite: () =>
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          body: { outcome: "too_soon" },
+        }),
+    });
+    const friend = share
+      .grantsFor(WHOLE)
+      .find((grant) => grant.grantee.value === "friend@example.com");
+
+    await share.invite(WHOLE, (friend as Grant).key);
+    await settle();
+
+    const refusal = refusalOf(
+      rowByText(renderTab(share), "friend@example.com"),
+    );
+    expect(allText(refusal)).toContain("You invited this person too recently.");
+    expect(errorMarks(renderDeep(refusal))).toHaveLength(1);
+  });
+
   it("says when someone last opened the workspace, with that time on hover", async () => {
     const lastVisit = new Date(Date.now() - 3 * 3600_000).toISOString();
     const { share } = await invitationPanel({
@@ -2401,18 +2491,91 @@ describe("ShareTab visiting agents", () => {
       },
     );
     await share.ensureVisitingAgentsLoaded();
-    const failed = byId(renderTab(share), "ws-share-agents-error");
-    expect(allText(failed)).toContain("it is stopped");
-    const retry = byId(failed, "ws-share-agents-retry");
-    expect(retry).toBeDefined();
+    const failed = attrsOf(byId(renderTab(share), "ws-share-agents-error") as AnyVnode);
+    expect(failed.error).toEqual({
+      message:
+        "Couldn't load the agents invited to this workspace. Try again. If this persists, report a bug.",
+      details: expect.stringContaining("it is stopped"),
+    });
+    expect(failed.isBugReportOffered).toBe(true);
+    const [retry] = failed.actions as { label: string; onclick: () => void }[];
+    expect(retry.label).toBe("Try again");
 
     isBroken = false;
-    (attrsOf(retry as AnyVnode).onclick as () => void)();
+    retry.onclick();
     await settle();
 
     const root = renderTab(share);
     expect(byId(root, "ws-share-agents-error")).toBeUndefined();
     expect(allText(byId(root, "ws-share-agents"))).toContain("Josh Claude");
+  });
+
+  it("offers only a start when the read failed on a stopped workspace", async () => {
+    const share = await publishedPanel(
+      {},
+      {
+        workspaceLiveness: () => "STOPPED",
+        fetchJson: (url: string) =>
+          Promise.resolve(
+            url.endsWith("/agents")
+              ? { ok: false, status: 502, body: { error: "it is stopped" } }
+              : {
+                  ok: true,
+                  status: 200,
+                  body: { enabled: true, url: "https://m.relay.example/" },
+                },
+          ),
+      },
+    );
+    await share.ensureVisitingAgentsLoaded();
+
+    expect(
+      actionsOf(renderTab(share), "ws-share-agents-error").map(
+        (action) => action.label,
+      ),
+    ).toEqual(["Start workspace"]);
+  });
+
+  it("says why an invite was refused, with the button that fixes it", async () => {
+    const share = await publishedPanel(
+      {},
+      {
+        fetchJson: (url: string) => {
+          if (url.endsWith("/agents/invites"))
+            return Promise.resolve({
+              ok: false,
+              status: 409,
+              body: {
+                error: "This workspace predates visiting agents; update it",
+                reason: "AGENTS_UNSUPPORTED",
+              },
+            });
+          if (url.endsWith("/agents"))
+            return Promise.resolve({ ok: true, status: 200, body: { agents: [] } });
+          if (url.endsWith("/invitation-outcomes"))
+            return Promise.resolve({ ok: true, status: 200, body: { outcomes: [] } });
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            body: {
+              enabled: true,
+              url: "https://m.relay.example/",
+              grants: { workspace: { emails: [], email_domains: [] }, services: {} },
+            },
+          });
+        },
+      },
+    );
+    await share.inviteVisitingAgent(share.wholeService);
+
+    const refused = attrsOf(byId(renderTab(share), "ws-share-agents-invite-error") as AnyVnode);
+    expect((refused.error as { message: string }).message).toBe(
+      "This workspace is too old to invite agents into. *Update it, then try again.*",
+    );
+    expect(refused.isBugReportOffered).toBe(false);
+    expect((refused.actions as { label: string }[]).map((action) => action.label)).toEqual([
+      "Update workspace",
+    ]);
   });
 
   it("says no agents have been invited when the list is empty", async () => {
@@ -2468,3 +2631,586 @@ describe("ShareTab visiting agents", () => {
     expect(share.visitingAgentScopeFor("web")).toEqual(["web"]);
   });
 });
+
+describe("ShareTab failures it can tell apart", () => {
+  it("says an app without a link gets one when it starts, rather than spinning", async () => {
+    const share = await publishedPanel();
+    share.selectTarget("docs");
+
+    const link = byId(renderTab(share), "ws-share-link");
+
+    expect(allText(link)).toContain(
+      "This app gets its link the first time it starts. Open it in this workspace, then come back.",
+    );
+    expect(collectVnodes(link).some((vnode) => vnode.tag === Spinner)).toBe(
+      false,
+    );
+  });
+
+  it("says once that a stopped workspace must start when turning sharing on fails on it", async () => {
+    const share = await readyPanel(
+      { grants: null },
+      {
+        workspaceLiveness: () => "STOPPED",
+        fetchJson: (_url: string, init?: RequestInit) =>
+          Promise.resolve(
+            init?.method === "PUT"
+              ? {
+                  ok: false,
+                  status: 502,
+                  body: {
+                    error: "Could not check the share state: exec failed",
+                    reason: "WORKSPACE_UNREACHABLE",
+                  },
+                }
+              : { ok: true, status: 200, body: { enabled: false, url: null, grants: null } },
+          ),
+      },
+    );
+    await share.publish();
+
+    const root = renderTab(share);
+
+    expect(errorOf(root, "ws-share-publish-error")?.message).toBe(
+      "This workspace is stopped. *Start it, then try again.*",
+    );
+    expect(actionsOf(root, "ws-share-publish-error").map((action) => action.label)).toEqual([
+      "Start workspace",
+    ]);
+    expect(byId(root, "ws-share-load-error")).toBeUndefined();
+  });
+
+  it("says once that a running workspace couldn't be reached when turning sharing on fails on it", async () => {
+    const share = await readyPanel(
+      { grants: null },
+      {
+        fetchJson: (_url: string, init?: RequestInit) =>
+          Promise.resolve(
+            init?.method === "PUT"
+              ? {
+                  ok: false,
+                  status: 502,
+                  body: { error: "exec failed", reason: "WORKSPACE_UNREACHABLE" },
+                }
+              : { ok: true, status: 200, body: { enabled: false, url: null, grants: null } },
+          ),
+      },
+    );
+    await share.publish();
+
+    const root = renderTab(share);
+
+    expect(errorOf(root, "ws-share-publish-error")?.message).toBe(
+      "Couldn't reach this workspace to set up sharing. *Make sure it's running, then try again.*",
+    );
+    expect(actionsOf(root, "ws-share-publish-error")).toEqual([
+      expect.objectContaining({ label: "Try again" }),
+    ]);
+    expect(byId(root, "ws-share-load-error")).toBeUndefined();
+  });
+
+  it("shows no link being set up while a failed address move waits on Restart sharing", async () => {
+    const share = await readyPanel(
+      {},
+      {
+        fetchJson: () =>
+          Promise.resolve({
+            ok: false,
+            status: 502,
+            body: { error: "Failed to write share files", reason: "ADDRESS_MOVE_FAILED" },
+          }),
+      },
+    );
+
+    const root = renderTab(share);
+
+    expect(byId(root, "ws-share-provisioning")).toBeUndefined();
+    expect(
+      ((attrsOf(byId(root, "ws-share-load-error") as AnyVnode).actions ?? []) as { label: string }[]).map(
+        (action) => action.label,
+      ),
+    ).toEqual(["Restart sharing"]);
+  });
+
+  it("offers Restart Imbue Studio when sharing is unavailable, and restarts the app from it", async () => {
+    const share = await readyPanel(
+      {},
+      {
+        fetchJson: () =>
+          Promise.resolve({
+            ok: false,
+            status: 503,
+            body: { error: "sharing handler not configured", reason: "UNAVAILABLE" },
+          }),
+      },
+    );
+    const retry = vi.fn();
+
+    await withMindsNative({ retry }, async () => {
+      const [restart] = actionsOf(renderTab(share), "ws-share-load-error");
+      expect(restart.label).toBe("Restart Imbue Studio");
+      restart.onclick();
+    });
+
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it("offers to start a stopped workspace for an app's link", async () => {
+    const share = await publishedPanel(
+      {},
+      { workspaceLiveness: () => "STOPPED" },
+    );
+    share.selectTarget("docs");
+
+    const link = byId(renderTab(share), "ws-share-link");
+
+    expect(allText(link)).toContain(
+      "Start this workspace to get this app's link.",
+    );
+    expect(allText(link)).toContain("Start workspace");
+  });
+
+  it("says a link that never answered is not answering, with a Try again", async () => {
+    const share = await publishedPanel();
+    share.isLive = false;
+    share.isLinkDeadlinePassed = true;
+    const republish = vi.spyOn(share, "republish").mockResolvedValue();
+
+    const notice = byId(
+      renderTab(share),
+      "ws-share-link-not-answering",
+    ) as AnyVnode;
+
+    expect(attrsOf(notice).error).toEqual({
+      message: "This link still isn't answering.",
+      details: "",
+    });
+    expect(attrsOf(notice).isBugReportOffered).toBe(true);
+    const [tryAgain, ask] = actionsOf(renderTab(share), "ws-share-link-not-answering");
+    expect([tryAgain.label, ask.label]).toEqual(["Try again", "Ask the agent to fix it"]);
+    tryAgain.onclick();
+    expect(republish).toHaveBeenCalledOnce();
+    expect(await assistDescriptionSentBy(ask)).toContain("link hasn't answered");
+    expect(allText(byId(renderTab(share), "ws-share-link"))).not.toContain(
+      "Preparing the link",
+    );
+  });
+
+  it("holds a notice's Ask the agent while its agent starts, and says under that notice why it couldn't", async () => {
+    const share = await publishedPanel();
+    share.isLive = false;
+    share.isLinkDeadlinePassed = true;
+    let answer: (response: Response) => void = () => undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise<Response>((resolve) => (answer = resolve))),
+    );
+    vi.spyOn(m, "redraw").mockImplementation(() => undefined);
+    const draw = mountedTab(share);
+
+    actionsOf(draw(), "ws-share-link-not-answering")[1].onclick();
+    expect(actionsOf(draw(), "ws-share-link-not-answering")[1]).toEqual(
+      expect.objectContaining({ label: "Starting an agent…", isDisabled: true }),
+    );
+
+    answer(
+      new Response(JSON.stringify({ error: "spawn failed", reason: "SPAWN_FAILED" }), {
+        status: 502,
+      }),
+    );
+    await settle();
+    const tab = draw();
+    const nested = byId(
+      renderDeep(tab),
+      "ws-share-link-not-answering-ask-agent-error",
+    );
+    expect(allText(nested)).toContain(
+      "Couldn't start an agent in this workspace.",
+    );
+    // One failure is one box: it is said on the tint already under it.
+    expect(
+      collectVnodes(nested).some((vnode) =>
+        classesOf(vnode).includes("c-important-surface"),
+      ),
+    ).toBe(false);
+    expect(actionsOf(tab, "ws-share-link-not-answering")[1].isDisabled).toBe(false);
+  });
+
+  it("offers Remove, not Retry, on an entry the workspace refused", async () => {
+    const share = await publishedPanel(
+      {},
+      {
+        fetchJson: (_url: string, init?: RequestInit) =>
+          Promise.resolve(
+            init?.method === "PUT"
+              ? {
+                  ok: false,
+                  status: 400,
+                  body: {
+                    error: "grant_refused",
+                    refusals: [
+                      {
+                        scope: "workspace",
+                        kind: "email_domain",
+                        value: "gmail.example",
+                        message: "gmail.example is not allowed here.",
+                      },
+                    ],
+                  },
+                }
+              : {
+                  ok: true,
+                  status: 200,
+                  body: {
+                    enabled: true,
+                    url: "https://m.relay.example/",
+                    grants: {
+                      workspace: { emails: [], email_domains: [] },
+                      services: {},
+                    },
+                  },
+                },
+          ),
+      },
+    );
+    share.addGrant("system_interface", "email_domain", "gmail.example");
+    await settle();
+
+    const row = rowByText(renderTab(share), "gmail.example");
+
+    expect(allText(row)).toContain("gmail.example is not allowed here.");
+    expect(allText(row)).toContain("Remove");
+    expect(allText(row)).not.toContain("Retry");
+  });
+
+  it("says a failed removal leaves the person's access in place", async () => {
+    const share = await publishedPanel(
+      {
+        grants: {
+          workspace: { emails: ["kim@example.org"], email_domains: [] },
+          services: {},
+        },
+      },
+      {
+        fetchJson: (_url: string, init?: RequestInit) =>
+          Promise.resolve(
+            init?.method === "PUT"
+              ? { ok: false, status: 500, body: {} }
+              : {
+                  ok: true,
+                  status: 200,
+                  body: {
+                    enabled: true,
+                    url: "https://m.relay.example/",
+                    grants: {
+                      workspace: {
+                        emails: ["kim@example.org"],
+                        email_domains: [],
+                      },
+                      services: {},
+                    },
+                  },
+                },
+          ),
+      },
+    );
+    share.removeGrant(
+      "system_interface",
+      share.grantsFor("system_interface")[0].key,
+    );
+    await settle();
+
+    const row = rowByText(renderTab(share), "kim@example.org");
+
+    expect(allText(row)).toContain("Couldn't remove — still has access");
+    expect(allText(row)).toContain("Retry");
+
+    // The card's details line is too small for the whole failure, so See
+    // details opens it in the error dialog, with its sentence and the status.
+    vi.spyOn(m, "redraw").mockImplementation(() => undefined);
+    errorDialogs.attachHost();
+    try {
+      const seeDetails = collectVnodes(row).find(
+        (vnode) => attrsOf(vnode)["data-failure-details"] !== undefined,
+      );
+      if (seeDetails === undefined) throw new Error("no See details on the card");
+      (attrsOf(seeDetails).onclick as () => void)();
+      const dialog = errorDialogs.current;
+      expect(dialog?.error.message).toBe(
+        "Couldn't save this change. Try again. If this persists, report a bug.",
+      );
+      expect(dialog?.error.details).toContain("HTTP 500");
+      expect(dialog?.isBugReportOffered).toBe(true);
+    } finally {
+      errorDialogs.dismiss();
+      errorDialogs.detachHost();
+    }
+  });
+
+  it("does not call an unread list empty, nor the workspace unshared, when the status could not be read", async () => {
+    const share = await readyPanel({
+      grants: {
+        workspace: { emails: ["kim@example.org"], email_domains: [] },
+        services: {},
+      },
+      publication_unknown_reason: "UNREADABLE",
+    });
+
+    const root = renderTab(share);
+
+    expect(byId(root, "ws-share-off-notice")).toBeUndefined();
+    expect(byId(root, "ws-share-publish-switch")).toBeUndefined();
+    expect(errorOf(root, "ws-share-load-error")?.message).toBe(
+      "Couldn't check whether this workspace is shared. Try again. If this persists, report a bug.",
+    );
+    expect(actionsOf(root, "ws-share-load-error")).toEqual([
+      expect.objectContaining({ label: "Try again" }),
+    ]);
+    expect(attrsOf(byId(root, "ws-share-load-error") as AnyVnode).isBugReportOffered).toBe(true);
+    expect(
+      attrsOf(byId(root, "ws-share-add-value") as AnyVnode)["data-tooltip"],
+    ).toBe("Sharing status couldn't be checked.");
+  });
+
+  it("replaces the empty-list line when no document could be read", async () => {
+    const share = new SharePanelModel(
+      sharePanelOptions({
+        fetchJson: () => Promise.resolve({ ok: false, status: 0, body: null }),
+      }),
+    );
+    await share.load();
+
+    const root = renderTab(share);
+
+    expect(byId(root, "ws-share-empty")).toBeUndefined();
+    expect(allText(byId(root, "ws-share-list-unread"))).toBe(
+      "The list of who has access couldn't be read.",
+    );
+    expect(errorOf(root, "ws-share-load-error")?.message).toBe(
+      "Imbue Studio didn't respond. Try again in a moment.",
+    );
+  });
+
+  it("offers to ask the workspace's agent when its sharing list cannot be read", async () => {
+    const share = await readyPanel(
+      {},
+      {
+        fetchJson: (_url: string, init?: RequestInit) =>
+          Promise.resolve(
+            init?.method === "PUT"
+              ? {
+                  ok: false,
+                  status: 502,
+                  body: {
+                    error: "could not decode",
+                    reason: "GRANTS_UNREADABLE",
+                  },
+                }
+              : {
+                  ok: true,
+                  status: 200,
+                  body: {
+                    enabled: false,
+                    url: null,
+                    grants: {
+                      workspace: { emails: [], email_domains: [] },
+                      services: {},
+                    },
+                  },
+                },
+          ),
+      },
+    );
+    await share.publish();
+
+    const root = renderTab(share);
+
+    expect(errorOf(root, "ws-share-publish-error")?.message).toBe(
+      "This workspace's list of who it's shared with can't be read, so sharing can't be changed right now.",
+    );
+    const [ask] = actionsOf(root, "ws-share-publish-error");
+    expect(ask).toEqual(
+      expect.objectContaining({ label: "Ask the agent to fix it" }),
+    );
+    expect(attrsOf(byId(root, "ws-share-publish-error") as AnyVnode).isBugReportOffered).toBe(
+      true,
+    );
+    expect(await assistDescriptionSentBy(ask)).toContain("share_grants.toml");
+  });
+
+  it.each([
+    {
+      failure: "a failed start",
+      respond: () =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({ error: "spawn failed", reason: "SPAWN_FAILED" }),
+            { status: 502 },
+          ),
+        ),
+      message: fallbackErrorSentence(
+        "Couldn't start an agent in this workspace",
+      ),
+      details: "spawn failed",
+      isBugReportOffered: true,
+    },
+    {
+      failure: "a refused start",
+      respond: () =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              error: "This workspace can't start a helper agent yet.",
+            }),
+            { status: 409 },
+          ),
+        ),
+      message: "This workspace can't start a helper agent yet.",
+      details: "HTTP 409",
+      isBugReportOffered: false,
+    },
+    {
+      failure: "a start that got no response",
+      respond: () => Promise.reject(new TypeError("Failed to fetch")),
+      message: NO_RESPONSE_SENTENCE,
+      details: "No response.",
+      isBugReportOffered: false,
+    },
+  ])("raises $failure pressed from a card's error dialog in a dialog of its own, and only there", async (failure) => {
+    const share = await publishedPanel(
+      {
+        grants: {
+          workspace: { emails: ["kim@example.org"], email_domains: [] },
+          services: {},
+        },
+      },
+      {
+        fetchJson: (_url: string, init?: RequestInit) =>
+          Promise.resolve(
+            init?.method === "PUT"
+              ? {
+                  ok: false,
+                  status: 502,
+                  body: { error: "could not decode", reason: "GRANTS_UNREADABLE" },
+                }
+              : {
+                  ok: true,
+                  status: 200,
+                  body: {
+                    enabled: true,
+                    url: "https://m.relay.example/",
+                    grants: {
+                      workspace: { emails: ["kim@example.org"], email_domains: [] },
+                      services: {},
+                    },
+                  },
+                },
+          ),
+      },
+    );
+    share.removeGrant("system_interface", share.grantsFor("system_interface")[0].key);
+    await settle();
+    const draw = mountedTab(share);
+    const row = rowByText(draw(), "kim@example.org");
+
+    vi.stubGlobal("fetch", vi.fn(failure.respond));
+    vi.spyOn(m, "redraw").mockImplementation(() => undefined);
+    errorDialogs.attachHost();
+    try {
+      const seeDetails = collectVnodes(row).find(
+        (vnode) => attrsOf(vnode)["data-failure-details"] !== undefined,
+      );
+      if (seeDetails === undefined) throw new Error("no See details on the card");
+      (attrsOf(seeDetails).onclick as () => void)();
+      const ask = errorDialogs.current?.actions?.find(
+        (action) => action.label === "Ask the agent to fix it",
+      );
+      if (ask === undefined) throw new Error("no Ask the agent in the dialog");
+      // The dialog closes as its button is pressed.
+      errorDialogs.dismiss();
+      ask.onclick();
+      await settle();
+
+      expect(errorDialogs.current?.error.message).toBe(failure.message);
+      expect(errorDialogs.current?.error.details).toContain(failure.details);
+      expect(errorDialogs.current?.isBugReportOffered).toBe(
+        failure.isBugReportOffered,
+      );
+      // Another notice's Ask the agent is a button of its own: neither the
+      // start nor its failure is drawn there.
+      share.isLive = false;
+      share.isLinkDeadlinePassed = true;
+      const tab = draw();
+      expect(
+        byId(renderDeep(tab), "ws-share-link-not-answering-ask-agent-error"),
+      ).toBeUndefined();
+      expect(actionsOf(tab, "ws-share-link-not-answering")[1].label).toBe(
+        "Ask the agent to fix it",
+      );
+    } finally {
+      errorDialogs.dismiss();
+      errorDialogs.detachHost();
+    }
+  });
+
+  it("offers Try again as the main button when turning sharing on fails at Imbue Cloud", async () => {
+    let isConnectorDown = true;
+    let isPublished = false;
+    const share = await readyPanel(
+      {},
+      {
+        fetchJson: (_url: string, init?: RequestInit) => {
+          if (init?.method === "PUT" && isConnectorDown)
+            return Promise.resolve({
+              ok: false,
+              status: 502,
+              body: { error: "upstream connect error", reason: "CONNECTOR_FAILED" },
+            });
+          if (init?.method === "PUT") isPublished = true;
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            body: { enabled: isPublished, url: null, grants: null },
+          });
+        },
+      },
+    );
+    await share.publish();
+
+    const [retry] = actionsOf(renderTab(share), "ws-share-publish-error");
+    expect(retry).toEqual(expect.objectContaining({ label: "Try again" }));
+
+    isConnectorDown = false;
+    retry.onclick();
+    await settle();
+
+    expect(byId(renderTab(share), "ws-share-publish-error")).toBeUndefined();
+    expect(share.isPublished).toBe(true);
+  });
+});
+
+/** The buttons an error display with this id offers. */
+function actionsOf(
+  root: unknown,
+  id: string,
+): ErrorAction[] {
+  const display = byId(root, id);
+  expect(display, `no error display ${id}`).toBeDefined();
+  return (attrsOf(display as AnyVnode).actions ?? []) as ErrorAction[];
+}
+
+/** What the agent is asked when `action` is pressed: the description its
+ * /help/assist request carries. The request is refused, so nothing past it
+ * (entering the workspace) runs here. */
+async function assistDescriptionSentBy(action: { onclick: () => void }): Promise<string> {
+  const assist = vi.fn((_url: string, _init?: RequestInit) =>
+    Promise.resolve(new Response("{}", { status: 500 })),
+  );
+  vi.stubGlobal("fetch", assist);
+  vi.spyOn(m, "redraw").mockImplementation(() => undefined);
+  action.onclick();
+  await settle();
+  expect(assist.mock.calls[0]?.[0]).toBe("/help/assist");
+  const init = assist.mock.calls[0]?.[1];
+  return String((JSON.parse(String(init?.body)) as { description?: string }).description);
+}

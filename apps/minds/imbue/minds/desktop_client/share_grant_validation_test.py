@@ -81,8 +81,8 @@ def test_validate_grants_document_refuses_a_user_id_that_is_not_one() -> None:
 
     assert [(refusal.kind, refusal.value, refusal.message) for refusal in refusals] == [
         ("user", " user-1 ", "user-1 is already granted here."),
-        ("user", "", " is not a user id."),
-        ("user", "   ", " is not a user id."),
+        ("user", "", "This entry is empty."),
+        ("user", "   ", "This entry is empty."),
     ]
 
 

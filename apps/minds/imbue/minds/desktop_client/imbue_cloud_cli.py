@@ -145,6 +145,11 @@ class ImbueCloudQuotaExceededCliError(ImbueCloudCliError):
     budget.
     """
 
+    # The refused entitlement's cap and current use as the connector reported
+    # them; None when the refusal carried no structured detail.
+    limit: float | None = None
+    current: float | None = None
+
 
 class ImbueCloudEmailNotVerifiedCliError(ImbueCloudCliError):
     """The connector refused the operation because the account's email is unverified.
@@ -249,9 +254,9 @@ class ImbueCloudShareRefusedCliError(ImbueCloudCliError):
     ``code`` is the reason: ``not_published`` (the workspace is unpublished),
     ``grants_out_of_date`` (the centralized grants table holds no open grant
     for the subject: push the document, then try once more), ``not_invitable``
-    (the grantee has already joined, or the workspace has no link yet), or
-    ``no_workspace_link`` (the workspace's shell has registered no address or
-    name yet, so there is nothing to email).
+    (the grantee has already joined), or ``no_workspace_link`` (the workspace's
+    shell has registered no address or name yet, so there is nothing to invite
+    to or email).
     """
 
     code: str = ""
@@ -654,6 +659,9 @@ class ImbueCloudCli(MutableModel):
             quota_exc = ImbueCloudQuotaExceededCliError(
                 f"{command_repr}: {quota_message}" if quota_message else f"{command_repr}: quota exceeded"
             )
+            quota_body = _parse_stderr_error_body(result.stderr) or {}
+            quota_exc.limit = _number_or_none(quota_body.get("limit"))
+            quota_exc.current = _number_or_none(quota_body.get("current"))
             quota_exc.exit_code = exit_code
             quota_exc.stdout = result.stdout
             quota_exc.stderr = result.stderr
@@ -1643,6 +1651,13 @@ def _parse_stderr_error_body(stderr: str) -> dict[str, Any] | None:
                 return parsed
         offset += len(line)
     return None
+
+
+def _number_or_none(value: object) -> float | None:
+    """A JSON number from an error body as a float; None for anything else (a bool is not a number here)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
 
 
 def _parse_stderr_error_message(stderr: str) -> str | None:

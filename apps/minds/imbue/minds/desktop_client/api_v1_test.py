@@ -3107,7 +3107,10 @@ def test_machine_sharing_status_reports_a_failed_domain_move_as_an_error(tmp_pat
     response = client.get(f"/api/v1/workspace-sharing/{agent_id}", headers=_auth_header())
 
     assert response.status_code == 502
-    assert "connector refused" in json.loads(response.data)["error"]
+    body = json.loads(response.data)
+    # The connector's words ride for the details; the reason is what the panel words its sentence from.
+    assert "connector refused" in body["error"]
+    assert body["reason"] == "CONNECTOR_FAILED"
     # The connector create may have moved the share before the failure, so
     # the poll must not keep serving the old domain from its cache.
     assert state.active_share_cache.get(_TEST_HOST_ID) is None
@@ -3717,11 +3720,18 @@ def test_machine_sharing_put_surfaces_connector_errors(tmp_path: Path) -> None:
     assert "Could not publish this workspace" in json.loads(response.data)["error"]
 
 
+def _share_quota_refusal(message: str, limit: float, current: float) -> ImbueCloudQuotaExceededCliError:
+    refusal = ImbueCloudQuotaExceededCliError(message)
+    refusal.limit = limit
+    refusal.current = current
+    return refusal
+
+
 def test_workspace_sharing_put_answers_a_full_share_quota_with_a_structured_code(tmp_path: Path) -> None:
     agent_id = AgentId()
     cli = _fake_sharing_cli(
-        create_share_error_to_raise=ImbueCloudQuotaExceededCliError(
-            "shares create: Shared workspace limit reached (50 of 50)."
+        create_share_error_to_raise=_share_quota_refusal(
+            "shares create: Shared workspace limit reached (50 of 50).", limit=50, current=50
         ),
         mngr_caller=_ShareProbeCaller(),
     )
@@ -3733,7 +3743,31 @@ def test_workspace_sharing_put_answers_a_full_share_quota_with_a_structured_code
     body = json.loads(response.data)
     assert body["code"] == "quota_exceeded"
     assert body["shared_workspaces_path"] == "/workspaces/shared"
+    # The panel words its own sentence from the reason and the counts.
+    assert (body["reason"], body["limit"], body["current"]) == ("SHARE_LIMIT_REACHED", 50, 50)
     assert "Shared workspace limit reached (50 of 50)" in body["error"]
+
+
+def test_workspace_sharing_put_answers_a_waitlisted_account_without_the_shared_workspaces_page(
+    tmp_path: Path,
+) -> None:
+    """The waitlist is refused with the quota shape and a zero cap, but no freed slot would let it share."""
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(
+        create_share_error_to_raise=_share_quota_refusal(
+            "shares create: This account is on the waitlist.", limit=0, current=0
+        ),
+        mngr_caller=_ShareProbeCaller(),
+    )
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    response = client.put(f"/api/v1/workspace-sharing/{agent_id}", headers=_auth_header())
+
+    body = json.loads(response.data)
+    assert response.status_code == 502, response.data
+    assert body["reason"] == "WAITLISTED"
+    assert "shared_workspaces_path" not in body
+    assert "code" not in body
 
 
 def test_machine_sharing_delete_disables(tmp_path: Path) -> None:
@@ -4296,11 +4330,9 @@ def test_machine_size_change_quotes_the_providers_refusal(
     )
 
     assert response.status_code == 502
-    error = json.loads(response.data)["error"]
-    assert (
-        error
-        == "The machine's provider refused the new size: ERROR: Docker refused the size: only 4 CPUs are available"
-    )
+    body = json.loads(response.data)
+    assert body["reason"] == "SIZE_REFUSED"
+    assert body["detail"] == "ERROR: Docker refused the size: only 4 CPUs are available"
     assert get_state(client.application).workspace_operation_registry.get(agent_id) is None
 
 
@@ -4367,6 +4399,9 @@ def test_machine_size_change_is_refused_under_a_running_operation(
     )
 
     assert response.status_code == 409
+    body = json.loads(response.data)
+    assert body["reason"] == "OPERATION_IN_PROGRESS"
+    assert body["error"].startswith("A restore is already in progress")
     assert caller.calls == []
 
 
@@ -4486,9 +4521,10 @@ def test_machine_size_change_explains_an_imbue_cloud_quota_refusal(tmp_path: Pat
     )
 
     assert response.status_code == 409
-    assert json.loads(response.data)["error"] == (
-        "Your plan cannot hold this size right now: Quota exceeded: active machine units limit is 16 (currently 8)"
-    )
+    body = json.loads(response.data)
+    assert body["reason"] == "PLAN_LIMIT"
+    # The connector's own words go with it, for the settings page's details.
+    assert body["detail"] == "Quota exceeded: active machine units limit is 16 (currently 8)"
 
 
 def test_machine_size_change_quotes_the_imbue_cloud_plugins_refusal(tmp_path: Path) -> None:
@@ -4502,10 +4538,9 @@ def test_machine_size_change_quotes_the_imbue_cloud_plugins_refusal(tmp_path: Pa
     response = client.post(f"/api/v1/workspaces/{agent_id}/machine-size", headers=_auth_header(), json={"disk_gb": 20})
 
     assert response.status_code == 502
-    assert json.loads(response.data)["error"] == (
-        "The machine's provider refused the new size: "
-        "Disk never shrinks: target_disk_gb=20 is below the machine's current 28GB"
-    )
+    body = json.loads(response.data)
+    assert body["reason"] == "SIZE_REFUSED"
+    assert body["detail"] == "Disk never shrinks: target_disk_gb=20 is below the machine's current 28GB"
 
 
 def test_machine_size_change_keeps_a_refusal_the_wrapper_did_not_prefix_whole(tmp_path: Path) -> None:
@@ -4519,9 +4554,7 @@ def test_machine_size_change_keeps_a_refusal_the_wrapper_did_not_prefix_whole(tm
     )
 
     assert response.status_code == 502
-    assert json.loads(response.data)["error"] == (
-        "The machine's provider refused the new size: Client too old: update to 1.2 or newer"
-    )
+    assert json.loads(response.data)["detail"] == "Client too old: update to 1.2 or newer"
 
 
 def test_machine_size_change_on_an_imbue_cloud_machine_takes_no_cpu_count(tmp_path: Path) -> None:
@@ -4550,7 +4583,24 @@ def test_machine_size_change_refuses_an_imbue_cloud_machine_with_no_linked_accou
     )
 
     assert response.status_code == 409
-    assert "not linked" in json.loads(response.data)["error"]
+    assert json.loads(response.data)["reason"] == "NOT_LINKED"
+
+
+def test_machine_size_change_on_an_imbue_cloud_machine_is_refused_under_a_running_operation(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client, cli = _imbue_cloud_resize_client(tmp_path, agent_id, HostState.RUNNING)
+    registry = get_state(client.application).workspace_operation_registry
+    assert registry.start_if_idle(agent_id, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc), None)
+
+    response = client.post(
+        f"/api/v1/workspaces/{agent_id}/machine-size", headers=_auth_header(), json={"memory_gb": 16}
+    )
+
+    assert response.status_code == 409
+    body = json.loads(response.data)
+    assert body["reason"] == "OPERATION_IN_PROGRESS"
+    assert body["error"].startswith("A restore is already in progress")
+    assert cli.resize_calls == []
 
 
 def test_machine_size_change_requires_bearer(tmp_path: Path) -> None:
@@ -7481,7 +7531,7 @@ def test_visiting_agents_invite_refuses_when_the_share_never_reached_the_workspa
     )
 
     assert response.status_code == 502, response.data
-    assert "Turn sharing off and on again" in json.loads(response.data)["error"]
+    assert json.loads(response.data)["reason"] == "SHARE_NOT_SET_UP"
     assert cli.created_shares == []
 
 
@@ -7499,7 +7549,10 @@ def test_visiting_agents_invite_reports_a_cli_refusal_as_a_bad_request(tmp_path:
     )
 
     assert response.status_code == 400
-    assert "not a grantable app" in json.loads(response.data)["error"]
+    body = json.loads(response.data)
+    assert body["reason"] == "AGENT_INVITE_REFUSED"
+    # The workspace's own words are kept for the panel's details.
+    assert "not a grantable app" in body["error"]
 
 
 def test_visiting_agents_revoke_runs_the_cli_as_the_owner_and_maps_an_unknown_agent_to_404(tmp_path: Path) -> None:
@@ -7522,6 +7575,7 @@ def test_visiting_agents_revoke_runs_the_cli_as_the_owner_and_maps_an_unknown_ag
     caller.agent_access_stderr = json.dumps({"error": f"no agent va-{'f' * 32}", "kind": "refused"}) + "\n"
     missing = client.delete(f"/api/v1/workspace-sharing/{agent_id}/agents/va-{'f' * 32}", headers=_auth_header())
     assert missing.status_code == 404
+    assert json.loads(missing.data)["reason"] == "AGENT_GONE"
 
     # A value that is not an agent id is refused before anything runs in the workspace.
     malformed = client.delete(f"/api/v1/workspace-sharing/{agent_id}/agents/--json", headers=_auth_header())
@@ -7542,6 +7596,7 @@ def test_visiting_agents_on_a_workspace_without_the_cli_answer_409_with_the_upda
     response = client.get(f"/api/v1/workspace-sharing/{agent_id}/agents", headers=_auth_header())
 
     assert response.status_code == 409, response.data
+    assert json.loads(response.data)["reason"] == "AGENTS_UNSUPPORTED"
     assert "update it" in json.loads(response.data)["error"]
 
 

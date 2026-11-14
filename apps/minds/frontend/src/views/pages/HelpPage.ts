@@ -5,15 +5,18 @@
 // via route params or a staged pending-launch from the open_help flow.
 
 import m from "mithril";
-import { getAppContext } from "../../app-context";
 import {
   HelpModel,
   isHelpLaunchStagedFor,
   stageHelpLaunchFromRoute,
   stagedHelpLaunchWorkspace,
 } from "../../models/help";
+import { getAppContext } from "../../app-context";
+import type { ErrorAction } from "../../models/errors";
 import { Button } from "../components/Button";
 import { Disclosure } from "../components/Disclosure";
+import { ErrorNotice } from "../components/ErrorDisplay";
+import { ErrorTitle } from "../components/errorDesign";
 import { Icon16 } from "../components/Icon";
 import { machineVerdict } from "../components/MachineVerdict";
 import { Spinner } from "../components/Spinner";
@@ -297,32 +300,59 @@ function loadingPhase(): m.Children {
   ]);
 }
 
-function agentErrorPhase(model: HelpModel): m.Children {
-  return m("div", { class: "p-4 text-center" }, [
+/** The agent start failed: our sentence, its remedies (Try again, or Update
+ * workspace for one too old to start a helper), the response behind See
+ * details, and Back to report, which carries the failure into the report. */
+export function agentErrorPhase(
+  model: HelpModel,
+  onUpdateWorkspace: () => void,
+): m.Children {
+  const error = model.agentError;
+  if (error === null) return null;
+  const actions: ErrorAction[] =
+    model.agentErrorReason === "TOO_OLD"
+      ? [
+          {
+            label: "Update workspace",
+            onclick: onUpdateWorkspace,
+          },
+        ]
+      : [
+          {
+            label: "Try again",
+            onclick: () => void model.retryAgentHelp(),
+          },
+        ];
+  return m("div", { class: "p-4" }, [
+    // This surface exists because of the failure, so its title carries the
+    // mark and the sentence under it sits flush.
     m(
-      "h2",
-      { class: "type-heading text-primary mb-2" },
+      ErrorTitle,
+      { typeClass: "type-heading", extra: "mb-2 justify-center" },
       "Couldn't start an agent",
     ),
-    m("p", { class: "type-body text-secondary mb-4" }, model.agentErrorMessage),
-    // Left-aligned inside this centred phase: the verdict is quoted output,
-    // and centring a wrapped command line makes it unreadable.
-    model.agentErrorDetail
-      ? m(
-          "div",
-          { class: "text-left mb-4" },
-          machineVerdict(model.agentErrorDetail),
-        )
-      : null,
-    m(
-      Button,
-      {
-        variant: "primary",
-        block: true,
-        onclick: () => model.backToReportFromError(),
-      },
-      "Back to report",
-    ),
+    // Back to report is this page's way to report the failure, so the
+    // display offers no second one.
+    m(ErrorNotice, {
+      id: "help-agent-error",
+      error,
+      actions,
+      isTitleMarked: true,
+      isBugReportOffered: false,
+      workspaceAgentId: model.launch.workspaceAgentId || null,
+      surfaceActions: [
+        m(
+          Button,
+          {
+            id: "help-back-to-report",
+            variant: "secondary",
+            block: true,
+            onclick: () => model.backToReportFromError(),
+          },
+          "Back to report",
+        ),
+      ],
+    }),
   ]);
 }
 
@@ -433,7 +463,12 @@ function HelpPageComponent(): m.Component {
       let body: m.Children;
       if (activeModel.phase === "agent_loading") body = loadingPhase();
       else if (activeModel.phase === "agent_error")
-        body = agentErrorPhase(activeModel);
+        body = agentErrorPhase(activeModel, () => {
+          getAppContext().shell.openUpdatesTab(
+            activeModel.launch.workspaceAgentId,
+          );
+          activeModel.close();
+        });
       else if (activeModel.phase === "sent") body = sentPhase(activeModel);
       else body = formPhase(activeModel);
       // Rendered inside the AppOverlay card (Shell), which supplies the card
@@ -458,11 +493,10 @@ export function titleRow(): m.Children {
     {
       class: "flex h-[56px] shrink-0 items-center border-b border-subtle px-3",
     },
-    m(
-      "h1",
-      { class: "flex items-center gap-1.5 type-label text-primary" },
-      [m(Icon16, { name: "bug", size: "sm" }), "Ran into a bug?"],
-    ),
+    m("h1", { class: "flex items-center gap-1.5 type-label text-primary" }, [
+      m(Icon16, { name: "bug", size: "sm" }),
+      "Ran into a bug?",
+    ]),
   );
 }
 

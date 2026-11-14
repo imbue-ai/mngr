@@ -46,6 +46,7 @@ from imbue.minds.desktop_client.update_status import EMPTY_UPDATE_WINDOW_MESSAGE
 from imbue.minds.desktop_client.update_status import format_update_window
 from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsCache
 from imbue.minds.errors import MindError
+from imbue.minds.errors import MindsConfigError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentId
 
@@ -73,9 +74,26 @@ _SCHEDULE_STATUS_BY_OUTCOME: Final[dict[UpdateScheduleOutcome, int]] = {
     UpdateScheduleOutcome.FAILED: 502,
 }
 
-_CANCEL_FAILURE_MESSAGE: Final[str] = "Couldn't reach this workspace to cancel its scheduled update."
-_SKIP_FAILURE_MESSAGE: Final[str] = "Couldn't reach this workspace to skip its update."
+_CANCEL_FAILURE_MESSAGE: Final[str] = (
+    "Couldn't reach this workspace to cancel its scheduled update. Make sure it's running, then try again."
+)
+_SKIP_FAILURE_MESSAGE: Final[str] = (
+    "Couldn't reach this workspace to skip its update. Make sure it's running, then try again."
+)
+_SIGN_IN_FAILURE_MESSAGE: Final[str] = (
+    "Couldn't open a chat in this workspace to sign in. Try again. If this persists, report a bug."
+)
 _DECISION_PENDING_REFUSAL: Final[str] = "This workspace's update is waiting on your decision in its chat."
+
+# The ``code`` each refusal with a sentence of its own carries, so the SPA shows that sentence rather than its
+# fallback, and knows whether it asks for a bug report. A dispatch or schedule refusal carries its outcome.
+_DECISION_PENDING_CODE: Final[str] = "DECISION_PENDING"
+_INVALID_REF_CODE: Final[str] = "INVALID_REF"
+_NOTHING_TO_UPDATE_CODE: Final[str] = "NOTHING_TO_UPDATE"
+_CANCEL_UNREACHED_CODE: Final[str] = "CANCEL_UNREACHED"
+_SKIP_UNREACHED_CODE: Final[str] = "SKIP_UNREACHED"
+_SIGN_IN_CHAT_FAILED_CODE: Final[str] = "SIGN_IN_CHAT_FAILED"
+_EMPTY_WINDOW_CODE: Final[str] = "EMPTY_WINDOW"
 
 
 # Refuses anything that could read as a flag or shell text in the chat's seed
@@ -157,11 +175,16 @@ def _json_response(payload: dict[str, object], status_code: int = 200) -> Respon
     return make_response(status_code=status_code, content=json.dumps(payload), media_type="application/json")
 
 
-def _error_response(message: str, status_code: int, detail: str = "") -> Response:
-    """An error body; ``detail`` is what the machine, mngr, or the host start said, shown apart from the message."""
+def _error_response(message: str, status_code: int, detail: str = "", code: str = "") -> Response:
+    """An error body; ``detail`` is what the machine, mngr, or the host start said, shown apart from the message.
+
+    ``code`` names a dispatch or schedule outcome for a surface that offers that outcome's remedy.
+    """
     payload: dict[str, object] = {"error": message}
     if detail:
         payload["detail"] = detail
+    if code:
+        payload["code"] = code
     return _json_response(payload, status_code)
 
 
@@ -180,7 +203,9 @@ def _dispatch_response(dispatch: UpdateDispatch) -> Response:
     status = _DISPATCH_STATUS_BY_OUTCOME[dispatch.outcome]
     if status == 200:
         return _json_response({"ok": True})
-    return _error_response(DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[dispatch.outcome], status, dispatch.failure_detail)
+    return _error_response(
+        DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[dispatch.outcome], status, dispatch.failure_detail, dispatch.outcome.value
+    )
 
 
 def _armed_target_ref(service: WorkspaceUpdateService, agent_id: AgentId) -> str:
@@ -196,7 +221,9 @@ def _schedule_response(schedule: UpdateSchedule) -> Response:
     status = _SCHEDULE_STATUS_BY_OUTCOME[schedule.outcome]
     if status == 200:
         return _json_response({"ok": True})
-    return _error_response(SCHEDULE_REFUSAL_MESSAGE_BY_OUTCOME[schedule.outcome], status, schedule.failure_detail)
+    return _error_response(
+        SCHEDULE_REFUSAL_MESSAGE_BY_OUTCOME[schedule.outcome], status, schedule.failure_detail, schedule.outcome.value
+    )
 
 
 def _resolve_machine_request(agent_id: str) -> tuple[WorkspaceUpdateService, AgentId] | Response:
@@ -229,7 +256,7 @@ def _resolve_target_request(agent_id: str, *, refusal: str) -> tuple[WorkspaceUp
     service, parsed_id = resolved
     # As the bulk routes refuse it: a fresh run would set aside the work the decision is about.
     if service.state_store.get(parsed_id).is_decision_pending:
-        return _error_response(_DECISION_PENDING_REFUSAL, 409)
+        return _error_response(_DECISION_PENDING_REFUSAL, 409, code=_DECISION_PENDING_CODE)
     body = request.get_json(silent=True, force=True)
     try:
         write = UiUpdateTargetRequest.model_validate(body if isinstance(body, dict) else {})
@@ -238,9 +265,9 @@ def _resolve_target_request(agent_id: str, *, refusal: str) -> tuple[WorkspaceUp
         return _error_response("Invalid JSON body", 400)
     target_ref = write.target_ref.strip()
     if target_ref and _OVERRIDE_REF_RE.fullmatch(target_ref) is None:
-        return _error_response("That doesn't look like a version, branch, or git ref.", 400)
+        return _error_response("That doesn't look like a version, branch, or git ref.", 400, code=_INVALID_REF_CODE)
     if not target_ref and not service.state_store.get(parsed_id).is_update_dispatchable:
-        return _error_response(refusal, 409)
+        return _error_response(refusal, 409, code=_NOTHING_TO_UPDATE_CODE)
     # After the gate, which keys on what the request itself asked for.
     return service, parsed_id, target_ref or _armed_target_ref(service, parsed_id)
 
@@ -267,7 +294,11 @@ def _handle_schedule_update(agent_id: str) -> Response:
     # A schedule armed during a run outlives it: if the run ends waiting on a decision, the
     # window would start a fresh run that sets the kept work aside.
     if service.state_store.get(parsed_id).is_run_in_flight:
-        return _error_response(DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[UpdateDispatchOutcome.ALREADY_RUNNING], 409)
+        return _error_response(
+            DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[UpdateDispatchOutcome.ALREADY_RUNNING],
+            409,
+            code=UpdateDispatchOutcome.ALREADY_RUNNING.value,
+        )
     return _schedule_response(service.schedule_update(parsed_id, override_ref=target_ref, is_auto_armed=False))
 
 
@@ -282,7 +313,7 @@ def _handle_cancel_schedule(agent_id: str) -> Response:
     service, parsed_id = resolved
     refusal = service.cancel_schedule(parsed_id)
     if refusal is not None:
-        return _error_response(_CANCEL_FAILURE_MESSAGE, 502, refusal.failure_detail)
+        return _error_response(_CANCEL_FAILURE_MESSAGE, 502, refusal.failure_detail, _CANCEL_UNREACHED_CODE)
     return _json_response({"ok": True})
 
 
@@ -294,7 +325,7 @@ def _handle_skip_update(agent_id: str) -> Response:
     service, parsed_id = resolved
     refusal = service.skip_update(parsed_id)
     if refusal is not None:
-        return _error_response(_SKIP_FAILURE_MESSAGE, 502, refusal.failure_detail)
+        return _error_response(_SKIP_FAILURE_MESSAGE, 502, refusal.failure_detail, _SKIP_UNREACHED_CODE)
     # The skip lives in the app's settings, which no update-state change announces.
     ui_publisher = get_state().ui_publisher
     if ui_publisher is not None:
@@ -312,7 +343,7 @@ def _handle_sign_in(agent_id: str) -> Response:
         return resolved
     service, parsed_id = resolved
     if not service.open_sign_in_chat(parsed_id):
-        return _error_response("Couldn't open a chat in this workspace to sign in.", 502)
+        return _error_response(_SIGN_IN_FAILURE_MESSAGE, 502, code=_SIGN_IN_CHAT_FAILED_CODE)
     return _json_response({"ok": True})
 
 
@@ -343,6 +374,7 @@ def _handle_kernel_fix(agent_id: str) -> Response:
         return _json_response({"ok": True})
     payload: dict[str, object] = {
         "error": KERNEL_FIX_REFUSAL_MESSAGE_BY_OUTCOME[dispatch.outcome],
+        "code": dispatch.outcome.value,
         "is_force_offered": dispatch.outcome in FORCEABLE_KERNEL_FIX_OUTCOMES,
         "running_chats": list(dispatch.running_chats),
     }
@@ -359,7 +391,7 @@ def _handle_set_auto_update_override(agent_id: str) -> Response:
     try:
         write = UiAutoUpdateOverrideRequest.model_validate(body if isinstance(body, dict) else {})
         if write.window_start_hour is not None and write.window_start_hour == write.window_end_hour:
-            return _error_response(EMPTY_UPDATE_WINDOW_MESSAGE, 400)
+            return _error_response(EMPTY_UPDATE_WINDOW_MESSAGE, 400, code=_EMPTY_WINDOW_CODE)
         override = (
             None
             if write.mode is None
@@ -375,7 +407,12 @@ def _handle_set_auto_update_override(agent_id: str) -> Response:
     except ValidationError as e:
         logger.debug("Rejected a malformed auto-update setting: {}", e)
         return _error_response("Invalid auto-update setting", 400)
-    if not service.set_auto_update_override(parsed_id, override):
+    try:
+        is_stored = service.set_auto_update_override(parsed_id, override)
+    except (MindsConfigError, OSError) as e:
+        logger.warning("Could not save the auto-update setting of {}: {}", parsed_id, e)
+        return _error_response(f"Could not save the auto-update setting: {e}", 500)
+    if not is_stored:
         return _error_response("Settings storage is not configured", 503)
     # The setting lives in the app's settings, which no update-state change announces.
     ui_publisher = get_state().ui_publisher

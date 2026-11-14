@@ -6,6 +6,9 @@
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
+import type { ErrorAction } from "../../models/errors";
+import type { ShareFailure } from "../../models/shareFailures";
+import { webLogin } from "../../models/webLogin";
 import {
   browserSharedWorkspacesDeps,
   SharedWorkspacesModel,
@@ -14,6 +17,8 @@ import {
 } from "../../models/sharedWorkspaces";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
+import { ErrorNotice } from "../components/ErrorDisplay";
+import { remedyActions } from "../components/errorRemedies";
 import { PageContainer } from "../components/Layout";
 import { Notice } from "../components/Notice";
 
@@ -114,12 +119,35 @@ function SharedRow(): m.Component<{
   };
 }
 
+/** The buttons a failure on this page offers: the ones the page can carry out. */
+function failureActions(failure: ShareFailure, onRetry: (() => void) | null): ErrorAction[] {
+  const actions: ErrorAction[] = [];
+  for (const remedy of failure.remedies) {
+    if (remedy === "retry" && onRetry !== null) actions.push({ label: "Try again", onclick: onRetry });
+    else if (remedy === "sign_in")
+      actions.push({ label: "Sign in", onclick: () => void webLogin.start() });
+    else if (remedy === "RESTART_APP") actions.push(...remedyActions(remedy));
+  }
+  return actions;
+}
+
+function renderFailure(id: string, failure: ShareFailure, onRetry: (() => void) | null): m.Children {
+  return m(ErrorNotice, {
+    id,
+    error: failure.error,
+    actions: failureActions(failure, onRetry),
+    isBugReportOffered: failure.isBugReportOffered,
+  });
+}
+
 function renderSection(section: AccountSharesSection, model: SharedWorkspacesModel, isMultiAccount: boolean): m.Children {
   const heading = isMultiAccount ? m("h2", { class: "type-heading text-primary" }, section.email) : null;
-  if (section.isUnavailable)
+  if (section.failure !== null)
     return m("div", { class: "flex flex-col gap-2" }, [
       heading,
-      m(Notice, { variant: "warn" }, `Could not reach Imbue Cloud for ${section.email}'s shares.`),
+      renderFailure(`shared-workspaces-load-error-${section.accountId}`, section.failure, () => {
+        void model.reloadSection(section);
+      }),
     ]);
   if (section.rows === null)
     return m("div", { class: "flex flex-col gap-2" }, [heading, m("div", { class: "type-body text-secondary" }, "Loading...")]);
@@ -169,7 +197,7 @@ export const SharedWorkspacesPage: m.Component<Record<string, never>, SharedWork
                 "the workspace is destroyed or unknown. Removing it frees the slot.",
             )
           : null,
-        model.errorMessage !== null ? m(Notice, { variant: "error" }, model.errorMessage) : null,
+        model.removeFailure !== null ? renderFailure("shared-workspaces-remove-error", model.removeFailure, null) : null,
         model.sections.length === 0
           ? m("div", { class: "type-body text-secondary" }, "Sign in to an account to see its shared workspaces.")
           : m(

@@ -17,6 +17,7 @@ from imbue.minds.desktop_client.data_types import ShareGatewayState
 from imbue.minds.desktop_client.identity_records import IdentityRecord
 from imbue.minds.desktop_client.share_materials_injection import MachineSharingLockRegistry
 from imbue.minds.desktop_client.share_materials_injection import ShareGatewayStatus
+from imbue.minds.desktop_client.share_materials_injection import ShareGrantsUnreadableError
 from imbue.minds.desktop_client.share_materials_injection import ShareInjectionError
 from imbue.minds.desktop_client.share_materials_injection import ShareStateUnreadError
 from imbue.minds.desktop_client.share_materials_injection import build_share_env_text
@@ -24,7 +25,6 @@ from imbue.minds.desktop_client.share_materials_injection import clear_share_mat
 from imbue.minds.desktop_client.share_materials_injection import clear_share_publication_from_agent
 from imbue.minds.desktop_client.share_materials_injection import is_share_gateway_status_stale
 from imbue.minds.desktop_client.share_materials_injection import parse_share_gateway_status
-from imbue.minds.desktop_client.share_materials_injection import probe_share_state_in_agent
 from imbue.minds.desktop_client.share_materials_injection import provision_share_files_in_agent
 from imbue.minds.desktop_client.share_materials_injection import read_share_gateway_status_from_agent
 from imbue.minds.desktop_client.share_materials_injection import read_share_grants_from_agent
@@ -395,9 +395,6 @@ def test_read_share_state_raises_when_the_probe_markers_are_missing() -> None:
 
     with pytest.raises(ShareStateUnreadError):
         read_share_state_from_agent(AgentId(), caller)
-    # The conservative probe reads the same answer as everything absent.
-    probe = probe_share_state_in_agent(AgentId(), caller)
-    assert (probe.has_gateway, probe.has_share_env, probe.grants_toml_text) == (False, False, None)
 
 
 def test_clear_share_publication_keeps_the_grants_document_and_is_best_effort() -> None:
@@ -481,7 +478,7 @@ def test_concurrent_grant_writes_never_corrupt_the_file(tmp_path: Path) -> None:
 def test_probe_reports_everything_absent_in_an_empty_workspace(tmp_path: Path) -> None:
     caller = _ExecutingMngrCaller(work_dir=tmp_path)
 
-    probe = probe_share_state_in_agent(AgentId(), caller)
+    probe = read_share_state_from_agent(AgentId(), caller)
 
     assert probe.has_gateway is False
     assert probe.has_share_env is False
@@ -495,7 +492,7 @@ def test_probe_round_trips_the_full_share_state_in_one_exec(tmp_path: Path) -> N
     grants_text = render_grants_toml({"emails": ["a@example.com"], "email_domains": []}, {})
     provision_share_files_in_agent(AgentId(), grants_text, None, "export A=b\n", caller)
 
-    probe = probe_share_state_in_agent(AgentId(), caller)
+    probe = read_share_state_from_agent(AgentId(), caller)
 
     assert probe.has_gateway is True
     assert probe.has_share_env is True
@@ -514,24 +511,11 @@ def test_probe_treats_an_empty_grants_file_as_absent(tmp_path: Path) -> None:
     (secrets_dir / "share.env").write_text("export A=b\n")
     (secrets_dir / "share_grants.toml").write_text("")
 
-    probe = probe_share_state_in_agent(AgentId(), caller)
+    probe = read_share_state_from_agent(AgentId(), caller)
 
     assert probe.has_gateway is True
     assert probe.has_share_env is True
     assert probe.grants_toml_text is None
-
-
-def test_probe_is_conservative_on_exec_failure() -> None:
-    # A failed probe must refuse (everything absent) rather than provision a
-    # share against unknown state; nothing has been written or created yet.
-    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="offline"))
-
-    probe = probe_share_state_in_agent(AgentId(), caller)
-
-    assert probe.has_gateway is False
-    assert probe.has_share_env is False
-    assert probe.grants_toml_text is None
-    assert caller.calls[0][-3:] == ["--no-start", "--format", "json"]
 
 
 def test_probe_raises_on_an_undecodable_grants_payload() -> None:
@@ -551,8 +535,8 @@ def test_probe_raises_on_an_undecodable_grants_payload() -> None:
     )
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=envelope))
 
-    with pytest.raises(ShareInjectionError):
-        probe_share_state_in_agent(AgentId(), caller)
+    with pytest.raises(ShareGrantsUnreadableError):
+        read_share_state_from_agent(AgentId(), caller)
 
 
 def test_probe_raises_when_the_grants_file_exists_but_cannot_be_read() -> None:
@@ -574,8 +558,8 @@ def test_probe_raises_when_the_grants_file_exists_but_cannot_be_read() -> None:
     )
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=envelope))
 
-    with pytest.raises(ShareInjectionError):
-        probe_share_state_in_agent(AgentId(), caller)
+    with pytest.raises(ShareGrantsUnreadableError):
+        read_share_state_from_agent(AgentId(), caller)
 
 
 def test_lock_registry_returns_one_lock_per_host() -> None:

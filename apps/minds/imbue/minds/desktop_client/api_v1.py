@@ -259,6 +259,7 @@ from imbue.minds.desktop_client.shared_workspaces import remove_account_share
 from imbue.minds.desktop_client.sharing_handler import GrantsRefusedError
 from imbue.minds.desktop_client.sharing_handler import ShareQuotaExceededError
 from imbue.minds.desktop_client.sharing_handler import SharingError
+from imbue.minds.desktop_client.sharing_handler import SharingFailureReason
 from imbue.minds.desktop_client.sharing_handler import get_active_share
 from imbue.minds.desktop_client.sharing_handler import get_active_share_cached
 from imbue.minds.desktop_client.sharing_handler import get_share_gateway_status_cached
@@ -690,9 +691,11 @@ def _handle_list_account_shares(account_id: str) -> AccountSharesResponse | Resp
     state = get_state()
     account = _signed_in_account_or_none(account_id)
     if account is None or state.session_store is None:
-        return _json_error(f"No signed-in account {account_id}", 404)
+        return _sharing_refusal_response("This account is not signed in.", SharingFailureReason.NOT_SIGNED_IN, 404)
     if state.imbue_cloud_cli is None:
-        return _json_error("Imbue Cloud is not configured on this app.", 503)
+        return _sharing_refusal_response(
+            "Imbue Cloud is not configured on this app.", SharingFailureReason.UNAVAILABLE, 503
+        )
     try:
         rows = list_account_shared_workspaces(
             str(account.email),
@@ -702,7 +705,7 @@ def _handle_list_account_shares(account_id: str) -> AccountSharesResponse | Resp
             state.backend_resolver,
         )
     except SharingError as exc:
-        return _json_error(str(exc), 502)
+        return _sharing_error_response(exc)
     return AccountSharesResponse(account_id=str(account.user_id), email=str(account.email), rows=tuple(rows))
 
 
@@ -717,9 +720,11 @@ def _handle_remove_account_share(account_id: str, host_id: str) -> AccountShareR
     state = get_state()
     account = _signed_in_account_or_none(account_id)
     if account is None or state.session_store is None:
-        return _json_error(f"No signed-in account {account_id}", 404)
+        return _sharing_refusal_response("This account is not signed in.", SharingFailureReason.NOT_SIGNED_IN, 404)
     if state.imbue_cloud_cli is None:
-        return _json_error("Imbue Cloud is not configured on this app.", 503)
+        return _sharing_refusal_response(
+            "Imbue Cloud is not configured on this app.", SharingFailureReason.UNAVAILABLE, 503
+        )
     try:
         with state.machine_sharing_locks.get_lock(host_id):
             try:
@@ -734,7 +739,7 @@ def _handle_remove_account_share(account_id: str, host_id: str) -> AccountShareR
             finally:
                 state.invalidate_sharing_caches(host_id)
     except SharingError as exc:
-        return _json_error(str(exc), 502)
+        return _sharing_error_response(exc)
     return AccountShareRemovedResponse(host_id=host_id, outcome=outcome)
 
 
@@ -2019,7 +2024,7 @@ def _handle_workspace_rename(agent_id: str) -> Response:
         if current_host_name is not None:
             taken.discard(current_host_name.casefold())
         if new_slug.casefold() in taken:
-            return _json_error(f"A workspace named '{new_slug}' already exists.", 409)
+            return _json_error(f"A workspace named '{new_slug}' already exists. Pick a different name.", 409)
 
     # Rename the host first, then update the display label. The operation is
     # idempotently re-runnable: re-running completes an interrupted rename.
@@ -2138,6 +2143,21 @@ def _dispatch_host_recovery_or_refusal(
             assert_never(unreachable)
 
 
+# The ``reason`` a resize refusal carries when the settings page has a sentence of its own for it.
+_RESIZE_REFUSAL_OPERATION_IN_PROGRESS: Final[str] = "OPERATION_IN_PROGRESS"
+_RESIZE_REFUSAL_SIZE_REFUSED: Final[str] = "SIZE_REFUSED"
+_RESIZE_REFUSAL_PLAN_LIMIT: Final[str] = "PLAN_LIMIT"
+_RESIZE_REFUSAL_NOT_LINKED: Final[str] = "NOT_LINKED"
+
+
+def _resize_operation_conflict_response(existing: WorkspaceOperationRecord) -> Response:
+    """409 for a resize that lost to an already-running operation on the same workspace."""
+    return _json_response(
+        {"error": _operation_conflict_message(existing), "reason": _RESIZE_REFUSAL_OPERATION_IN_PROGRESS},
+        status_code=409,
+    )
+
+
 # How long the provider's resize command gets: it rewrites a record and, for a
 # docker host, applies it with ``docker update``; neither reaches the network.
 _MACHINE_RESIZE_TIMEOUT_SECONDS: Final[float] = 60.0
@@ -2202,7 +2222,7 @@ def _handle_workspace_machine_size_change(agent_id: str) -> MachineSizeChangeRes
     registry = state.workspace_operation_registry
     existing_operation = registry.get(parsed_id)
     if existing_operation is not None and existing_operation.status == WorkspaceOperationStatus.RUNNING:
-        return _operation_conflict_error(existing_operation)
+        return _resize_operation_conflict_response(existing_operation)
 
     refusal = _resize_machine_through_provider_or_refusal(agent_id, provider_name, host_id, selection, state)
     if refusal is not None:
@@ -2241,11 +2261,17 @@ def _record_imbue_cloud_machine_size(
     account = session_store.get_account_for_workspace(str(parsed_id)) if session_store is not None else None
     imbue_cloud_cli: ImbueCloudCli | None = state.imbue_cloud_cli
     if account is None or imbue_cloud_cli is None:
-        return _json_error("This workspace is not linked to a signed-in Imbue Cloud account.", 409)
+        return _json_response(
+            {
+                "error": "This workspace is not linked to a signed-in Imbue Cloud account.",
+                "reason": _RESIZE_REFUSAL_NOT_LINKED,
+            },
+            status_code=409,
+        )
     registry = state.workspace_operation_registry
     existing_operation = registry.get(parsed_id)
     if existing_operation is not None and existing_operation.status == WorkspaceOperationStatus.RUNNING:
-        return _operation_conflict_error(existing_operation)
+        return _resize_operation_conflict_response(existing_operation)
     try:
         recorded = imbue_cloud_cli.resize_machine(
             str(account.email),
@@ -2255,10 +2281,24 @@ def _record_imbue_cloud_machine_size(
         )
     except ImbueCloudQuotaExceededCliError as exc:
         logger.info("Resizing the machine of {} was refused by the account's quota: {}", parsed_id, exc)
-        return _json_error(f"Your plan cannot hold this size right now: {_imbue_cloud_refusal_text(exc)}", 409)
+        return _json_response(
+            {
+                "error": "Your plan cannot hold this size right now.",
+                "reason": _RESIZE_REFUSAL_PLAN_LIMIT,
+                "detail": _imbue_cloud_refusal_text(exc),
+            },
+            status_code=409,
+        )
     except ImbueCloudCliError as exc:
         logger.warning("Resizing the machine of {} failed: {}", parsed_id, exc)
-        return _json_error(f"The machine's provider refused the new size: {_imbue_cloud_refusal_text(exc)}", 502)
+        return _json_response(
+            {
+                "error": "This machine couldn't be resized to that size.",
+                "reason": _RESIZE_REFUSAL_SIZE_REFUSED,
+                "detail": _imbue_cloud_refusal_text(exc),
+            },
+            status_code=502,
+        )
     logger.info(
         "Recorded a new machine size for {} on Imbue Cloud (units target={}, disk target={})",
         parsed_id,
@@ -2299,7 +2339,14 @@ def _resize_machine_through_provider_or_refusal(
             return _json_error("mngr returned no result for the resize, so the new size was not recorded.", 502)
         verdict = mngr_failure_verdict(result.stderr) or f"mngr exited with code {result.returncode}"
         logger.warning("Resizing the machine of {} failed (rc={}): {}", agent_id, result.returncode, verdict)
-        return _json_error(f"The machine's provider refused the new size: {verdict}", 502)
+        return _json_response(
+            {
+                "error": "This machine couldn't be resized to that size.",
+                "reason": _RESIZE_REFUSAL_SIZE_REFUSED,
+                "detail": verdict,
+            },
+            status_code=502,
+        )
     logger.info("Recorded a new machine size for {} on {}: {}", agent_id, provider_name, selection.model_dump())
     return None
 
@@ -2407,19 +2454,25 @@ _OPERATION_CONFLICT_PHRASES: Final[dict[WorkspaceOperationKind, str]] = {
 }
 
 
-def _operation_conflict_error(existing: WorkspaceOperationRecord | None) -> Response:
-    """409 for a dispatch that lost to an already-running operation on the same workspace."""
+def _operation_conflict_message(existing: WorkspaceOperationRecord | None) -> str:
+    """What a dispatch that lost to an already-running operation on the same workspace tells the user."""
     phrase = (
         _OPERATION_CONFLICT_PHRASES.get(existing.kind, "Another operation")
         if existing is not None
         else "Another operation"
     )
+    return (
+        f"{phrase} is already in progress for this workspace. Wait for it to finish before starting another operation."
+    )
+
+
+def _operation_conflict_error(existing: WorkspaceOperationRecord | None) -> Response:
+    """409 for a dispatch that lost to an already-running operation on the same workspace."""
     # ``operation_kind`` lets the desktop word the conflict itself; other
     # callers read ``error`` and ignore the extra key.
     return _json_response(
         {
-            "error": f"{phrase} is already in progress for this workspace. "
-            "Wait for it to finish before starting another operation.",
+            "error": _operation_conflict_message(existing),
             "operation_kind": existing.kind.value if existing is not None else None,
         },
         status_code=409,
@@ -3798,6 +3851,7 @@ def _sharing_document_to_response(document: dict[str, object]) -> MachineSharing
         identities=_identities(document),
         grants_synced=grants_synced if isinstance(grants_synced, bool) else None,
         migrated_domain_from=_optional_str(document, "migrated_domain_from"),
+        publication_unknown_reason=_optional_str(document, "publication_unknown_reason"),
         invitation_outcomes=_invitation_outcomes(document),
     )
 
@@ -3829,6 +3883,20 @@ def _service_labels(document: dict[str, object]) -> dict[str, str]:
     return {str(name): str(label) for name, label in raw_labels.items() if label}
 
 
+def _sharing_error_response(exc: SharingError) -> Response:
+    """A failed sharing operation's answer (a 502, or a full share quota's 403): its full account and its reason."""
+    if isinstance(exc, ShareQuotaExceededError):
+        return _share_quota_exceeded_response(exc)
+    return _json_response({"error": str(exc), "reason": exc.reason}, status_code=502)
+
+
+def _unknown_sharing_workspace_response(workspace_id: str) -> Response:
+    return _json_response(
+        {"error": f"Unknown workspace {workspace_id}", "reason": SharingFailureReason.WORKSPACE_UNKNOWN},
+        status_code=404,
+    )
+
+
 def _sharing_host_for_workspace(workspace_id: str) -> str | None:
     """The current machine of the workspace named by ``workspace_id``, or None.
 
@@ -3855,7 +3923,7 @@ def _handle_workspace_sharing_get(workspace_id: str) -> MachineSharingResponse |
     """Return the workspace's sharing document: status + the grants in force."""
     host_id = _sharing_host_for_workspace(workspace_id)
     if host_id is None:
-        return _json_error(f"Unknown workspace {workspace_id}", 404)
+        return _unknown_sharing_workspace_response(workspace_id)
     return _machine_sharing_get_core(host_id)
 
 
@@ -3865,7 +3933,7 @@ def _handle_workspace_sharing_put(workspace_id: str) -> MachineSharingResponse |
     """Publish a workspace: give it an address on the internet. No body; it admits nobody by itself."""
     host_id = _sharing_host_for_workspace(workspace_id)
     if host_id is None:
-        return _json_error(f"Unknown workspace {workspace_id}", 404)
+        return _unknown_sharing_workspace_response(workspace_id)
     return _publish_workspace_core(host_id)
 
 
@@ -3875,7 +3943,7 @@ def _handle_workspace_sharing_grants_put(workspace_id: str) -> MachineSharingRes
     """Replace a workspace's grants document, published or not. Body: ``{"grants": <document>}``."""
     host_id = _sharing_host_for_workspace(workspace_id)
     if host_id is None:
-        return _json_error(f"Unknown workspace {workspace_id}", 404)
+        return _unknown_sharing_workspace_response(workspace_id)
     # The envelope is validated by the spectree model on the route; only the
     # document it carries is read out here.
     grants = SharingGrantsDocument.model_validate((request.get_json(silent=True, force=True) or {}).get("grants"))
@@ -3888,7 +3956,7 @@ def _handle_workspace_sharing_delete(workspace_id: str) -> MachineSharingRespons
     """Unpublish a workspace (revokes the relay token; live visitors are cut). The grant list is kept."""
     host_id = _sharing_host_for_workspace(workspace_id)
     if host_id is None:
-        return _json_error(f"Unknown workspace {workspace_id}", 404)
+        return _unknown_sharing_workspace_response(workspace_id)
     return _unpublish_workspace_core(host_id)
 
 
@@ -3898,7 +3966,7 @@ def _handle_workspace_sharing_invite(workspace_id: str) -> InvitationResultRespo
     """Invite one grant's grantee; answers the granter-visible outcome, or 409 with the connector's refusal code."""
     host_id = _sharing_host_for_workspace(workspace_id)
     if host_id is None:
-        return _json_error(f"Unknown workspace {workspace_id}", 404)
+        return _unknown_sharing_workspace_response(workspace_id)
     body = InviteGranteeRequest.model_validate(request.get_json(silent=True, force=True) or {})
     if (body.user_id is None) == (body.email is None):
         return _json_error("Exactly one of user_id and email is required", 400)
@@ -3909,7 +3977,7 @@ def _handle_workspace_sharing_invite(workspace_id: str) -> InvitationResultRespo
     except ImbueCloudShareRefusedCliError as exc:
         return _json_response({"error": exc.code, "message": str(exc)}, status_code=409)
     except SharingError as exc:
-        return _json_error(str(exc), 502)
+        return _sharing_error_response(exc)
     return InvitationResultResponse(outcome=result.outcome, invited_at=result.invited_at)
 
 
@@ -3919,14 +3987,14 @@ def _handle_workspace_sharing_invitation_outcomes(workspace_id: str) -> Invitati
     """What the granter may learn about each open user or email grant: invited, could not invite, or joined."""
     host_id = _sharing_host_for_workspace(workspace_id)
     if host_id is None:
-        return _json_error(f"Unknown workspace {workspace_id}", 404)
+        return _unknown_sharing_workspace_response(workspace_id)
     state = get_state()
     try:
         entries = list_invitation_outcomes_for_workspace(host_id, state.backend_resolver)
     except ImbueCloudShareRefusedCliError as exc:
         return _json_response({"error": exc.code, "message": str(exc)}, status_code=409)
     except SharingError as exc:
-        return _json_error(str(exc), 502)
+        return _sharing_error_response(exc)
     return InvitationOutcomesResponse(
         outcomes=tuple(
             InvitationOutcomeEntryResponse(
@@ -3949,7 +4017,7 @@ def _handle_workspace_sharing_mobile_access_link(workspace_id: str) -> MobileAcc
     """Email the signed-in account the link to its own published workspace; answers how the request ended."""
     host_id = _sharing_host_for_workspace(workspace_id)
     if host_id is None:
-        return _json_error(f"Unknown workspace {workspace_id}", 404)
+        return _unknown_sharing_workspace_response(workspace_id)
     state = get_state()
     try:
         with state.machine_sharing_locks.get_lock(host_id):
@@ -3957,7 +4025,7 @@ def _handle_workspace_sharing_mobile_access_link(workspace_id: str) -> MobileAcc
     except ImbueCloudShareRefusedCliError as exc:
         return _json_response({"error": exc.code, "message": str(exc)}, status_code=409)
     except SharingError as exc:
-        return _json_error(str(exc), 502)
+        return _sharing_error_response(exc)
     return MobileAccessLinkResponse(
         outcome=result.outcome, recipient_email=result.recipient_email, sent_at=result.sent_at
     )
@@ -3983,8 +4051,13 @@ def _visiting_agents_mngr_caller() -> MngrCaller:
 def _visiting_agents_failure(exc: VisitingAgentsError) -> Response:
     """The response for a CLI run that failed for a reason other than a refusal."""
     if isinstance(exc, VisitingAgentsUnsupportedError):
-        return _json_error(str(exc), 409)
+        return _sharing_refusal_response(str(exc), SharingFailureReason.AGENTS_UNSUPPORTED, 409)
     return _json_error(str(exc), 502)
+
+
+def _sharing_refusal_response(message: str, reason: SharingFailureReason, status_code: int) -> Response:
+    """A sharing refusal: its full account, and the reason the share panel or page words its own sentence from."""
+    return _json_response({"error": message, "reason": reason}, status_code=status_code)
 
 
 def _visiting_agent_entry(agent: VisitingAgent) -> VisitingAgentEntryResponse:
@@ -3999,12 +4072,12 @@ def _visiting_agents_workspace(workspace_id: str) -> tuple[str, AgentId] | Respo
     """
     host_id = _sharing_host_for_workspace(workspace_id)
     if host_id is None:
-        return _json_error(f"Unknown workspace {workspace_id}", 404)
+        return _unknown_sharing_workspace_response(workspace_id)
     state = get_state()
     try:
         agent_id = resolve_agent_for_host(state.backend_resolver, host_id, state.session_store)
     except SharingError as exc:
-        return _json_error(str(exc), 404)
+        return _sharing_refusal_response(str(exc), exc.reason, 404)
     return host_id, agent_id
 
 
@@ -4040,8 +4113,10 @@ def _handle_workspace_visiting_agents_invite(workspace_id: str) -> VisitingAgent
     state = get_state()
     owner = owner_account_for_workspace(state.session_store, parsed_id)
     if owner is None:
-        return _json_error(
-            "This workspace is not associated with a signed-in account, so nobody can invite an agent", 409
+        return _sharing_refusal_response(
+            "This workspace is not associated with a signed-in account, so nobody can invite an agent",
+            SharingFailureReason.NOT_LINKED,
+            409,
         )
     body = VisitingAgentInviteRequest.model_validate(request.get_json(silent=True, force=True) or {})
 
@@ -4061,14 +4136,16 @@ def _handle_workspace_visiting_agents_invite(workspace_id: str) -> VisitingAgent
             name_hint=body.name_hint,
         )
     except VisitingAgentsRefusedError as exc:
-        return _json_error(str(exc), 400)
+        return _sharing_refusal_response(str(exc), SharingFailureReason.AGENT_INVITE_REFUSED, 400)
     except VisitingAgentsError as exc:
         return _visiting_agents_failure(exc)
     # The connector can hold a share whose materials never reached the workspace
     # (the create landed, the injection did not); the CLI then has no auth origin
     # to put in the instructions, and publishing again is a no-op for that share.
     if not invite.is_published:
-        return _json_error(VISITING_AGENT_SHARE_NOT_SET_UP_MESSAGE, 502)
+        return _sharing_refusal_response(
+            VISITING_AGENT_SHARE_NOT_SET_UP_MESSAGE, SharingFailureReason.SHARE_NOT_SET_UP, 502
+        )
     return VisitingAgentInviteResponse(
         code=invite.code,
         expires_at=invite.expires_at,
@@ -4093,7 +4170,9 @@ def _handle_workspace_visiting_agent_delete(
     state = get_state()
     owner = owner_account_for_workspace(state.session_store, parsed_id)
     if owner is None:
-        return _json_error("This workspace is not associated with a signed-in account", 409)
+        return _sharing_refusal_response(
+            "This workspace is not associated with a signed-in account", SharingFailureReason.NOT_LINKED, 409
+        )
     try:
         revoked = revoke_visiting_agent(
             build_agent_address(parsed_id, state.backend_resolver),
@@ -4102,7 +4181,7 @@ def _handle_workspace_visiting_agent_delete(
             revoker_user_id=str(owner.user_id),
         )
     except VisitingAgentsRefusedError as exc:
-        return _json_error(str(exc), 404)
+        return _sharing_refusal_response(str(exc), SharingFailureReason.AGENT_GONE, 404)
     except VisitingAgentsError as exc:
         return _visiting_agents_failure(exc)
     return VisitingAgentRevokeResponse(revoked=revoked)
@@ -4114,7 +4193,7 @@ def _handle_workspace_sharing_readiness(workspace_id: str) -> SharingReadinessRe
     """Probe whether the workspace's shared hostname is live end to end yet."""
     host_id = _sharing_host_for_workspace(workspace_id)
     if host_id is None:
-        return _json_error(f"Unknown workspace {workspace_id}", 404)
+        return _unknown_sharing_workspace_response(workspace_id)
     return _machine_sharing_readiness_core(host_id)
 
 
@@ -4137,7 +4216,7 @@ def _machine_sharing_get_core(host_id: str) -> MachineSharingResponse | Response
         # A failed repair may still have moved the share on the connector, so
         # the readiness poll must not keep serving the old domain from its cache.
         state.invalidate_sharing_caches(host_id)
-        return _json_error(str(exc), 502)
+        return _sharing_error_response(exc)
     if document.get("migrated_domain_from") is not None:
         state.invalidate_sharing_caches(host_id)
     return _sharing_document_to_response(document)
@@ -4167,10 +4246,8 @@ def _publish_workspace_core(host_id: str) -> MachineSharingResponse | Response:
                 # connector create can succeed before the injection fails), so
                 # the readiness poll must not keep serving a stale lookup.
                 state.invalidate_sharing_caches(host_id)
-    except ShareQuotaExceededError as exc:
-        return _share_quota_exceeded_response(exc)
     except SharingError as exc:
-        return _json_error(str(exc), 502)
+        return _sharing_error_response(exc)
     return _sharing_document_to_response(document)
 
 
@@ -4180,10 +4257,17 @@ def _share_quota_exceeded_response(exc: ShareQuotaExceededError) -> Response:
     The remedy is on the shared-workspaces page (a leaked share holds the
     slot), so the body names it rather than inviting a retry.
     """
-    return _json_response(
-        {"error": str(exc), "code": "quota_exceeded", "shared_workspaces_path": SHARED_WORKSPACES_PAGE_PATH},
-        status_code=403,
-    )
+    body: dict[str, object] = {
+        "error": str(exc),
+        "reason": exc.reason,
+        "code": "quota_exceeded",
+        "shared_workspaces_path": SHARED_WORKSPACES_PAGE_PATH,
+    }
+    if exc.limit is not None:
+        body["limit"] = exc.limit
+    if exc.current is not None:
+        body["current"] = exc.current
+    return _json_response(body, status_code=403)
 
 
 def _save_grants_core(host_id: str, grants: SharingGrantsDocument) -> MachineSharingResponse | Response:
@@ -4195,7 +4279,7 @@ def _save_grants_core(host_id: str, grants: SharingGrantsDocument) -> MachineSha
     except GrantsRefusedError as exc:
         return _grant_refusal_response(exc.refusals)
     except SharingError as exc:
-        return _json_error(str(exc), 502)
+        return _sharing_error_response(exc)
     return _sharing_document_to_response(document)
 
 
@@ -4229,10 +4313,8 @@ def _machine_sharing_put_core(host_id: str) -> MachineSharingResponse | Response
                 state.invalidate_sharing_caches(host_id)
     except GrantsRefusedError as exc:
         return _grant_refusal_response(exc.refusals)
-    except ShareQuotaExceededError as exc:
-        return _share_quota_exceeded_response(exc)
     except SharingError as exc:
-        return _json_error(str(exc), 502)
+        return _sharing_error_response(exc)
     return _sharing_document_to_response(document)
 
 
@@ -4267,7 +4349,7 @@ def _unpublish_workspace_core(host_id: str) -> MachineSharingResponse | Response
             finally:
                 state.invalidate_sharing_caches(host_id)
     except SharingError as exc:
-        return _json_error(str(exc), 502)
+        return _sharing_error_response(exc)
     return _sharing_document_to_response(document)
 
 

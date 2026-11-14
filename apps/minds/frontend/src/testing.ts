@@ -28,6 +28,7 @@ import type {
 import type { SharePanelModelOptions } from "./models/sharePanel";
 import type { SharedWorkspaceRow } from "./models/sharedWorkspaces";
 import { BTN_VARIANTS } from "./views/components/constants";
+import { ICONS_16 } from "./views/components/icons";
 import { ShellState } from "./views/shell/shell-state";
 
 /** A request helper's result a test expects to have failed, narrowed to its
@@ -813,4 +814,13 @@ export function withAttr(node: unknown, name: string): AnyVnode[] {
 /** The vnode with this `id`, from a tree or an already collected list. */
 export function byId(node: unknown, id: string): AnyVnode | undefined {
   return collectVnodes(node).find((vnode) => attrsOf(vnode).id === id);
+}
+
+/** Every error mark (`errorMark`) in a rendered tree, found by the alert glyph
+ * it trusts in. Render with `renderDeep` first: a mark drawn inside a component
+ * is invisible until that component's view has run. */
+export function errorMarks(node: unknown): AnyVnode[] {
+  return collectVnodes(node).filter(
+    (vnode) => vnode.tag === "<" && vnode.children === ICONS_16["alert-filled"],
+  );
 }

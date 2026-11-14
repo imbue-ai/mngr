@@ -11,6 +11,8 @@ const path = require('node:path');
 const { EventEmitter } = require('node:events');
 
 const {
+  INSTALL_FAILED_CODE,
+  INSTALL_NO_SIGNAL_CODE,
   installPolicyFor,
   installStagedUpdate,
   readLinuxPackageType,
@@ -152,7 +154,8 @@ test('an install that never starts throws, naming the cause the updater reported
   const updater = fakeUpdater(new Error('Command failed: pkexec /bin/bash -c dpkg -i minds.deb'));
   await assert.rejects(
     () => installStagedUpdate(updater, waitOptions(() => false)),
-    /Installing the update failed: Command failed: pkexec/,
+    (error) =>
+      /Installing the update failed: Command failed: pkexec/.test(error.message) && error.code === INSTALL_FAILED_CODE,
   );
 });
 
@@ -160,7 +163,10 @@ test('an install that never starts and reports nothing still throws', async () =
   const updater = fakeUpdater(null);
   await assert.rejects(
     () => installStagedUpdate(updater, waitOptions(() => false)),
-    /Installing the update failed: the updater never started installing it/,
+    // Told apart from a reported failure: with nothing said, the install may still be under way.
+    (error) =>
+      /Installing the update failed: the updater never started installing it/.test(error.message) &&
+      error.code === INSTALL_NO_SIGNAL_CODE,
   );
 });
 

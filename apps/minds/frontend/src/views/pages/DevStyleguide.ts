@@ -580,7 +580,13 @@ export function DevStyleguide(): m.Component {
                   version: "0.4.2",
                   installPolicy: "on-request",
                   needsPassword: true,
-                  error: "Installing the update failed: the password prompt was cancelled.",
+                  error: {
+                    message:
+                      "The update didn't install. It's still downloaded. Try again. If this persists, report a bug.",
+                    details:
+                      "Installing the update failed: Command failed: pkexec",
+                    isBugReportOffered: true,
+                  },
                   isInstalling: false,
                   onRestart: () => {},
                   onDismiss: () => {},

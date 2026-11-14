@@ -14,6 +14,7 @@ import { Badge } from "../../components/Badge";
 import { Button } from "../../components/Button";
 import { TextInput } from "../../components/FormControls";
 import { Icon16 } from "../../components/Icon";
+import { markedLine, richErrorText } from "../../components/errorDesign";
 import { renderImplicitPermissionsHint } from "../../components/ImplicitPermissionsHint";
 import { SectionHeader } from "../../components/Layout";
 import { Modal } from "../../components/Modal";
@@ -272,9 +273,9 @@ function renderBody(
       content: [
         model.errorMessage
           ? m(
-              "p",
-              { id: "ws-perm-error", class: "type-body text-important mb-3 shrink-0", role: "alert" },
-              model.errorMessage,
+              "div",
+              { id: "ws-perm-error", class: "mb-3 shrink-0", role: "alert" },
+              markedLine({ isInline: true }, richErrorText(model.errorMessage)),
             )
           : null,
         renderSelectedPanel(model, local, data, machineName, selected, selectSection, onReviewRequest),

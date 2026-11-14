@@ -1086,7 +1086,10 @@ def test_an_update_whose_machine_would_not_start_carries_the_starts_diagnosis_an
     assert dispatch.failure_detail == "ERROR: The box behind host-5821 is gone"
     assert started == [agent_id]
     assert len(caller.calls) == 1
-    assert service.state_store.get(agent_id).dispatch_failure == "Couldn't start this workspace to run the update."
+    assert (
+        service.state_store.get(agent_id).dispatch_failure
+        == "Couldn't start this workspace to run the update. Try again. If this persists, report a bug."
+    )
 
 
 def test_an_armed_schedule_shows_on_the_row_at_once_from_the_workspaces_own_file(
@@ -1233,6 +1236,8 @@ def test_an_auto_update_arm_the_workspace_refused_says_so_on_the_row_until_an_ar
     refused = service.state_store.get(agent_id)
     assert refused.dispatch_failure == SCHEDULE_REFUSAL_MESSAGE_BY_OUTCOME[UpdateScheduleOutcome.NO_CRON]
     assert refused.dispatch_failure_detail == detail
+    # The code is what the surfaces key the refusal's remedies and bug report on.
+    assert refused.dispatch_failure_code == "NO_CRON"
 
     service.arm_for_auto_update(agent_id)
 

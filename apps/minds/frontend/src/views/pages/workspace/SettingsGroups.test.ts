@@ -6,6 +6,7 @@ import {
   registerAppContext,
 } from "../../../app-context";
 import { createEmptyStores } from "../../../models/boot";
+import { WINDOW_LOGIN_LAPSED_SENTENCE } from "../../../models/errors";
 import type { UiWorkspaceUpdate } from "../../../channel/messages";
 import type {
   SettingsGroup,
@@ -24,6 +25,7 @@ import {
   jsonResponse,
   renderDeep,
   settle,
+  withMindsNative,
 } from "../../../testing";
 import { CopyField } from "../../components/Layout";
 import { SettingsGroups } from "./SettingsGroups";
@@ -116,6 +118,7 @@ function harness(
         color: "#aabbcc",
         palette: { blue: "#aabbcc", pink: "#e8a7a8" },
         is_stale: false,
+        is_provider_signed_out: false,
         is_account_owned_provider: false,
         leased_owner_email: "",
         has_account: false,
@@ -315,7 +318,7 @@ describe("the Account settings group's link to an account", () => {
     await settleDispatch();
 
     expect(routeSet).not.toHaveBeenCalled();
-    expect(models.get(UNBACKED)?.accountErrorMessage).toBe("refused");
+    expect(models.get(UNBACKED)?.accountError?.message).toBe("refused");
   });
 });
 
@@ -410,6 +413,66 @@ describe("the General settings group's color picker", () => {
   });
 });
 
+describe("the General settings group's rename", () => {
+  it("sends the same name again from a failed rename's Try again", async () => {
+    let isHostUnreachable = true;
+    const { draw, requests } = harness(() =>
+      Promise.resolve(
+        isHostUnreachable
+          ? jsonResponse({ error: "Failed to rename workspace host: ssh timed out" }, 502)
+          : jsonResponse({}),
+      ),
+    );
+    press(renderDeep(draw(BACKED, "general")) as AnyVnode, "Save");
+    await settleDispatch();
+    const failed = renderDeep(draw(BACKED, "general")) as AnyVnode;
+    expect(allText(byId(failed, "rename-error"))).toContain(
+      "Couldn't rename this workspace. Try again. If this persists, report a bug.",
+    );
+
+    isHostUnreachable = false;
+    press(byId(failed, "rename-error") as AnyVnode, "Try again");
+    await settleDispatch();
+
+    const renames = requests.filter((url) => url.endsWith("/rename"));
+    expect(renames).toEqual([
+      `/api/v1/workspaces/${BACKED}/rename`,
+      `/api/v1/workspaces/${BACKED}/rename`,
+    ]);
+    expect(byId(renderDeep(draw(BACKED, "general")), "rename-error")).toBeUndefined();
+  });
+
+  it("asks for a restart, not another try, when this window's login lapsed", async () => {
+    const retry = vi.fn();
+    await withMindsNative({ retry }, async () => {
+      const { draw } = harness(() =>
+        Promise.resolve(jsonResponse({ error: "Unauthorized" }, 401)),
+      );
+      press(renderDeep(draw(BACKED, "general")) as AnyVnode, "Save");
+      await settleDispatch();
+
+      const notice = collectVnodes(draw(BACKED, "general")).find(
+        (vnode) => attrsOf(vnode).id === "rename-error",
+      );
+      if (notice === undefined) throw new Error("the failure was not drawn");
+      expect(attrsOf(notice).error).toEqual(
+        expect.objectContaining({ message: WINDOW_LOGIN_LAPSED_SENTENCE }),
+      );
+      const actions = attrsOf(notice).actions as {
+        label: string;
+        onclick: () => void;
+      }[];
+      expect(actions.map((action) => action.label)).toEqual([
+        "Restart Imbue Studio",
+      ]);
+      expect(attrsOf(notice).isBugReportOffered).toBe(false);
+      actions[0].onclick();
+    });
+
+    expect(retry).toHaveBeenCalledOnce();
+  });
+});
+
 describe("the General settings group's SSH command", () => {
   it("offers a remote machine's SSH command outside recovery, and nothing for a machine without one", () => {
     const command = "ssh -i /k/id -p 2222 root@203.0.113.7";
@@ -425,6 +488,34 @@ describe("the General settings group's SSH command", () => {
       "Connect over SSH",
     );
     expect(copyValues(draw(UNBACKED, "general"))).toEqual([]);
+  });
+});
+
+describe("the General settings group while its provider is erroring", () => {
+  it("offers Sign in for an expired Imbue Cloud sign-in, and says it can't check otherwise", () => {
+    const signedOut = harness().draw(BACKED, "general", {
+      is_stale: true,
+      is_provider_signed_out: true,
+    });
+    expect(allText(signedOut)).toContain(
+      "Sign in to Imbue Cloud again  to rename this workspace or change its color.",
+    );
+    const signIn = collectVnodes(signedOut).find(
+      (vnode) =>
+        typeof attrsOf(vnode).onclick === "function" &&
+        allText(vnode.children) === "Sign in",
+    );
+    if (signIn === undefined) throw new Error("no Sign in button");
+    (attrsOf(signIn).onclick as () => void)();
+    expect(m.route.set).toHaveBeenCalledWith("/accounts");
+
+    const otherwise = allText(
+      harness().draw(BACKED, "general", { is_stale: true }),
+    );
+    expect(otherwise).toContain(
+      "Imbue Studio can't check on this workspace right now",
+    );
+    expect(otherwise).not.toContain("Sign in");
   });
 });
 
@@ -776,6 +867,45 @@ describe("the General settings group's Machine size section", () => {
       ),
     ).toBeUndefined();
     expect(pressableWithLabel(after, "Restart now")).toBeDefined();
+  });
+
+  it("sends a resize refused for want of a linked account to the Account settings, asking no bug report", async () => {
+    const h = harness((url) =>
+      url.startsWith("/api/v1/")
+        ? Promise.resolve(
+            jsonResponse(
+              {
+                error: "This workspace is not linked to a signed-in Imbue Cloud account.",
+                reason: "NOT_LINKED",
+              },
+              409,
+            ),
+          )
+        : Promise.resolve(jsonResponse(CLOUD)),
+    );
+    const section = machineSizeSection(drawWithSize(h, UNBACKED, CLOUD));
+    if (section === undefined) throw new Error("the section was not drawn");
+    const onchange = attrsOf(memorySelect(section)).onchange as (event: Event) => void;
+    onchange({ target: { value: "16" } } as unknown as Event);
+    const picked = machineSizeSection(h.draw(UNBACKED, "general"));
+    if (picked === undefined) throw new Error("the section was not redrawn");
+    press(picked, "Save size");
+    await settleDispatch();
+
+    const notice = collectVnodes(h.draw(UNBACKED, "general")).find(
+      (vnode) => attrsOf(vnode).id === "machine-resize-error",
+    );
+    if (notice === undefined) throw new Error("the refusal was not drawn");
+    expect((attrsOf(notice).error as { message: string }).message).toBe(
+      "Link this workspace to your Imbue Cloud account before resizing its machine.",
+    );
+    expect(attrsOf(notice).isBugReportOffered).toBe(false);
+    const [openAccount] = attrsOf(notice).actions as { label: string; onclick: () => void }[];
+    expect(openAccount.label).toBe("Open account settings");
+    openAccount.onclick();
+    expect(m.route.set).toHaveBeenLastCalledWith(
+      `/workspace/${UNBACKED}/options?tab=settings&group=account`,
+    );
   });
 
   it("says the machine is restarting, offers no second restart, and holds the controls", () => {

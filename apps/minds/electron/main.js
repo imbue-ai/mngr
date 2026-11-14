@@ -90,6 +90,7 @@ const {
   splitRestoreEntries,
 } = require('./session-persistence');
 const updater = require('./updater');
+const { INSTALL_NO_SIGNAL_CODE } = require('./install-policy');
 const displayZoom = require('./display-zoom');
 const launchVersion = require('./launch-version');
 const { resolveWindowControls, windowControlsSwitch } = require('./window-controls');
@@ -3238,7 +3239,8 @@ ipcMain.handle('check-for-updates', async () => {
 // the install goes through; when it does not (on a .deb, a cancelled password
 // prompt) the failure travels as a payload rather than a rejection, because a
 // rejected invoke reaches the renderer wrapped in Electron's "Error invoking
-// remote method" text, and the renderer shows this message verbatim.
+// remote method" text. The renderer says the sentence that fits `kind` and
+// keeps the message for its details.
 //
 // After a successful install the quit is asked for on a later tick and can be
 // cancelled at the running-workspaces prompt, leaving the app up with the
@@ -3249,7 +3251,10 @@ ipcMain.handle('install-update', async () => {
   try {
     await updater.installNow();
   } catch (err) {
-    return { error: String((err && err.message) || err) };
+    return {
+      error: String((err && err.message) || err),
+      kind: err && err.code === INSTALL_NO_SIGNAL_CODE ? 'no-signal' : 'failed',
+    };
   }
   await waitForQuitCancelled();
   return { error: null };

@@ -14,9 +14,13 @@ import {
   classTokensOf,
   collectVnodes,
   OUT_OF_DATE_UPDATE,
+  jsonResponse,
   recordingFetch,
+  renderDeep,
   renderRoot,
+  settle,
   updatesShell,
+  withMindsNative,
   workspacesMessage,
 } from "../../testing";
 import { LandingPage } from "./LandingPage";
@@ -32,6 +36,7 @@ interface Harness {
 function harness(
   updates: Record<string, UiWorkspaceUpdate>,
   isAutoUpdateEnabled: boolean,
+  respond?: (url: string) => Promise<Response>,
 ): Harness {
   const shell = updatesShell(updates, isAutoUpdateEnabled);
   const base = workspacesMessage();
@@ -43,7 +48,7 @@ function harness(
       { ...alpha, id: BETA, name: "beta", host_id: "host-dd44" },
     ],
   });
-  const { fetchImpl } = recordingFetch();
+  const { fetchImpl } = recordingFetch(respond);
   vi.stubGlobal("fetch", fetchImpl);
   const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
   vi.spyOn(m, "redraw").mockImplementation(() => undefined);
@@ -69,6 +74,17 @@ function press(vnode: AnyVnode | undefined): void {
   (attrsOf(vnode).onclick as (event: MouseEvent) => void)({
     stopPropagation: () => undefined,
   } as MouseEvent);
+}
+
+/** The labels of the buttons drawn as primary under `node`. */
+function primaryLabels(node: unknown): string[] {
+  return collectVnodes(node)
+    .filter(
+      (vnode) =>
+        vnode.tag === "button" &&
+        classTokensOf(vnode).includes("bg-surface-inverse"),
+    )
+    .map((vnode) => allText(vnode.children).trim());
 }
 
 /** The badge's press landed on the row's Updates tab, flagged to flash. */
@@ -249,3 +265,45 @@ describe("a row's update badge while its run is under way", () => {
     expectUpdatesTabOpened(routeSet);
   });
 });
+
+describe("the bulk update strip", () => {
+  it("draws its own Schedule all updates secondary beside a refusal whose restart is the fix", async () => {
+    // Scheduling would meet the same lapsed login, so the strip's one main
+    // button is the error's Restart Imbue Studio.
+    await withMindsNative({}, async () => {
+      harness(
+        { [ALPHA]: OUT_OF_DATE_UPDATE, [BETA]: OUT_OF_DATE_UPDATE },
+        false,
+        (url) =>
+          Promise.resolve(
+            url.endsWith("/bulk/now")
+              ? jsonResponse({ error: "Unauthorized" }, 401)
+              : jsonResponse({}),
+          ),
+      );
+      // One instance throughout: the refusal lives in its state.
+      const instance = (LandingPage as unknown as () => m.Component)();
+      const drawStrip = (): unknown =>
+        byId(
+          renderDeep(
+            (instance.view as unknown as (v: m.Vnode) => m.Children).call(
+              instance,
+              m(instance) as m.Vnode,
+            ),
+          ),
+          "landing-bulk-updates",
+        );
+      expect(primaryLabels(drawStrip())).toEqual(["Schedule all updates"]);
+
+      const updateAllNow = collectVnodes(drawStrip()).find(
+        (vnode) =>
+          vnode.tag === "button" && allText(vnode.children).trim() === "Update all now",
+      );
+      press(updateAllNow);
+      await settle();
+
+      expect(primaryLabels(drawStrip())).toEqual(["Restart Imbue Studio"]);
+    });
+  });
+});
+

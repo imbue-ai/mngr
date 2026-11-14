@@ -7,9 +7,9 @@ import { getAppContext } from "../../app-context";
 import type { AutoUpdatePromptModel } from "../../models/autoUpdatePrompt";
 import { Button } from "./Button";
 import { DialogCloseButton, Modal } from "./Modal";
-import { Notice } from "./Notice";
 import { Spinner } from "./Spinner";
 import { renderUpdateWindowPicker } from "./UpdateWindowPicker";
+import { settingsFailureLine } from "./SettingsFailureLine";
 
 export interface AutoUpdatePromptModalAttrs {
   model: AutoUpdatePromptModel;
@@ -60,7 +60,7 @@ export function AutoUpdatePromptModal(): m.Component<AutoUpdatePromptModalAttrs>
                 m("li", "You can change this anytime in Studio settings"),
               ]),
             ]),
-            model.error ? m(Notice, { variant: "error" }, model.error) : null,
+            settingsFailureLine("auto-update-prompt-error", model.failure),
             m("div", { class: "flex flex-wrap items-center gap-2 pt-1" }, [
               m(
                 Button,

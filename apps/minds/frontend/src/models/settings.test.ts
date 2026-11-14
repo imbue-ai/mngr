@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { PeekedChannel, UpdateChannel, UpdateState, UpdateStatus } from "../electron-bridge";
+import type {
+  PeekedChannel,
+  UpdateChannel,
+  UpdateState,
+  UpdateStatus,
+} from "../electron-bridge";
 import {
   jsonResponse,
   pendingInstallUpdate,
@@ -54,9 +59,10 @@ describe("SettingsModel", () => {
     expect(model.isLoadFailed).toBe(false);
   });
 
-  it("marks the load failed on a non-OK response", async () => {
+  it("marks the load failed on a non-OK response, and asks for a restart only when the login lapsed", async () => {
+    let status = 503;
     const model = new SettingsModel(
-      async () => new Response("nope", { status: 503 }),
+      async () => new Response("nope", { status }),
       () => {},
     );
 
@@ -64,6 +70,65 @@ describe("SettingsModel", () => {
 
     expect(model.overview).toBeNull();
     expect(model.isLoadFailed).toBe(true);
+    expect(model.loadFailure?.isReconnectNeeded).toBe(false);
+    expect(model.loadFailure?.error.message).toBe(
+      "Couldn't load your settings. Try again. If this persists, report a bug.",
+    );
+
+    status = 401;
+    await model.load();
+    expect(model.loadFailure?.isReconnectNeeded).toBe(true);
+    expect(model.loadFailure?.error.message).toBe(
+      "Imbue Studio needs to restart to reconnect this window.",
+    );
+  });
+
+  it("keeps an account's reason behind the master password results and names the route's own refusals plainly", async () => {
+    const answers = [
+      jsonResponse({
+        ok: false,
+        results: [
+          { account: "a@b.com", is_ok: true, error: null },
+          { account: "c@d.com", is_ok: false, error: "locked on this device" },
+        ],
+      }),
+      jsonResponse(
+        {
+          error:
+            "Couldn't check which accounts are signed in. Try again in a moment.",
+          reason: "ACCOUNTS_UNREADABLE",
+        },
+        503,
+      ),
+      jsonResponse({ error: "Sync is unavailable in this configuration" }, 503),
+      jsonResponse({ error: "Not authenticated" }, 401),
+    ];
+    const model = new SettingsModel(
+      async () => answers.shift() as Response,
+      () => {},
+    );
+
+    await model.changeMasterPassword("p", "p");
+    expect(model.isMasterPasswordAllOk).toBe(false);
+    expect(model.masterPasswordResults?.[1]?.error).toBe(
+      "locked on this device",
+    );
+
+    await model.changeMasterPassword("p", "p");
+    expect(model.masterPasswordRefusal).toBe(
+      "Couldn't check which accounts are signed in. Try again in a moment.",
+    );
+    expect(model.masterPasswordFailure).toBeNull();
+
+    await model.changeMasterPassword("p", "p");
+    expect(model.masterPasswordRefusal).toBe("");
+    expect(model.masterPasswordFailure?.error.message).toBe(
+      "Couldn't change the master password. Try again. If this persists, report a bug.",
+    );
+
+    // A lapsed login is restarted, not reported.
+    await model.changeMasterPassword("p", "p");
+    expect(model.masterPasswordFailure?.isReconnectNeeded).toBe(true);
   });
 
   it("applies the returned version after a successful error-reporting write", async () => {
@@ -99,7 +164,15 @@ describe("SettingsModel", () => {
         const url = String(input);
         if (url.endsWith("/sign-in-browser")) {
           bodies.push(JSON.parse(String(init?.body)));
-          return isRefusing ? jsonResponse({ error: "That browser is not installed" }, 400) : jsonResponse({});
+          return isRefusing
+            ? jsonResponse(
+                {
+                  error: "That browser isn't installed any more. Pick another.",
+                  reason: "BROWSER_NOT_INSTALLED",
+                },
+                400,
+              )
+            : jsonResponse({});
         }
         return jsonResponse(settingsOverview());
       },
@@ -108,13 +181,81 @@ describe("SettingsModel", () => {
     await model.load();
 
     await model.setSignInBrowser("/Applications/Firefox.app");
-    expect(model.overview?.sign_in_browser_id).toBe("/Applications/Firefox.app");
+    expect(model.overview?.sign_in_browser_id).toBe(
+      "/Applications/Firefox.app",
+    );
 
     isRefusing = true;
     await model.setSignInBrowser("/Applications/Gone.app");
+    expect(model.overview?.sign_in_browser_id).toBe(
+      "/Applications/Firefox.app",
+    );
+    // The route's own sentence explains itself: no report asked for.
+    expect(model.signInBrowserFailure?.isExplained).toBe(true);
+    expect(model.signInBrowserFailure?.error.message).toBe(
+      "That browser isn't installed any more. Pick another.",
+    );
+    expect(bodies).toEqual([
+      { browser_id: "/Applications/Firefox.app" },
+      { browser_id: "/Applications/Gone.app" },
+    ]);
+    // Picking it again would be refused again, so the refusal offers no retry.
+    expect(model.signInBrowserFailure?.retry).toBeUndefined();
+  });
+
+  it("offers a failed sign-in browser write a Try again that sends the same pick", async () => {
+    const bodies: unknown[] = [];
+    let isFailing = true;
+    const model = new SettingsModel(
+      async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/sign-in-browser")) {
+          bodies.push(JSON.parse(String(init?.body)));
+          return isFailing ? jsonResponse({ error: "Could not save the sign-in browser: disk full" }, 500) : jsonResponse({});
+        }
+        return jsonResponse(settingsOverview());
+      },
+      () => {},
+    );
+    await model.load();
+
+    await model.setSignInBrowser("/Applications/Firefox.app");
+    expect(model.signInBrowserFailure?.error.message).toBe(
+      "Couldn't save this change. Try again. If this persists, report a bug.",
+    );
+    const retry = model.signInBrowserFailure?.retry;
+    if (retry === undefined) throw new Error("no Try again on the failure");
+
+    isFailing = false;
+    retry();
+    await vi.waitFor(() => expect(model.signInBrowserFailure).toBeNull());
+
     expect(model.overview?.sign_in_browser_id).toBe("/Applications/Firefox.app");
-    expect(model.signInBrowserError).toBe("That browser is not installed");
-    expect(bodies).toEqual([{ browser_id: "/Applications/Firefox.app" }, { browser_id: "/Applications/Gone.app" }]);
+    expect(bodies).toEqual([
+      { browser_id: "/Applications/Firefox.app" },
+      { browser_id: "/Applications/Firefox.app" },
+    ]);
+  });
+
+  it("says why a settings record a newer app saved can't be changed, with no retry or report", async () => {
+    const sentence =
+      "These settings were saved by a newer version of Imbue Studio and can only be changed there.";
+    const model = new SettingsModel(
+      async (input, init) => {
+        if (init?.method === "PUT")
+          return jsonResponse({ error: sentence, reason: "SETTINGS_TOO_NEW" }, 409);
+        return jsonResponse(settingsOverview());
+      },
+      () => {},
+    );
+    await model.load();
+
+    await model.setAutoUpdateEnabled("local", true);
+
+    expect(model.autoUpdateFailure?.isExplained).toBe(true);
+    expect(model.autoUpdateFailure?.error.message).toBe(sentence);
+    expect(model.autoUpdateFailure?.isBugReportOffered).toBe(false);
+    expect(model.autoUpdateFailure?.retry).toBeUndefined();
   });
 
   it("surfaces a refused error-reporting write with the server's reason", async () => {
@@ -262,14 +403,17 @@ describe("SettingsModel", () => {
       is_enabled: false,
       style: "both",
     });
-    expect(model.notificationPrefsError).toContain("network error");
+    expect(model.notificationPrefsFailure?.error.message).toBe(
+      "Couldn't save this change — Imbue Studio didn't respond. Try again in a moment.",
+    );
+    expect(model.notificationPrefsFailure?.isBugReportOffered).toBe(false);
 
     isServerUp = true;
     await model.setNotificationPrefs("user-7", {
       is_enabled: false,
       style: "both",
     });
-    expect(model.notificationPrefsError).toBe("");
+    expect(model.notificationPrefsFailure).toBeNull();
     expect(model.notificationPrefs().is_enabled).toBe(false);
   });
 
@@ -296,7 +440,11 @@ describe("SettingsModel", () => {
       style: "both",
     });
 
-    expect(model.notificationPrefsError).toBe(
+    expect(model.notificationPrefsFailure?.error.message).toBe(
+      "Couldn't save this change. Try again. If this persists, report a bug.",
+    );
+    expect(model.notificationPrefsFailure?.isBugReportOffered).toBe(true);
+    expect(model.notificationPrefsFailure?.error.details).toContain(
       "notifications are not available yet",
     );
     expect(model.notificationPrefs().is_enabled).toBe(true);
@@ -381,7 +529,7 @@ describe("SettingsModel", () => {
 
     await model.changeMasterPassword("aaa", "bbb");
 
-    expect(model.masterPasswordError).toContain("do not match");
+    expect(model.masterPasswordRefusal).toContain("do not match");
     expect(postCount).toBe(0);
   });
 });
@@ -517,7 +665,11 @@ describe("SettingsModel release channels", () => {
 
       expect(switches).toEqual([]);
       expect(model.updateState?.channel).toBe("alpha");
-      expect(model.updateError).toContain("beta channel is unavailable");
+      expect(model.updateError?.message).toBe(
+        "The Beta channel is unavailable right now, so Imbue Studio stayed on Alpha.",
+      );
+      // The sentence says what happened and what it means; nothing to report.
+      expect(model.updateError?.isBugReportOffered).toBe(false);
     });
   });
 
@@ -629,7 +781,35 @@ describe("SettingsModel release channels", () => {
       await model.loadUpdateState();
 
       expect(model.updateState).toBeNull();
-      expect(model.updateError).toContain("MINDS_ROOT_NAME is unreadable");
+      expect(model.updateError?.message).toBe(
+        "Couldn't load your update settings. Try again. If this persists, report a bug.",
+      );
+      expect(model.updateError?.details).toContain(
+        "MINDS_ROOT_NAME is unreadable",
+      );
+    });
+  });
+
+  it("clears a failed update-state read when Try again reads it", async () => {
+    const { surface } = nativeStub(RUNNING, PEEKED);
+    let isBroken = true;
+    const flaky = {
+      ...surface,
+      getUpdateState: async () => {
+        if (isBroken) throw new Error("MINDS_ROOT_NAME is unreadable");
+        return RUNNING;
+      },
+    };
+    await withMindsNative(flaky, async () => {
+      const model = new SettingsModel(undefined, () => {});
+      await model.loadUpdateState();
+      expect(model.updateError).not.toBeNull();
+
+      isBroken = false;
+      await model.loadUpdateState();
+
+      expect(model.updateError).toBeNull();
+      expect(model.updateState?.channel).toBe("alpha");
     });
   });
 
@@ -669,7 +849,7 @@ describe("SettingsModel release channels", () => {
       expect(model.updateState?.status.type).toBe("update-available");
       expect(model.peekedChannels["beta"].version).toBe("0.4.30");
       expect(model.isUpdateBusy).toBe(false);
-      expect(model.updateError).toBe("");
+      expect(model.updateError).toBeNull();
     });
   });
 
@@ -729,7 +909,12 @@ describe("SettingsModel release channels", () => {
 
       await model.checkForUpdatesNow();
 
-      expect(model.updateError).toContain("Cannot find channel alpha-mac.yml");
+      expect(model.updateError?.message).toBe(
+        "Couldn't check for updates. Try again. If this persists, report a bug.",
+      );
+      expect(model.updateError?.details).toContain(
+        "Cannot find channel alpha-mac.yml",
+      );
       // Left busy, the panel would read as a check that never returns.
       expect(model.isUpdateBusy).toBe(false);
       expect(model.updateState?.channel).toBe("alpha");
@@ -744,16 +929,78 @@ describe("SettingsModel release channels", () => {
     const { surface } = nativeStub(RUNNING, PEEKED);
     const failing = {
       ...surface,
-      installUpdate: async () => ({ error: "Installing the update failed: Command failed: pkexec" }),
+      installUpdate: async () => ({
+        error: "Installing the update failed: Command failed: pkexec",
+        kind: "failed" as const,
+      }),
     };
     await withMindsNative(failing, async () => {
       const model = new SettingsModel(undefined, () => {});
       await model.loadUpdateState();
 
-      await model.installUpdateNow();
+      await model.installUpdateNow("Install and restart");
 
-      expect(model.updateError).toContain("Installing the update failed");
+      expect(model.updateError?.message).toBe(
+        "The update didn't install. It's still downloaded. Try again. If this persists, report a bug.",
+      );
+      expect(model.updateError?.details).toContain("Command failed: pkexec");
+      expect(model.updateError?.isBugReportOffered).toBe(true);
       expect(model.isUpdateInstalling).toBe(false);
+    });
+  });
+
+  it("says an install that never signalled may still be under way, naming the button to press again", async () => {
+    // macOS: an install asked for while the system updater is still taking the
+    // download raises nothing within the wait, and can still go through.
+    const { surface } = nativeStub(RUNNING, PEEKED);
+    const silent = {
+      ...surface,
+      installUpdate: async () => ({
+        error:
+          "Installing the update failed: the updater never started installing it",
+        kind: "no-signal" as const,
+      }),
+    };
+    await withMindsNative(silent, async () => {
+      const model = new SettingsModel(undefined, () => {});
+      await model.loadUpdateState();
+
+      await model.installUpdateNow("Restart now");
+
+      expect(model.updateError?.message).toBe(
+        "Imbue Studio couldn't confirm the update started installing. " +
+          "If it hasn't restarted in a minute, press Restart now to try again.",
+      );
+      // The install may still be under way, so the sentence asks for patience, not a report.
+      expect(model.updateError?.isBugReportOffered).toBe(false);
+    });
+  });
+
+  it("says a refused channel switch left the app on the channel it was on", async () => {
+    const { surface } = nativeStub(RUNNING, PEEKED);
+    const refusing = {
+      ...surface,
+      setUpdateChannel: async () => {
+        throw new Error(
+          "Error invoking remote method 'set-update-channel': Error: Unknown update channel",
+        );
+      },
+    };
+    await withMindsNative(refusing, async () => {
+      const model = new SettingsModel(undefined, () => {});
+      await model.loadUpdateState();
+
+      await model.requestChannel("stable");
+      if (model.pendingChannelSwitch !== null)
+        await model.confirmChannelSwitch();
+
+      expect(model.updateError?.message).toBe(
+        "Imbue Studio couldn't switch which updates you get. You're still on Alpha updates. " +
+          "Try again. If this persists, report a bug.",
+      );
+      expect(model.updateError?.details).toContain(
+        "Error invoking remote method",
+      );
     });
   });
 
@@ -766,12 +1013,12 @@ describe("SettingsModel release channels", () => {
       const model = new SettingsModel(undefined, () => {});
       await model.loadUpdateState();
 
-      const done = model.installUpdateNow();
+      const done = model.installUpdateNow("Restart now");
       expect(model.isUpdateInstalling).toBe(true);
       resolveInstall();
       await done;
       expect(model.isUpdateInstalling).toBe(false);
-      expect(model.updateError).toBe("");
+      expect(model.updateError).toBeNull();
     });
   });
 

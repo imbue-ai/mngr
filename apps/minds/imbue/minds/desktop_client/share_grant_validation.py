@@ -216,7 +216,7 @@ def _user_refusal_message(normalized: str, already_granted: AbstractSet[str], st
     if normalized in stored:
         return None
     if not normalized:
-        return f"{normalized} is not a user id."
+        return "This entry is empty."
     if normalized in already_granted:
         return f"{normalized} is already granted here."
     return None

@@ -164,7 +164,7 @@ class UpdateSkipReason(UpperCaseStrEnum):
 # rather than "last night": the window is configurable to any hours.
 SKIP_REASON_MESSAGES: Final[dict[UpdateSkipReason, str]] = {
     UpdateSkipReason.UPDATE_IN_FLIGHT: "An update was already running in this workspace during the last update window.",
-    UpdateSkipReason.LEASE_HELD: "Another update flow was working in this workspace during the last update window.",
+    UpdateSkipReason.LEASE_HELD: "An agent was already updating this workspace during the last update window.",
     UpdateSkipReason.NEEDS_SIGN_IN: "No AI account was signed in to this workspace during the last update window.",
     UpdateSkipReason.DISPATCH_FAILED: "The update couldn't be started during the last update window.",
     UpdateSkipReason.WINDOW_CLOSED: "The last update window closed before the update could start.",
@@ -172,7 +172,7 @@ SKIP_REASON_MESSAGES: Final[dict[UpdateSkipReason, str]] = {
 
 
 # Every route that sets an update window refuses an empty one in these words.
-EMPTY_UPDATE_WINDOW_MESSAGE: Final[str] = "The update window needs a start and end that differ"
+EMPTY_UPDATE_WINDOW_MESSAGE: Final[str] = "The update window needs a start and end that differ."
 
 
 def format_update_window(window: tuple[int, int]) -> str:
@@ -239,6 +239,11 @@ class UpdateDispatchFailure(FrozenModel):
     detail: str = Field(
         default="",
         description="Bounded verbatim output from the machine, mngr, or the host start; '' when there was none",
+    )
+    code: str = Field(
+        default="",
+        description="Which failure this was (an UpdateDispatchOutcome or UpdateScheduleOutcome value, or DISPATCH_RAISED), "
+        "for a surface that offers the remedy for one or decides whether it asks for a bug report",
     )
 
 

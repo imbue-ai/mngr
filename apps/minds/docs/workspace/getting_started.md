@@ -77,7 +77,7 @@ the workspace can always open it, with or without a grant.
 
 The first publish takes 30 to 90 seconds. While the link is generated the
 panel names the step under way: "Creating link", "Setting up encryption",
-"Connecting to the relay", then "Verifying end to end". You can grant
+"Connecting this workspace", then "Checking the link works". You can grant
 permissions while the link is still being prepared.
 
 Permissions are granted per target. The panel lists the whole workspace
@@ -95,9 +95,11 @@ vocabulary.
 
 A grant appears in the list the moment you add it and saves behind the
 panel, so nothing locks while the write is in flight. A save that fails
-marks the row "Could not save" and offers Retry. A removal takes effect as
-soon as it saves, because the workspace re-reads the list on every
-request.
+marks the row "Couldn't add" (or "Couldn't remove -- still has access")
+with "See details" and Retry; an entry the workspace refuses says why and
+offers Remove instead, since sending it again would be refused again. A
+removal takes effect as soon as it saves, because the workspace re-reads
+the list on every request.
 
 Granting does not tell anyone. Each person's row offers Invite, which
 sends them an email from Imbue naming what you shared -- the app, by the

@@ -9,6 +9,8 @@ import { Button } from "../../components/Button";
 import { Spinner } from "../../components/Spinner";
 import { renderSwitch } from "../../components/Switch";
 import { renderUpdateWindowPicker } from "../../components/UpdateWindowPicker";
+import { updateDispatchErrorNotice } from "../../components/UpdateDispatchErrorNotice";
+import { settingsFailureLine } from "../../components/SettingsFailureLine";
 
 export function workspaceUpdateSettings(model: SettingsModel): m.Children {
   const overview = model.overview;
@@ -52,13 +54,7 @@ export function workspaceUpdateSettings(model: SettingsModel): m.Children {
         }),
       ],
     ),
-    model.autoUpdateError
-      ? m(
-          "p",
-          { class: "type-helper text-important mt-3", role: "alert" },
-          model.autoUpdateError,
-        )
-      : null,
+    settingsFailureLine("auto-update-error-app", model.autoUpdateFailure),
     customSettingsRow(model),
     renderUpdateWindowPicker({
       idSuffix: "app",
@@ -74,13 +70,7 @@ export function workspaceUpdateSettings(model: SettingsModel): m.Children {
       "Scheduled updates start inside this window. A workspace must be running during the window for its " +
         "scheduled update to start; one that isn't is tried again in the next window.",
     ),
-    model.updateWindowError
-      ? m(
-          "p",
-          { class: "type-helper text-important mt-3", role: "alert" },
-          model.updateWindowError,
-        )
-      : null,
+    settingsFailureLine("update-window-error-app", model.updateWindowFailure),
   ]);
 }
 
@@ -157,13 +147,13 @@ function customSettingsRow(model: SettingsModel): m.Children {
           ),
         ),
       ),
-      model.workspaceResetError
-        ? m(
-            "p",
-            { class: "type-helper text-important", role: "alert" },
-            model.workspaceResetError,
-          )
-        : null,
+      model.workspaceResetFailure === null
+        ? null
+        : updateDispatchErrorNotice({
+            id: "update-settings-reset-error",
+            agentId: model.workspaceResetFailure.agentId,
+            error: model.workspaceResetFailure.error,
+          }),
     ],
   );
 }

@@ -74,6 +74,7 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_account_scope import is_valid_account_id
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.update_status import EMPTY_UPDATE_WINDOW_MESSAGE
+from imbue.minds.errors import MindsConfigError
 from imbue.minds.errors import SettingsRecordTooNewError
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
@@ -346,6 +347,14 @@ def _json_response(payload: FrozenModel, status_code: int = 200) -> Response:
 
 def _error_response(message: str, status_code: int) -> Response:
     return Response(json.dumps({"error": message}), status=status_code, mimetype="application/json")
+
+
+def _refusal_response(message: str, reason: str, status_code: int = 400, detail: str = "") -> Response:
+    """A refusal whose sentence is fit to show as it is; ``reason`` tells the settings page which one it is."""
+    payload = {"error": message, "reason": reason}
+    if detail:
+        payload["detail"] = detail
+    return Response(json.dumps(payload), status=status_code, mimetype="application/json")
 
 
 def _unauthenticated_response() -> Response:
@@ -695,7 +704,7 @@ def _handle_browser_import_run() -> Response:
 
 
 def _empty_update_window_response() -> Response:
-    return _error_response(EMPTY_UPDATE_WINDOW_MESSAGE, 400)
+    return _refusal_response(EMPTY_UPDATE_WINDOW_MESSAGE, "EMPTY_WINDOW")
 
 
 def _resolved_account_settings(account_id: str) -> UiAccountSettings:
@@ -741,12 +750,16 @@ def _handle_account_settings(account_id: str) -> Response:
         # Only the explicitly-sent fields land: a key never chosen stays
         # absent from the record, which is what "never chosen" means to it.
         settings_store.apply_settings_values(account_id, write.model_dump(mode="json", exclude_none=True))
-    except SettingsRecordTooNewError:
-        return _error_response(
-            f"These settings were saved by a newer version of Imbue Studio "
-            f"(format {settings_store.get_stored_settings_format(account_id)}) and can only be changed there",
-            409,
+    except SettingsRecordTooNewError as e:
+        return _refusal_response(
+            str(e),
+            "SETTINGS_TOO_NEW",
+            status_code=409,
+            detail=f"The stored settings record is format {settings_store.get_stored_settings_format(account_id)}.",
         )
+    except OSError as e:
+        logger.warning("Could not save the account's settings: {}", e)
+        return _error_response(f"Could not save your settings: {e}", 500)
     sync_scheduler = get_state().sync_scheduler
     if sync_scheduler is not None:
         sync_scheduler.kick()
@@ -796,8 +809,12 @@ def _handle_sign_in_browser_write() -> Response:
     if write.browser_id is not None and all(
         browser.browser_id != write.browser_id for browser in state.sign_in_browsers.list_browsers()
     ):
-        return _error_response("That browser is not installed", 400)
-    minds_config.set_sign_in_browser_id(write.browser_id)
+        return _refusal_response("That browser isn't installed any more. Pick another.", "BROWSER_NOT_INSTALLED")
+    try:
+        minds_config.set_sign_in_browser_id(write.browser_id)
+    except (MindsConfigError, OSError) as e:
+        logger.warning("Could not save the sign-in browser: {}", e)
+        return _error_response(f"Could not save the sign-in browser: {e}", 500)
     return _json_response(write)
 
 

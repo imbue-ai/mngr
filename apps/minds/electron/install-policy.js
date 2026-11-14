@@ -82,6 +82,11 @@ function relaunchTargetFor({ packageType, appImagePath, executablePath, args }) 
   return { executablePath: appImagePath, args: [] };
 }
 
+/** The `code` on an install that reported an error and never started. */
+const INSTALL_FAILED_CODE = 'ERR_INSTALL_FAILED';
+/** The `code` on an install that neither started nor reported anything. */
+const INSTALL_NO_SIGNAL_CODE = 'ERR_INSTALL_NO_SIGNAL';
+
 /** How long an install gets to start before it counts as one that never did. */
 const INSTALL_START_TIMEOUT_MS = 20_000;
 const INSTALL_START_POLL_MS = 50;
@@ -140,7 +145,11 @@ async function installStagedUpdate(
   for (let waited = 0; !hasInstallStarted(); waited += intervalMs) {
     if (waited >= timeoutMs) {
       const cause = failure === null ? 'the updater never started installing it' : String(failure.message || failure);
-      throw new Error(`Installing the update failed: ${cause}`);
+      const error = new Error(`Installing the update failed: ${cause}`);
+      // Whether the updater said why: with no error and no signal the install
+      // may still be under way (macOS, Squirrel still taking the download).
+      error.code = failure === null ? INSTALL_NO_SIGNAL_CODE : INSTALL_FAILED_CODE;
+      throw error;
     }
     await sleep(intervalMs);
   }
@@ -150,6 +159,8 @@ async function installStagedUpdate(
 }
 
 module.exports = {
+  INSTALL_FAILED_CODE,
+  INSTALL_NO_SIGNAL_CODE,
   PACKAGE_TYPE_FILENAME,
   readLinuxPackageType,
   installPolicyFor,

@@ -2,6 +2,7 @@ import m from "mithril";
 import type { WorkspaceMessage } from "../../models/workspaceMessage";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createEmptyStores } from "../../models/boot";
+import { recoveryRoute } from "../../models/create";
 import { takePendingHelpLaunch } from "../../models/help";
 import { ErrorDialogQueue } from "../../models/errorDialog";
 import { WebLoginModel } from "../../models/webLogin";
@@ -1839,7 +1840,7 @@ describe("ShellState updates", () => {
 
     shell.openUpdatesTab(AGENT);
     const first = shell.takeUpdatesTabArrival(AGENT)?.serial ?? 0;
-    const failure = { isOk: false, error: "Couldn't reach this workspace.", detail: "" };
+    const failure = { isOk: false, status: 502, error: "Couldn't reach this workspace.", detail: "", code: "" };
     shell.openUpdatesTab(AGENT, { failure });
 
     expect(routeSet).toHaveBeenLastCalledWith(
@@ -1916,7 +1917,7 @@ describe("enterWorkspaceOrRecover", () => {
     // loader; Recovery dispatches the start and comes back via /goto.
     const { routeSet } = shellWithMachine("STOPPED");
     expect(routeSet).toHaveBeenCalledWith(
-      `/agents/agent-aa11/recovery?return_to=${encodeURIComponent("/goto/agent-aa11/")}&intent=start`,
+      recoveryRoute("agent-aa11", "/goto/agent-aa11/", "start"),
     );
   });
 
@@ -1934,7 +1935,7 @@ describe("enterWorkspaceOrRecover", () => {
     if (entry === null) throw new Error("fixture machine missing");
     shell.enterWorkspaceOrRecover(entry, "RUNNING");
     expect(routeSet).toHaveBeenCalledWith(
-      `/agents/agent-aa11/recovery?return_to=${encodeURIComponent("/goto/agent-aa11/")}`,
+      recoveryRoute("agent-aa11", "/goto/agent-aa11/", null),
     );
   });
 });

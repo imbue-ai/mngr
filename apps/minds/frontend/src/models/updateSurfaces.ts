@@ -299,7 +299,7 @@ function verdictMessage(update: UiWorkspaceUpdate, isChatKnown: boolean): string
 function needsSignInLine(isAutoUpdateEnabled: boolean): string {
   return isAutoUpdateEnabled
     ? "No AI account is signed in to this workspace, so Studio can't update it automatically. Sign in, and Studio schedules its update again."
-    : "No AI account is signed in to this workspace, so its update can't start. Sign in, then try again.";
+    : "No AI account is signed in to this workspace, so its update can't start. *Sign in, then try again.*";
 }
 
 /** The line for an update on offer. */

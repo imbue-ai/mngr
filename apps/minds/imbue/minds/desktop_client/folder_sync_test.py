@@ -225,7 +225,7 @@ def test_spec_refuses_a_path_that_is_not_absolute(tmp_path: Path) -> None:
     share may use, because the check that would have said so defends nothing --
     see :func:`_build_folder_sync_spec`.
     """
-    with pytest.raises(FolderSyncError, match="absolute path"):
+    with pytest.raises(FolderSyncError, match="Pick a folder on this computer"):
         _build_folder_sync_spec(
             agent_id=_AGENT_ID,
             host_id=_HOST_ID,
