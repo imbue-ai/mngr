@@ -206,7 +206,6 @@ describe("SettingsModel", () => {
     expect(model.notificationPrefs()).toEqual({
       is_enabled: true,
       style: "os",
-      has_chosen: true,
       version: "np-2",
     });
     // The app-wide applied prefs (which gate arrivals) follow the write.

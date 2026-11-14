@@ -186,18 +186,6 @@ def _write_notification_style_into_raw(data: dict[str, object], style: Notificat
     data.pop("notification_os_hint_dismissed", None)
 
 
-def _has_notification_choice(data: dict[str, object]) -> bool:
-    """A saved style counts as a choice; so does a master toggle an older install stored here.
-
-    The toggle moved to the per-account settings record, whose own choice the
-    caller ORs in; the key check stays for a config the migration has not
-    visited (it never writes the key back, so this only ever reads old state).
-    """
-    return data.get("notification_style") in tuple(NotificationStyle) or isinstance(
-        data.get("notifications_enabled"), bool
-    )
-
-
 def _as_str_keyed_dict(value: object) -> dict[str, object] | None:
     """Return ``value`` as a concretely-typed ``dict[str, object]``, or None if it isn't a mapping.
 
@@ -620,25 +608,16 @@ class MindsConfig(MutableModel):
             "allow_agent_command_execution", False, expected_version, compute_version, enabled
         )
 
-    def get_notification_style_with_choice(self) -> tuple[NotificationStyle, bool]:
-        """Read the delivery style and whether this file records a notification choice, in one snapshot.
-
-        The master toggle lives in the per-account settings record; a choice
-        made only there is the caller's to OR in.
-        """
+    def get_notification_style(self) -> NotificationStyle:
+        """Read the delivery style. Default: both in-app cards and system banners."""
         with self._lock:
-            data = self._read_raw()
-            return (_style_from_raw(data), _has_notification_choice(data))
+            return _style_from_raw(self._read_raw())
 
     def set_notification_style_if_version_matches(
         self,
         expected_version: str,
-        compute_version: Callable[[NotificationStyle, bool], str],
+        compute_version: Callable[[NotificationStyle], str],
         style: NotificationStyle,
-        # Whether a notification choice exists outside this file (the
-        # account settings records): the served version was computed with it
-        # ORed in, so the check here must be too.
-        is_chosen_elsewhere: bool,
     ) -> str | None:
         """Atomically compare-and-swap the notification style under one lock hold.
 
@@ -653,10 +632,8 @@ class MindsConfig(MutableModel):
         """
         with self._lock:
             data = self._read_raw()
-            current_style = _style_from_raw(data)
-            has_chosen = _has_notification_choice(data) or is_chosen_elsewhere
-            if compute_version(current_style, has_chosen) != expected_version:
+            if compute_version(_style_from_raw(data)) != expected_version:
                 return None
             _write_notification_style_into_raw(data, style)
             self._write_raw(data)
-            return compute_version(style, True)
+            return compute_version(style)

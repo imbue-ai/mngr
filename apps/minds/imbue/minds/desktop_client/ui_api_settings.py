@@ -88,7 +88,6 @@ class UiNotificationPrefs(FrozenModel):
 
     is_enabled: bool = Field(description="Master notifications toggle (gates every OS nudge the app sends)")
     style: NotificationStyle = Field(description="Delivery style for every feed entry")
-    has_chosen: bool = Field(description="Whether notification preferences have been explicitly saved")
     version: str = Field(description="If-Match version for the notification-style write")
 
 
@@ -323,8 +322,8 @@ def _unauthenticated_response() -> Response:
     return _error_response("Not authenticated", 401)
 
 
-def _compute_flag_version(key: str, value: bool) -> str:
-    """The If-Match version of a one-flag record: a hash of its stored value under its key."""
+def _compute_one_value_version(key: str, value: bool | str) -> str:
+    """The If-Match version of a one-value record: a hash of its stored value under its key."""
     canonical = json.dumps({key: value}, sort_keys=True)
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
@@ -336,7 +335,7 @@ def compute_error_reporting_version(report_unexpected_errors: bool) -> str:
     equals A -- exactly the staleness contract optimistic concurrency needs
     for a record this small.
     """
-    return _compute_flag_version("report_unexpected_errors", report_unexpected_errors)
+    return _compute_one_value_version("report_unexpected_errors", report_unexpected_errors)
 
 
 def compute_remote_execution_version(allow_agent_command_execution: bool) -> str:
@@ -345,47 +344,26 @@ def compute_remote_execution_version(allow_agent_command_execution: bool) -> str
     Its own record, like the other two, so a write to it never 412s a page
     that only touched error reporting or notifications.
     """
-    return _compute_flag_version("allow_agent_command_execution", allow_agent_command_execution)
+    return _compute_one_value_version("allow_agent_command_execution", allow_agent_command_execution)
 
 
-def compute_notification_style_version(style: str, has_chosen: bool) -> str:
-    """The If-Match version of the notification-style record: a hash of its stored values.
+def compute_notification_style_version(style: str) -> str:
+    """The If-Match version of the notification-style record: a hash of its stored value.
 
-    A per-record version (rather than folding these values into the
+    A per-record version (rather than folding the style into the
     error-reporting version) keeps each record's writes from 412-ing pages
     that only touched the other record.
     """
-    canonical = json.dumps({"style": style, "has_chosen": has_chosen}, sort_keys=True)
-    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
-
-
-def _is_notification_choice_recorded() -> bool:
-    """Whether notification preferences have ever been chosen on this install.
-
-    A saved delivery style in ``config.toml``, or a master toggle in any
-    account's settings record (the device's included), counts. Install-wide
-    on purpose: the one-time first-choice card asks once per install, as it
-    did when one install-wide copy backed every account.
-    """
-    minds_config = get_state().minds_config
-    if minds_config is None:
-        # No settings storage: there is nowhere to save a choice.
-        return True
-    if minds_config.get_notification_style_with_choice()[1]:
-        return True
-    settings_store = get_state().account_settings_store
-    return settings_store is not None and settings_store.is_notifications_enabled_chosen_anywhere()
+    return _compute_one_value_version("style", style)
 
 
 def _current_notification_prefs(context: SettingsResolutionContext) -> UiNotificationPrefs:
     """The notification-prefs record (defaults when no MindsConfig is wired)."""
-    has_chosen = _is_notification_choice_recorded()
     style = resolve_notification_style(context)
     return UiNotificationPrefs(
         is_enabled=resolve_notifications_enabled(context),
         style=style,
-        has_chosen=has_chosen,
-        version=compute_notification_style_version(style, has_chosen),
+        version=compute_notification_style_version(style),
     )
 
 
@@ -547,14 +525,10 @@ def _apply_notification_style_write(
     # _apply_error_reporting_write above: the version check and the write must not be two
     # separate locked calls, or a concurrent writer starting from the same version could
     # slip in between them and silently clobber this write.
-    settings_store = get_state().account_settings_store
     return minds_config.set_notification_style_if_version_matches(
         expected_version=expected_version,
         compute_version=compute_notification_style_version,
         style=write.style,
-        # The served version folds in a master-toggle choice recorded in the
-        # settings records, so the check must see the same has_chosen.
-        is_chosen_elsewhere=(settings_store is not None and settings_store.is_notifications_enabled_chosen_anywhere()),
     )
 
 

@@ -19,7 +19,6 @@ import type {
   UiNotificationsMessage,
 } from "../channel/messages";
 import { electronBridge } from "../electron-bridge";
-import { putAccountSettings } from "./accountSettings";
 import type { NotificationsStore } from "./notifications";
 import type { WorkspaceMessage } from "./workspaceMessage";
 import { workspaceMessageFromDestination } from "./workspaceMessage";
@@ -33,8 +32,6 @@ export interface NotificationPrefs {
   is_enabled: boolean;
   style: NotificationStyle;
   version: string;
-  /** Absent on older backends; only an explicit false offers the first-use choice. */
-  has_chosen?: boolean;
 }
 
 /** What gating assumes until real prefs load (and whenever the backend does
@@ -334,78 +331,6 @@ export interface NotificationsUiHooks {
 }
 
 export class NotificationsUiController {
-  private hasReceivedNotification = false;
-  isSavingChoice = false;
-  choiceError = "";
-
-  get shouldChooseNotificationStyle(): boolean {
-    return (
-      this.hasReceivedNotification &&
-      currentNotificationPrefs().has_chosen === false
-    );
-  }
-
-  /** Null chooses the bell alone; every answer is saved through the settings
-   * API: the style on its own If-Match-guarded record, and the master toggle
-   * through the window's account's settings PUT. */
-  async chooseNotificationStyle(
-    style: NotificationStyle | null,
-    accountId: string,
-  ): Promise<void> {
-    if (this.isSavingChoice) return;
-    this.isSavingChoice = true;
-    this.choiceError = "";
-    this.redraw();
-    const current = currentNotificationPrefs();
-    const next = { is_enabled: style !== null, style: style ?? current.style };
-    try {
-      const response = await postNotificationStyleWrite(
-        this.fetchImpl(),
-        current.version,
-        next.style,
-      );
-      if (response.status === 412) {
-        await this.loadPrefs();
-        if (this.shouldChooseNotificationStyle)
-          this.choiceError =
-            "Settings changed in another window. Please choose again.";
-      } else if (response.ok) {
-        const result = (await response.json()) as { version: string };
-        if (next.is_enabled !== current.is_enabled) {
-          const enabledResponse = await putAccountSettings(
-            this.fetchImpl(),
-            accountId,
-            { notifications_enabled: next.is_enabled },
-          );
-          if (!enabledResponse.ok) {
-            // The style write landed and changed the record's version: adopt
-            // it (keeping the card up via has_chosen) so a retry's style POST
-            // matches instead of 412-ing against this click's own write.
-            applyNotificationPrefs({
-              ...current,
-              style: next.style,
-              version: result.version,
-            });
-            this.choiceError = "Could not save your choice. Please try again.";
-            return;
-          }
-        }
-        applyNotificationPrefs({
-          ...next,
-          has_chosen: true,
-          version: result.version,
-        });
-      } else {
-        this.choiceError = "Could not save your choice. Please try again.";
-      }
-    } catch {
-      this.choiceError = "Could not save your choice. Please try again.";
-    } finally {
-      this.isSavingChoice = false;
-      this.redraw();
-    }
-  }
-
   /** Entry ids currently flashing as toasts, newest first. A transient view of
    * the feed: retiring one never touches the underlying entry. */
   liveToastIds: readonly string[] = [];
@@ -448,21 +373,11 @@ export class NotificationsUiController {
     store: Pick<NotificationsStore, "entries" | "unresolvedCount">,
   ): void {
     this.seenEntryIds = new Set(store.entries.map((entry) => entry.id));
-    this.hasReceivedNotification ||= store.entries.some(
-      (entry) => !entry.is_resolved,
-    );
     this.relayBadgeCount(store.unresolvedCount);
   }
 
   /** The channel's per-frame hook (wired in index.ts as onNotificationsChanged). */
   handleNotificationsMessage(message: UiNotificationsMessage): void {
-    const isFirstNotification =
-      !this.hasReceivedNotification &&
-      message.entries.some((entry) => !entry.is_resolved);
-    if (isFirstNotification) {
-      this.hasReceivedNotification = true;
-      void this.loadPrefs();
-    }
     const previouslySeen = this.seenEntryIds;
     const currentIds = new Set(message.entries.map((entry) => entry.id));
     this.seenEntryIds = currentIds;
@@ -665,8 +580,8 @@ export class NotificationsUiController {
   private async loadPrefsOnce(): Promise<void> {
     const generationAtStart = appliedPrefsGeneration;
     try {
-      // The window's account's record: the master toggle is account-keyed
-      // (and the chooser writes it there), so the gate must read the same one.
+      // The window's account's record: the master toggle is account-keyed,
+      // so the gate must read the same one.
       const accountId = this.hooks.accountId?.() ?? "local";
       const response = await this.fetchImpl()(
         `/ui/api/settings?account=${encodeURIComponent(accountId)}`,

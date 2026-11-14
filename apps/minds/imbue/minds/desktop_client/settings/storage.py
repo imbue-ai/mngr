@@ -29,11 +29,10 @@ def load_settings_context(
     if minds_config is None:
         install = InstallSettings()
     else:
-        notification_style, _has_chosen = minds_config.get_notification_style_with_choice()
         install = InstallSettings(
             sign_in_browser=minds_config.get_sign_in_browser_id(),
             report_unexpected_errors=minds_config.get_report_unexpected_errors(),
-            notification_style=notification_style,
+            notification_style=minds_config.get_notification_style(),
             allow_agent_command_execution=minds_config.get_allow_agent_command_execution(),
         )
     account = settings_store.read_settings(account_id) if settings_store is not None else AccountSettings()

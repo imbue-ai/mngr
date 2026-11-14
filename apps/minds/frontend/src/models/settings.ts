@@ -582,7 +582,6 @@ export class SettingsModel {
       const applied: NotificationPrefs = {
         ...current,
         ...next,
-        has_chosen: true,
         version: result.version,
       };
       // Merge onto the CURRENT overview, not the pre-await `overview`

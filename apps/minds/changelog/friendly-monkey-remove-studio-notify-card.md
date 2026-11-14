@@ -1,0 +1,1 @@
+Removed the "How should Imbue Studio notify you?" card that appeared after the first notification. Notifications now stay on the default (in-app cards and system banners) until changed in Settings > Notifications. The settings overview's `notification_prefs` no longer carries `has_chosen`.

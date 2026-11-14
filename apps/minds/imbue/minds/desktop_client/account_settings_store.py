@@ -110,21 +110,6 @@ class AccountSettingsStore(AccountDocumentStore[AccountDocumentRecord]):
             return SUPPORTED_SETTINGS_FORMAT
         return max(_stored_settings_format(record), record.document_format)
 
-    def is_notifications_enabled_chosen_anywhere(self) -> bool:
-        """Whether any account's record (the device's included) carries an explicit master-toggle choice.
-
-        Install-wide on purpose: "has the user chosen notification preferences"
-        gates the one-time first-choice card, and before the settings moved to
-        per-account records one install-wide copy answered it for every window.
-        """
-        with self._lock:
-            self._load_unlocked()
-            return any(
-                "notifications_enabled" in record.metadata
-                for by_doc_id in self._records_by_user_id.values()
-                for record in by_doc_id.values()
-            )
-
     # Writes
     def apply_settings_values(self, user_id: str, value_by_key: Mapping[str, object]) -> None:
         """Merge explicitly-chosen setting values into the account's record and mark it for the next push.

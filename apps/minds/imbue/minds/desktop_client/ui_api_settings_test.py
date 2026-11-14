@@ -352,10 +352,8 @@ def test_the_master_notifications_toggle_is_written_through_the_account_settings
     assert response.status_code == 200
     assert json.loads(response.data)["notifications_enabled"] is False
     assert settings_store.read_settings("local").notifications_enabled is False
-    # The style is untouched, and either key counts as a saved notification choice.
-    assert minds_config.get_notification_style_with_choice() == (NotificationStyle.BOTH, False)
-    prefs = json.loads(client.get("/ui/api/settings").data)["notification_prefs"]
-    assert (prefs["is_enabled"], prefs["has_chosen"]) == (False, True)
+    assert minds_config.get_notification_style() == NotificationStyle.BOTH
+    assert json.loads(client.get("/ui/api/settings").data)["notification_prefs"]["is_enabled"] is False
 
 
 def test_error_reporting_write_with_a_malformed_body_is_rejected_with_400(tmp_path: Path) -> None:
@@ -419,8 +417,7 @@ def test_settings_overview_carries_the_default_notification_prefs_with_their_own
     assert json.loads(response.data)["notification_prefs"] == {
         "is_enabled": True,
         "style": "both",
-        "has_chosen": False,
-        "version": compute_notification_style_version(style="both", has_chosen=False),
+        "version": compute_notification_style_version(style="both"),
     }
 
 
@@ -450,36 +447,11 @@ def test_notification_prefs_write_round_trips_with_the_served_version(tmp_path: 
     )
 
     assert response.status_code == 200
-    new_version = compute_notification_style_version(style="cards", has_chosen=True)
+    new_version = compute_notification_style_version(style="cards")
     assert json.loads(response.data)["version"] == new_version
-    assert minds_config.get_notification_style_with_choice() == (NotificationStyle.CARDS, True)
+    assert minds_config.get_notification_style() == NotificationStyle.CARDS
     # The next overview serves the written values under the new version.
     assert json.loads(client.get("/ui/api/settings").data)["notification_prefs"]["version"] == new_version
-
-
-def test_choosing_default_notifications_is_persisted_and_rejects_another_windows_stale_choice(tmp_path: Path) -> None:
-    config_dir = tmp_path / "config"
-    client, _app, _auth_store = build_desktop_client_for_test(
-        tmp_path, is_authenticated=True, minds_config=MindsConfig(data_dir=config_dir)
-    )
-    prefs = json.loads(client.get("/ui/api/settings").data)["notification_prefs"]
-    assert prefs["has_chosen"] is False
-    assert prefs["style"] == "both"
-    response = client.post(
-        "/ui/api/settings/notifications",
-        json={"style": "both"},
-        headers={"If-Match": prefs["version"]},
-    )
-    assert response.status_code == 200
-    assert json.loads(response.data)["version"] != prefs["version"]
-    assert MindsConfig(data_dir=config_dir).get_notification_style_with_choice() == (NotificationStyle.BOTH, True)
-    assert json.loads(client.get("/ui/api/settings").data)["notification_prefs"]["has_chosen"] is True
-    stale = client.post(
-        "/ui/api/settings/notifications",
-        json={"style": "cards"},
-        headers={"If-Match": prefs["version"]},
-    )
-    assert stale.status_code == 412
 
 
 def test_notification_style_write_lands_in_one_config_write(tmp_path: Path) -> None:
@@ -502,7 +474,7 @@ def test_notification_style_write_lands_in_one_config_write(tmp_path: Path) -> N
 
     assert response.status_code == 200
     assert minds_config.write_count == 1
-    assert minds_config.get_notification_style_with_choice() == (NotificationStyle.OS, True)
+    assert minds_config.get_notification_style() == NotificationStyle.OS
 
 
 def test_notification_prefs_write_with_a_malformed_style_is_rejected_with_400(tmp_path: Path) -> None:
@@ -519,7 +491,7 @@ def test_notification_prefs_write_with_a_malformed_style_is_rejected_with_400(tm
     )
 
     assert response.status_code == 400
-    assert minds_config.get_notification_style_with_choice()[0] == "both"
+    assert minds_config.get_notification_style() == "both"
 
 
 def test_notification_prefs_write_with_a_stale_version_is_rejected_with_412(tmp_path: Path) -> None:
@@ -527,7 +499,7 @@ def test_notification_prefs_write_with_a_stale_version_is_rejected_with_412(tmp_
     client, _app, _auth_store = build_desktop_client_for_test(
         tmp_path, is_authenticated=True, minds_config=minds_config
     )
-    stale_version = compute_notification_style_version(style="both", has_chosen=False)
+    stale_version = compute_notification_style_version(style="both")
     # Another window changes the style after this page loaded its version.
     (tmp_path / "config").mkdir(parents=True, exist_ok=True)
     (tmp_path / "config" / "config.toml").write_text('notification_style = "os"\n')
@@ -540,7 +512,7 @@ def test_notification_prefs_write_with_a_stale_version_is_rejected_with_412(tmp_
 
     assert response.status_code == 412
     # The stale write must not have clobbered the newer value.
-    assert minds_config.get_notification_style_with_choice()[0] == "os"
+    assert minds_config.get_notification_style() == "os"
 
 
 def test_notification_prefs_write_without_if_match_is_rejected_with_428(tmp_path: Path) -> None:
@@ -555,7 +527,7 @@ def test_notification_prefs_write_without_if_match_is_rejected_with_428(tmp_path
     )
 
     assert response.status_code == 428
-    assert minds_config.get_notification_style_with_choice()[0] == "both"
+    assert minds_config.get_notification_style() == "both"
 
 
 def test_notification_prefs_write_without_a_minds_config_is_rejected_with_503(tmp_path: Path) -> None:

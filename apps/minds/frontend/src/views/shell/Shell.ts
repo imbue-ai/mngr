@@ -36,8 +36,6 @@ import { SidebarMenu } from "./SidebarMenu";
 import { AccountSwitcherMenu } from "./AccountSwitcher";
 import { Titlebar } from "./Titlebar";
 import { ToastLayer } from "./ToastLayer";
-import { NotificationChoiceCard } from "./NotificationChoiceCard";
-import { resolveWindowFocus } from "../../window-focus";
 import { Wash } from "./Wash";
 import { WorkspaceFrame } from "./WorkspaceFrame";
 import { LocalPageNotice } from "./LocalPageNotice";
@@ -475,19 +473,6 @@ export function Shell(): m.Component<ShellAttrs> {
                   shell.notificationsUi?.openEntry(item.entry);
               },
             })
-          : null,
-        shell.notificationsUi?.shouldChooseNotificationStyle &&
-        electronBridge.isDesktop &&
-        resolveWindowFocus(undefined) &&
-        !isCaptureMode
-          ? m(
-              "div",
-              {
-                class:
-                  "fixed bottom-4 left-4 z-[150] w-[390px] max-w-[calc(100vw-2rem)]",
-              },
-              m(NotificationChoiceCard, { controller: shell.notificationsUi }),
-            )
           : null,
         // Bottom right, out of the way: the update is not urgent, and the app
         // stays fully usable with it on screen.

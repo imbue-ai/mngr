@@ -9,7 +9,6 @@ from imbue.minds.desktop_client.minds_config import NotificationStyle
 from imbue.minds.desktop_client.minds_config import WorkspaceAutoUpdateMode
 from imbue.minds.desktop_client.minds_config import WorkspaceAutoUpdateOverride
 from imbue.minds.desktop_client.minds_config import effective_auto_update
-from imbue.minds.desktop_client.testing import ReadCountingMindsConfig
 from imbue.minds.desktop_client.testing import WriteCountingMindsConfig
 from imbue.minds.errors import MindsConfigError
 
@@ -182,48 +181,25 @@ def test_multiple_settings_coexist(tmp_path: Path) -> None:
     assert config.get_report_unexpected_errors() is False
 
 
-def test_notification_style_defaults_with_no_choice(tmp_path: Path) -> None:
-    """On a fresh install: style 'both', nothing chosen yet."""
+def test_notification_style_defaults_to_both(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
-    assert config.get_notification_style_with_choice() == (NotificationStyle.BOTH, False)
+    assert config.get_notification_style() == NotificationStyle.BOTH
 
 
 def test_malformed_notification_style_falls_back_to_the_default(tmp_path: Path) -> None:
     """A malformed stored style reads as the default rather than exploding, mirroring _get_bool."""
     config = _make_config(tmp_path)
     (tmp_path / "config.toml").write_text('notification_style = "shout"\n')
-    assert config.get_notification_style_with_choice()[0] == "both"
+    assert config.get_notification_style() == "both"
     (tmp_path / "config.toml").write_text("notification_style = 3\n")
-    assert config.get_notification_style_with_choice()[0] == "both"
+    assert config.get_notification_style() == "both"
 
 
-def test_an_existing_saved_style_counts_as_a_choice(tmp_path: Path) -> None:
-    (tmp_path / "config.toml").write_text('notification_style = "cards"\n')
-    assert _make_config(tmp_path).get_notification_style_with_choice() == (NotificationStyle.CARDS, True)
-
-
-def test_a_legacy_master_toggle_in_the_config_still_counts_as_a_choice(tmp_path: Path) -> None:
-    """An install the migration has not visited may still hold the moved key; its presence is a saved choice."""
-    (tmp_path / "config.toml").write_text("notifications_enabled = false\n")
-    assert _make_config(tmp_path).get_notification_style_with_choice() == (NotificationStyle.BOTH, True)
-
-
-def test_get_notification_style_with_choice_reads_under_one_lock_acquisition(tmp_path: Path) -> None:
-    """One _read_raw() call, not two: the style and the choice flag feed one If-Match version,
-    so they must come from one snapshot of the file."""
-    config = ReadCountingMindsConfig(data_dir=tmp_path)
-    read_count_before = config.read_count
-
-    config.get_notification_style_with_choice()
-
-    assert config.read_count - read_count_before == 1
-
-
-def _notification_style_test_version(style: NotificationStyle, has_chosen: bool = False) -> str:
+def _notification_style_test_version(style: NotificationStyle) -> str:
     """A trivial, deterministic version stamp -- these tests only care that
     set_notification_style_if_version_matches treats a mismatch as a mismatch, not about
     the real hashing scheme (that lives in ui_api_settings.py)."""
-    return f"{style}:{has_chosen}"
+    return f"v-{style}"
 
 
 def test_set_notification_style_if_version_matches_applies_on_a_matching_version(tmp_path: Path) -> None:
@@ -234,12 +210,11 @@ def test_set_notification_style_if_version_matches_applies_on_a_matching_version
         expected_version=starting_version,
         compute_version=_notification_style_test_version,
         style=NotificationStyle.OS,
-        is_chosen_elsewhere=False,
     )
 
-    assert new_version == _notification_style_test_version(NotificationStyle.OS, True)
+    assert new_version == _notification_style_test_version(NotificationStyle.OS)
     assert config.write_count == 1
-    assert config.get_notification_style_with_choice() == (NotificationStyle.OS, True)
+    assert config.get_notification_style() == NotificationStyle.OS
 
 
 def test_set_notification_style_if_version_matches_rejects_a_stale_version_without_writing(tmp_path: Path) -> None:
@@ -254,12 +229,11 @@ def test_set_notification_style_if_version_matches_rejects_a_stale_version_witho
         expected_version=stale_version,
         compute_version=_notification_style_test_version,
         style=NotificationStyle.CARDS,
-        is_chosen_elsewhere=False,
     )
 
     assert result is None
     assert config.write_count == 0
-    assert config.get_notification_style_with_choice() == (NotificationStyle.OS, True)
+    assert config.get_notification_style() == NotificationStyle.OS
 
 
 def test_set_notification_style_if_version_matches_closes_the_check_then_act_race(tmp_path: Path) -> None:
@@ -275,35 +249,17 @@ def test_set_notification_style_if_version_matches_closes_the_check_then_act_rac
         expected_version=starting_version,
         compute_version=_notification_style_test_version,
         style=NotificationStyle.OS,
-        is_chosen_elsewhere=False,
     )
     second = config.set_notification_style_if_version_matches(
         expected_version=starting_version,
         compute_version=_notification_style_test_version,
         style=NotificationStyle.CARDS,
-        is_chosen_elsewhere=False,
     )
 
     assert first is not None
     assert second is None
     assert config.write_count == 1
-    assert config.get_notification_style_with_choice()[0] == NotificationStyle.OS
-
-
-def test_the_style_cas_folds_in_a_choice_recorded_in_the_settings_records(tmp_path: Path) -> None:
-    """The served version ORs in a master-toggle choice from the account settings records,
-    so the check here must see the same has_chosen or every write would 412."""
-    config = WriteCountingMindsConfig(data_dir=tmp_path)
-    version_with_choice = _notification_style_test_version(NotificationStyle.BOTH, True)
-
-    new_version = config.set_notification_style_if_version_matches(
-        expected_version=version_with_choice,
-        compute_version=_notification_style_test_version,
-        style=NotificationStyle.CARDS,
-        is_chosen_elsewhere=True,
-    )
-
-    assert new_version == _notification_style_test_version(NotificationStyle.CARDS, True)
+    assert config.get_notification_style() == NotificationStyle.OS
 
 
 def test_a_style_write_retires_the_stored_os_hint_flag(tmp_path: Path) -> None:
@@ -312,16 +268,13 @@ def test_a_style_write_retires_the_stored_os_hint_flag(tmp_path: Path) -> None:
     (tmp_path / "config.toml").write_text("notification_os_hint_dismissed = true\n")
 
     config.set_notification_style_if_version_matches(
-        expected_version=_notification_style_test_version(NotificationStyle.BOTH, True),
+        expected_version=_notification_style_test_version(NotificationStyle.BOTH),
         compute_version=_notification_style_test_version,
         style=NotificationStyle.OS,
-        # The hint key predates the choice flag's config half, so the stored
-        # record reads as already chosen through the legacy toggle check.
-        is_chosen_elsewhere=True,
     )
 
     assert "notification_os_hint_dismissed" not in (tmp_path / "config.toml").read_text()
-    assert config.get_notification_style_with_choice()[0] == NotificationStyle.OS
+    assert config.get_notification_style() == NotificationStyle.OS
 
 
 def test_set_report_unexpected_errors_if_version_matches_applies_on_a_matching_version(tmp_path: Path) -> None:
@@ -426,7 +379,7 @@ def test_migration_delete_removes_only_the_moved_keys(tmp_path: Path) -> None:
     assert "window_start_hour" not in raw
     assert "auto_update_workspaces" not in raw
     # The style is install-keyed and stays; the skipped targets move in their own (3B) migration.
-    assert config.get_notification_style_with_choice() == (NotificationStyle.CARDS, True)
+    assert config.get_notification_style() == NotificationStyle.CARDS
     assert config.read_skipped_update_targets_for_migration() == {"agent-1": "minds-v1"}
 
 

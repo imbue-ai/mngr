@@ -184,7 +184,6 @@ function main(): void {
   window.addEventListener("blur", () => channel.resendClientState());
   electronBridge.onWindowFocusChanged((isFocused) => {
     setRelayedWindowFocus(isFocused);
-    m.redraw();
     channel.resendClientState();
     if (isFocused) void notificationsUi.loadPrefs();
   });

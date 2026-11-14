@@ -123,17 +123,6 @@ def test_a_malformed_record_resolves_from_the_defaults(tmp_path: Path) -> None:
     assert store.read_settings(user_id) == AccountSettings()
 
 
-def test_is_notifications_enabled_chosen_anywhere_sees_every_accounts_record(tmp_path: Path) -> None:
-    store = _make_store(tmp_path)
-    assert store.is_notifications_enabled_chosen_anywhere() is False
-    store.apply_settings_values(uuid4().hex, {"auto_update_workspaces": True})
-    assert store.is_notifications_enabled_chosen_anywhere() is False
-
-    store.apply_settings_values(uuid4().hex, {"notifications_enabled": True})
-
-    assert store.is_notifications_enabled_chosen_anywhere() is True
-
-
 def test_seed_if_absent_never_overwrites_an_existing_record(tmp_path: Path) -> None:
     user_id = uuid4().hex
     store = _make_store(tmp_path)

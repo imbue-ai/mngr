@@ -375,21 +375,6 @@ def make_minds_config_allowing_agent_command_execution(data_dir: Path) -> MindsC
     return minds_config
 
 
-class ReadCountingMindsConfig(MindsConfig):
-    """MindsConfig double that counts config-file reads: each is one lock-guarded load, so counting
-    them proves whether a multi-field getter reads its fields under one lock acquisition or several."""
-
-    _read_count: int = PrivateAttr(default=0)
-
-    def _read_raw(self) -> dict[str, object]:
-        self._read_count += 1
-        return super()._read_raw()
-
-    @property
-    def read_count(self) -> int:
-        return self._read_count
-
-
 def is_workspace_options_pane_hidden(html: str, pane: str) -> bool:
     """Whether the workspace options panel ships ``pane`` hidden (it must ship both).
 
