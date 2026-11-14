@@ -1,1 +1,0 @@
-The JSONL `error` event (`--format jsonl`) now carries an error's structured facts under `details` when it has any: `MngrError.event_details()` returns them (none by default), so a caller can word the failure itself instead of parsing the message. An unreachable provider (`ProviderUnavailableError`) reports its `short_reason` and, when it names one, its `short_remediation` there.

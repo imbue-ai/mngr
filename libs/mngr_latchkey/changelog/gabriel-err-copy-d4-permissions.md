@@ -1,1 +1,0 @@
-Add `is_chrome_profile_missing_failure`, which tells a failed `latchkey auth import-chrome` that found no Google Chrome profile to import from, and `is_scopes_not_granted_failure`, which tells a strict browser sign-in whose consent screen was left with some access unticked, so callers can word those failures for the user.

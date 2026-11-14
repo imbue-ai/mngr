@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-13
+
+A quota refusal (`ImbueCloudQuotaExceededError`) now reports its entitlement, limit and current use in the JSONL `error` event's `details`, so Imbue Studio can name the plan limit that refused a create. A plan switch the connector refuses with a stated reason (the ally plan's eligibility, or a waitlisted account) raises `ImbueCloudPlanRefusedError` and fails with `code: plan_refused`, so callers can tell it from a failure worth retrying; a waitlisted account's refusal no longer reads as "Unauthenticated (403)".
+
+`mngr imbue_cloud shares invite --help` now names the `no_workspace_link` refusal, which Imbue Cloud returns for an invitation to a workspace whose link or name has not reached it yet.
+
+Gen-2 slice VMs get a new every-boot oneshot, `mngr-btrfs-reclaim.service`, that turns on the data filesystem's automatic reclaim of sparse data block groups (`dynamic_reclaim` and `periodic_reclaim`). Without it, data block groups come to own the whole disk on a busy workspace, metadata can no longer grow, and writes and even deletes fail with ENOSPC while `df` still shows free space. It acts only on a kernel carrying the fix for a transaction abort reclaim could otherwise trigger (6.12.114 or later in the 6.12 series, 6.18.14 or later in the 6.18 series, or 7.0 and later), and leaves reclaim off on any other.
+
 ## 2026-11-10
 
 The connector client takes part in Imbue Studio's opt-in profiling mode. Every attempt `ImbueCloudConnectorClient._send` makes runs inside a `connector.request` span of the `imbue_common` tracer, with the arguments `method`, `path` (the route without its query string), `attempt`, `trace_id`, `span_id`, and the response `status` (or the transport error's class name when the attempt failed), and while a profiling mode is enabled the request carries a W3C `traceparent` header built from that span's own ids, alongside the bearer and client-id headers. The connector's access log records the header, so a trace id from a desktop trace finds the server-side duration of every connector call it caused. A token refresh in `auth_helper` (`force_refresh`, and `get_active_token` when the access token is near expiry) runs inside a `connector.token_refresh` span. Until a profiling mode is enabled the tracer is a no-op and no header is sent, so the client's requests are unchanged.

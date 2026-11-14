@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-13
+
+The default Lima guest images (`DEFAULT_IMAGE_URL_AARCH64` and `DEFAULT_IMAGE_URL_X86_64`) move to the Debian 13 genericcloud `20261103-2651` release (kernel 6.12.115-2), matching the gen-2 slice guest image and the template's `[providers.lima]` pins.
+
 ## 2026-11-09
 
 Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.

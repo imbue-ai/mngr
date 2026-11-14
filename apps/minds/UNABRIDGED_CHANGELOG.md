@@ -4,6 +4,224 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-13
+
+Removed the "How should Imbue Studio notify you?" card that appeared after the first notification. Notifications now stay on the default (in-app cards and system banners) until changed in Settings > Notifications. The settings overview's `notification_prefs` no longer carries `has_chosen`.
+
+Shared pieces for plainer error messages in the desktop app, which later changes adopt as they rewrite their messages (no message changes here):
+
+- An error display: a tinted box holding a red alert mark, our sentence beside it in ordinary black text, a grey "See details" trailing that sentence which opens the status, server text or output in place, and then the buttons that fit the error. Amber in place of red for a condition the user fixes themselves or that clears on its own, and amber with a quiet "Still trying..." while the app is retrying on its own, since nothing has failed yet. The box can carry longer content such as steps or a list in place of the sentence, and an error drawn inside another error's box (why an "Ask the agent to fix it" couldn't start, under that error's buttons) takes no tint of its own, so one failure reads as one box. It comes as an in-place notice and as a styled dialog that any screen can raise in place of a native alert.
+
+- An error's buttons are the fixes for it: the first is its main one, drawn as the primary button, unless the sentence asks the user to do something and that button only confirms it afterwards (Retry, Try again, Check again), in which case it waits as a secondary. A way out (Dismiss, Discard) follows the fixes as a ghost and is never the main button, and "Report a bug" comes last, a ghost beside other buttons and a button of its own when it is alone. A button can also be drawn in the danger color (a Deny), show a spinner while it runs, or be shown disabled with a tooltip saying why. They are drawn smaller than the surface's own buttons, which stay in the surface's own footer below the box.
+
+- Error sentences are written in a small markup the app renders: a command in `backticks` is set as code, and *the ask* -- the instruction the user is to follow -- is set apart in semibold italic, so it stands out from the generic "Try again. If this persists, report a bug." around it. A bug report, a native alert and the log carry the sentence with the markup taken off.
+
+- An inline error for what is too small to be a notice -- under a field, or in a card's meta line -- keeps red text at helper size with the same mark.
+
+- "Report a bug" on an error opens the bug-report form with the error's sentence and details attached; the form shows them under "Details attached to this report", and the report sent to Imbue carries them. If the user switches the form to having an agent help instead, they show under "Details the agent will see" and go into the agent's chat.
+
+- When the styled dialog cannot be shown, the native alert fallback gives the sentence plus "See the log for details." and writes the details to the log.
+
+- A fallback for a failed request with no usable reason ("<what failed>. Try again. If this persists, report a bug.", or "Imbue Studio didn't respond. Try again in a moment." when no response came back); every use states whether the user can try again, and one that can't drops "Try again", keeping the raw response for the details.
+
+- An "Ask the agent" button that starts a chat in a workspace seeded with a description, through the same route as the help page's "Start agent". It can sit among an error's buttons, with a failed start shown under them. When the workspace refuses the start (for example, it has no agent-assist skill), the button is withdrawn and the refusal shows without "Report a bug".
+
+- One set of remedies (restart Imbue Studio, update Imbue Studio, ask the agent) that a route can name beside its error and the app draws as the same button on every screen, whether the route named it or the screen picked it for an error it words itself.
+
+- An "Update Imbue Studio" button, for an error that refuses this version as too old, that opens the app's Updates settings, and on macOS a "Reopen Imbue Studio" button that quits the app through its usual quit prompt and starts it again, for a fix (like a Full Disk Access grant) that applies only after a relaunch.
+
+- A rule for a panel's own buttons beside an error on the same panel: while the error leads its row with a main button, the panel's primary button is drawn secondary, so the error's fix is the one dark button there.
+
+- Every error dialog is titled by what failed ("Couldn't start \"alpha\""), with the mark on that title and the sentence flush under it saying why and what to do -- and that sentence drops a lead the title already says, so the dialog never says the same thing twice. A caller with no title of its own gets "Hit a snag" rather than an untitled dialog. The dialog's x is the only way to dismiss it -- there is no Close button beside it, and a dialog with nothing to press has no button row at all.
+
+Plainer error messages on the workspaces list, when opening a workspace, and on the recovery card:
+
+- A workspace that is still loading keeps its spinner and, after about ten seconds, says why under it. Where this device can't build the connection, it says so at once and offers "Restart Imbue Studio" on desktop. A workspace discovery has reported and doesn't know offers Back to workspaces after the ten seconds: one still in the list says Imbue Studio can't find it right now, and one that isn't says it may have been removed. A dropped connection says "The connection to this workspace dropped." with Try again (on desktop, beside a main "Restart Imbue Studio" button), and an expired workspace link offers to open the workspace again.
+
+- The recovery card says what failed in one sentence (the internal reason behind "See details"), puts its buttons inside that error, shows a refused or lost restart, and lists the restart's steps in plain language above how it ended, with the full log behind the same "See details" as the verdict and the SSH command under "Connection details". A provider's named fix is shown ("To fix it, *start Docker*."), and a network that blocks SSH is said once, on the card. Where the app is still retrying on its own -- an unreachable provider, a restart it lost track of -- the card says so as a warning rather than a failure, and the card's heading no longer spins while it does.
+
+- Status badges beside a workspace's name are set at the smaller, heavier size the rest of the error design uses. List badges name the recovery that ran ("Restart failed", "Couldn't reconnect", or "Not responding" when nothing ran), and a workspace that needs the network isn't badged while this computer is offline or on a network that blocks the connection. When workspace details fail to load, the list says so in red with Retry and Report a bug.
+
+- A failed Start or Stop opens a styled dialog titled by what failed ("Couldn't start \"alpha\""), with Try again and the provider's own reason under that title when the provider is what failed (Docker not running, say); a workspace Imbue Cloud holds is titled "Can't start ..." and gets Imbue Cloud's own sentence instead. Held workspaces can also read "Suspended" or "Unavailable", with a tooltip saying why, and remote-row chips explain themselves on hover.
+
+- A provider, account or connection row whose check failed says under its name line, across the row, the provider's own reason (an expired login, say), then that its workspaces may be missing from the list and the provider's fix, with the raw error behind "See details" and Report a bug. The command a fix names is set as code, and because the copy asks the user to run it first, the row's Check again waits on that rather than leading as the main button. A connection whose login isn't set up on this computer reads as a warning. The panel header counts rows that need attention. A failed Check again, connection removal or connection form uses the styled dialog instead of an alert, each titled by what failed, a connection whose provider this version doesn't support offers "Update Imbue Studio", and the in-use refusal counts workspaces without naming an internal id.
+
+- An unexpected page error shows a styled "Something went wrong" page, and a spent login link suggests restarting Imbue Studio.
+
+Plainer, actionable messages when creating a workspace, in the start chat, and when signing in or managing accounts. Each says what failed, adds the cause when Imbue Studio knows it, keeps the raw error behind "See details", and offers Report a bug unless it is something the user fixes themselves:
+
+- A failed create is drawn with the chat's own pieces rather than the tinted box the rest of the app uses: the alert mark leads the sentence as an agent turn, "See details" trails it, and the ways forward are the user's answer row underneath -- the surest fix emphasized at its right, Dismiss and Report a bug as quiet links at its left. The step each sentence asks for is set apart from the rest of it, and a command it names is set as code.
+
+- A failed create reads "Couldn't create <name>." with a cause sentence when recognised: a repository it couldn't get (worded for GitHub, other hosts and SSH), a missing branch or tag, a branch it couldn't switch to, a missing local folder, an unresolved provider or account, an unreachable provider (with the provider's own fix, e.g. "start Docker"), a name already taken, an unverified or suspended account, an app too old for Imbue Cloud, no room on Imbue Cloud, the waitlist, a named plan limit, an unknown outcome, or an unreadable template. The create log is behind "See details", also for a failure watched live.
+
+- Retry is offered only where it can help. Imbue Cloud refusals offer "Run on this computer" (turning Imbue Cloud backups and sharing off where the account can't use Imbue Cloud), and an app too old also offers "Update Imbue Studio". These sit in the failure's answer row, the surest fix first (Update Imbue Studio, then Run on this computer, then Retry), with "Dismiss" among the row's quiet links. A Retry that can't be used (its connection was removed) is greyed out with the reason on hover, and the sentence gives that reason instead of asking for a retry; an interrupted create reads as a warning rather than a failure, and in that state leads with Discard.
+
+- Discarding an interrupted create stays on the page until the leftover is removed, then the row leaves the workspaces list; a failed discard says so.
+
+- The create form and Create from Template word the server's refusals plainly, show one naming a form field under that field as a small red line with the same mark, refuse up front a create under an account signed out since the form loaded, offer Sign in for a create refused for want of a signed-in account, and offer Restart Imbue Studio for a create that got no answer or a lapsed window login. While such a refusal (or a failed AI-key mint or account action) offers its fix, the page's own Create, Create key or Add account button steps down to secondary.
+
+- The start chat says "I couldn't set that up: <reason>." and names an offered account that is no longer signed in.
+
+- Account cards say why the plan, usage or notification settings couldn't load, with Try again, Sign in, Update Imbue Studio or Restart Imbue Studio. Manage Accounts names the action that failed ("Couldn't log out <email>."), and a plan switch Imbue Cloud refuses gives its reason without asking for a retry. A failed AI-key mint says so in our words.
+
+- The Sign in to Imbue dialog uses our own sentences, and drops Try again when the sign-in went through but couldn't be saved on this computer. The Sign in with Imbue key page gets Try again, and "Open workspace settings" (its Account section) for a workspace with no Imbue account. The window's login page offers "Restart Imbue Studio" instead of terminal instructions.
+
+- The providers panel reports connection failures in the styled error dialog instead of a native alert, each titled by what failed ("Couldn't remove team modal") with the cause under that title, says how many workspaces still use a connection being removed, and offers Update Imbue Studio for one a newer version added.
+
+- The provider sign-in relay page tells an unreachable workspace from one that couldn't take the sign-in, and says when only the workspace's owner can connect an account.
+
+Plainer messages in the share panel, with a button for the next step wherever there is one:
+
+- Every sharing failure now carries why it failed, and the panel says it in its own words, with the underlying text behind "See details" and a "Report a bug" button where nothing else explains it.
+
+- A stopped workspace is no longer told it is too old to be shared: one notice says "This workspace is stopped. Start it, then try again." with a "Start workspace" button, which comes back to the Share tab once the workspace answers. A running workspace that can't be reached gets one notice too, naming what couldn't be done (setting up sharing, saving a change, sending an invitation), with "Try again" when turning sharing on. Reopening the Share tab after the workspace answers no longer shows the earlier failures. A workspace that really is too old says so, with an "Update workspace" button.
+
+- Sharing that needs an account says which step is missing: sign in (with "Sign in"), sign in to the account that owns the workspace, link the workspace to an account (with a button to its account settings), or that the list of signed-in accounts could not be read.
+
+- An expired Imbue Cloud sign-in, a waitlisted account, and a plan's shared-workspace limit ("Your plan allows 3 shared workspaces and 3 are shared already...") each get their own sentence instead of command output. A full plan also offers "Review shared workspaces"; a waitlisted account, which no freed slot would help, does not.
+
+- A workspace whose sharing could not be checked is no longer drawn as unshared; the panel says it couldn't check, with "Try again" and "Report a bug", or asks you to sign in to the account that owns the workspace.
+
+- Turning sharing on or off when it fails for a reason the panel can't name, an Imbue Cloud failure among them, offers "Try again".
+
+- A link that never answers is no longer shown as ready after five minutes: the panel says "This link still isn't answering." with a "Try again" that turns sharing off and on, "Ask the agent to fix it" and "Report a bug". The setup steps no longer mention the relay.
+
+- An app with no link yet explains that it gets one the first time it starts (or that the workspace needs starting) instead of spinning forever.
+
+- A person whose access could not be saved says "Couldn't add" or "Couldn't remove — still has access" on their card, with "See details" and "Retry"; a refused entry says why and offers "Remove" instead of a Retry that would be refused again. A refused invitation gets "See details" too.
+
+- An unreadable sharing list inside the workspace offers "Ask the agent to fix it" as its main button.
+
+- Invitation and mobile-link failures say plainly what went wrong, including "This workspace's link isn't ready yet. Invite again in a minute." instead of "This person has already joined."
+
+- A failed move to a new sharing address offers "Restart sharing" and keeps the switch drawn as on.
+
+- Inviting, listing and revoking visiting agents say what failed in plain words, with "Start workspace", "Update workspace", "Open account settings" or "Restart sharing" where they help. A list that couldn't be read offers "Try again", or only "Start workspace" when the workspace is stopped.
+
+- The shared-workspaces page says when an account's shares couldn't be read, with "Try again" for that account (or "Sign in"), and says plainly when a share couldn't be removed.
+
+Plainer update messages:
+
+- A failed update check says "Couldn't check for updates — check your internet connection, then try again." for a network failure or timeout, and the fallback sentence with "Report a bug" otherwise, in an error box whose main button is "Try again" (in place of the panel's "Check now") and with the updater's text behind "See details". A failed download now says the new version couldn't be downloaded and will be tried again at the next check, instead of reading as a failed check.
+
+- An update that didn't go out, on a workspace's Updates tab, ends with what to do next and keeps the workspace's output behind "See details", with "Try again" and (only where nothing explains the failure) "Report a bug" in one row; a workspace too old to update itself leads with "Ask its agent", then "Create a new workspace", and offers no "Try again", which can't work there.
+
+- Scheduling, cancelling or skipping an update, and opening the sign-in chat for one, say what to do when they fail ("Make sure it's running, then try again.", "Try again in a moment."), a schedule refused because the workspace is stopped leads with "Start workspace" (with "Try again" beside it), and a missed update window no longer blames "another update flow".
+
+- The automatic-updates switch, the one-time auto-update offer, "Use Studio settings" and a workspace's own automatic-updates choice say plainly when a change wasn't saved, with "Try again" and the details collapsed, instead of an HTTP status.
+
+- The no-backups question explains that the update keeps a history of your files and can be rolled back, instead of mentioning git.
+
+- A Linux copy run from source shows the install command that updates it, and an AppImage started without its file says how it gets updates, instead of "Updates are disabled in dev builds."
+
+- A refused "Schedule all updates" or "Update all now" shows its failure under the buttons instead of in a native alert, with "Restart Imbue Studio" when this window needs reconnecting.
+
+- While an update error shows its own main button (a too-old workspace's "Ask its agent", "Restart Imbue Studio" for a window that needs reconnecting), the Updates tab's "Schedule update" or "Update now", the kernel card's restart, the strip's "Schedule all updates" and, beside a failed update check, the Settings panel's install button are drawn as secondary buttons, so the fix is the one main button.
+
+- The Updates panel and the "ready to install" card say what failed in their own words (with "Try again" on a failed load) instead of a stringified error.
+
+Plainer workspace settings and Settings page messages:
+
+- Asking a workspace's agent for help ("Ask its agent", "Ask the agent to fix it") starts the workspace first when it is stopped. When an agent can't be started, a workspace too old to start a helper offers "Update workspace", and other failures offer "Try again", with the details collapsed.
+
+- An expired Imbue Cloud sign-in no longer reads as an unreachable workspace when renaming or recoloring it: it says to sign in again, with "Sign in".
+
+- A size an Imbue Cloud plan has no room for says "Your plan doesn't have room for this size right now. Pick a smaller size.", with the quota behind "See details"; saving the size a machine already has says "That's already this machine's size." for both the size picker and the typed sizes.
+
+- Renaming a workspace to a name another workspace has says "A workspace named '<name>' already exists. Pick a different name."
+
+- Loading a workspace's settings or your Settings, renaming, resizing, recoloring, linking or unlinking its account, saving notification, update-window and sign-in-browser settings, and changing the master password each say what failed in plain words, with "Try again" or "Restart Imbue Studio" where they help. A master-password change some accounts didn't take lists them as an error, with each account's reason behind "See details" and "Report a bug".
+
+- Folder sync says "Pick a folder on this computer to sync.", says "workspace" rather than "machine", and a folder no longer set up to sync offers its switch instead of a "Try again" that cannot work.
+
+Every one of these errors is drawn to the shared error design: the alert mark leads a black sentence in a tinted box, "See details" trails that sentence, and the step a sentence asks for is set apart from the rest of it. Smaller refusals -- a name already taken, an invalid colour, a size that isn't a whole number, a refused share entry, a refused invitation, a zoom the app wouldn't take -- keep red text at the smaller size with the same mark, rather than reading as full notices. The permissions pane's own error line carries the mark too.
+
+Where a surface used to state a failure in a line of its own and put the error under it, the error now carries that sentence: the Updates tab's status line is dropped for the update that didn't start and for a sign-in the workspace refused, so the failure is said once, with the tab's heading carrying the mark and the sentence under it flush. The update-ready card's install failure spans the card under its content row. Help's "Couldn't start an agent" puts the mark on that heading and sits the sentence flush under it, with "Back to report" below as the surface's own button. A failed "Ask the agent to fix it" start is said on the tint of the error whose button started it, rather than in a box of its own inside that one.
+
+Permission failures now say what happened in plain words, with the technical detail behind "See details" and a "Report a bug" button:
+
+- The request popup no longer prints raw JSON or tool output: a failed save, an unfinished sign-in (or access left unticked on the consent screen), a workspace that refused the permission and an unsyncable folder each get their own sentence, with "Restart Imbue Studio" when the permission service is not running.
+
+- An approval the workspace refused after it was recorded no longer leaves the agent waiting: the agent is told, and the popup offers "Close", as it does for a request already answered elsewhere. A request the popup can't show offers "Deny" (for a permission it doesn't recognize) or "Close", and doesn't ask the user to try again.
+
+- Denying a request for a service Imbue Studio cannot set up at all (no browser sign-in, no credential form, no usable account on the workspace's machine) tells the agent why, so it does not just ask again.
+
+- Refused typed credentials say to check them and try again, with the service's reason behind "See details".
+
+- The Permissions tab says why it could not load, leading with the fix: "Restart Imbue Studio" (with "Try again"), "Update Imbue Studio" alone, or "Try again". Refused changes are worded for the user, including a permission whose definition is gone ("Ask the agent to request it again", which says so while the agent starts and shows why under the error if it can't, and is withdrawn once the workspace refuses the request). On a computer with no device id, "Add file" and "Add folder" are greyed out with "Imbue Studio can't share files from this computer.", and the request popup holds Approve while a shared path is edited.
+
+- The notification feed reads "Still waiting" rather than "Closed" for a request whose workspace is not listed, and a stale notification says the request is no longer pending.
+
+- A failed Chrome cookie import says what failed instead of the import tool's output, and drops "Try again" when Chrome is missing. An unreadable Chrome profile keeps its steps, with "Open System Settings" beside them until opening it fails; once System Settings is open (or has to be opened by hand), "Reopen Imbue Studio" leads on macOS, since the Full Disk Access grant applies only after a relaunch. Beside that button, the cookie offer's "Continue to sign in" is drawn secondary.
+
+- Every permission error uses the shared error display. The request popup shows a spinner while it re-reads a request list that would not load, and a refused sign-in in the Permissions tab opens the app's error dialog.
+
+Every one of these is drawn to the shared error design: the alert mark leads a black sentence in a tinted box, "See details" trails that sentence, and the step a sentence asks for ("*Restart Imbue Studio and try again.*", "*Check them and approve again.*") is set apart from the rest of it. What is too small for a notice -- a path outside the shareable folders, a computer that can't share files, a folder sync that failed -- keeps red text at the smaller size with the same mark. The request popup's "Imbue Studio couldn't load your requests." reads as a warning that is still trying rather than as a failure, since the popup keeps asking on its own.
+
+# Plainer errors for removing workspaces and for backups
+
+- A removal that finished before Imbue Studio can confirm the workspace is gone now says so and keeps checking ("Confirming removal..." on the list) instead of reading as failed. A removal that really failed leads with a plain sentence, keeps Retry and Dismiss, and puts the command output behind "See details"; a refused Retry says why, led by what it leaves to do ("Back to workspaces" when the workspace may already be gone, "Update Imbue Studio" when a newer version set it up), and the list badge reads "Removal failed".
+
+- Refusals of Remove workspace and of taking a workspace off the list each get their own sentence in a styled display (no more native alert), with the server's text behind "See details", and "Restart Imbue Studio", "Update Imbue Studio", "Back to workspaces" or "Try again" where that is the remedy.
+
+- Workspace settings and the Backups page say when the backup history or backup check could not be read, with one way to check again for each read that failed; a check with no verdict no longer looks healthy, and its "Check again" steps down to a plain button while another error on the panel leads with its own. Problems the backup check finds are listed with "Update backup software" as their main button when it is their fix, and a failed change to backup verification shows its details with "Try again", which sends the same change again.
+
+- Backup software updates, restores, and turning backups on, off or elsewhere explain failures from why they failed (including an Imbue Cloud plan with no room), offering Try again or Stop chats and try again where they fit, with the raw output behind "See details". These retries sit in the failure's own row, led by the surest one. A restore that couldn't save a copy of the current state first leads with "Restore without backing up first", followed by a quiet "Cancel" that leaves the restore undone; a refusal that says to reload the page offers "Reload page". A restore that left programs not yet running offers "Restart workspace"; one whose restored program settings could not be read says the programs won't start on the next restart and offers "Ask the agent to fix it" (withdrawn, leaving the reason and Report a bug, when the workspace can't take the request). A restore that succeeded but couldn't finish updating the backup software afterwards offers "Update backup software" beside that warning. Restore explains why it is greyed out while another backup task runs. A backup task refused because another is already running says so ("Another task is already running on this workspace..."), a refused Cancel says it is too late to cancel or that the task already finished, and a lapsed window login offers "Restart Imbue Studio".
+
+- The "Backup setup failed" notification says plainly that backups aren't set up (or that the plan has no room), and the workspace's Backups page shows the failure with a "Set up backups" button.
+
+- An unfinished backup cleanup says so on the Accounts card with Try again, a crashed cleanup reaches the notifications, and still being over the storage limit says which workspaces' backups only the computer that created them can delete.
+
+- The Recently destroyed page names a backup that belongs to no workspace in plain words, offers Try again when its list could not be loaded or a delete failed (sending the same delete again), and reads the list again instead of showing an error when a backup being deleted is already gone.
+
+Every one of these errors is drawn to the shared error design: the alert mark leads a black sentence in a tinted box, "See details" trails that sentence, and the step a sentence asks for is set apart from the rest of it -- "*Press Save to try again*", "*Wait for it to finish, then try again*", "*Make sure the workspace is running*", "*Reload the page to check*". A refused removal or remove-from-list is titled by what failed ("Couldn't take this workspace off the list") with the cause under that title. A way out that leaves the failure standing -- the "Cancel" beside "Restore without backing up first", the "Dismiss" beside a refused retry -- is drawn as a quiet button after the fixes rather than beside them.
+
+Plainer startup errors in the desktop app and the Linux install script:
+
+- When Imbue Studio cannot start, the error screen now reads "Imbue Studio couldn't start. Try again. If this persists, report a bug." When the app started but never answered, or a step after that failed, "Show details" also carries the last lines of the app's log (where the real reason is), not just a port; the bug report sent from that screen carries them too. Neither this screen nor the "stopped unexpectedly" screen shows the one-time login code those log lines can hold.
+
+- A failed first-launch setup no longer blames the internet for everything. It reads "Imbue Studio couldn't finish setting itself up." followed by "Check your internet connection, then press Retry." only when a download failed, "Your disk is full. Free up some space, then press Retry." for a full disk, and "Try again. If this persists, report a bug." otherwise.
+
+- Retry on a failed setup now runs setup again before starting the app, instead of skipping straight to starting it.
+
+- "View full log" now opens the log that holds the failure on screen (the setup's log for a setup failure), sits under "See details", and says where the log is when it cannot be opened, instead of silently doing nothing.
+
+- Every loading screen now shows the progress bar and status line, not only the one at launch: after a Retry, a "Restart Imbue Studio", or a window opened while the app is starting.
+
+- If moving Imbue Studio's files to their new folders fails on macOS, one box titled "Imbue Studio couldn't finish moving its files" explains that nothing was deleted and that opening the app again finishes the move, without a stack trace and without a second crash box.
+
+- `install-linux.sh` now names the step that failed when a command it runs fails, and says that re-running the script is safe. A WSL install with no PowerShell to create the Windows desktop shortcut now says to start Imbue Studio from a WSL terminal with the command shown.
+
+The startup error screen is drawn to the shared error design: the alert mark leads its title, the sentence under it is the page's own ink rather than a greyed line, "See details" trails that sentence (and is absent when there is nothing to disclose) with the raw output left-aligned under it and the buttons last, and the step a sentence asks for -- "*Free up some space, then press Retry*", "*Check your internet connection, then press Retry*" -- is set apart from the rest of it. The app draws this mark red; this screen has no red that reads on its brown, so it takes the page's ink, as every other shape on that page does.
+
+`docs/deploy/next_deploy.md` queues a one-time recompute of production's `gold.activity` back to 2026-08-26 after the analytics deploy that counts only typed user turns and leaves out update commits, so the older days are corrected too.
+
+Starting the app with a stopped remote workspace no longer logs "Failed to read the latchkey permissions of host ... Host not found" for it. A change to a workspace's registered agents is now carried to its machine only once discovery has looked at the workspace since the app started and found it running; until then it is held, where before the attempt failed and the change was lost.
+
+The errors logged when a workspace's machine cannot be read or pushed to now end with the host state discovery reports.
+
+- Signing in to any MCP-based service (the builtin `*-mcp` connectors, and a custom service that signs in through an MCP server's OAuth flow) now returns through the callback page Imbue Studio hosts, as Notion MCP's sign-in already did, so the provider's consent screen no longer shows a localhost redirect URL.
+
+- The bundled latchkey moves to 3.24.0, which names the OAuth client it registers for an MCP sign-in after the app ("Imbue") alone, the name the consent screen shows.
+
+- Browser sign-ins to services whose `latchkey services info` reports the `systemBrowserLogin` capability (Google, Ramp, Fastmail, MCP servers' OAuth sign-ins) now open in the user's own default browser (`latchkey auth browser --system`), where they are already signed in, instead of the browser latchkey controls. This covers the first sign-in to a service and the re-sign-in of a stale account, from the permission dialog and from "Connect" on the Add connection pane, and a custom service's sign-in. A first "Connect" now runs the way the dialog's first sign-in does, so for a service without the capability it opens latchkey's normal browser rather than the ephemeral one it used before. Adding a further account to a service that already has one ("Add account" in the dialog, "Connect" on a connected service) keeps latchkey's ephemeral browser, so the user still lands on a fresh sign-in screen and can pick a new account; the system browser would sign in as whoever is already logged in there. A sign-in abandoned in the system browser only fails once latchkey times it out, after 15 minutes.
+
+- The one-time "Import your Chrome cookies?" offer is no longer made before a sign-in that opens the user's own browser, since the import only fills the browser latchkey controls. The permission dialog's detail payloads carry `is_system_browser_login_supported` for that, and each account choice of a predefined request says whether latchkey holds the account (`is_stored`), which is how the dialog tells a stale account's re-sign-in (the user's own browser) from adding one the agent asked for that is not connected here (latchkey's).
+
+- The bundled latchkey moves to 3.23.1 (the `--system` flag arrived in 3.23.0).
+
+The next-deployment checklist gains the fleet rollout of btrfs automatic reclaim: re-prep boxes onto the `20261103-2651` guest image, install the reclaim oneshot on every leased VM with `minds-admin install-vm-guest-units`, then reboot each VM onto a 6.12.114 or later kernel with `minds-admin reboot-guest-kernel`.
+
+The gate every mutating backup program runs first, and the update watchdog's busy check, now count a chat whose agent type mngr's config does not name -- which mngr reports as `RUNNING_UNKNOWN_AGENT_TYPE` while its process runs -- as working, so neither interrupts it.
+
+The log records a host recovery's worker writes, including a failed step's error record, now carry which recovery it is: `recovery_kind` (`start` or `restart`), `recovery_trigger` (`API` for the restart and machine-resize routes, `UNATTENDED` for the automatic start of a stuck machine) and the machine's `provider_name`. They reach error reports as extra data on each event (not as searchable tags), so failed start steps reported under one message can be told apart. The record written when the worker crashes outright does not carry them. `dispatch_host_recovery` takes a new required `trigger` argument.
+
+Opening the Screen (the agent's browser view) in Imbue Studio no longer triggers macOS's "find devices on local networks" prompt. Studio's WebRTC no longer announces the Mac's address on the local network. On Macs with another app on the same Electron version installed, that prompt could carry that app's name, for example "Logi Options+".
+
+Imbue Studio 0.10.4: the desktop app's version moves to 0.10.4 and its pinned workspace template to `minds-v0.10.4`, a patch release over 0.10.3 (workspaces already on 0.10.x are not prompted to update). It carries everything on `main` since the 0.10.3 cut: plain, actionable error copy across the app, sign-ins through the system browser with latchkey 3.24.0 bundled, the startup fix that keeps remote grants made from another computer, the Screen no longer triggering macOS's local-network prompt, and paramiko 5.0.1 in the bundle; the template side moves Claude Code to 2.1.323 (Claude Fable 5.2), Codex to 0.169.0, OpenCode to 1.19.5, agy to 1.5.8 and datalib to v0.54.1, restarts idle agents after an update that changes their harness, and adds the taskbar resource gauge and the quieter tray bubbles.
+
+The next-deploy checklist's MIND-562 security-floor item now records that the template moves Codex to 0.169.0, so the first release carrying it ships the Codex half of that fix.
+
 ## 2026-11-12
 
 The dev-setup checklist and the environments reference now point at

@@ -1,1 +1,0 @@
-When the Docker daemon can't be reached, the provider's unavailability error now names the fix ("start Docker", or "start Docker on <host>" for a remote daemon), so `mngr list` and clients such as Imbue Studio can tell the user what to do.

@@ -13,6 +13,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Changed
 
 - Changed: `is_shell_command_message` moved from `imbue.mngr_claude.dialogs` to `imbue.mngr.agents.tui_utils`.
+- Changed: The TUI dialog registry is verified against Claude Code 2.1.323; all patterns are unchanged.
 
 ### Fixed
 

@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-13
+
+The Agent SDK driver's approximate cost now prices Claude Fable 5.2 at its own list rates ($8 input, $40 output, $10 cache write and $0.20 cache read per million tokens). Before, a `claude-fable-5-2` turn fell through to the Fable 5 rates, which overstated its input, output and cache writes by a quarter and its cache reads fivefold.
+
 ## 2026-11-09
 
 Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.

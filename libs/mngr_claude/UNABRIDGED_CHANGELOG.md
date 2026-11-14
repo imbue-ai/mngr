@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-13
+
+The Claude Code TUI dialog registry is now read against Claude Code 2.1.323, the version the release Dockerfile and default-workspace-template install. Every dialog pattern, option label and the shell-mode footer were checked against the 2.1.323 executable and are unchanged.
+
 ## 2026-11-12
 
 The fan-out release test pins the response's `usage.output_tokens` as an integer, the field `common_transcript_convert._build_metrics` reads as the agent step's `completion_tokens`.

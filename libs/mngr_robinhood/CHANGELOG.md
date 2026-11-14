@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: The Agent SDK driver's approximate cost prices Claude Fable 5.2 at its own rates instead of Fable 5's.
+
 ## [v0.2.1] - 2026-10-28
 
 ## [v0.2.0] - 2026-10-22

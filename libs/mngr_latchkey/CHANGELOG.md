@@ -12,12 +12,16 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `remote-execution` request type in the `permission-requests` gateway extension, granting a device-pinned `remote-execution-<device id>[:<program>]` permission (new `remote_execution` module).
 - Added: Latchkey 3.22.0's `mcp` login flow for custom services, with the new `mcp_metadata` module checking OAuth endpoints against the MCP server's published metadata; capture-flow URLs may be on a parent domain.
 - Added: `set_registered_agents_for_host` and `list_registered_agent_ids_for_host` in `agent_setup`.
+- Added: `is_system_browser` option on `Latchkey.auth_browser` and `auth_browser_login` (`latchkey auth browser --system`), `LatchkeyServiceInfo.is_system_browser_login_supported` and `custom_services.is_system_browser_login_flow`; combining it with the ephemeral browser raises `LatchkeyError`.
+- Added: `is_chrome_profile_missing_failure` and `is_scopes_not_granted_failure` classify those sign-in failures.
 
 ### Changed
 
-- Changed: Bumped Latchkey version to 3.22.0, which is also the new minimum locally-installed version; the bundled service catalog now includes Asana.
+- Changed: Bumped Latchkey to 3.24.0, which is also the remote-host version and the new minimum locally-installed version (`LATCHKEY_MIN_VERSION`); the bundled service catalog now includes Asana.
 - Changed: Custom services belong to their machine (each machine store has its own `config.json`, migrated from the old symlink) and are deregistered with their last account; adds `Latchkey.deregister_custom_service` and `ServicesCatalog(is_including_every_machine=True)`.
 - Changed: The services catalog marks protocol-handshake permissions `is_implicit`; `ServicePermissionInfo` lists them under `implicit_permission_schemas` and `with_implicit_permissions` adds them to any non-empty grant.
+- Changed: `Latchkey.auth_browser` pins Imbue Studio's redirect URI before every MCP OAuth sign-in that registers a client (builtin `*-mcp` and custom `mcp` flow, per new `is_mcp_oauth_service`); `MINDS_OAUTH_REDIRECT_URI` replaces `MINDS_OAUTH_REDIRECT_URI_BY_SERVICE`.
+- Changed: The `minds-workspaces-backups-manage` verb admits `/backup-service/setup/retry`.
 
 ### Fixed
 

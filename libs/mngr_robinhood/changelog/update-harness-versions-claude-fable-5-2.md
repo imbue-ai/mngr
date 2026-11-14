@@ -1,1 +1,0 @@
-The Agent SDK driver's approximate cost now prices Claude Fable 5.2 at its own list rates ($8 input, $40 output, $10 cache write and $0.20 cache read per million tokens). Before, a `claude-fable-5-2` turn fell through to the Fable 5 rates, which overstated its input, output and cache writes by a quarter and its cache reads fivefold.

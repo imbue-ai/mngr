@@ -1,1 +1,0 @@
-The `minds-workspaces-backups-manage` verb also admits `/backup-service/setup/retry`, the route that runs a new workspace's failed backup setup again, so a backups-manage grant covers every mutating backup-service route.

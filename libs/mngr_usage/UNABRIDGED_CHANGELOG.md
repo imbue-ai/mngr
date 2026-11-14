@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-13
+
+Claude Fable 5.2 (`anthropic/claude-fable-5-2`) is priced: $8 input, $40 output, $10 cache write and $0.20 cache read per million tokens, and it can be billed in fast mode at twice those rates. Before, a usage source reporting Fable 5.2 tokens recorded the session as unpriced.
+
 ## 2026-11-09
 
 Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.

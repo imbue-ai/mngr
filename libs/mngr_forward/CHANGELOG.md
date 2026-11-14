@@ -6,10 +6,15 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: 502/503/504 responses the proxy generates itself carry `X-Mngr-Forward-Reason` (the cause) and `X-Mngr-Forward-Request-Sent` (`no` only when the request never reached the backend).
+
 ### Changed
 
 - Changed: The `httpx2` dependency floor moves from 2.12.0 to 2.13.1, the version the rest of the repo now requires.
 - Changed: `mngr forward` follows each agent's services with `mngr event <agent>@<host>.<provider>`, skipping a discovery pass so a new workspace's origins route sooner; it logs each stream's time to first event.
+- Changed: A broken-off connection gets a page with Try again and "See details", a spent sign-in link offers the path it was for, and framed proxy pages post their reason to the parent window.
 
 ### Fixed
 

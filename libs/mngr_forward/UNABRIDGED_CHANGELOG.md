@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-13
+
+Every 502, 503 or 504 the forward proxy answers itself now says why and whether the request ever reached the backend: an `X-Mngr-Forward-Reason` header names the case (discovery not reported yet, no known agent, no route, a connection that could not be built on this device, an unreachable host, a backend not listening or not answering, a response that broke off or timed out, an exhausted connection pool), and `X-Mngr-Forward-Request-Sent` is `no` only when the request never reached the backend, so a client can say "nothing was changed" exactly when that is true. A backend's own 502/503/504 carries neither header.
+
+A connection that broke off now gets a page with a Try again button and the proxy's text behind "See details" instead of bare text, and a spent sign-in link gets a page that offers the path it was for. A framed proxy page posts its reason to its parent window, and says when it goes away, so an embedding application can draw its own explanation over the frame (see the README's "When the proxy answers a request itself").
+
 ## 2026-11-09
 
 Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.

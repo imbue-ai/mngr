@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Claude Fable 5.2 (`anthropic/claude-fable-5-2`) pricing ($8 input, $40 output, $10 cache write, $0.20 cache read per million tokens; fast mode at twice those).
+
 ### Changed
 
 - Changed: The window sitter and task dispatcher cron recipes count `RUNNING_BACKGROUND` agents as working.

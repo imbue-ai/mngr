@@ -184,6 +184,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Notifications (feed, toast, OS banner) when an Imbue account is signed out by session expiry or a workspace stops responding and cannot be restarted.
 - Added: The titlebar account switcher marks accounts with no session on this device as "(signed out)" and offers a per-row "Sign in".
 - Added: `custom-service` permission requests may use Latchkey 3.22.0's `mcp` login flow, checked against the metadata the MCP server publishes.
+- Added: Released Imbue Studio 0.10.4, a patch over 0.10.3 pinning template `minds-v0.10.4` (Claude Code 2.1.323 / Claude Fable 5.2, Codex 0.169.0, OpenCode 1.19.5), carrying the error-copy rewrite, system-browser sign-ins, latchkey 3.24.0 and paramiko 5.0.1.
 
 ### Changed
 
@@ -394,6 +395,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Provider sign-in relay refusals carry a `reason` (embed contract v14), letting a workspace retry on a fresh port instead of falling back to paste-a-code.
 - Changed: The pool-host runbook (`docs/deploy/ops/pool-hosts.md`) says to bake a tag from an mngr checkout at that same tag (a newer checkout can fail every slice of an older tag), that a pre-`minds-v0.10.0` tag needs a box with no `minds-v0.10.0`+ slice, and that the baking machine must stay awake until the bake exits.
 - Changed: A workspace created through `POST /api/v1/workspaces` with an `account_id` and no `backup_provider` now gets Imbue backups by default, as desktop-created ones do.
+- Changed: Plainer, actionable error messages across the desktop app -- workspaces list and recovery card, create and sign-in, sharing, updates, workspace settings, permissions, backups and removal, and the startup and setup screens -- drawn with one shared error design: a sentence saying what failed and what to do, raw output behind "See details", the fix as the main button, and "Report a bug" attaching the error to the report.
+- Changed: Browser sign-ins to services whose latchkey reports `systemBrowserLogin` (Google, Ramp, Fastmail, MCP servers' OAuth) open in the user's own default browser (`latchkey auth browser --system`), and skip the Chrome cookie-import offer; adding a further account keeps latchkey's ephemeral browser.
+- Changed: Every MCP-based sign-in (builtin `*-mcp` connectors and custom MCP-flow services) returns through Imbue Studio's hosted callback page, so the consent screen no longer shows a localhost redirect.
+- Changed: Bundled latchkey moves to 3.24.0.
+- Changed: Host recovery worker log records carry `recovery_kind`, `recovery_trigger` and `provider_name`; `dispatch_host_recovery` takes a required `trigger` argument.
 
 ### Deprecated
 
@@ -423,6 +429,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Removed: Browser-mode Web Notifications and the osascript/tkinter notification fallbacks; only the desktop app delivers OS notifications.
 - Removed: The titlebar back button and global back/forward arrows.
 - Removed: `scripts/install-wsl.sh` and `scripts/setup-raspberry-pi.sh`, folded into `install-linux.sh`.
+- Removed: The "How should Imbue Studio notify you?" card after the first notification; notifications stay on the default (in-app cards and system banners) until changed in Settings > Notifications, and `notification_prefs` drops `has_chosen`.
 
 ### Fixed
 
@@ -570,6 +577,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: Workspaces can again be created on AWS, GCP and Azure connections from templates that publish ports; new connections get the Screen ports in `firewall_published_ports` (existing ones need their cloud's `prepare` rerun).
 - Fixed: The desktop app again refuses `openExternal`, routing custom-scheme launches through the ask-first link router instead of silently granting them.
 - Fixed: Starting the desktop app no longer wipes a remote workspace's connector grants made from another computer; policy writes now read the machine's policy first and are refused when it cannot be read.
+- Fixed: Starting the app with a stopped remote workspace no longer logs "Host not found" for its latchkey permissions, and a change to its registered agents is held until discovery finds it running instead of being lost.
+- Fixed: Opening the Screen no longer triggers macOS's local-network prompt; Studio's WebRTC no longer announces the Mac's local address.
+- Fixed: Mutating backup programs and the update watchdog no longer interrupt a chat whose agent type mngr's config doesn't name (`RUNNING_UNKNOWN_AGENT_TYPE`).
+- Fixed: Retry on a failed first-launch setup runs setup again instead of only starting the app, and "View full log" opens the log holding the failure instead of silently doing nothing.
+- Fixed: A removal that finished before Imbue Studio can confirm the workspace is gone reads "Confirming removal..." and keeps checking instead of showing as failed.
 
 ### Security
 

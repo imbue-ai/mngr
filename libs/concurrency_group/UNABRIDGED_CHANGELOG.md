@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-13
+
+Deflaked `test_get_reader_thread_stack_names_the_running_steps_without_paths`: it now samples the reader thread's stack once the thread is waiting for output, not as soon as the child has started. A sample taken during setup could land in a `@contextmanager` generator that yielded before the stack walk reached its caller, returning a one-frame stack.
+
 ## 2026-11-09
 
 Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.

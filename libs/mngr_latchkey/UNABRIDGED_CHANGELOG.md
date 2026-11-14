@@ -4,6 +4,20 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-13
+
+Add `is_chrome_profile_missing_failure`, which tells a failed `latchkey auth import-chrome` that found no Google Chrome profile to import from, and `is_scopes_not_granted_failure`, which tells a strict browser sign-in whose consent screen was left with some access unticked, so callers can word those failures for the user.
+
+The `minds-workspaces-backups-manage` verb also admits `/backup-service/setup/retry`, the route that runs a new workspace's failed backup setup again, so a backups-manage grant covers every mutating backup-service route.
+
+- `Latchkey.auth_browser` pins the redirect URI Imbue Studio hosts (`latchkey auth prepare <service> '{"redirectUri": ...}'`) before every MCP server's OAuth sign-in that registers a new client, not just Notion MCP's: every builtin `*-mcp` service, and a custom service registered with the `mcp` login flow. `is_mcp_oauth_service` decides which services those are, and `MINDS_OAUTH_REDIRECT_URI` replaces the per-service `MINDS_OAUTH_REDIRECT_URI_BY_SERVICE`.
+
+- The latchkey version installed on remote hosts, and the minimum version a local CLI must have (`LATCHKEY_MIN_VERSION`), both move to 3.24.0. The minimum is a hard dependency: 3.24.0 is the first release to accept an `auth prepare` for a registered `mcp` service, so an older CLI would refuse the pin and with it the sign-in.
+
+- `Latchkey.auth_browser` and `auth_browser_login` take an `is_system_browser` option that runs the sign-in as `latchkey auth browser <service> --system` (latchkey >= 3.23.0), opening it in the user's own default browser instead of the one latchkey controls. `LatchkeyServiceInfo` reports the matching `systemBrowserLogin` capability of `latchkey services info` as `is_system_browser_login_supported` (`False` when latchkey reports no capabilities), which is what callers pass. The option cannot be combined with the ephemeral browser, which only the browser latchkey controls can provide (latchkey refuses the two together), so asking for both raises `LatchkeyError` and `add_account`, whose fresh session is the point, never uses the system browser. `custom_services.is_system_browser_login_flow` says ahead of registration whether a custom service's login flow will have the capability (only the MCP flow does).
+
+- The latchkey version installed on remote hosts, and the minimum version a local CLI must have (`LATCHKEY_MIN_VERSION`), both move to 3.23.1.
+
 ## 2026-11-12
 
 Require `filelock>=4.2.1`, the first release fixing the `ReadWriteLock` advisories (among them GHSA-v4x8-3wr5-3wq8) that the forward-ownership lock was exposed to.

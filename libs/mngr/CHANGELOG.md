@@ -14,6 +14,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `RUNNING_BACKGROUND` agent state for an agent whose turn ended while declared work is outstanding, tracked by deadline-bounded work leases under the agent's `leases/` directory (`resources/mngr_work_lease_lib.sh` writes them; turn-end hooks date them 24 hours ahead by default, overridable per agent with `HOOK_WORK_LEASE_TTL_SECONDS`, both defined in `hosts/work_leases.py`); `--running` selects it too and `mngr ls` reports `leases`.
 - Added: `ssh_utils.load_ssh_private_key_file`, loading any paramiko key type, with `SSHPrivateKeyError` subclasses `SSHPrivateKeyEncryptedError` and `SSHPrivateKeyUnparseableError`.
 - Added: The docker/VPS container entrypoint runs the image's `/usr/local/bin/mngr-container-start-hook`, detached, after restoring sshd on a container restart.
+- Added: The JSONL `error` event carries an error's structured facts under `details` (`MngrError.event_details()`); `ProviderUnavailableError` reports `short_reason` and `short_remediation` there.
+- Added: A warning when SSH connection retries are exhausted, naming the attempt count, time spent, deadline, why it stopped and the underlying paramiko exception class.
 
 ### Changed
 
@@ -23,6 +25,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `mngr event` with an id-pinned address uses only a provider discovery would load; a removed or disabled provider now fails as target-not-found.
 - Changed: The `agent_release_testing` helpers and `DEFAULT_HOST_LOCK_TIMEOUT_SECONDS` are public.
 - Changed: The in-host idle watcher (`activity_watcher.sh`) reads `data.json` with one `jq` call per check instead of six (~0.84% to ~0.17% of a core); its per-check `DEBUG` event is gone.
+- Changed: The mngr Docker image (`resources/Dockerfile`) installs Claude Code 2.1.323 (was 2.1.307), whose `fable` alias is Claude Fable 5.2.
 
 ### Fixed
 
@@ -30,6 +33,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: An SSH connection whose local address vanished (`EADDRNOTAVAIL`, e.g. after a network switch, VPN toggle, or sleep/wake) is now treated as a dead connection and retried on a rebuilt connection, surfacing as `HostConnectionError` instead of a raw `OSError`; this stops the latchkey forward daemon's gateway provisioning from crashing on it.
 - Fixed: `mngr create` now removes an agent that cannot take input while starting (e.g. stopped on a dialog) and fails with `Failed to start agent <name>: ...`, instead of leaving it running with its worktree and branch deleted.
 - Fixed: `mngr gc` no longer deletes the volume of a host still being created when it listed hosts; volumes younger than the provider's `min_online_host_age_seconds` are spared on providers that report volume creation time (Modal, local).
+- Fixed: A message containing a NUL character sent to a tmux-input agent is refused with `SendMessageError` before anything is typed, instead of crashing the send or pasting the NULs.
+- Fixed: A local host command that cannot start raises `CommandStartError` (a `MngrError`) instead of `ProcessSetupError`, so `mngr message` with `ErrorBehavior.CONTINUE` records the agent as failed rather than aborting.
 
 ### Security
 

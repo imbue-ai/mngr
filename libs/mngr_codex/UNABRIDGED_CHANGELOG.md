@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-13
+
+The real-CLI release tests pin codex agents to `gpt-6.1-sol` (was `gpt-5.5`). A ChatGPT-account login now rejects `gpt-5.5` ("not supported when using Codex with a ChatGPT account"), so every turn in those tests failed before the agent could reply.
+
 ## 2026-11-09
 
 Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.

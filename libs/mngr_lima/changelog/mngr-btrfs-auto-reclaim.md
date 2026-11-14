@@ -1,1 +1,0 @@
-The default Lima guest images (`DEFAULT_IMAGE_URL_AARCH64` and `DEFAULT_IMAGE_URL_X86_64`) move to the Debian 13 genericcloud `20261103-2651` release (kernel 6.12.115-2), matching the gen-2 slice guest image and the template's `[providers.lima]` pins.

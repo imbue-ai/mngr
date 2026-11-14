@@ -4,6 +4,18 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-13
+
+The JSONL `error` event (`--format jsonl`) now carries an error's structured facts under `details` when it has any: `MngrError.event_details()` returns them (none by default), so a caller can word the failure itself instead of parsing the message. An unreachable provider (`ProviderUnavailableError`) reports its `short_reason` and, when it names one, its `short_remediation` there.
+
+When connecting to a host retries transient SSH handshake failures and still fails, mngr now logs a warning saying how many attempts it made, how long it kept trying against which deadline, whether it stopped because the deadline passed or because a later failure is not retried, and the paramiko exception class underneath. This separates a host whose handshake kept failing transiently until the retry deadline from one that refused the connection outright. A connect that fails on its first attempt logs nothing new.
+
+- A message containing a NUL character, sent to an agent that takes its input as keystrokes into its tmux pane (the interactive TUI agents and command agents), is refused with a `SendMessageError` saying so, before anything is typed into the pane. This covers Claude's compaction instructions too. codex, opencode and pi deliver messages over their own APIs and are unaffected. Previously a short one crashed the send, and a long one (1024 characters or more) was pasted into the agent's input NULs and all.
+
+- A shell command run on a local host through the host's command methods (`execute_idempotent_command`, `execute_stateful_command`, `execute_streaming_command`) that cannot be started at all now raises `CommandStartError`, a `MngrError`, instead of escaping as the concurrency group's `ProcessSetupError`. `mngr message` and `send_message_to_agents` with `ErrorBehavior.CONTINUE` therefore record such an agent as failed rather than raising out of the whole call.
+
+The release Dockerfile installs Claude Code 2.1.323 (was 2.1.307), the version default-workspace-template now pins. Its `fable` alias resolves to Claude Fable 5.2.
+
 ## 2026-11-12
 
 `imbue-mngr` now pins `paramiko==5.0.1` (was `3.5.1`), the first line of releases fixing CVE-2026-44405. Paramiko 5 drops SHA-1 key exchange, SHA-1 (`ssh-rsa`) RSA signatures, DSA keys and GSSAPI, so mngr can no longer reach SSH servers that offer only those.

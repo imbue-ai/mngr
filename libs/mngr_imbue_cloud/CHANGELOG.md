@@ -13,6 +13,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `mngr imbue_cloud backup-repo create|list|roll-token|destroy|usage` for the backup store, and `bucket freeze <name>` to make a legacy bucket read-only.
 - Added: Gen-2 slice VMs publish the data filesystem's host quota at `/mngr-vol/.host-diskinfo`.
 - Added: With profiling enabled, connector requests carry a W3C `traceparent` header and record `connector.request` / `connector.token_refresh` spans.
+- Added: Gen-2 slice VMs run `mngr-btrfs-reclaim.service` on every boot, enabling btrfs `dynamic_reclaim` and `periodic_reclaim` on kernels with the transaction-abort fix, so data block groups no longer fill the disk and cause ENOSPC while `df` shows free space.
+- Added: `ImbueCloudQuotaExceededError` reports its entitlement, limit and use in the JSONL `error` event's `details`; a plan switch refused with a reason raises `ImbueCloudPlanRefusedError` (`code: plan_refused`), so a waitlisted account no longer reads as "Unauthenticated (403)".
 
 ### Changed
 

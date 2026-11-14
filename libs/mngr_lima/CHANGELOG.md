@@ -12,7 +12,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Security
 
-- Security: The default Lima guest image is now Debian 13 genericcloud `20261026-2643` (kernel `6.12.113-1`, fixing CVE-2026-98432).
+- Security: The default Lima guest images are now Debian 13 genericcloud `20261103-2651` (kernel `6.12.115-2`, which includes the CVE-2026-98432 fix).
 
 ## [v0.2.1] - 2026-10-28
 
