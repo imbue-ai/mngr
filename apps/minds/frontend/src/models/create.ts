@@ -4,11 +4,13 @@
 
 import m from "mithril";
 import type { AccountPanelState } from "../generated/ui";
+import type { RequestOutcome } from "./errors";
 import type { MachineSizeNumbers } from "./machineSize";
 import type { OnboardingProgress } from "./onboarding";
 import { onboardingProgress } from "./onboarding";
 import type { OperationProgress } from "./progress";
 import { progressOf } from "./progress";
+import { defaultFetchJson } from "./workspaceOptions";
 
 // /ui/api/create response shapes (hand-typed: the per-area /ui/api
 // bodies are not part of the generated channel schema yet). Keep in sync
@@ -350,7 +352,7 @@ export class MindLivenessTracker {
     return "UNKNOWN";
   }
 
-  async start(agentId: string): Promise<boolean> {
+  async start(agentId: string): Promise<LifecycleActionResult> {
     return await this.runAction(
       agentId,
       "RUNNING",
@@ -358,7 +360,7 @@ export class MindLivenessTracker {
     );
   }
 
-  async stop(agentId: string): Promise<boolean> {
+  async stop(agentId: string): Promise<LifecycleActionResult> {
     return await this.runAction(
       agentId,
       "STOPPED",
@@ -370,24 +372,18 @@ export class MindLivenessTracker {
     agentId: string,
     target: "RUNNING" | "STOPPED",
     url: string,
-  ): Promise<boolean> {
+  ): Promise<LifecycleActionResult> {
     this.pendingTargetByAgentId.set(agentId, target);
     this.redraw();
-    let isOk: boolean;
-    try {
-      const response = await fetch(url, {
-        method: "POST",
-        credentials: "same-origin",
-      });
-      isOk = response.ok;
-    } catch {
-      isOk = false;
-    }
-    if (!isOk) this.pendingTargetByAgentId.delete(agentId);
+    const result = await defaultFetchJson(url, { method: "POST" });
+    if (!result.ok) this.pendingTargetByAgentId.delete(agentId);
     this.redraw();
-    return isOk;
+    return result.ok ? { isOk: true } : { isOk: false, outcome: { status: result.status, body: result.body } };
   }
 }
+
+/** How a Start or Stop ended: the response is kept for a failure's details. */
+export type LifecycleActionResult = { isOk: true } | { isOk: false; outcome: RequestOutcome };
 
 // Creating-page watcher: status polling (authoritative) + the op-log
 // SSE (live log lines only), port of creating.js. The op-log streams stay

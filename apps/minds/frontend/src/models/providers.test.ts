@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 import type { UiAccountProvidersEntry, UiConnectionEntry } from "../generated/ui";
+import { TextResponseBody } from "./errors";
 import {
   ProvidersStore,
   accountSectionTitleFor,
-  connectionDetailFor,
   connectionLaunchLabel,
+  connectionRemovalErrorFor,
+  connectionRowProblemFor,
   connectionStatusChipFor,
   editControlFor,
+  providerRowProblemFor,
+  providersSummaryFor,
   providerStatusChipFor,
   removeControlFor,
 } from "./providers";
@@ -58,23 +62,33 @@ describe("ProvidersStore", () => {
     ]);
   });
 
-  it("counts every row and every error across sections", () => {
+  it("counts every row, and every row that asks something of the user, across sections", () => {
     const store = new ProvidersStore();
     store.applyProvidersMessage({
       type: "providers",
       accounts: [
         account({
           imbue_cloud: { name: "imbue_cloud_user-1", backend: null, status: "ERROR", error_type: "X", error_message: "y" },
-          connections: [connection(), connection({ id: "conn-2", status: "ERROR" })],
+          connections: [
+            connection(),
+            connection({ id: "conn-2", status: "ERROR" }),
+            connection({ id: "conn-3", status: "PROFILE_MISSING" }),
+            connection({ id: "conn-4", status: "UNLISTED" }),
+          ],
         }),
         account({ user_id: "local", email: "", imbue_cloud: null }),
       ],
-      device_providers: [{ name: "docker", backend: "docker", status: "OK" }],
+      device_providers: [
+        { name: "docker", backend: "docker", status: "OK" },
+        { name: "lima", backend: null, status: "ERROR", error_type: "E", error_message: "m" },
+      ],
       last_event_at: null,
       last_full_snapshot_at: null,
     });
-    expect(store.rowCount()).toBe(4);
-    expect(store.errorCount()).toBe(2);
+    expect(store.rowCount()).toBe(7);
+    // A connection still starting up is not the user's to fix; a missing login is.
+    expect(store.attentionCount()).toBe(4);
+    expect(providersSummaryFor(store.rowCount(), store.attentionCount())).toBe("7 providers, 4 need attention");
   });
 });
 
@@ -104,46 +118,116 @@ describe("row decisions", () => {
     expect(connectionStatusChipFor("UNLISTED").tone).toBe("muted");
     expect(connectionStatusChipFor("READ_ONLY").label).toBe("Needs a newer app");
     expect(connectionStatusChipFor("NO_CREDENTIALS").label).toBe("No credentials");
-    expect(connectionStatusChipFor("PROFILE_MISSING")).toEqual({ label: "Set up on this device", tone: "warn" });
+    expect(connectionStatusChipFor("PROFILE_MISSING")).toEqual({ label: "Set up on this computer", tone: "warn" });
   });
 
-  it("tells a missing login's setup step apart from a provider error, and names the fix for both", () => {
-    expect(
-      connectionDetailFor({
-        status: "PROFILE_MISSING",
-        error_type: "ProviderCredentialSourceMissingError",
-        error_message: "AWS profile 'work' is not configured on this machine",
-        remediation: "run `aws configure --profile work`",
-      }),
-    ).toBe(
-      "This connection uses a login that is not set up on this device. To use it here, run `aws configure " +
-        "--profile work`, then check again.",
+  it("tells a missing login's setup step apart from a failed check, keeping the fix visible and the raw error behind details", () => {
+    const missing = connectionRowProblemFor({
+      status: "PROFILE_MISSING",
+      error_type: "ProviderCredentialSourceMissingError",
+      error_message: "AWS profile 'work' is not configured on this machine",
+      remediation: "run `aws configure --profile work`",
+    });
+    expect(missing?.message).toContain("not set up on this computer");
+    expect(missing?.message).toContain("run `aws configure --profile work`");
+    expect(missing?.message).not.toContain("ProviderCredentialSourceMissingError");
+    expect(missing?.details).toBe(
+      "ProviderCredentialSourceMissingError: AWS profile 'work' is not configured on this machine",
     );
-    expect(
-      connectionDetailFor({
+
+    // The provider's own reason is what tells the user what to do, so it leads
+    // the row; mngr's generic wrapper and the exception type stay in details.
+    const wrapped =
+      "Provider 'aws_1' is not available: The SSO session for profile 'work' has expired. " +
+      "Any agents managed by this provider could not be reached.";
+    const failed = connectionRowProblemFor({
+      status: "ERROR",
+      error_type: "ProviderNotAuthorizedError",
+      error_message: wrapped,
+      error_reason: "The SSO session for profile 'work' has expired",
+      remediation: "run `aws sso login --profile work`",
+    });
+    expect(failed?.message).toBe(
+      "The SSO session for profile 'work' has expired. Workspaces on it may be missing from the list. " +
+        "To fix it, *run `aws sso login --profile work`*.",
+    );
+    expect(failed?.details).toBe(`ProviderNotAuthorizedError: ${wrapped}`);
+
+    const unfixable = connectionRowProblemFor({ status: "ERROR", error_type: "E", error_message: "boom", remediation: null });
+    expect(unfixable?.message).toBe("boom. Workspaces on it may be missing from the list.");
+    expect(unfixable?.details).toBe("E: boom");
+    expect(connectionRowProblemFor({ status: "OK", error_type: null, error_message: null, remediation: null })).toBeNull();
+  });
+
+  it("leads a provider row with its reason and fix, keeping the exception type behind details", () => {
+    const docker = providerRowProblemFor(
+      {
         status: "ERROR",
-        error_type: "ProviderNotAuthorizedError",
-        error_message: "expired",
-        remediation: "run `aws sso login --profile work`",
-      }),
-    ).toBe("ProviderNotAuthorizedError: expired (fix: run `aws sso login --profile work`)");
-    expect(connectionDetailFor({ status: "ERROR", error_type: "E", error_message: "boom", remediation: null })).toBe(
-      "E: boom",
+        error_type: "ProviderUnavailableError",
+        error_message: "Cannot connect to Docker daemon: connection refused",
+        error_reason: "Cannot connect to Docker daemon: connection refused",
+        remediation: "start Docker",
+      },
+      "provider",
     );
-    expect(connectionDetailFor({ status: "OK", error_type: null, error_message: null, remediation: null })).toBe("");
+    expect(docker?.message).toBe(
+      "Cannot connect to Docker daemon: connection refused. Workspaces on it may be missing from the list. " +
+        "To fix it, *start Docker*.",
+    );
+    expect(docker?.details).toBe("ProviderUnavailableError: Cannot connect to Docker daemon: connection refused");
+
+    // With nothing of the provider's to show, the row names itself the way its section does.
+    const silent = { status: "ERROR" as const, error_type: null, error_message: null };
+    expect(providerRowProblemFor(silent, "account")?.message).toMatch(/^Couldn't check this account\./);
+    expect(providerRowProblemFor({ status: "OK", error_type: null, error_message: null }, "provider")).toBeNull();
   });
 
-  it("disables Remove while machines use the connection or a newer app owns it", () => {
+  it("summarises the panel by rows needing attention rather than errors", () => {
+    expect(providersSummaryFor(3, 0)).toBe("3 providers");
+    expect(providersSummaryFor(1, 1)).toBe("1 provider, 1 needs attention");
+    expect(providersSummaryFor(5, 2)).toBe("5 providers, 2 need attention");
+  });
+
+  it("keeps a removal's refusal visible, since the user can act on it, and hides anything else behind details", () => {
+    const inUse = connectionRemovalErrorFor({
+      status: 409,
+      body: { error: "This connection still has 2 active workspaces. Remove them first, then remove the connection." },
+    });
+    expect(inUse.message).toBe(
+      "This connection still has 2 active workspaces. Remove them first, then remove the connection.",
+    );
+    expect(inUse.details).toContain("HTTP 409");
+
+    const unknown = connectionRemovalErrorFor({ status: 404, body: { error: "Unknown cloud account 'modal_abc'." } });
+    expect(unknown.message).toBe("Couldn't remove this connection. Try again. If this persists, report a bug.");
+    expect(unknown.details).toBe("HTTP 404\nUnknown cloud account 'modal_abc'.");
+
+    const unanswered = connectionRemovalErrorFor({ status: 0, body: null });
+    expect(unanswered.message).not.toContain("internet");
+    expect(connectionRemovalErrorFor({ status: 409, body: null }).message).toContain("Couldn't remove this connection");
+  });
+
+  it("keeps a 409 that carries no sentence of the route's off the visible line", () => {
+    const proxyText = connectionRemovalErrorFor({ status: 409, body: new TextResponseBody("upstream conflict") });
+    expect(proxyText.message).toBe("Couldn't remove this connection. Try again. If this persists, report a bug.");
+    expect(proxyText.details).toBe("HTTP 409\nupstream conflict");
+
+    const detailOnly = connectionRemovalErrorFor({ status: 409, body: { detail: "lease held by host-abc" } });
+    expect(detailOnly.message).toBe("Couldn't remove this connection. Try again. If this persists, report a bug.");
+    expect(detailOnly.details).toContain("lease held by host-abc");
+  });
+
+  it("disables Remove while workspaces use the connection or a newer app owns it", () => {
     expect(removeControlFor({ workspace_count: 0, status: "OK" })).toEqual({
       isEnabled: true,
       tooltip: "Remove this connection",
     });
     expect(removeControlFor({ workspace_count: 2, status: "OK" })).toEqual({
       isEnabled: false,
-      tooltip: "In use by 2 machines — destroy them first.",
+      tooltip: "In use by 2 workspaces. Remove them first.",
     });
     expect(removeControlFor({ workspace_count: 1, status: "ERROR" }).tooltip).toBe(
-      "In use by 1 machine — destroy them first.",
+      "In use by 1 workspace. Remove it first.",
     );
     expect(removeControlFor({ workspace_count: 0, status: "READ_ONLY" }).isEnabled).toBe(false);
   });

@@ -71,6 +71,7 @@ from imbue.mngr_forward.cookie import create_session_cookie
 from imbue.mngr_forward.cookie import create_subdomain_auth_token
 from imbue.mngr_forward.cookie import verify_session_cookie
 from imbue.mngr_forward.cookie import verify_subdomain_auth_token
+from imbue.mngr_forward.data_types import ProxyAnswerReason
 from imbue.mngr_forward.data_types import SystemInterfaceBackendAnsweredPayload
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailurePayload
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
@@ -78,13 +79,17 @@ from imbue.mngr_forward.embedding import EmbedderOrigin
 from imbue.mngr_forward.embedding import build_frame_ancestors_policy
 from imbue.mngr_forward.envelope import EnvelopeWriter
 from imbue.mngr_forward.errors import MngrForwardError
-from imbue.mngr_forward.loading_page import render_loading_page
 from imbue.mngr_forward.primitives import BROWSER_BRIDGE_PATH
 from imbue.mngr_forward.primitives import MNGR_FORWARD_SESSION_COOKIE_NAME
 from imbue.mngr_forward.primitives import OneTimeCode
 from imbue.mngr_forward.primitives import ParsedForwardHost
 from imbue.mngr_forward.primitives import ServiceLabel
 from imbue.mngr_forward.primitives import parse_forward_host
+from imbue.mngr_forward.proxy_pages import EXPIRED_LINK_PLAIN_TEXT
+from imbue.mngr_forward.proxy_pages import PROXY_REASON_HEADER
+from imbue.mngr_forward.proxy_pages import REQUEST_SENT_HEADER
+from imbue.mngr_forward.proxy_pages import render_expired_link_page
+from imbue.mngr_forward.proxy_pages import render_proxy_answer_page
 from imbue.mngr_forward.request_headers import AgentRequestHeaders
 from imbue.mngr_forward.request_headers import NO_REQUEST_HEADERS
 from imbue.mngr_forward.request_headers import RequestHeadersFileReader
@@ -922,8 +927,13 @@ async def _forward_workspace_http(
             # socket still holding the unread request is a clean EOF on macOS
             # (``RemoteProtocolError``) and an RST on Linux (``ReadError``).
             logger.debug("Failed to reach the backend for {} at {}: {}", agent_id, backend_url, e)
-            _emit_backend_failure(envelope_writer, agent_id, _connect_failure_reason(was_backend_refused), None, e)
-            return _service_unavailable_response(request)
+            failure_reason = _connect_failure_reason(was_backend_refused)
+            _emit_backend_failure(envelope_writer, agent_id, failure_reason, None, e)
+            return _service_unavailable_response(
+                request,
+                _connect_failure_answer_reason(failure_reason),
+                is_request_sent=_was_request_sent(e, was_backend_refused),
+            )
         except httpx2.PoolTimeout as e:
             # PoolTimeout fires while waiting to check out a pooled connection,
             # before the backend is ever dialed: the proxy's own pool is
@@ -935,7 +945,13 @@ async def _forward_workspace_http(
             _emit_backend_failure(
                 envelope_writer, agent_id, SystemInterfaceBackendFailureReason.POOL_EXHAUSTED, None, e
             )
-            return PlainTextResponse("Proxy connection pool exhausted", status_code=504)
+            return _proxy_answer_response(
+                request,
+                504,
+                "Proxy connection pool exhausted",
+                ProxyAnswerReason.POOL_EXHAUSTED,
+                is_request_sent=False,
+            )
         except httpx2.TimeoutException as e:
             # A wedged-but-listening backend produces a TimeoutException
             # rather than ConnectError. Surface this as CONNECT_ERROR so a
@@ -945,7 +961,13 @@ async def _forward_workspace_http(
             _emit_backend_failure(
                 envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None, e
             )
-            return PlainTextResponse("Backend stream timed out", status_code=504)
+            return _proxy_answer_response(
+                request,
+                504,
+                "Backend stream timed out",
+                ProxyAnswerReason.TIMED_OUT,
+                is_request_sent=_was_request_sent(e, was_backend_refused),
+            )
         finally:
             # Cancelling the loser is what releases its resources; a no-op on
             # whichever task already finished, so the success path leaves
@@ -1050,8 +1072,13 @@ async def _forward_workspace_http(
         # (``ReadError``). Which one arrives is the platform's choice, not a
         # distinction about the backend.
         logger.debug("Failed to reach the backend for {} at {}: {}", agent_id, backend_url, e)
-        _emit_backend_failure(envelope_writer, agent_id, _connect_failure_reason(was_backend_refused), None, e)
-        return _service_unavailable_response(request)
+        failure_reason = _connect_failure_reason(was_backend_refused)
+        _emit_backend_failure(envelope_writer, agent_id, failure_reason, None, e)
+        return _service_unavailable_response(
+            request,
+            _connect_failure_answer_reason(failure_reason),
+            is_request_sent=_was_request_sent(e, was_backend_refused),
+        )
     except _BackendBodyError as e:
         # The headers arrived and the body did not finish, so the backend was
         # reachable and answered -- a mid-response failure (same shape as
@@ -1060,13 +1087,25 @@ async def _forward_workspace_http(
         # starting does not produce this.
         logger.warning("Lost the backend connection for {} at {}: {}", agent_id, backend_url, e)
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.SSE_EOF, None, e)
-        return PlainTextResponse("Backend connection lost", status_code=502)
+        return _proxy_answer_response(
+            request,
+            502,
+            "Backend connection lost",
+            ProxyAnswerReason.CONNECTION_LOST,
+            is_request_sent=True,
+        )
     except httpx2.PoolTimeout as e:
         # Same distinction as the SSE branch above: the proxy's own pool is
         # exhausted and the backend was never dialed.
         logger.warning("Exhausted the proxy connection pool for {} at {}: {}", agent_id, backend_url, e)
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.POOL_EXHAUSTED, None, e)
-        return PlainTextResponse("Proxy connection pool exhausted", status_code=504)
+        return _proxy_answer_response(
+            request,
+            504,
+            "Proxy connection pool exhausted",
+            ProxyAnswerReason.POOL_EXHAUSTED,
+            is_request_sent=False,
+        )
     except httpx2.TimeoutException as e:
         # Either the dial timed out, or the backstop expired on a backend that
         # never answered at all. Both are genuine failures (the stall notice
@@ -1076,7 +1115,13 @@ async def _forward_workspace_http(
         # accepted it and then stayed silent is a different condition.
         logger.warning("Timed out reaching the backend for {} at {}: {}", agent_id, backend_url, e)
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None, e)
-        return PlainTextResponse("Backend timed out", status_code=504)
+        return _proxy_answer_response(
+            request,
+            504,
+            "Backend timed out",
+            ProxyAnswerReason.TIMED_OUT,
+            is_request_sent=_was_request_sent(e, was_backend_refused),
+        )
     finally:
         stall_notice.cancel()
         # Cancelling the loser is what actually releases the backend
@@ -1113,7 +1158,7 @@ async def _forward_workspace_http(
 # What ``PoolTimeout`` means, spelled out because it is the one message-less
 # exception here whose description is read by a person rather than by a log.
 # ``POOL_EXHAUSTED`` is a device-side reason, and the recovery card expands a
-# device-side detail verbatim behind "Error details" -- so the class-name
+# device-side detail verbatim behind "See details" -- so the class-name
 # fallback below would put the bare word "PoolTimeout" in front of a user. Every
 # other message-less case reaches only the log, where the class name is exactly
 # the right amount of detail.
@@ -1189,61 +1234,61 @@ def _emit_backend_answered(
         logger.trace("Could not emit system_interface_backend_answered envelope for {}: {}", agent_id, e)
 
 
-# The proxy loader: the canonical "Loading workspace" page that re-attempts the
-# workspace until the backend answers. A downstream consumer can reuse
-# ``render_loading_page`` so its own loading page renders identically.
-#
-# It polls in the background (fetch) rather than full-reloading via a
-# ``<meta http-equiv="refresh">``. A full-page reload of this view steals OS
-# focus from any sibling Electron WebContentsView overlaying it -- e.g. the
-# minds bug-report modal -- on every tick, which makes the overlay's inputs
-# impossible to type into (the text already entered survives, but the textarea
-# loses focus each second). Electron has no per-view focus-on-navigation /
-# focusable control for WebContentsView to opt out of this; see
-# https://github.com/electron/electron/issues/42578. Polling leaves the page
-# (and so the focused overlay) untouched while waiting and only navigates once
-# the workspace is actually reachable -- which also keeps the spinner smooth.
-_LOADING_POLL_SCRIPT: Final[str] = """\
-    <script>
-      (function () {
-        var INTERVAL_MS = 1000;
-        function poll() {
-          fetch(window.location.href, { credentials: 'same-origin', redirect: 'manual', cache: 'no-store' })
-            .then(function (resp) {
-              // 503 is this loader (the backend is still unreachable): keep
-              // waiting. Any other status -- or an opaque redirect -- means the
-              // workspace is answering, so navigate to render it for real.
-              if (resp.status === 503) {
-                setTimeout(poll, INTERVAL_MS);
-              } else {
-                window.location.reload();
-              }
-            }, function () {
-              setTimeout(poll, INTERVAL_MS);
-            });
-        }
-        setTimeout(poll, INTERVAL_MS);
-      })();
-    </script>
-"""
-_SERVICE_UNAVAILABLE_HTML = render_loading_page(body_extra=_LOADING_POLL_SCRIPT)
+def _proxy_answer_response(
+    request: Request,
+    status_code: int,
+    plain_text: str,
+    reason: ProxyAnswerReason,
+    is_request_sent: bool,
+) -> Response:
+    """Answer an agent-origin request the proxy could not hand a backend's answer to.
 
-
-def _service_unavailable_response(request: Request) -> Response:
-    """Return a 503 (styled loading page for browsers, plain text otherwise).
+    A browser gets a page (see :mod:`imbue.mngr_forward.proxy_pages`): a 503 is
+    the loading page, which re-attempts the origin in the background and reloads
+    once it answers; a 502/504 is the broken-off-connection page, with
+    ``plain_text`` behind its "See details". Any other caller gets
+    ``plain_text``. Both carry the reason and whether the request reached the
+    backend as headers.
 
     Recovery navigation is driven by a consumer off the per-agent
-    ``system_interface_backend_failure`` envelope, not by the plugin. That
-    separation keeps the plugin origin-agnostic: it does not need to know
-    where any consumer is listening. For browsers that hit the plugin
-    directly (including users landing here mid-restart), we serve a styled
-    loading page that polls the workspace in the background and reloads once
-    it answers, so the experience is not a blank flash.
+    ``system_interface_backend_failure`` envelope, not by the plugin, which keeps
+    the plugin origin-agnostic.
     """
-    accepts_html = "text/html" in request.headers.get("accept", "")
-    if accepts_html:
-        return HTMLResponse(content=_SERVICE_UNAVAILABLE_HTML, status_code=503)
-    return PlainTextResponse("Backend not yet available", status_code=503)
+    headers = {
+        PROXY_REASON_HEADER: reason.value,
+        REQUEST_SENT_HEADER: "yes" if is_request_sent else "no",
+    }
+    if "text/html" in request.headers.get("accept", ""):
+        page = render_proxy_answer_page(reason, status_code=status_code, details=plain_text)
+        return HTMLResponse(content=page, status_code=status_code, headers=headers)
+    return PlainTextResponse(plain_text, status_code=status_code, headers=headers)
+
+
+def _service_unavailable_response(
+    request: Request, reason: ProxyAnswerReason, is_request_sent: bool = False
+) -> Response:
+    """The 503 for a request no backend answered before its response headers."""
+    return _proxy_answer_response(request, 503, "Backend not yet available", reason, is_request_sent)
+
+
+def _was_request_sent(exc: BaseException, was_backend_refused: Callable[[], bool]) -> bool:
+    """Whether a request that failed with ``exc`` may have reached the backend.
+
+    False only where the proxy knows it did not: the connection was never made
+    (a refused or timed-out dial, no free pool slot), or the agent's host refused
+    the channel to the backend's port. Anything later -- the connection dropped
+    or went silent after the request was written -- may have been acted on.
+    """
+    if isinstance(exc, (httpx2.ConnectError, httpx2.ConnectTimeout, httpx2.PoolTimeout)):
+        return False
+    return not was_backend_refused()
+
+
+def _connect_failure_answer_reason(failure_reason: SystemInterfaceBackendFailureReason) -> ProxyAnswerReason:
+    """The page reason for a request that was dialed and got no response headers."""
+    if failure_reason is SystemInterfaceBackendFailureReason.BACKEND_NOT_LISTENING:
+        return ProxyAnswerReason.NOT_LISTENING
+    return ProxyAnswerReason.NOT_ANSWERING
 
 
 def _sanitize_next_url(value: str) -> str:
@@ -1281,7 +1326,9 @@ def _handle_subdomain_auth_bridge(
     if not verify_subdomain_auth_token(
         token=token, signing_key=signing_key, origin_coordinate=str(host_info.coordinate)
     ):
-        return PlainTextResponse("Invalid or expired subdomain auth token", status_code=403)
+        if "text/html" in request.headers.get("accept", ""):
+            return HTMLResponse(content=render_expired_link_page(next_url), status_code=403)
+        return PlainTextResponse(EXPIRED_LINK_PLAIN_TEXT, status_code=403)
     cookie_value = create_session_cookie(signing_key=signing_key)
     response = Response(status_code=302, headers={"Location": next_url})
     _set_forward_session_cookie(
@@ -1359,10 +1406,14 @@ async def _handle_workspace_forward_http(
 
     instance_key = resolver.resolve_instance_for_coordinate(str(host_info.coordinate))
     if instance_key is None:
-        # No known agent for this origin yet (discovery still warming up, or
-        # the agent is gone). There is no agent to attribute a failure
-        # envelope to, so just serve the auto-retrying loader.
-        return _service_unavailable_response(request)
+        # No agent to attribute a failure envelope to, so just serve the
+        # auto-retrying loader, saying whether discovery has looked yet.
+        reason = (
+            ProxyAnswerReason.UNKNOWN_AGENT
+            if resolver.has_completed_initial_discovery()
+            else ProxyAnswerReason.DISCOVERY_PENDING
+        )
+        return _service_unavailable_response(request, reason)
     # Envelopes and logs carry the bare agent id (the wire contract); resolver
     # lookups use the host-scoped instance key.
     agent_id = instance_key.agent_id
@@ -1436,7 +1487,14 @@ async def _handle_workspace_forward_http(
             unresolved_warning_limiter, instance_key, host_info.service_name, stream_manager
         )
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.UNRESOLVED, None)
-        return _service_unavailable_response(request)
+        is_events_stream_down = (
+            stream_manager is not None
+            and stream_manager.get_events_stream_status(instance_key).running_seconds is None
+        )
+        return _service_unavailable_response(
+            request,
+            ProxyAnswerReason.NO_ROUTE_EVENTS_STOPPED if is_events_stream_down else ProxyAnswerReason.NO_ROUTE,
+        )
 
     backend_url = str(target.url)
     try:
@@ -1462,8 +1520,14 @@ async def _handle_workspace_forward_http(
         if suppressed_repeats is not None:
             repeat_suffix = f" ({suppressed_repeats} earlier failures suppressed)" if suppressed_repeats > 0 else ""
             logger.warning("SSH tunnel setup failed for {}: {}{}", agent_id, e, repeat_suffix)
-        _emit_backend_failure(envelope_writer, agent_id, _tunnel_setup_failure_reason(e), None, e)
-        return _service_unavailable_response(request)
+        tunnel_failure_reason = _tunnel_setup_failure_reason(e)
+        _emit_backend_failure(envelope_writer, agent_id, tunnel_failure_reason, None, e)
+        return _service_unavailable_response(
+            request,
+            ProxyAnswerReason.LOCAL_CONNECTION_FAILED
+            if tunnel_failure_reason is SystemInterfaceBackendFailureReason.TUNNEL_SETUP_FAILED
+            else ProxyAnswerReason.UNREACHABLE,
+        )
 
     if tunnel_client is None and _is_loopback_url(backend_url) and not allow_host_loopback:
         # A loopback registered URL with no SSH tunnel is what a stopped
@@ -1480,7 +1544,7 @@ async def _handle_workspace_forward_http(
             backend_url,
         )
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
-        return _service_unavailable_response(request)
+        return _service_unavailable_response(request, ProxyAnswerReason.UNREACHABLE)
 
     active_client = tunnel_client or http_client
     return await _forward_workspace_http(

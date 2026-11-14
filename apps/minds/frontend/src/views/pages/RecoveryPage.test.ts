@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearAppContextForTests, registerAppContext } from "../../app-context";
 import { createEmptyStores } from "../../models/boot";
 import { ShellState } from "../shell/shell-state";
+import { LocalPageNotice } from "../shell/LocalPageNotice";
 import { RecoveryPage } from "./RecoveryPage";
 import {
   RecoveryModel,
@@ -132,7 +133,12 @@ describe("recovery page return", () => {
     // about, and the reader has to go Home and back in by hand.
     const { routeSets } = withShell();
     const vnode = pageShowing(ANSWERING, {
-      model: { recoveryError: "Start step of host restart failed" },
+      model: {
+        recoveryError: {
+          message: "Imbue Studio couldn't restart this workspace. Try again. If this persists, report a bug.",
+          details: "Start step of host restart failed",
+        },
+      },
     });
 
     runUpdate(vnode);
@@ -283,6 +289,28 @@ describe("recovery page held machine", () => {
       "Workspace maintenance",
     );
     expect(findPanel(rendered)).toBeDefined();
+  });
+
+  it("keeps the network notice when the card that would say it is not shown", () => {
+    withShell();
+    const blocked: RecoveryInfo = {
+      ...ANSWERING,
+      health: "stuck",
+      device_environment: "SSH_BLOCKED",
+    };
+    const isNoticeDeferringToCard = (vnode: UpdateVnode): unknown =>
+      attrsOf(
+        collectVnodes(render(vnode)).find(
+          (node) => node.tag === LocalPageNotice,
+        ) as AnyVnode,
+      ).isDeviceConditionShown;
+
+    expect(isNoticeDeferringToCard(pageShowing(blocked))).toBe(true);
+    expect(
+      isNoticeDeferringToCard(
+        pageShowing(blocked, { state: { heldMessage: MAINTENANCE_MESSAGE } }),
+      ),
+    ).toBe(false);
   });
 });
 

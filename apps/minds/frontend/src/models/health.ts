@@ -8,6 +8,9 @@
 // of navigating on the user's behalf.
 
 import type { UiDiscoveryHealthMessage, UiEnvironmentMessage, UiHealthMessage } from "../channel/messages";
+import type { RecoveryFailureCause } from "../generated/ui";
+
+export type { RecoveryFailureCause };
 
 // Neither recovery state says the machine was stopped -- the unattended path
 // only starts it. Which one ran is `RecoveryKind` below; read that, never the
@@ -46,9 +49,11 @@ export class HealthStore {
   private deviceEnvironment: EnvironmentCondition = "UNKNOWN";
   private isRecoveryANoOpByAgentId = new Set<string>();
   // A map rather than a set, because the absent case is a third answer: the
-  // frame reports which recovery is running only while one is, and "no recovery
-  // to describe" is not the same as "a recovery that skips the stop".
+  // frame reports which recovery is running (or, once it failed, which one ran)
+  // only while there is one to describe, and "no recovery to describe" is not
+  // the same as "a recovery that skips the stop".
   private recoveryKindByAgentId = new Map<string, RecoveryKind>();
+  private recoveryFailureCauseByAgentId = new Map<string, RecoveryFailureCause>();
 
   /** Reconnect is resync: the snapshot only carries non-HEALTHY agents, so
    * the per-workspace state must be cleared before it is reapplied or an
@@ -62,6 +67,7 @@ export class HealthStore {
     // always carries an environment frame, which overwrites it.
     this.isRecoveryANoOpByAgentId.clear();
     this.recoveryKindByAgentId.clear();
+    this.recoveryFailureCauseByAgentId.clear();
   }
 
   applyHealthMessage(message: UiHealthMessage): void {
@@ -70,6 +76,7 @@ export class HealthStore {
       this.errorByAgentId.delete(message.agent_id);
       this.isRecoveryANoOpByAgentId.delete(message.agent_id);
       this.recoveryKindByAgentId.delete(message.agent_id);
+      this.recoveryFailureCauseByAgentId.delete(message.agent_id);
       return;
     }
     this.statusByAgentId.set(message.agent_id, message.status);
@@ -81,6 +88,11 @@ export class HealthStore {
       this.recoveryKindByAgentId.delete(message.agent_id);
     } else {
       this.recoveryKindByAgentId.set(message.agent_id, message.recovery_kind);
+    }
+    if (message.recovery_failure_cause === null || message.recovery_failure_cause === undefined) {
+      this.recoveryFailureCauseByAgentId.delete(message.agent_id);
+    } else {
+      this.recoveryFailureCauseByAgentId.set(message.agent_id, message.recovery_failure_cause);
     }
   }
 
@@ -119,9 +131,14 @@ export class HealthStore {
     return this.isRecoveryANoOpByAgentId.has(agentId);
   }
 
-  /** Which recovery this workspace is running, or null when there is none in
-   * flight to describe. Only "restart" -- a full stop+start bounce, which only
-   * the user's own click dispatches -- licenses calling it a restart. */
+  /** Which step of this workspace's failed recovery failed, or null when it
+   * has no failed recovery. */
+  recoveryFailureCauseFor(agentId: string): RecoveryFailureCause | null {
+    return this.recoveryFailureCauseByAgentId.get(agentId) ?? null;
+  }
+
+  /** Which recovery this workspace is running (or, once it failed, ran), or
+   * null when there is none to describe. */
   recoveryKindFor(agentId: string): RecoveryKind | null {
     return this.recoveryKindByAgentId.get(agentId) ?? null;
   }

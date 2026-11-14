@@ -4,9 +4,9 @@ Factored into a card and a page half so a consumer that wants to render the
 same loading state inside its own layout can pull in ``render_loading_card``
 and ``LOADING_CARD_CSS`` rather than hand-matching the markup.
 
-The proxy serves it with a small background poll that re-attempts the workspace
-until it answers; a consumer can reuse it and layer its own controls and script
-on top via the ``card_extra`` / ``style_extra`` / ``body_extra`` hooks.
+The proxy's own pages (``proxy_pages``) are drawn with the same stylesheet; a
+consumer can reuse this page and layer its own controls and script on top via
+the ``card_extra`` / ``style_extra`` / ``body_extra`` hooks.
 """
 
 from typing import Final
@@ -66,10 +66,9 @@ LOADING_CARD_CSS: Final[str] = """\
 LOADING_PAGE_CSS: Final[str] = LOADING_PAGE_CENTERING_CSS + LOADING_CARD_CSS
 
 # The default heading/message. A consumer may override these at runtime (via
-# its own script) for non-loading states, but the initial render -- and the
-# proxy loader always -- shows this. The loading state has no message; the
-# empty <p> stays in the markup so a consumer's script can populate it for the
-# other states.
+# its own script) for non-loading states, but the initial render shows this.
+# The loading state has no message; the empty <p> stays in the markup so a
+# consumer's script can populate it for the other states.
 _LOADING_TITLE: Final[str] = "Loading workspace"
 _LOADING_MESSAGE: Final[str] = ""
 
@@ -80,7 +79,7 @@ def render_loading_card(*, card_attrs: str = "", card_extra: str = "") -> str:
     The shared building block behind ``render_loading_page``; a consumer that
     hosts the card inside its own layout (e.g. the minds recovery page, which
     embeds it under the app titlebar) renders this plus ``LOADING_CARD_CSS``
-    so its card cannot drift from the proxy loader's.
+    so its card cannot drift from the canonical one.
 
     ``card_attrs`` -- extra attributes on the ``.card`` element (e.g. ``data-*``).
     ``card_extra`` -- extra markup appended inside the ``.card`` (e.g. buttons).
@@ -112,7 +111,7 @@ def render_loading_page(
     ``card_extra``   -- extra markup appended inside the ``.card`` (e.g. buttons).
     ``body_extra``   -- extra markup after the ``.card`` (e.g. a ``<script>``).
 
-    With every hook empty this is exactly the proxy loader.
+    With every hook empty this is the bare loading page.
     """
     return f"""<!doctype html>
 <html>

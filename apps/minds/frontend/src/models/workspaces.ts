@@ -12,6 +12,21 @@
 import type { UiWorkspaceEntry, UiWorkspacesMessage } from "../channel/messages";
 import type { RemoteTileState } from "../generated/ui";
 
+// The canonical content origin is agent-keyed (the workspace id); host-keyed
+// origins are the legacy shape a stale frame may still sit on before the
+// plugin's redirect heals it, so both families are expected senders.
+const WORKSPACE_ORIGIN_FAMILY =
+  /^(?:[a-z0-9_-]+\.)*(?:host|agent)-[a-f0-9]+\.(?:localhost|127\.0\.0\.1)$/i;
+
+/** Whether `origin` is one of the workspace content origins the forward serves. */
+export function isWorkspaceOrigin(origin: string): boolean {
+  try {
+    return WORKSPACE_ORIGIN_FAMILY.test(new URL(origin).hostname);
+  } catch {
+    return false;
+  }
+}
+
 export interface AccentCacheEntry {
   accent: string | null;
   name: string | null;

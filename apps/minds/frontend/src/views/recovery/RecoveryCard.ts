@@ -24,10 +24,18 @@ import { CopyField } from "../components/Layout";
 import { Collapsible } from "../components/Collapsible";
 import { DialogCloseButton } from "../components/Modal";
 import { Notice } from "../components/Notice";
+import { machineVerdict } from "../components/MachineVerdict";
 import { Spinner } from "../components/Spinner";
-import type { RecoveryModel } from "../../models/backups";
+import type { RecoveryInfo, RecoveryModel } from "../../models/backups";
+import { recoveryFailureSentence } from "../../models/backups";
+import type { ErrorAction, UserFacingError } from "../../models/errors";
 import type { EnvironmentCondition, RecoveryKind } from "../../models/health";
 import { electronBridge } from "../../electron-bridge";
+import {
+  ErrorDetailsToggle,
+  ErrorNotice,
+  restartAppActions,
+} from "../components/ErrorDisplay";
 
 /**
  * The card's heading, which is also its verdict.
@@ -122,17 +130,6 @@ export function recoverySubheading(
 }
 
 /**
- * What an unreachable backend means for the machine, and what happens next.
- *
- * Deliberately provider-agnostic -- no "check your internet", since a local
- * docker daemon is independent of the network. The actual cause comes from the
- * provider itself and is shown verbatim below this, so Imbue Studio never has to
- * hand-author a sentence per provider failure mode.
- */
-const BACKEND_UNREACHABLE_EXPLANATION =
-  "This issue may be transient. Imbue Studio will reconnect you to your workspace as soon as it can be reached again.";
-
-/**
  * What this device's own condition means for the machine, and what to do.
  *
  * Both states describe this device, and neither vouches for the machine. What
@@ -146,20 +143,14 @@ const BACKEND_UNREACHABLE_EXPLANATION =
  * They differ in what they ask of the user: nothing at all when the network is
  * simply down (it comes back, and the app is watching for it), and a different
  * network when this one blocks the connection Imbue Studio needs -- a wait that would
- * never end on its own. The SSH copy names the protocol and concedes the browser
- * works, because otherwise it reads as the app being wrong about a connection
- * the user can see is fine.
+ * never end on its own. The blocked-network copy concedes that web pages still
+ * load, because otherwise it reads as the app being wrong about a connection
+ * the user can see is fine; the protocol it blocks is behind "See details".
  */
-const ENVIRONMENT_BLOCKED_EXPLANATION: Record<
-  Exclude<EnvironmentCondition, "NONE" | "UNKNOWN">,
-  string
-> = {
-  OFFLINE:
-    "This device has no network connection. Imbue Studio will reconnect to your workspace as soon as it does.",
-  SSH_BLOCKED:
-    "This network blocks the connection Imbue Studio uses to reach your workspaces (SSH). " +
-    "Your browser works, but Imbue Studio can't get through. Try another network or a VPN.",
-};
+const OFFLINE_EXPLANATION = "This device has no network connection.";
+const SSH_BLOCKED_SENTENCE =
+  "This network blocks the connection Imbue Studio uses (SSH), even though web pages still load. " +
+  "*Try a different network, such as a phone hotspot.*";
 
 /**
  * What a connection this device could not make means, and what fixes it.
@@ -213,6 +204,34 @@ export interface RecoveryCardAttrs {
   onClose?: () => void;
 }
 
+/** A heading over a condition Imbue Studio waits out on its own: the spinner
+ * says it is waiting, so no sentence has to. */
+function cardHeading(text: string): m.Children {
+  return m("div", { class: "type-heading pr-10" }, text);
+}
+
+/** The provider's own account of an unreachable backend. A fix the provider
+ * named is what the user reads, with its error behind See details; without
+ * one, the error itself is the sentence, since it may be the only clue to
+ * what to do. A refused key is Imbue Studio's own sentence. */
+export function backendUnreachableError(info: RecoveryInfo): UserFacingError {
+  const remediation = info.unreachable_remediation ?? "";
+  if (info.is_access_rejected || remediation === "") {
+    const reason = info.unreachable_reason.trim();
+    return {
+      message:
+        reason === ""
+          ? "Imbue Studio can't reach the service that runs this workspace right now."
+          : reason,
+      details: "",
+    };
+  }
+  return {
+    message: `To fix it, *${remediation}*.`,
+    details: info.unreachable_reason,
+  };
+}
+
 /** Open the bug-report surface for this machine, so the report identifies the
  * right workspace. Assist is never offered from here: the machine the card
  * speaks for is the one that cannot answer.
@@ -230,12 +249,82 @@ function reportProblem(agentId: string): void {
   m.route.set("/help", shell.overlayQuery({ workspace: agentId, assist: "0" }));
 }
 
+interface RecoveryCardState {
+  isSettling: boolean;
+  isBusy: boolean;
+  recoveryKind: RecoveryKind | null;
+  /** This device's condition as the card reads it. */
+  environment: EnvironmentCondition;
+  /** The card says that condition in place of its own states. */
+  isDeviceConditionShown: boolean;
+}
+
+function recoveryCardState(
+  model: RecoveryModel,
+  info: RecoveryInfo,
+  isSelfDismissing: boolean,
+): RecoveryCardState {
+  // On a surface that dismisses itself, a finished recovery is still
+  // waiting on the confirmation that dismisses it. Reading as idle in that
+  // window would offer a Restart button for the recovery that just ran.
+  const isSettling = isSelfDismissing && model.isRecoverySucceeded;
+  // A recovery nobody started from this card counts too: the unattended
+  // start, or the same machine's card in another window. Its progress is
+  // what is actually happening to the machine, so the card must not offer a
+  // Restart button beside it -- nor replace one with a waiting-for-network
+  // line. The click flips isRecoveryRunning at once while info.health only
+  // moves on the next poll, so reading health alone would drop a running
+  // recovery's spinner and log lines for a poll interval.
+  const isBusy =
+    model.isRecoveryRunning || isSettling || info.health === "recovering";
+  // A recovery dispatched from here knows which it is from the click,
+  // before the tracker has caught up and can answer -- and that window is
+  // exactly when the user is looking at the card they just clicked. One
+  // merely attached to (the unattended start, another window's) does not,
+  // and has to take the tracker's word: ``isRecoveryRunning`` covers both,
+  // so it cannot stand in for the distinction.
+  const recoveryKind = model.dispatchedRecoveryKind ?? info.recovery_kind;
+  // The device's condition, and never over a restart the user asked for:
+  // their own stop+start bounce is a recovery to narrate, and rendering the
+  // block would swap its spinner for a wait that does not hold it. The
+  // same holds while a finished recovery waits for the confirmation that
+  // dismisses the card. The app's unattended start is neither -- it is
+  // entered unasked within seconds of a network flap and lasts as long as
+  // the network is down, which is when the device's condition is the
+  // explanation the user needs, so it does not hide it. The route answers
+  // NONE for a machine on this device, whose outage a dead network cannot
+  // explain, and UNKNOWN while nothing has been measured.
+  const isNarratingUserBounce =
+    (isBusy && recoveryKind === "restart") || isSettling;
+  const environment: EnvironmentCondition = isNarratingUserBounce
+    ? "NONE"
+    : info.device_environment;
+  const isDeviceConditionShown =
+    environment !== "NONE" &&
+    environment !== "UNKNOWN" &&
+    info.health !== "healthy";
+  return {
+    isSettling,
+    isBusy,
+    recoveryKind,
+    environment,
+    isDeviceConditionShown,
+  };
+}
+
+/** Whether the card says this device's condition in place of its own
+ * states, so a surface around it need not say it again. */
+export function isDeviceConditionShownOnCard(model: RecoveryModel): boolean {
+  const info = model.info;
+  if (info === null) return false;
+  return recoveryCardState(model, info, false).isDeviceConditionShown;
+}
+
 /** The card's body, assuming the model has loaded. The shells handle the
  * loading and load-error states, which differ between them. */
 export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
-  // The device-side card's verbatim error is collapsed by default: it is what
-  // makes a broken install diagnosable, and unreadable to everyone else.
-  let isDeviceErrorOpen = false;
+  // Open while the attempt is still running and has no error to carry it.
+  let isRestartLogOpen = false;
   return {
     view(vnode) {
       const {
@@ -246,41 +335,8 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
       } = vnode.attrs;
       const info = model.info;
       if (info === null) return null;
-      // On a surface that dismisses itself, a finished recovery is still
-      // waiting on the confirmation that dismisses it. Reading as idle in that
-      // window would offer a Restart button for the recovery that just ran.
-      const isSettling = isSelfDismissing && model.isRecoverySucceeded;
-      // A recovery nobody started from this card counts too: the unattended
-      // start, or the same machine's card in another window. Its progress is
-      // what is actually happening to the machine, so the card must not offer a
-      // Restart button beside it -- nor replace one with a waiting-for-network
-      // line. The click flips isRecoveryRunning at once while info.health only
-      // moves on the next poll, so reading health alone would drop a running
-      // recovery's spinner and log lines for a poll interval.
-      const isBusy =
-        model.isRecoveryRunning || isSettling || info.health === "recovering";
-      // A recovery dispatched from here knows which it is from the click,
-      // before the tracker has caught up and can answer -- and that window is
-      // exactly when the user is looking at the card they just clicked. One
-      // merely attached to (the unattended start, another window's) does not,
-      // and has to take the tracker's word: ``isRecoveryRunning`` covers both,
-      // so it cannot stand in for the distinction.
-      const recoveryKind = model.dispatchedRecoveryKind ?? info.recovery_kind;
-      // The device's condition, and never over a restart the user asked for:
-      // their own stop+start bounce is a recovery to narrate, and rendering the
-      // block would swap its spinner for a wait that does not hold it. The
-      // same holds while a finished recovery waits for the confirmation that
-      // dismisses the card. The app's unattended start is neither -- it is
-      // entered unasked within seconds of a network flap and lasts as long as
-      // the network is down, which is when the device's condition is the
-      // explanation the user needs, so it does not hide it. The route answers
-      // NONE for a machine on this device, whose outage a dead network cannot
-      // explain, and UNKNOWN while nothing has been measured.
-      const isNarratingUserBounce =
-        (isBusy && recoveryKind === "restart") || isSettling;
-      const environment: EnvironmentCondition = isNarratingUserBounce
-        ? "NONE"
-        : info.device_environment;
+      const { isBusy, recoveryKind, environment, isDeviceConditionShown } =
+        recoveryCardState(model, info, isSelfDismissing);
       // This device having no usable network outranks everything below,
       // including the backend verdict, because it explains those too: a laptop
       // that cannot reach the network cannot reach the provider either, so the
@@ -292,37 +348,20 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
       // its own: the machine answering clears it, and so does connectivity
       // coming back -- which also runs the start that was withheld. On a dead
       // network only the second of those can happen.
-      if (
-        environment !== "NONE" &&
-        environment !== "UNKNOWN" &&
-        info.health !== "healthy"
-      ) {
+      if (isDeviceConditionShown) {
         return m("div", { class: "flex flex-col gap-3" }, [
-          m(
-            "div",
-            { class: "type-heading pr-10" },
-            deviceScopedHeading(info.workspace_name),
-          ),
-          m(
-            "p",
-            { class: "type-helper text-tertiary" },
-            ENVIRONMENT_BLOCKED_EXPLANATION[environment],
-          ),
-          m("div", { class: "flex items-center gap-2" }, [
-            m(
-              "span",
-              { class: "type-label text-secondary" },
-              "Waiting for network…",
-            ),
-            m(
-              Button,
-              {
-                variant: "secondary",
-                onclick: () => reportProblem(info.agent_id),
-              },
-              "Report a problem",
-            ),
-          ]),
+          cardHeading(deviceScopedHeading(info.workspace_name)),
+          environment === "SSH_BLOCKED"
+            ? m(ErrorNotice, {
+                id: "recovery-environment-error",
+                error: { message: SSH_BLOCKED_SENTENCE, details: "" },
+                workspaceAgentId: info.agent_id,
+              })
+            : m(
+                "p",
+                { class: "type-helper text-tertiary" },
+                OFFLINE_EXPLANATION,
+              ),
         ]);
       }
       // The backend being unreachable outranks whatever else the machine's
@@ -347,35 +386,25 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
         info.health !== "healthy" &&
         environment !== "UNKNOWN"
       ) {
+        // Both halves of the verdict: which machine is affected, and why. The
+        // card can be opened from a list or a stale tab, so the machine it
+        // speaks for is never assumed to be obvious.
+        const heading = info.provider_label
+          ? `${info.workspace_name} unreachable: Can't connect to ${info.provider_label}`
+          : `Can't reach ${info.workspace_name} right now`;
         return m("div", { class: "flex flex-col gap-3" }, [
-          // Both halves of the verdict: which machine is affected, and why. The
-          // card can be opened from a list or a stale tab, so the machine it
-          // speaks for is never assumed to be obvious.
-          m(
-            "div",
-            { class: "type-heading pr-10" },
-            `${info.workspace_name} unreachable: Can't connect to ${info.provider_label}`,
-          ),
-          m(
-            "p",
-            { class: "type-helper text-tertiary" },
-            BACKEND_UNREACHABLE_EXPLANATION,
-          ),
-          info.unreachable_reason
-            ? m(Notice, { variant: "error" }, info.unreachable_reason)
-            : null,
-          m(
-            "div",
-            { class: "flex items-center gap-2" },
-            m(
-              Button,
-              {
-                variant: "secondary",
-                onclick: () => reportProblem(info.agent_id),
-              },
-              "Report a problem",
-            ),
-          ),
+          // A refused key does not come back on its own; anything else
+          // reconnects once the provider answers again.
+          cardHeading(heading),
+          m(ErrorNotice, {
+            id: "recovery-provider-error",
+            error: backendUnreachableError(info),
+            // A refused key does not come back on its own; anything else
+            // reconnects once the provider answers again, so nothing has
+            // failed yet.
+            isRetrying: !info.is_access_rejected,
+            workspaceAgentId: info.agent_id,
+          }),
         ]);
       }
       // The connection failed on this device, before the machine was ever
@@ -398,55 +427,20 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
       ) {
         const isRestartAppAvailable = electronBridge.isDesktop;
         return m("div", { class: "flex flex-col gap-3" }, [
-          m(
-            "div",
-            { class: "type-heading pr-10" },
-            deviceScopedHeading(info.workspace_name),
-          ),
-          m(
-            "p",
-            { class: "type-helper text-tertiary" },
-            isRestartAppAvailable
-              ? `${DEVICE_CANNOT_CONNECT_CONDITION} ${DEVICE_CANNOT_CONNECT_REMEDY}`
-              : DEVICE_CANNOT_CONNECT_CONDITION,
-          ),
-          m(
-            "div",
-            { class: "flex items-center gap-2" },
-            // No Restart workspace: bouncing a machine that is probably fine
-            // would interrupt real work without touching the actual fault.
-            isRestartAppAvailable
-              ? m(
-                  Button,
-                  {
-                    variant: "primary",
-                    onclick: () => electronBridge.restartApp(),
-                  },
-                  "Restart Imbue Studio",
-                )
-              : null,
-            m(
-              Button,
-              {
-                variant: "secondary",
-                onclick: () => reportProblem(info.agent_id),
-              },
-              "Report a problem",
-            ),
-          ),
-          info.device_error_detail
-            ? collapsibleSection(
-                {
-                  id: "recovery-device-error",
-                  label: "Error details",
-                  isOpen: isDeviceErrorOpen,
-                  onToggle: () => {
-                    isDeviceErrorOpen = !isDeviceErrorOpen;
-                  },
-                },
-                m(Notice, { variant: "error" }, info.device_error_detail),
-              )
-            : null,
+          cardHeading(deviceScopedHeading(info.workspace_name)),
+          // No Restart workspace: bouncing a machine that is probably fine
+          // would interrupt real work without touching the actual fault.
+          m(ErrorNotice, {
+            id: "recovery-device-error",
+            error: {
+              message: isRestartAppAvailable
+                ? `${DEVICE_CANNOT_CONNECT_CONDITION} ${DEVICE_CANNOT_CONNECT_REMEDY}`
+                : DEVICE_CANNOT_CONNECT_CONDITION,
+              details: info.device_error_detail,
+            },
+            actions: restartAppActions(),
+            workspaceAgentId: info.agent_id,
+          }),
         ]);
       }
       const health = isBusy ? "recovering" : info.health;
@@ -461,6 +455,17 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
               onClose !== undefined
             ? { label: "Close", onclick: onClose }
             : null;
+      const errors = recoveryErrorsFor(model, isBusy);
+      // Busy, the restart button is the disabled progress label, which only
+      // the row can draw.
+      const isRemedyInError = errors.length > 0 && !isBusy;
+      const cardActions: ErrorAction[] = [
+        ...(onwardAction === null ? [] : [onwardAction]),
+        {
+          label: "Restart workspace",
+          onclick: () => void model.dispatchRecovery(),
+        },
+      ];
       return m("div", { class: "flex flex-col gap-4" }, [
         m("div", { class: "flex flex-col gap-2" }, [
           m("div", { class: "flex items-center gap-2 type-heading pr-10" }, [
@@ -475,7 +480,7 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
               ),
             ),
           ]),
-          isBusy
+          isBusy || model.logLines.length > 0
             ? null
             : m(
                 "p",
@@ -483,52 +488,111 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
                 recoverySubheading(health, info.is_host_offline),
               ),
         ]),
+        // What the attempt went through, ahead of how it ended. The raw lines
+        // go behind the error's own See details once there is one; until then
+        // the steps carry their own.
+        model.logLines.length > 0
+          ? m("div", { class: "flex flex-col" }, [
+              m(
+                "ul",
+                {
+                  class:
+                    "type-helper text-secondary list-none m-0 p-0 flex flex-col gap-0.5",
+                },
+                plainRecoveryProgress(model.logLines).map((line) =>
+                  m("li", line),
+                ),
+              ),
+              errors.length > 0
+                ? null
+                : m("div", { class: "type-helper self-start" }, [
+                    m(ErrorDetailsToggle, {
+                      id: "recovery-log-details",
+                      isOpen: isRestartLogOpen,
+                      onToggle: () => {
+                        isRestartLogOpen = !isRestartLogOpen;
+                      },
+                    }),
+                    isRestartLogOpen
+                      ? m(
+                          "div",
+                          {
+                            id: "recovery-log-details-panel",
+                            role: "region",
+                            "aria-labelledby": "recovery-log-details",
+                          },
+                          machineVerdict(model.logLines.join("\n")),
+                        )
+                      : null,
+                  ]),
+            ])
+          : null,
         model.recoveryNotice !== null
           ? m(Notice, { variant: "info" }, model.recoveryNotice)
           : null,
-        m("div", { class: "flex items-center gap-2" }, [
-          onwardAction === null
-            ? null
-            : m(
-                Button,
-                { variant: "primary", onclick: onwardAction.onclick },
-                onwardAction.label,
-              ),
-          m(
-            Button,
-            {
-              variant: onwardAction === null ? "primary" : "secondary",
-              disabled: isBusy,
-              onclick: () => void model.dispatchRecovery(),
-            },
-            isBusy
-              ? recoveryBusyActionLabel(info.is_host_offline, recoveryKind)
-              : "Restart workspace",
-          ),
-          m(
-            Button,
-            {
-              variant: "secondary",
-              onclick: () => reportProblem(info.agent_id),
-            },
-            "Report a problem",
-          ),
-        ]),
-        model.logLines.length > 0
-          ? m(
-              "pre",
-              {
-                class:
-                  "type-helper font-mono bg-fill-hover rounded-md p-3 max-h-64 overflow-y-auto whitespace-pre-wrap break-words",
-                onupdate(preVnode: m.VnodeDOM) {
-                  const el = preVnode.dom;
-                  el.scrollTop = el.scrollHeight;
-                },
+        model.isRecoveryFollowLost
+          ? m(ErrorNotice, {
+              id: "recovery-follow-lost",
+              tone: "warn",
+              error: {
+                message: recoveryFollowLostSentence(
+                  model.followedRecoveryKind,
+                ),
+                details: "",
               },
-              model.logLines.join("\n"),
-            )
+              actions: [
+                {
+                  label: "Restart workspace",
+                  onclick: () => void model.dispatchRecovery(),
+                },
+              ],
+              isBugReportOffered: false,
+              workspaceAgentId: info.agent_id,
+            })
           : null,
-        m(RecoveryTroubleshooting, { model }),
+        // A failure carries the card's buttons, so the remedy sits with the
+        // error it answers; without one they stand in a row of their own.
+        errors.map((error, index) =>
+          m(ErrorNotice, {
+            key: index,
+            id: `recovery-error-${index}`,
+            error: index === 0 ? withRestartLog(error, model.logLines) : error,
+            actions: index === 0 && isRemedyInError ? cardActions : [],
+            isBugReportOffered: index === 0 && isRemedyInError,
+            workspaceAgentId: info.agent_id,
+          }),
+        ),
+        isRemedyInError
+          ? null
+          : m("div", { class: "flex items-center gap-2" }, [
+              onwardAction === null
+                ? null
+                : m(
+                    Button,
+                    { variant: "primary", onclick: onwardAction.onclick },
+                    onwardAction.label,
+                  ),
+              m(
+                Button,
+                {
+                  variant: onwardAction === null ? "primary" : "secondary",
+                  disabled: isBusy,
+                  onclick: () => void model.dispatchRecovery(),
+                },
+                isBusy
+                  ? recoveryBusyActionLabel(info.is_host_offline, recoveryKind)
+                  : "Restart workspace",
+              ),
+              m(
+                Button,
+                {
+                  variant: "secondary",
+                  onclick: () => reportProblem(info.agent_id),
+                },
+                "Report a problem",
+              ),
+            ]),
+        m(RecoveryConnectionDetails, { model }),
       ]);
     },
   };
@@ -545,9 +609,8 @@ interface CollapsibleSectionAttrs {
 /**
  * A collapsed section: a summary row that toggles its children.
  *
- * The troubleshooting blocks are for the rare reader who is actually
- * debugging; expanded, they push the restart button -- the thing almost
- * everyone came for -- off the bottom of the panel.
+ * The connection details are for the rare reader who is actually
+ * debugging; expanded, they would crowd the card's own actions.
  *
  * This card's own dress over `Collapsible`: a text
  * marker, and a summary at the weight of the headings around it.
@@ -577,79 +640,132 @@ function collapsibleSection(
 }
 
 /**
- * The bordered Troubleshooting block: the errors this episode produced, and a
- * shell into the machine's host.
- *
- * Error details carries the recovery error the tracker is holding and whatever
- * this card's own dispatch reported, and nothing else. There is no diagnostics
- * probe behind it anymore: the probe and the route that reached it are both
- * gone, and what the background health tracker observes goes to the log rather
- * than to a list of questions nobody could act on.
- *
- * The two sources are deduped on the string itself, because usually they carry
- * one: every server-side recovery failure hands the same message to the tracker
- * and to the operation record, and printing it twice reads as two faults. They
- * are still both consulted, since either can be the only one there -- a
- * dispatch this card never got to start reports client-side only, and an
- * unattended start that failed before this card opened is the tracker's
- * alone.
+ * The errors to show above the card's buttons, newest first: this card's own
+ * restart outcome, then the failure the workspace's state reports, worded by
+ * the step that failed. One failure reported by both (every server-side failure
+ * reaches the tracker and the operation alike) is shown once, in the tracker's
+ * better-informed words.
  */
-export function RecoveryTroubleshooting(): m.Component<{
+/** The error with the restart attempt's log under it, so the card opens the
+ * verdict and the attempt together rather than offering two See details. */
+function withRestartLog(
+  error: UserFacingError,
+  logLines: readonly string[],
+): UserFacingError {
+  if (logLines.length === 0) return error;
+  const log = `Restart log:\n${logLines.join("\n")}`;
+  return {
+    ...error,
+    details: error.details === "" ? log : `${error.details}\n\n${log}`,
+  };
+}
+
+function recoveryErrorsFor(
+  model: RecoveryModel,
+  isBusy: boolean,
+): UserFacingError[] {
+  const info = model.info;
+  const failure = info !== null && !isBusy ? recoveryFailureError(info) : null;
+  const errors: UserFacingError[] = [];
+  if (
+    model.recoveryError !== null &&
+    !isSameFailure(model.recoveryError, failure)
+  ) {
+    errors.push(model.recoveryError);
+  }
+  if (failure !== null) errors.push(failure);
+  return errors;
+}
+
+/** Whether the card's own error reports the tracker's failure: a refused
+ * dispatch's details wrap the tracker's reason in the response's status line. */
+function isSameFailure(
+  error: UserFacingError,
+  failure: UserFacingError | null,
+): boolean {
+  if (failure === null) return false;
+  return (
+    error.details === failure.details ||
+    (failure.details !== "" && error.details.includes(failure.details))
+  );
+}
+
+/** The failure the workspace's state reports, or null for a workspace whose
+ * recovery has not failed. */
+export function recoveryFailureError(
+  info: RecoveryInfo,
+): UserFacingError | null {
+  if (info.health !== "recovery_failed") return null;
+  return {
+    message: recoveryFailureSentence(
+      info.recovery_failure_cause ?? null,
+      info.recovery_kind,
+    ),
+    details: info.health_error,
+  };
+}
+
+/** What the card says once it stopped following a recovery whose status it
+ * could not read. Only the user's own restart is called a restart. */
+export function recoveryFollowLostSentence(kind: RecoveryKind | null): string {
+  const lost =
+    kind === "restart"
+      ? "Imbue Studio lost track of this restart."
+      : "Imbue Studio lost track of its attempt to reconnect to this workspace.";
+  return `${lost} The workspace may still be coming back -- its status above keeps updating. You can restart it if it doesn't.`;
+}
+
+// The restart log's steps, said plainly. The log itself carries the internal
+// names a bug report needs; it stays behind "See details".
+const PLAIN_RECOVERY_STEPS: Record<string, string> = {
+  "Stopping the system-services agent.": "Stopping the workspace.",
+  "Starting the system-services agent.": "Starting the workspace.",
+  "The workspace was already running; it was not restarted.":
+    "The workspace was already running, so it wasn't restarted.",
+  "Waiting for the system interface to respond.":
+    "Waiting for the workspace to answer.",
+  "The system interface is responding again.":
+    "The workspace is answering again.",
+};
+
+/** The restart's progress as a short plain list: the steps a user would
+ * recognise, skipping the bookkeeping lines. */
+export function plainRecoveryProgress(logLines: readonly string[]): string[] {
+  return logLines.flatMap((line) => {
+    const plain = PLAIN_RECOVERY_STEPS[line];
+    return plain === undefined ? [] : [plain];
+  });
+}
+
+/**
+ * The connection details for reaching the workspace's machine directly:
+ * collapsed, for the developer or support person who knows what to do with
+ * them. Nothing on the card asks a user to run it.
+ */
+export function RecoveryConnectionDetails(): m.Component<{
   model: RecoveryModel;
 }> {
-  let openSection: "errors" | "ssh" | null = null;
+  let isOpen = false;
   return {
     view(vnode) {
-      const { model } = vnode.attrs;
-      const info = model.info;
-      if (info === null) return null;
-      const errors = [
-        ...new Set(
-          [model.recoveryError, info.health_error].filter(
-            (error): error is string => Boolean(error),
-          ),
-        ),
-      ];
-      const isSshOffered = Boolean(info.ssh_command);
-      if (errors.length === 0 && !isSshOffered) return null;
-      return m(
-        "div",
-        { class: "flex flex-col gap-3 rounded-md border border-subtle p-3" },
+      const info = vnode.attrs.model.info;
+      if (info === null || !info.ssh_command) return null;
+      return collapsibleSection(
+        {
+          id: "recovery-ssh",
+          label: "Connection details",
+          isOpen,
+          onToggle: () => {
+            isOpen = !isOpen;
+          },
+        },
         [
-          m("div", { class: "type-label text-secondary" }, "Troubleshooting"),
-          errors.length > 0
-            ? collapsibleSection(
-                {
-                  id: "recovery-errors",
-                  label: "Error details",
-                  isOpen: openSection === "errors",
-                  onToggle: () => {
-                    openSection = openSection === "errors" ? null : "errors";
-                  },
-                },
-                errors.map((error) => m(Notice, { variant: "error" }, error)),
-              )
-            : null,
-          isSshOffered
-            ? collapsibleSection(
-                {
-                  id: "recovery-ssh",
-                  label: "Connect over SSH",
-                  isOpen: openSection === "ssh",
-                  onToggle: () => {
-                    openSection = openSection === "ssh" ? null : "ssh";
-                  },
-                },
-                [
-                  m(
-                    "p",
-                    { class: "type-helper text-tertiary" },
-                    "For direct debugging, connect to the machine's host from a terminal:",
-                  ),
-                  m(CopyField, { value: info.ssh_command }),
-                ],
-              )
-            : null,
+          m(
+            "p",
+            { class: "type-helper text-tertiary" },
+            "To connect to this workspace's machine from a terminal:",
+          ),
+          m(CopyField, { value: info.ssh_command }),
         ],
       );
     },

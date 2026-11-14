@@ -281,6 +281,29 @@ class HostRecoveryKind(LowerCaseStrEnum):
     RESTART = auto()
 
 
+class RecoveryFailureCause(UpperCaseStrEnum):
+    """Which step of a host recovery failed, so the surfaces can say what happened in plain words.
+
+    It also says whether the recovery ran any command against the workspace,
+    which decides whether the failure may be described as a failed restart.
+    """
+
+    # No command ran: the workspace's services agent could not be found.
+    WORKSPACE_NOT_FOUND = auto()
+    # No command ran: the worker that runs the recovery could not be started.
+    WORKER_NOT_STARTED = auto()
+    # A stop or start command failed.
+    STEP_FAILED = auto()
+    # A stop or start command was rejected by the workspace's provider as unavailable.
+    PROVIDER_UNREACHABLE = auto()
+    # The start ran, and discovery then no longer knew the workspace.
+    LOST_AFTER_START = auto()
+    # The start ran, and the workspace did not answer within the readiness wait.
+    NOT_ANSWERING_AFTER_START = auto()
+    # The worker crashed; whether it had run a command is unknown.
+    WORKER_CRASHED = auto()
+
+
 OnChangeCallback = Callable[[AgentId, AgentHealth], None]
 OnRecoveryCallback = Callable[[AgentId], None]
 OnStuckEdgeCallback = Callable[[AgentId], None]
@@ -376,6 +399,10 @@ class _AgentRecord(MutableModel):
         default=None,
         description="Failure reason carried while health is RECOVERY_FAILED, for the recovery page to render.",
     )
+    last_recovery_failure_cause: RecoveryFailureCause | None = Field(
+        default=None,
+        description="Which step failed, carried alongside ``last_recovery_error``.",
+    )
     backend_outage: BackendOutageObservation | None = Field(
         default=None,
         description=(
@@ -417,11 +444,11 @@ class _AgentRecord(MutableModel):
     recovery_kind: HostRecoveryKind | None = Field(
         default=None,
         description=(
-            "Which recovery the in-flight RECOVERING episode is running. Set when a recovery wins "
-            "the RECOVERING transition and read only while RECOVERING -- the recovery card picks "
-            "its heading from it (a RESTART reads as 'Restarting <machine>...', a START as the "
-            "weaker 'Reconnecting to <machine>...', since a start may well be a no-op). None "
-            "outside one."
+            "Which recovery the RECOVERING episode is running, or the RECOVERY_FAILED one ran. Set "
+            "when a recovery wins the RECOVERING transition and read only in those two states -- the "
+            "recovery card picks its heading from it (a RESTART reads as 'Restarting <machine>...', a "
+            "START as the weaker 'Reconnecting to <machine>...', since a start may well be a no-op), "
+            "and the list badge names a failed one the same way. None outside one."
         ),
     )
 
@@ -1177,6 +1204,7 @@ class SystemInterfaceHealthTracker(MutableModel):
             # A fresh recovery attempt supersedes any prior failure reason, and
             # any prior attempt's account of whether it booted anything.
             record.last_recovery_error = None
+            record.last_recovery_failure_cause = None
             record.is_recovery_a_no_op = False
             record.is_recovery_progress_unverified = False
             self._seen_answering_during_recovery_agents.discard(aid_str)
@@ -1189,8 +1217,8 @@ class SystemInterfaceHealthTracker(MutableModel):
             self._fire_on_change(agent_id, fire_health)
         return fire_health is not None
 
-    def mark_recovery_failed(self, agent_id: AgentId, error: str) -> bool:
-        """Mark ``agent_id`` as RECOVERY_FAILED, carrying ``error`` as the reason.
+    def mark_recovery_failed(self, agent_id: AgentId, error: str, cause: RecoveryFailureCause) -> bool:
+        """Mark ``agent_id`` as RECOVERY_FAILED, carrying ``error`` as the reason and ``cause`` as its step.
 
         Called when a recovery fails to bring the workspace back within its
         window, or its ``mngr`` commands error out. The reason is surfaced to
@@ -1212,6 +1240,7 @@ class SystemInterfaceHealthTracker(MutableModel):
                 record.failure_run_started_at = None
                 record.failure_run_started_wall_at = None
                 record.last_recovery_error = error
+                record.last_recovery_failure_cause = cause
                 # Always re-fire: a second failure with a new reason must reach
                 # the recovery page even if the state is already RECOVERY_FAILED.
                 record.health = AgentHealth.RECOVERY_FAILED
@@ -1258,6 +1287,14 @@ class SystemInterfaceHealthTracker(MutableModel):
             if record is None:
                 return None
             return record.last_recovery_error
+
+    def get_last_recovery_failure_cause(self, agent_id: AgentId) -> RecoveryFailureCause | None:
+        """Return which step of ``agent_id``'s recovery failed, if it is RECOVERY_FAILED."""
+        with self._lock:
+            record = self._records.get(str(agent_id))
+            if record is None or record.health != AgentHealth.RECOVERY_FAILED:
+                return None
+            return record.last_recovery_failure_cause
 
     def record_recovery_started_nothing(self, agent_id: AgentId) -> None:
         """Record that this episode's dispatched ``mngr start`` reported it booted no host.
@@ -1317,16 +1354,17 @@ class SystemInterfaceHealthTracker(MutableModel):
             return record.backend_outage
 
     def get_recovery_kind(self, agent_id: AgentId) -> HostRecoveryKind | None:
-        """Return which recovery is in flight, or None if not RECOVERING.
+        """Return which recovery is in flight, or which one failed; None in any other state.
 
-        Only meaningful while the agent is RECOVERING; returns None otherwise so
-        a stale value from a prior episode is never read. The recovery card picks
-        its heading from it: a RESTART reads as "Restarting <machine>...", a
-        START (which may be a no-op) as the weaker "Reconnecting to <machine>...".
+        Only meaningful while the agent is RECOVERING or RECOVERY_FAILED;
+        returns None otherwise so a stale value from a prior episode is never
+        read. The recovery card picks its heading from it: a RESTART reads as
+        "Restarting <machine>...", a START (which may be a no-op) as the weaker
+        "Reconnecting to <machine>...". A failed one is named the same way.
         """
         with self._lock:
             record = self._records.get(str(agent_id))
-            if record is None or record.health != AgentHealth.RECOVERING:
+            if record is None or record.health not in (AgentHealth.RECOVERING, AgentHealth.RECOVERY_FAILED):
                 return None
             return record.recovery_kind
 

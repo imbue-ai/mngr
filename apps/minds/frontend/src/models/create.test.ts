@@ -39,7 +39,7 @@ describe("MindLivenessTracker", () => {
     const tracker = new MindLivenessTracker(() => undefined);
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => ({ ok: true }) as Response),
+      vi.fn(async () => new Response(null, { status: 200 })),
     );
     const startPromise = tracker.start("agent-1");
     expect(tracker.displayedLiveness("agent-1", "STOPPED")).toBe("STARTING");
@@ -64,10 +64,21 @@ describe("MindLivenessTracker", () => {
     const tracker = new MindLivenessTracker(() => undefined);
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => ({ ok: false }) as Response),
+      vi.fn(async () => new Response(null, { status: 500 })),
     );
     await tracker.stop("agent-2");
     expect(tracker.displayedLiveness("agent-2", "RUNNING")).toBe("RUNNING");
+  });
+
+  it("keeps the refusal's body for the failure it reports", async () => {
+    const tracker = new MindLivenessTracker(() => undefined);
+    const body = { error: "Could not start the workspace host: This workspace is undergoing maintenance and will be back shortly." };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse(body, 502)),
+    );
+    const result = await tracker.start("agent-4");
+    expect(result).toEqual({ isOk: false, outcome: { status: 502, body } });
   });
 });
 

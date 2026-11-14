@@ -1906,7 +1906,10 @@ def _perform_workspace_lifecycle(agent_id: str, action: str) -> WorkspaceLifecyc
     )
     if not outcome.is_successful:
         reason = f": {outcome.failure_reason}" if outcome.failure_reason else ""
-        return _json_error(f"Could not {action} the workspace host{reason}", 502)
+        body: dict[str, object] = {"error": f"Could not {action} the workspace host{reason}"}
+        if outcome.provider_reason is not None:
+            body["provider_reason"] = outcome.provider_reason
+        return _json_response(body, status_code=502)
 
     info = backend_resolver.get_agent_display_info(parsed_id)
     host_state = None
@@ -2398,9 +2401,15 @@ def _operation_conflict_error(existing: WorkspaceOperationRecord | None) -> Resp
         if existing is not None
         else "Another operation"
     )
-    return _json_error(
-        f"{phrase} is already in progress for this workspace. Wait for it to finish before starting another operation.",
-        409,
+    # ``operation_kind`` lets the desktop word the conflict itself; other
+    # callers read ``error`` and ignore the extra key.
+    return _json_response(
+        {
+            "error": f"{phrase} is already in progress for this workspace. "
+            "Wait for it to finish before starting another operation.",
+            "operation_kind": existing.kind.value if existing is not None else None,
+        },
+        status_code=409,
     )
 
 
@@ -4656,6 +4665,16 @@ _ACCOUNT_LISTING_FAILED_MESSAGE: Final[str] = (
 )
 
 
+def _connection_in_use_message(active_workspace_count: int) -> str:
+    """The 409 sentence for removing a connection that workspaces still run on, shown to the user as is."""
+    if active_workspace_count == 1:
+        return "This connection still has 1 active workspace. Remove it first, then remove the connection."
+    return (
+        f"This connection still has {active_workspace_count} active workspaces. "
+        "Remove them first, then remove the connection."
+    )
+
+
 def _running_connection_operation_message(registry: ConnectionOperationRegistry, instance_name: str) -> str | None:
     """The 409 message for a registration or update still running on the connection, or None when none is.
 
@@ -5353,11 +5372,12 @@ def _handle_list_local_credential_profiles() -> LocalCredentialProfilesResponse 
 @require_api_or_cookie_auth
 @API_SPEC.validate(resp=json_response_model(OkResponse))
 def _handle_recheck_cloud_account(account_name: str) -> OkResponse | Response:
-    """Re-check a connection now by bouncing discovery (the "Check now" button after a login was set up outside the app).
+    """Re-check a connection now by bouncing discovery (the "Check again" button after the user fixed it outside the app).
 
     Discovery re-checks a provider whose local login is missing on its own slow
-    cadence; this is the user saying the login exists now. The bounce restarts
-    the observe producer for every provider, which is the one lever there is.
+    cadence; this is the user saying the login exists now, or that a failed
+    check's fix is in. The bounce restarts the observe producer for every
+    provider, which is the one lever there is.
     """
     connection_store = _configured_connection_store()
     if isinstance(connection_store, Response):
@@ -5406,10 +5426,7 @@ def _handle_delete_cloud_account(account_name: str) -> OkResponse | Response:
         )
     if active_agent_ids:
         return _json_error(
-            f"Cloud account {account_name!r} still has {len(active_agent_ids)} active workspace(s); "
-            "destroy them before removing the account.",
-            409,
-            CONNECTION_ERROR_CODE_CONNECTION_IN_USE,
+            _connection_in_use_message(len(active_agent_ids)), 409, CONNECTION_ERROR_CODE_CONNECTION_IN_USE
         )
     # A record is seeded only once `mngr create` returns, and a cloud create
     # runs for minutes, so the sources above cannot see a create in flight.

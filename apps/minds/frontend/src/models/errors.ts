@@ -150,6 +150,18 @@ export function errorCodeFromBody(body: ResponseBody): string | null {
   return stringField(body, "code") || null;
 }
 
+/** The workspace provider's own reason a failed Start or Stop carries
+ * (`provider_reason`), or null when it carries none. */
+export function providerReasonFromBody(body: ResponseBody): string | null {
+  return stringField(body, "provider_reason").trim() || null;
+}
+
+/** The kind of the operation a 409 says already holds the workspace
+ * (`operation_kind`), or null when it names none. */
+export function operationKindFromBody(body: ResponseBody): string | null {
+  return stringField(body, "operation_kind") || null;
+}
+
 /** The refusing route's own account of why (its `detail`), or "" when it gave
  * none. */
 export function refusalDetailFromBody(body: ResponseBody): string {
@@ -209,6 +221,13 @@ function bodyAsText(body: ResponseBody): string {
   );
   if (Object.keys(rest).length > 0) lines.push(JSON.stringify(rest));
   return lines.join("\n");
+}
+
+/** `text` ending as a sentence, for someone else's words (a provider's reason)
+ * placed among ours. */
+export function asSentence(text: string): string {
+  const trimmed = text.trim();
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
 }
 
 export interface ResponseErrorOptions extends RetryOptions {

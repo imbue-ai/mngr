@@ -9,6 +9,7 @@
 
 import m from "mithril";
 import { Button } from "../components/Button";
+import { richErrorText } from "../components/errorDesign";
 import { noticeVariantClass } from "../components/Notice";
 import type { ShellState } from "./shell-state";
 import type { NoticeAction, NoticePayload } from "./notice-band";
@@ -68,7 +69,11 @@ export function NoticeBand(): m.Component<NoticeBandAttrs> {
           "div",
           { class: "flex items-center gap-3 px-4 py-2 " + noticeVariantClass(payload.variant) },
           [
-            m("span", { class: "type-body flex-1 min-w-0" }, payload.message),
+            m(
+              "span",
+              { class: "type-body flex-1 min-w-0" },
+              richErrorText(payload.message),
+            ),
             ...payload.actions.map((action) =>
               m(
                 Button,

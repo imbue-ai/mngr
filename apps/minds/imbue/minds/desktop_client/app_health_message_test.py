@@ -3,6 +3,7 @@
 from imbue.minds.desktop_client.app import _ui_health_message
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
+from imbue.minds.desktop_client.system_interface_health import RecoveryFailureCause
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.mngr.primitives import AgentId
 
@@ -23,16 +24,19 @@ def test_the_no_op_start_reaches_the_frame_only_on_the_terminal_state() -> None:
     in_progress = _ui_health_message(tracker, str(agent_id), AgentHealth.RECOVERING)
     assert in_progress.is_recovery_a_no_op is False
     assert in_progress.error is None
-    # Which recovery it is, however, is news precisely while one is running.
+    # Which recovery it is, however, is news while one is running.
     assert in_progress.recovery_kind is HostRecoveryKind.START
 
-    tracker.mark_recovery_failed(agent_id, "The system interface did not respond.")
+    tracker.mark_recovery_failed(
+        agent_id, "The system interface did not respond.", RecoveryFailureCause.NOT_ANSWERING_AFTER_START
+    )
     terminal = _ui_health_message(tracker, str(agent_id), AgentHealth.RECOVERY_FAILED)
     assert terminal.is_recovery_a_no_op is True
     assert terminal.error == "The system interface did not respond."
-    # And stops being news once the episode is over: a held reading would go on
-    # describing a recovery that is no longer running.
-    assert terminal.recovery_kind is None
+    # The ended episode keeps its kind and its cause, so the badge can tell a
+    # failed start from a failed restart and from a recovery that ran nothing.
+    assert terminal.recovery_kind is HostRecoveryKind.START
+    assert terminal.recovery_failure_cause is RecoveryFailureCause.NOT_ANSWERING_AFTER_START
 
 
 def test_a_restart_that_really_booted_a_host_keeps_the_restart_framing() -> None:
@@ -40,7 +44,9 @@ def test_a_restart_that_really_booted_a_host_keeps_the_restart_framing() -> None
     tracker = SystemInterfaceHealthTracker()
     agent_id = AgentId.generate()
     tracker.mark_recovering(agent_id, HostRecoveryKind.RESTART)
-    tracker.mark_recovery_failed(agent_id, "The system interface did not respond.")
+    tracker.mark_recovery_failed(
+        agent_id, "The system interface did not respond.", RecoveryFailureCause.NOT_ANSWERING_AFTER_START
+    )
 
     assert _ui_health_message(tracker, str(agent_id), AgentHealth.RECOVERY_FAILED).is_recovery_a_no_op is False
 

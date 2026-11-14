@@ -12,14 +12,14 @@ afterEach(() => {
 });
 
 /** Register a context carrying nothing but the health store this notice reads. */
-function noticeFor(environment: EnvironmentCondition): string {
+function noticeFor(environment: EnvironmentCondition, isDeviceConditionShown = false): string {
   const health = new HealthStore();
   health.applyEnvironmentMessage({ type: "environment", state: environment });
   registerAppContext({ stores: { health }, shell: {} } as unknown as AppContext);
   // The bridge resolves window.mindsNative on every call, and vitest's node
   // environment has no window at all.
   vi.stubGlobal("window", {});
-  return allText(renderRoot(LocalPageNotice, {}));
+  return allText(renderRoot(LocalPageNotice, { isDeviceConditionShown }));
 }
 
 describe("LocalPageNotice", () => {
@@ -29,7 +29,11 @@ describe("LocalPageNotice", () => {
     // only thing that can speak, and this component's one line is what hands it
     // over. The copy selection itself is notice-band.ts's own business.
     expect(noticeFor("OFFLINE")).toContain("No network connection.");
-    expect(noticeFor("SSH_BLOCKED")).toContain("This network blocks the connection to your workspaces.");
+    expect(noticeFor("SSH_BLOCKED")).toContain("This network won't let Imbue Studio reach your workspaces. Try a different network.");
+  });
+
+  it("leaves the device's condition to a page that says it itself", () => {
+    expect(noticeFor("SSH_BLOCKED", true)).toBe("");
   });
 
   it("says nothing about a device with no trouble to report, or none measured yet", () => {

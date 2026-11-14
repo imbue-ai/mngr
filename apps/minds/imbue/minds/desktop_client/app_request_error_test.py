@@ -1,4 +1,4 @@
-"""Unit tests for the friendly navigation-level 404/405 error page.
+"""Unit tests for the friendly navigation-level 404/405/500 error pages.
 
 A routing-level 404/405 reached by a real page navigation renders the
 RequestError page styled like the rest of Imbue Studio with a way back home, while fetch/XHR callers
@@ -7,6 +7,7 @@ RequestError page styled like the rest of Imbue Studio with a way back home, whi
 
 from pathlib import Path
 
+from flask import Response
 from flask.testing import FlaskClient
 
 from imbue.minds.desktop_client.app import create_desktop_client
@@ -82,3 +83,23 @@ def test_accept_header_fallback_detects_a_navigation_without_sec_fetch_dest(tmp_
     assert "Back to workspaces" in navigation.get_data(as_text=True)
     assert fetch_like.status_code == 404
     assert "Back to workspaces" not in fetch_like.get_data(as_text=True)
+
+
+def test_document_navigation_to_a_failing_page_renders_the_styled_500_page(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+
+    @client.application.get("/explode")
+    def explode() -> Response:
+        raise RuntimeError("test boom")
+
+    response = client.get("/explode", headers={"Sec-Fetch-Dest": "document"})
+
+    assert response.status_code == 500
+    assert response.mimetype == "text/html"
+    body = response.get_data(as_text=True)
+    assert "Something went wrong" in body
+    assert "location.reload()" in body
+    assert 'href="/help"' in body
+    assert 'href="/"' in body
+    # The exception is kept for a report, collapsed rather than as the page.
+    assert "<details><summary>See details</summary><pre>Internal Server Error: test boom</pre></details>" in body

@@ -18,7 +18,7 @@ const POPUP_ACTIONS = Object.freeze({
 
 // A workspace's own app addresses: `[<app>.]agent-<hex>.localhost`, and the
 // legacy host-keyed family a stale address may still name. The same family as
-// WORKSPACE_ORIGIN_FAMILY in frontend/src/views/shell/WorkspaceFrame.ts, less
+// WORKSPACE_ORIGIN_FAMILY in frontend/src/models/workspaces.ts, less
 // its `.127.0.0.1` form, which no URL can carry (it does not parse).
 const WORKSPACE_HOST_PATTERN = /^(?:[a-z0-9_-]+\.)*((?:agent|host)-[a-f0-9]+)\.localhost$/i;
 // A workspace id as the renderer reports it; mirrors the embed contract's

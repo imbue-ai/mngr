@@ -11,7 +11,22 @@
 
 import type { UiWorkspaceEntry } from "../../channel/messages";
 import type { RemoteTileState } from "../../generated/ui";
-import type { DiscoveryHealth, RecoveryKind, WorkspaceHealth } from "../../models/health";
+import type { RequestOutcome, UserFacingError } from "../../models/errors";
+import {
+  asSentence,
+  errorFromResponse,
+  errorMessageFromBody,
+  plainErrorText,
+  providerReasonFromBody,
+  responseDetails,
+} from "../../models/errors";
+import type {
+  DiscoveryHealth,
+  EnvironmentCondition,
+  RecoveryFailureCause,
+  RecoveryKind,
+  WorkspaceHealth,
+} from "../../models/health";
 import type { MindLiveness } from "../../models/create";
 import { MIND_LIVENESS_LABELS } from "../../models/create";
 
@@ -36,20 +51,45 @@ export const MAINTENANCE_MESSAGE = "This workspace is undergoing maintenance and
  * connector answers a refused start with the same words. */
 export const RETIRED_MESSAGE =
   "This workspace has been retired and cannot be started again. " +
-  "Download its data from its backups, or contact support if it has none.";
+  "*Download its data from its backups, or contact support if it has none.*";
+
+/** The sentence a suspended account's surfaces show, in Imbue Cloud's own words. */
+export const SUSPENDED_MESSAGE =
+  "This account is suspended. *If you believe this is a mistake, contact support@imbue.com.*";
+
+export interface LivenessBadge {
+  label: string;
+  /** Why the row cannot be started or opened, for a hold; "" otherwise. */
+  tooltip: string;
+}
 
 /** What the liveness badge says: the lifecycle label, except that a machine an
  * operator is holding says so instead of "Stopped" (the badge is the one
- * place the row explains why Start is missing). */
-export function livenessBadgeLabelFor(liveness: string, stopKind: string): string {
-  if (isMaintenanceHold(liveness, stopKind)) return "Maintenance";
-  if (isRetiredHold(liveness, stopKind)) return "Retired";
-  return MIND_LIVENESS_LABELS[liveness] ?? "Status unknown";
+ * place the row explains why Start is missing), with why on its tooltip. */
+export function livenessBadgeFor(liveness: string, stopKind: string): LivenessBadge {
+  if (isMaintenanceHold(liveness, stopKind))
+    return { label: "Maintenance", tooltip: plainErrorText(MAINTENANCE_MESSAGE) };
+  if (isRetiredHold(liveness, stopKind)) {
+    return {
+      label: "Retired",
+      tooltip:
+        "This workspace has been retired, so it can't be started again. " +
+        "Its backups are still available from the Backups button.",
+    };
+  }
+  if (isSuspensionHold(liveness, stopKind))
+    return { label: "Suspended", tooltip: plainErrorText(SUSPENDED_MESSAGE) };
+  if (isHeldStop(liveness, stopKind)) {
+    return {
+      label: "Unavailable",
+      tooltip: "Imbue Cloud is holding this workspace stopped, so it can't be started from here.",
+    };
+  }
+  return { label: MIND_LIVENESS_LABELS[liveness] ?? "Status unknown", tooltip: "" };
 }
 
 /** Whether a machine is stopped, or on its way there, under an operator's
- * maintenance hold: the badge and the notice band name it (the suspension
- * hold reads as a plain "Stopped"). */
+ * maintenance hold: the badge and the notice band name it. */
 export function isMaintenanceHold(liveness: string, stopKind: string): boolean {
   return stopKind === "maintenance" && (liveness === "STOPPED" || liveness === "STOPPING");
 }
@@ -59,6 +99,18 @@ export function isMaintenanceHold(liveness: string, stopKind: string): boolean {
  * backups) differs from waiting out a maintenance hold. */
 export function isRetiredHold(liveness: string, stopKind: string): boolean {
   return stopKind === "retired" && (liveness === "STOPPED" || liveness === "STOPPING");
+}
+
+/** Whether a machine is stopped, or on its way there, because its owner's
+ * account is suspended. */
+export function isSuspensionHold(liveness: string, stopKind: string): boolean {
+  return stopKind === "suspension" && (liveness === "STOPPED" || liveness === "STOPPING");
+}
+
+/** Whether a machine is stopped, or on its way there, under any stop its owner
+ * cannot end. */
+function isHeldStop(liveness: string, stopKind: string): boolean {
+  return !isOwnerStartableStopKind(stopKind) && (liveness === "STOPPED" || liveness === "STOPPING");
 }
 
 /** Whether the app has any current reading of a machine's state at all. */
@@ -76,6 +128,53 @@ export function mindControlsFor(
     isStartShown: isShutdownSupported && liveness === "STOPPED" && isOwnerStartableStopKind(entry.stop_kind ?? ""),
     isStopShown: isShutdownSupported && liveness === "RUNNING",
   };
+}
+
+/**
+ * The error for a Start or Stop the app could not carry out.
+ *
+ * A start Imbue Cloud refused because it holds the workspace says why in Imbue
+ * Cloud's own words (a suspension reads as maintenance on the wire, so the
+ * row's stop kind tells the two apart). Anything else names what failed,
+ * without claiming it changed nothing: the command may have got further than
+ * its answer says (a start that timed out is still running).
+ */
+export function lifecycleFailureError(
+  action: "start" | "stop",
+  name: string,
+  stopKind: string,
+  outcome: RequestOutcome,
+): LifecycleFailure {
+  const reason = errorMessageFromBody(outcome.body, "");
+  const details = responseDetails(outcome);
+  // The connector answers with these sentences as plain text; ours carry the
+  // copy markup, so the two are compared without it.
+  if (action === "start" && reason.includes(plainErrorText(RETIRED_MESSAGE))) {
+    return { error: { message: RETIRED_MESSAGE, details }, isHold: true };
+  }
+  if (action === "start" && reason.includes(plainErrorText(MAINTENANCE_MESSAGE))) {
+    const message = stopKind === "suspension" ? SUSPENDED_MESSAGE : MAINTENANCE_MESSAGE;
+    return { error: { message, details }, isHold: true };
+  }
+  // The workspace's provider is what failed: its own reason says what to do.
+  const providerReason = providerReasonFromBody(outcome.body);
+  return {
+    error: errorFromResponse(
+      `Couldn't ${action} "${name}"`,
+      outcome,
+      {
+        plainReason:
+          providerReason === null ? null : `Couldn't ${action} "${name}". ${asSentence(providerReason)}`,
+      },
+    ),
+    isHold: false,
+  };
+}
+
+export interface LifecycleFailure {
+  error: UserFacingError;
+  /** Imbue Cloud is holding the workspace: the sentence explains it in full. */
+  isHold: boolean;
 }
 
 /** The sentence shown when removing a synced record from the list fails. A
@@ -110,7 +209,7 @@ export function lifecycleConfirmation(action: "stop" | "restart", name: string, 
  * "blocked" is a row whose click could go nowhere, so the row is not
  * clickable: a cloud machine this device holds no SSH key for (nothing on the
  * far side would answer; its chip says so), or a stop an operator holds (no
- * Start is offered; a maintenance hold is named by the badge). */
+ * Start is offered; the badge names the hold). */
 export type RowClickAction = "enter" | "recover" | "recover-start" | "blocked";
 
 // ``liveness`` is a plain string (only equality against the lifecycle names
@@ -126,8 +225,7 @@ export function rowClickActionFor(
   // not change that.
   if ((entry.key_state ?? "") !== "") return "blocked";
   // A stop an operator holds is not the owner's to end, so a click has
-  // nowhere useful to go: no Start is offered, and a maintenance hold is
-  // named by the badge (the other holds read as plain "Stopped").
+  // nowhere useful to go: no Start is offered, and the badge names the hold.
   const isStoppedOnPurposeByOthers =
     (liveness === "STOPPED" || liveness === "STOPPING") && !isOwnerStartableStopKind(entry.stop_kind ?? "");
   if (isStoppedOnPurposeByOthers) return "blocked";
@@ -171,22 +269,38 @@ export function rowClickActionFor(
  * instead.)
  *
  * The last reading, "recovery_failed", is where the badge would overstate one
- * step later: when the dispatched start reported it booted no host, the machine
- * was up throughout -- it was never taken down and brought back, so a "Restart
- * failed" badge describes something the user did not experience. It reads as a
- * machine that never answered instead.
+ * step later. When the dispatched start reported it booted no host, or the
+ * recovery failed before it ran anything, the machine was never taken down and
+ * brought back, so it reads as a machine that never answered. Otherwise the
+ * failure is named after the recovery that ran: only the user's own restart
+ * failed as a restart; the app's start failed to reconnect.
  */
 export function healthBadgeLabelFor(
   health: WorkspaceHealth,
   isRecoveryANoOp: boolean,
   recoveryKind: RecoveryKind | null,
   isDeviceCannotConnect: boolean,
+  recoveryFailureCause: RecoveryFailureCause | null = null,
 ): string | null {
   if (health === "healthy") return null;
   if (isDeviceCannotConnect) return "Can't connect from this device";
-  if (health === "stuck") return "Server not responding";
+  if (health === "stuck") return "Not responding";
   if (health === "recovering") return recoveryKind === "restart" ? "Restarting..." : "Reconnecting...";
-  return isRecoveryANoOp ? "Not responding" : "Restart failed";
+  const isNothingRun =
+    recoveryFailureCause === "WORKSPACE_NOT_FOUND" || recoveryFailureCause === "WORKER_NOT_STARTED";
+  if (isRecoveryANoOp || isNothingRun) return "Not responding";
+  return recoveryKind === "restart" ? "Restart failed" : "Couldn't reconnect";
+}
+
+/** Whether this device's own network explains a workspace not answering, so
+ * its row should not blame the workspace: the device is offline or on a network
+ * that blocks the connection, and the workspace needs the network to be
+ * reached. The page's notice names the device's condition instead. */
+export function isOutageExplainedByDevice(
+  environment: EnvironmentCondition,
+  isWorkspaceNetworkDependent: boolean,
+): boolean {
+  return isWorkspaceNetworkDependent && (environment === "OFFLINE" || environment === "SSH_BLOCKED");
 }
 
 /** The location badge of a remote row: a cloud workspace is named by its
@@ -203,9 +317,14 @@ export interface RemoteStateChip {
   label: string;
   /** Whether the chip reports a problem (rendered in the important tone). */
   isImportant: boolean;
-  /** The chip's tooltip: the label spelled out, or the failure detail behind an error. */
-  title: string;
+  /** What the chip means, on hover. */
+  tooltip: string;
+  /** For a failure, what a click on the chip shows: our sentence, with the
+   * server's detail behind See details. */
+  error: UserFacingError | null;
 }
+
+const ACCESS_SETUP_FAILED_SENTENCE = "Setting up this computer's access to this workspace failed.";
 
 /** The chip a remote row shows for its derived access state, or null for the plain state. */
 export function remoteStateChipFor(
@@ -214,46 +333,61 @@ export function remoteStateChipFor(
   switch (tile.state) {
     case "connecting":
       return {
-        label: "connecting…",
+        label: "Connecting…",
         isImportant: false,
-        title: "Setting up this device's access to this machine",
+        tooltip: "Imbue Studio is setting up this computer's access to this workspace.",
+        error: null,
       };
     case "unreachable":
       return {
-        label: "unreachable",
+        label: "Unreachable",
         isImportant: true,
-        title: "This machine could not be reached from this device",
+        tooltip:
+          "Imbue Studio can't reach this workspace from this computer. Its machine may have been released, " +
+          "or this computer's access to it stopped working.",
+        error: null,
       };
     case "error":
       return {
-        label: "sync error",
+        label: "Can't connect from here",
         isImportant: true,
-        title: tile.detail || "Setting up this device's access to this machine failed",
+        tooltip: `${ACCESS_SETUP_FAILED_SENTENCE} Click to see details.`,
+        error: {
+          message: ACCESS_SETUP_FAILED_SENTENCE,
+          details: tile.detail ?? "",
+        },
       };
     case "locked":
       return {
-        label: "locked",
+        label: "Locked",
         isImportant: false,
-        title: "Enter your master password to reach this machine",
+        tooltip: "Enter your master password to reach this workspace from this computer.",
+        error: null,
       };
     case "missing_connection":
       return {
-        label: "connection removed",
+        label: "Connection removed",
         isImportant: true,
-        title:
-          "The connection this machine runs on was removed; re-add it or remove this machine from the list",
+        tooltip:
+          "The connection this workspace runs on was removed from your account. Add it again, or remove this " +
+          "workspace from the list.",
+        error: null,
       };
     case "no_credentials":
       return {
-        label: "no credentials",
+        label: "No credentials here",
         isImportant: true,
-        title: "The credentials of the connection this machine runs on are not available on this device",
+        tooltip: "The credentials of the connection this workspace runs on aren't available on this computer.",
+        error: null,
       };
     case "read_only":
       return {
-        label: "needs a newer app",
+        label: "Needs a newer app",
         isImportant: true,
-        title: "This machine was set up by a newer version of the app",
+        tooltip:
+          "The connection this workspace runs on was added by a newer version of Imbue Studio. Update Imbue " +
+          "Studio to reach this workspace from this computer.",
+        error: null,
       };
     default:
       return null;

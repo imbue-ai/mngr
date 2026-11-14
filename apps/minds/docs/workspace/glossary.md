@@ -220,5 +220,5 @@ Key concepts in the Imbue Studio system:
   See `libs/mngr_imbue_cloud/README.md` ("Adoption and key rotation") and [the lost-device runbook](../deploy/reference/lost-device-runbook.md).
 
 - **stop kind**: why a remote (imbue_cloud) machine's current stop happened, recorded by the connector beside its lifecycle status and cleared by every start (`specs/workspace-stop-kinds.md`).
-  `owner` (the user's own stop, from any device) and `idle` (an operator stop to free capacity) are the owner's to end with Start; `maintenance` (an operator hold, such as a fleet migration) and `suspension` (the account suspend fan-out) are not -- a held machine offers no Start control (a `maintenance` hold is named "Maintenance" by its badge; a `suspension` reads as plain "Stopped"), and the connector refuses owner starts of it.
+  `owner` (the user's own stop, from any device) and `idle` (an operator stop to free capacity) are the owner's to end with Start; `maintenance` (an operator hold, such as a fleet migration) and `suspension` (the account suspend fan-out) are not -- a held machine offers no Start control (its badge names the hold: "Maintenance", "Suspended", or "Unavailable" for a kind this build does not know), and the connector refuses owner starts of it.
   A kind this build does not recognize is treated as a hold (shown but not actionable).

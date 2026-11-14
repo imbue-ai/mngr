@@ -172,8 +172,8 @@ user id or `local` for the device. Every window is for one account, and sees tha
     with an ``mfa_serial``).
 
 `/api/v1/desktop/cloud-accounts/<instance>/recheck` (POST):
-    re-checks a connection now by bouncing discovery: the providers panel's "Check now" button
-    after a login was set up outside the app. 404 for an unknown connection.
+    re-checks a connection now by bouncing discovery: the providers panel's "Check again" button
+    after a login was set up, or a failed check fixed, outside the app. 404 for an unknown connection.
 
 `/api/v1/desktop/cloud-accounts/operations/<instance>` (GET):
     the state of a registration or update: ``status`` (RUNNING, DONE, FAILED), ``is_done``, the

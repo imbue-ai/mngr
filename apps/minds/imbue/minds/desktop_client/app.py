@@ -160,6 +160,7 @@ from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import AgentFailureLogGate
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
+from imbue.minds.desktop_client.system_interface_health import RecoveryFailureCause
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.turn_credentials import TurnCredentialBroker
 from imbue.minds.desktop_client.ui_api import create_ui_blueprint
@@ -214,6 +215,7 @@ from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordSto
 from imbue.minds.desktop_client.workspace_record_store import is_account_synced_provider
 from imbue.minds.desktop_client.workspace_recovery import UnattendedRecoveryDispatcher
 from imbue.minds.desktop_client.workspace_recovery import is_network_dependent_workspace
+from imbue.minds.desktop_client.workspace_recovery import provider_error_reason
 from imbue.minds.desktop_client.workspace_recovery import read_backend_unreachable_verdict
 from imbue.minds.desktop_client.workspace_recovery import read_device_cannot_connect_verdict
 from imbue.minds.desktop_client.workspace_update_state import AutoUpdatePolicy
@@ -331,10 +333,14 @@ def _handle_authenticate() -> Response:
     is_valid = get_state().auth_store.validate_and_consume_code(code=code)
 
     if not is_valid:
+        # This is the app's own login on this computer, not an Imbue account,
+        # so the page does not ask the user to sign in again.
         html = build_error_page_html(
             title="Sign-in failed",
-            message="This login code is invalid or has already been used. "
-            "Find the login URL printed where the Imbue Studio app is running and open that full link.",
+            message="This login link has already been used or has expired. "
+            "If Imbue Studio doesn't show your workspaces, restart it to open a fresh one.",
+            details="If you started Imbue Studio from a terminal, find the login URL printed there "
+            "and open that full link.",
         )
         return make_html_response(content=html, status_code=403)
 
@@ -356,6 +362,18 @@ def _handle_authenticate() -> Response:
         samesite="lax",
     )
     return response
+
+
+def _is_document_navigation() -> bool:
+    """Whether the current request is a page navigation rather than a fetch.
+
+    Chromium always sends Sec-Fetch-Dest; the Accept sniff is the fallback for
+    clients that don't (fetches default to Accept: */*).
+    """
+    sec_fetch_dest = request.headers.get("Sec-Fetch-Dest", "")
+    if sec_fetch_dest:
+        return sec_fetch_dest == "document"
+    return "text/html" in request.headers.get("Accept", "")
 
 
 def _resolved_workspace_color(backend_resolver: BackendResolverInterface, agent_id: AgentId) -> str:
@@ -1221,6 +1239,8 @@ def _provider_entry_from_discovery(
             status=ProviderPanelStatus.ERROR,
             error_type=error.type_name,
             error_message=error.message,
+            error_reason=provider_error_reason(error, name),
+            remediation=error.remediation,
         )
     backend = backend_by_name.get(name)
     if backend is None:
@@ -1267,6 +1287,7 @@ def _connection_entry(
         status=status,
         error_type=error.type_name if error is not None else None,
         error_message=error.message if error is not None else None,
+        error_reason=provider_error_reason(error, view.instance_name) if error is not None else None,
         remediation=error.remediation if error is not None else None,
         credential_source=view.credential_source,
         workspace_count=workspace_count,
@@ -2765,17 +2786,17 @@ def _ui_health_message(tracker: SystemInterfaceHealthTracker, agent_id: str, sta
     error: str | None = None
     is_recovery_a_no_op = False
     recovery_kind: HostRecoveryKind | None = None
+    recovery_failure_cause: RecoveryFailureCause | None = None
     if status == AgentHealth.RECOVERY_FAILED:
         error = tracker.get_last_recovery_error(AgentId(agent_id))
         # Only read on the terminal state, which is the only one whose copy
         # turns on it -- everywhere else the episode is still in progress and
         # the start may yet report.
         is_recovery_a_no_op = tracker.is_recovery_a_no_op(AgentId(agent_id))
-    if status == AgentHealth.RECOVERING:
-        # Which recovery it is is news only while one is running, which is the
-        # only state whose copy turns on it. The tracker gates it the same way,
-        # so a frame that raced the episode's end reads None and the surfaces
-        # fall back to the weaker claim rather than to a stale one.
+        recovery_failure_cause = tracker.get_last_recovery_failure_cause(AgentId(agent_id))
+    if status in (AgentHealth.RECOVERING, AgentHealth.RECOVERY_FAILED):
+        # Which recovery it is is news only while one is running or once it has
+        # failed, the two states whose copy turns on it.
         recovery_kind = tracker.get_recovery_kind(AgentId(agent_id))
     return UiHealthMessage(
         agent_id=agent_id,
@@ -2783,6 +2804,7 @@ def _ui_health_message(tracker: SystemInterfaceHealthTracker, agent_id: str, sta
         error=error,
         is_recovery_a_no_op=is_recovery_a_no_op,
         recovery_kind=recovery_kind,
+        recovery_failure_cause=recovery_failure_cause,
     )
 
 
@@ -2872,14 +2894,8 @@ def create_desktop_client(
             # friendly page with a way home instead. Navigation is detected
             # from the request, not the path: even an /api/ URL strands the
             # user when opened as a document, while fetch()/XHR callers (who
-            # read resp.ok, not the body) keep the raw status. Chromium always
-            # sends Sec-Fetch-Dest; the Accept sniff is the fallback for
-            # clients that don't (fetches default to Accept: */*).
-            sec_fetch_dest = request.headers.get("Sec-Fetch-Dest", "")
-            is_document_navigation = (
-                sec_fetch_dest == "document" if sec_fetch_dest else "text/html" in request.headers.get("Accept", "")
-            )
-            if exc.code in (404, 405) and is_document_navigation:
+            # read resp.ok, not the body) keep the raw status.
+            if exc.code in (404, 405) and _is_document_navigation():
                 if exc.code == 404:
                     title, message = "Page not found", "This page doesn't exist (it may have moved)."
                 else:
@@ -2889,7 +2905,19 @@ def create_desktop_client(
                 )
             return exc
         logger.opt(exception=exc).error("Unhandled exception on {} {}", request.method, request.path)
-        return make_response(status_code=500, content=f"Internal Server Error: {exc}")
+        raw_text = f"Internal Server Error: {exc}"
+        if _is_document_navigation():
+            return make_html_response(
+                content=build_error_page_html(
+                    title="Something went wrong",
+                    message="Imbue Studio couldn't show this page. Try again. If this persists, report a bug.",
+                    details=raw_text,
+                    is_retry_offered=True,
+                    is_report_offered=True,
+                ),
+                status_code=500,
+            )
+        return make_response(status_code=500, content=raw_text)
 
     install_request_profiling(app)
 

@@ -48,6 +48,12 @@ describe("noticeBandFor", () => {
     );
   });
 
+  it("names the workspace rather than a component when the unreachable provider has no name", () => {
+    const band = noticeBandFor("stuck", "healthy", true, { isBackendUnreachable: true });
+    expect(band?.message).toBe("Can't reach this workspace right now");
+    expect(band?.key).toBe("workspace-recovering");
+  });
+
   it("leaves a healthy machine unbanded even while its provider is erroring", () => {
     // A stale row is not a broken machine: the workspace keeps answering
     // through the forward whatever discovery last managed to poll.
@@ -111,7 +117,7 @@ describe("noticeBandFor", () => {
     // claiming they are offline is a claim they know to be false -- and they
     // would discount whatever the app says next.
     const band = noticeBandFor("stuck", "healthy", true, { deviceEnvironment: "SSH_BLOCKED" });
-    expect(band?.message).toBe("This network blocks the connection to your workspaces.");
+    expect(band?.message).toBe("This network won't let Imbue Studio reach your workspaces. Try a different network.");
   });
 
   it("blames this device before it blames the backend behind it", () => {
@@ -142,7 +148,7 @@ describe("noticeBandFor", () => {
     // recovery_failed branch, the band would say "This machine stopped
     // responding." about a machine nothing here ever reached.
     const failed = noticeBandFor("recovery_failed", "healthy", true, { deviceEnvironment: "SSH_BLOCKED" });
-    expect(failed?.message).toBe("This network blocks the connection to your workspaces.");
+    expect(failed?.message).toBe("This network won't let Imbue Studio reach your workspaces. Try a different network.");
   });
 
   it("does not blame this device's network for a machine that runs on it", () => {
@@ -255,7 +261,10 @@ describe("restart-app availability", () => {
     // Browser mode has no main process: the button would be inert, which is
     // worse than stating the condition and offering nothing.
     const band = noticeBandFor("healthy", "blocked", true, { isRestartAppAvailable: false });
-    expect(band?.message).toBe(noticeBandFor("healthy", "blocked", true)?.message);
+    expect(band?.message).toContain(noticeBandFor("healthy", "blocked", true)?.message ?? "");
+    // With no button to press, it says where the app to restart runs.
+    expect(band?.message).toContain("Restart the Imbue Studio app on the computer running it.");
+    expect(noticeBandFor("healthy", "blocked", true)?.message).not.toContain("computer running it");
     expect(band?.actions).toEqual([]);
     expect(localPageNoticeFor("blocked", false)?.actions).toEqual([]);
   });
@@ -320,6 +329,16 @@ describe("noticeBandFor, a machine stopped on purpose", () => {
     expect(noticeBandFor("stuck", "blocked", true, { liveness: "STOPPED", stopKind: "retired" })?.key).toBe(
       "discovery-blocked",
     );
+  });
+
+  it("tells a suspended owner the account is suspended", () => {
+    const suspended = noticeBandFor("stuck", "healthy", true, { liveness: "STOPPED", stopKind: "suspension" });
+    expect(suspended?.key).toBe("workspace-suspended");
+    expect(suspended?.variant).toBe("info");
+    expect(suspended?.message).toBe(
+      "This account is suspended. *If you believe this is a mistake, contact support@imbue.com.*",
+    );
+    expect(suspended?.actions).toEqual([]);
   });
 
   it("keeps a device block off the user's own restart through the connector's states", () => {

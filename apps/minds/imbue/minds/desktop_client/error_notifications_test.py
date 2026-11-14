@@ -12,6 +12,7 @@ from imbue.minds.desktop_client.error_notifications import ErrorNotificationGate
 from imbue.minds.desktop_client.error_notifications import WORKSPACE_RECOVERY_FAILED_TITLE
 from imbue.minds.desktop_client.error_notifications import WorkspaceRecoveryFailureReporter
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
+from imbue.minds.desktop_client.system_interface_health import RecoveryFailureCause
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import RecordingNotificationDispatcher
 from imbue.minds.desktop_client.testing import make_notification_feed_for_test
@@ -115,7 +116,9 @@ def _make_recovery_failure_setup(
 def _fail_recovery(tracker: SystemInterfaceHealthTracker, agent_id: AgentId) -> None:
     tracker.mark_stuck(agent_id)
     tracker.mark_recovering(agent_id, HostRecoveryKind.START)
-    assert tracker.mark_recovery_failed(agent_id, f"start failed {uuid4().hex}") is True
+    assert (
+        tracker.mark_recovery_failed(agent_id, f"start failed {uuid4().hex}", RecoveryFailureCause.STEP_FAILED) is True
+    )
 
 
 def test_recovery_failure_reporter_notifies_once_per_outage_and_lands_on_the_workspace() -> None:
@@ -124,7 +127,7 @@ def test_recovery_failure_reporter_notifies_once_per_outage_and_lands_on_the_wor
     _fail_recovery(tracker, agent_id)
     # A retry that fails again inside the same outage re-fires RECOVERY_FAILED.
     tracker.mark_recovering(agent_id, HostRecoveryKind.RESTART)
-    tracker.mark_recovery_failed(agent_id, f"restart failed {uuid4().hex}")
+    tracker.mark_recovery_failed(agent_id, f"restart failed {uuid4().hex}", RecoveryFailureCause.STEP_FAILED)
 
     assert [(request.subtitle, request.url) for request in dispatcher.dispatched] == [
         (WORKSPACE_RECOVERY_FAILED_TITLE, f"/workspace/{agent_id}")

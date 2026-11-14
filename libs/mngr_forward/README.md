@@ -117,6 +117,58 @@ Without the flag nothing is stripped or stamped. The proxy attaches no meaning
 to the headers: what they carry is the host application's contract with the
 services behind its agents.
 
+## When the proxy answers a request itself
+
+When a request to an agent origin cannot be handed to its backend, or the
+backend's answer breaks off, the proxy answers it with one of its own statuses:
+
+- **503**: no backend answered before its response headers -- the agent is not
+  known yet, its origin has no route, the connection to its host could not be
+  made, or nothing answered on the backend's port. Retrying later may work.
+- **502**: the backend's response broke off after its headers.
+- **504**: the connection to the backend could not be made in time, the backend
+  accepted the request and never answered, or the proxy's own connection pool
+  had no free slot.
+
+A backend that itself answers with one of these statuses is forwarded
+unchanged; only the proxy's own answers carry these two headers:
+
+- `X-Mngr-Forward-Reason`: why the proxy answered, one of `DISCOVERY_PENDING`
+  (discovery has not reported yet), `UNKNOWN_AGENT` (discovery has reported and
+  knows no agent for the origin), `NO_ROUTE`, `NO_ROUTE_EVENTS_STOPPED` (no
+  route while the agent's events stream, which delivers routes, is not
+  running), `LOCAL_CONNECTION_FAILED` (this device could not build its end of
+  the connection), `UNREACHABLE`, `NOT_LISTENING` (the agent's host refused the
+  backend's port), `NOT_ANSWERING`, `CONNECTION_LOST`, `TIMED_OUT`,
+  `POOL_EXHAUSTED`.
+- `X-Mngr-Forward-Request-Sent`: `no` when the request never reached the
+  backend (no route, no connection, a refused or timed-out dial, no pool slot,
+  a refused channel to the backend's port), so the backend cannot have acted on
+  it; `yes` when it was sent, in whole or in part, before the connection
+  dropped or timed out, so the backend may have acted on it.
+
+A caller that does not accept HTML gets the status, the headers and a short
+plain-text body. A browser gets a page instead: for a 503, the "Loading
+workspace" page, which re-attempts the origin every second and loads the
+backend's answer once there is one; for a 502 or 504, a page saying the
+connection dropped, with a Try again button and the plain-text body behind "See
+details". A spent or invalid sign-in link to an agent origin
+(`/_subdomain_auth`) gets a page that offers the path it was for.
+
+The pages do not explain the reason. A framed page tells its parent window
+instead, which can draw its own account over the frame:
+
+```js
+// on load, and again whenever a re-attempt answers with a different reason
+{type: "mngr-forward:page", reason, status, details}
+// when the page goes away (it loaded the backend's answer, or the frame moved on)
+{type: "mngr-forward:page-closed"}
+```
+
+`status` is the page's HTTP status and `details` its plain-text body. The
+`frame-ancestors` policy every proxied origin carries means the parent is the
+agent's own origin family or an allowed embedder.
+
 ## TLS trust for plain browsers
 
 With `--use-http2` the proxy serves leaf certificates minted per startup from

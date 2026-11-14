@@ -781,6 +781,7 @@ def record_provider_discovery_error(
     message: str,
     last_snapshot_at: datetime | None = None,
     error_type_name: str = "ProviderUnavailableError",
+    remediation: str | None = None,
 ) -> None:
     """Surface a discovery error for ``provider_name``, as an errored poll would.
 
@@ -797,6 +798,7 @@ def record_provider_discovery_error(
             type_name=error_type_name,
             message=message,
             provider_name=ProviderInstanceName(provider_name),
+            remediation=remediation,
         ),
         last_snapshot_at=last_snapshot_at if last_snapshot_at is not None else datetime.now(timezone.utc),
     )

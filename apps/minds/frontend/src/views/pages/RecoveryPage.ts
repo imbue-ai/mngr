@@ -31,6 +31,8 @@
 import m from "mithril";
 import { getAppContext } from "../../app-context";
 import { PageContainer } from "../components/Layout";
+import { ErrorNotice } from "../components/ErrorDisplay";
+import { richErrorText } from "../components/errorDesign";
 import { Notice } from "../components/Notice";
 import {
   MAINTENANCE_MESSAGE,
@@ -38,7 +40,11 @@ import {
   isOwnerStartableStopKind,
 } from "./landing-controls";
 import { Spinner } from "../components/Spinner";
-import { RecoveryPanel } from "../recovery/RecoveryCard";
+import {
+  isDeviceConditionShownOnCard,
+  RecoveryPanel,
+} from "../recovery/RecoveryCard";
+import { LocalPageNotice } from "../shell/LocalPageNotice";
 import { browserLifecycleDeps, RecoveryModel } from "../../models/backups";
 import type { RecoveryKind } from "../../models/health";
 
@@ -166,49 +172,82 @@ export const RecoveryPage: m.Component<Record<string, never>, RecoveryState> = {
     leaveForMachine(vnode.state);
   },
   view(vnode) {
-    const { model } = vnode.state;
-    if (model.loadError !== null) {
-      return m(
-        PageContainer,
-        m("div", { class: "flex flex-col gap-4 pt-10" }, [
-          m("h1", { class: "type-heading-lg" }, "Workspace recovery"),
-          m(Notice, { variant: "error" }, model.loadError),
-        ]),
-      );
-    }
-    if (model.info === null) {
-      return m(
-        PageContainer,
-        m("div", { class: "flex items-center gap-2 pt-10" }, [
-          m(Spinner, { size: "sm" }),
-          "Loading...",
-        ]),
-      );
-    }
-    // Only while the machine is not answering: once the operator's start
-    // brings it back, the panel (and its Open workspace) takes over.
-    if (vnode.state.heldMessage !== null && !isMachineAnswering(model)) {
-      return m(
-        PageContainer,
-        m("div", { class: "flex flex-col gap-4 pt-10" }, [
-          m("h1", { class: "type-heading-lg" }, "Workspace maintenance"),
-          m(Notice, { variant: "info" }, vnode.state.heldMessage),
-        ]),
-      );
-    }
-    return m(
-      "div",
-      { class: "flex justify-center px-4 pt-10 pb-10" },
-      m(RecoveryPanel, {
-        panelId: "recovery-page-panel",
-        model,
-        // Withheld until the machine answers, for the reason the module
-        // comment gives: before that, this button would name a destination
-        // known not to work.
-        onEnterMachine: isMachineAnswering(model)
-          ? () => leaveForMachine(vnode.state)
-          : null,
+    const { body, isCardShown } = recoveryPageContent(vnode.state);
+    return [
+      m(LocalPageNotice, {
+        isDeviceConditionShown:
+          isCardShown && isDeviceConditionShownOnCard(vnode.state.model),
       }),
-    );
+      body,
+    ];
   },
 };
+
+interface RecoveryPageContent {
+  body: m.Children;
+  /** The recovery card is what the page shows. */
+  isCardShown: boolean;
+}
+
+function recoveryPageContent(state: RecoveryState): RecoveryPageContent {
+  const { model } = state;
+  if (model.loadError !== null) {
+    const body = m(
+      PageContainer,
+      m("div", { class: "flex flex-col gap-4 pt-10" }, [
+        m("div", { class: "flex items-center gap-3" }, [
+          m(Spinner, { size: "md" }),
+          m("h1", { class: "type-heading-lg" }, "Workspace recovery"),
+        ]),
+        m(ErrorNotice, {
+          id: "recovery-load-error",
+          error: model.loadError,
+          actions: [
+            {
+              label: "Back to workspaces",
+              onclick: () => m.route.set("/"),
+            },
+          ],
+        }),
+      ]),
+    );
+    return { body, isCardShown: false };
+  }
+  if (model.info === null) {
+    const body = m(
+      PageContainer,
+      m("div", { class: "flex items-center gap-2 pt-10" }, [
+        m(Spinner, { size: "sm" }),
+        "Loading...",
+      ]),
+    );
+    return { body, isCardShown: false };
+  }
+  // Only while the machine is not answering: once the operator's start
+  // brings it back, the panel (and its Open workspace) takes over.
+  if (state.heldMessage !== null && !isMachineAnswering(model)) {
+    const body = m(
+      PageContainer,
+      m("div", { class: "flex flex-col gap-4 pt-10" }, [
+        m("h1", { class: "type-heading-lg" }, "Workspace maintenance"),
+        m(Notice, { variant: "info" }, richErrorText(state.heldMessage)),
+      ]),
+    );
+    return { body, isCardShown: false };
+  }
+  const body = m(
+    "div",
+    { class: "flex justify-center px-4 pt-10 pb-10" },
+    m(RecoveryPanel, {
+      panelId: "recovery-page-panel",
+      model,
+      // Withheld until the machine answers, for the reason the module
+      // comment gives: before that, this button would name a destination
+      // known not to work.
+      onEnterMachine: isMachineAnswering(model)
+        ? () => leaveForMachine(state)
+        : null,
+    }),
+  );
+  return { body, isCardShown: true };
+}

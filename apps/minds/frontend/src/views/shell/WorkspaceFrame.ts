@@ -15,6 +15,10 @@ import {
   type ProviderRelayAnswer,
   stopProviderRelay,
 } from "../../models/providerRelay";
+import { isWorkspaceOrigin } from "../../models/workspaces";
+import type { ForwardPageActionKind, ForwardPageReport } from "../../models/forwardPages";
+import { ForwardPageTracker, forwardPageNotice, isNoticeSpinnerOnly } from "../../models/forwardPages";
+import { ForwardPageOverlay } from "./ForwardPageOverlay";
 import type { ImmersiveChange } from "./immersive";
 import { ImmersiveController } from "./immersive";
 import { LOCAL_FILES_SECTION } from "../../models/workspacePermissions";
@@ -86,13 +90,6 @@ export interface PermissionResolutionEntry {
   requestId: string;
   resolution: "granted" | "denied";
 }
-
-// The canonical content origin is agent-keyed (the workspace id); host-keyed
-// origins are the legacy shape a stale frame may still sit on before the
-// plugin's redirect heals it, so both families are expected senders. Exported
-// for tests only.
-export const WORKSPACE_ORIGIN_FAMILY =
-  /^(?:[a-z0-9_-]+\.)*(?:host|agent)-[a-f0-9]+\.(?:localhost|127\.0\.0\.1)$/i;
 
 // A feature missing here is refused to every page inside the workspace,
 // however far down it is framed, before the OS is ever asked. `microphone`
@@ -571,6 +568,44 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
   let armedSoloWindowId: string | null = null;
   let armedIsSoloReopened = false;
 
+  // The workspace connection's own page the frame holds, if any, and the
+  // redraw that brings in its explanation once its spinner-only seconds end.
+  const forwardPage = new ForwardPageTracker();
+  let forwardPageTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function clearForwardPage(): boolean {
+    if (forwardPageTimer !== null) {
+      clearTimeout(forwardPageTimer);
+      forwardPageTimer = null;
+    }
+    return forwardPage.clear();
+  }
+
+  function armForwardPageTimer(): void {
+    forwardPageTimer = setTimeout(() => {
+      forwardPageTimer = null;
+      // A timer can fire a moment before Date.now says the seconds are up.
+      if (forwardPage.report !== null && forwardPage.msUntilExplained() > 0) armForwardPageTimer();
+      m.redraw();
+    }, forwardPage.msUntilExplained());
+  }
+
+  const onWindowMessage = (event: MessageEvent): void => {
+    if (frameElement === null) return;
+    const isChanged = forwardPage.receive({
+      data: event.data,
+      origin: event.origin,
+      isFromFrame: event.source === frameElement.contentWindow,
+    });
+    if (!isChanged) return;
+    if (forwardPage.report === null) {
+      clearForwardPage();
+    } else if (forwardPageTimer === null) {
+      armForwardPageTimer();
+    }
+    m.redraw();
+  };
+
   function armFrame(
     shell: ShellState,
     workspaceAnyId: string,
@@ -588,6 +623,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
     );
     const isNavigating = frameElement.getAttribute("src") !== expected;
     if (isNavigating) {
+      clearForwardPage();
       isMountedPageReady = false;
       immersive?.frameNavigated();
       shell.highlightedChromeAnchor = null;
@@ -606,6 +642,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
   // at the workspace root rather than wherever its own app had routed itself.
   function reloadFrame(shell: ShellState): void {
     if (frameElement === null || armedWorkspaceAnyId === null) return;
+    clearForwardPage();
     isMountedPageReady = false;
     immersive?.frameNavigated();
     shell.highlightedChromeAnchor = null;
@@ -620,12 +657,43 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
     );
   }
 
+  function forwardPageOverlay(
+    shell: ShellState,
+    workspaceAnyId: string,
+    report: ForwardPageReport,
+  ): m.Children {
+    const notice = forwardPageNotice(report, {
+      isRestartAppAvailable: electronBridge.isDesktop,
+      isWorkspaceListed: shell.stores.workspaces.entryByAnyId(workspaceAnyId) !== null,
+    });
+    const onAction = (kind: ForwardPageActionKind): void => {
+      switch (kind) {
+        case "try-again":
+          reloadFrame(shell);
+          return;
+        case "restart-app":
+          electronBridge.restartApp();
+          return;
+        case "back-to-workspaces":
+          m.route.set("/");
+          return;
+      }
+    };
+    return m(ForwardPageOverlay, {
+      notice,
+      isSpinnerOnly: isNoticeSpinnerOnly(notice, forwardPage.msUntilExplained()),
+      workspaceAgentId: shell.stores.workspaces.toAgentScopedId(workspaceAnyId),
+      onAction,
+    });
+  }
+
   return {
     oncreate(vnode) {
       const { shell, workspaceAnyId, soloWindowId, isSoloReopened } =
         vnode.attrs;
       frameElement = vnode.dom.querySelector("#content-frame");
       frameElement?.addEventListener("load", stampFrameLoad);
+      window.addEventListener("message", onWindowMessage);
       immersive = buildImmersiveController(frameElement, document, (change) => {
         if (contract !== null)
           endpoint?.send(contract.IMMERSIVE_CHANGED, { ...change });
@@ -694,6 +762,9 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           },
           onWorkspaceReady: (promises) => {
             isMountedPageReady = true;
+            // The workspace's own page is up, so no proxy page is left to
+            // speak for, whether or not its going-away message arrived.
+            if (clearForwardPage()) m.redraw();
             linkHandling.pageReady(promises);
             // A message held while the page was not listening -- a fresh
             // mount, or a click from another workspace -- goes now.
@@ -743,13 +814,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
               return null;
             }
           },
-          isExpectedOrigin: (origin: string) => {
-            try {
-              return WORKSPACE_ORIGIN_FAMILY.test(new URL(origin).hostname);
-            } catch {
-              return false;
-            }
-          },
+          isExpectedOrigin: isWorkspaceOrigin,
           handlers,
         });
         closeActiveTabForwarder = () => {
@@ -885,6 +950,8 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
         frameElement?.removeEventListener("load", onFrameLoad);
       onFrameLoad = null;
       frameElement?.removeEventListener("load", stampFrameLoad);
+      window.removeEventListener("message", onWindowMessage);
+      clearForwardPage();
       if (snapshotResendTimer !== null) {
         clearTimeout(snapshotResendTimer);
         snapshotResendTimer = null;
@@ -895,7 +962,8 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
       unsubscribeWorkspaces = null;
       frameElement = null;
     },
-    view() {
+    view(vnode) {
+      const { shell } = vnode.attrs;
       // Health is reported by the shell's band, which shrinks this surface
       // rather than covering it: an unresponsive machine's last frame is
       // often the thing the user needs to read, and the band sits clear of it.
@@ -915,6 +983,9 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           class: "workspace-surface border-0 bg-surface-primary",
           style: "box-shadow: 0 1px 0 rgba(255,255,255,0.05) inset;",
         }),
+        forwardPage.report === null || armedWorkspaceAnyId === null
+          ? null
+          : forwardPageOverlay(shell, armedWorkspaceAnyId, forwardPage.report),
       ]);
     },
   };

@@ -8,6 +8,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import SUPPRESSION_WAIT_SECONDS
+from imbue.minds.desktop_client.testing import SYSTEM_SERVICES_PROVIDER_NAME
 from imbue.minds.desktop_client.testing import SuppressionAnnouncingTracker
 from imbue.minds.desktop_client.testing import build_resolver_with_system_services
 from imbue.minds.desktop_client.testing import write_blocking_stub_mngr
@@ -16,6 +17,7 @@ from imbue.minds.desktop_client.workspace_lifecycle import MindHostAction
 from imbue.minds.desktop_client.workspace_lifecycle import MindHostActionOutcome
 from imbue.minds.desktop_client.workspace_lifecycle import _lead_with_error_lines
 from imbue.minds.desktop_client.workspace_lifecycle import perform_mind_host_action
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_imbue_cloud.errors import WORKSPACE_HELD_MESSAGE
@@ -250,6 +252,37 @@ def test_a_stop_that_failed_leaves_the_machine_healing_itself(tmp_path: Path) ->
 
     assert outcome.is_successful is False
     assert tracker.is_unattended_recovery_suppressed(workspace_agent) is False
+
+
+def test_a_start_its_provider_refused_reports_the_providers_own_reason(tmp_path: Path) -> None:
+    """When the workspace's provider is what failed, its own reason is lifted out of mngr's output.
+
+    mngr wraps it in a generic sentence naming the provider, behind warnings that
+    can name other hosts; the reason alone is what tells the user what to do.
+    """
+    reason = "Cannot connect to Docker daemon: connection refused"
+    wrapped = str(ProviderUnavailableError(SYSTEM_SERVICES_PROVIDER_NAME, reason))
+    provider_down_mngr = write_stub_mngr(
+        tmp_path,
+        "provider_down_mngr",
+        f"echo 'WARNING: some other host is unreachable' >&2\ncat >&2 <<'MSG'\nError: {wrapped}\nMSG\nexit 1",
+    )
+
+    _workspace_agent, outcome = _perform(
+        MindHostAction.START, SystemInterfaceHealthTracker(), tmp_path, mngr_binary=provider_down_mngr
+    )
+
+    assert outcome.is_successful is False
+    assert outcome.provider_reason == reason
+    assert outcome.failure_reason is not None and wrapped in outcome.failure_reason
+
+
+def test_a_failure_that_is_not_the_providers_names_no_provider_reason(tmp_path: Path) -> None:
+    _workspace_agent, outcome = _perform(
+        MindHostAction.STOP, SystemInterfaceHealthTracker(), tmp_path, mngr_binary=_failing_mngr(tmp_path)
+    )
+
+    assert outcome.provider_reason is None
 
 
 @pytest.mark.witnesses(

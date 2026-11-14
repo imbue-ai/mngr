@@ -10,6 +10,8 @@ import type {
   UiConnectionEntry,
   UiProviderEntry,
 } from "../generated/ui";
+import type { RequestOutcome, UserFacingError } from "./errors";
+import { asSentence, errorFromResponse, errorFromSentenceResponse } from "./errors";
 
 /** The owner the local profile's section reports (never synced). */
 export const LOCAL_PROFILE_USER_ID = "local";
@@ -59,25 +61,98 @@ export function connectionStatusChipFor(
     case "READ_ONLY":
       return { label: "Needs a newer app", tone: "warn" };
     case "PROFILE_MISSING":
-      return { label: "Set up on this device", tone: "warn" };
+      return { label: "Set up on this computer", tone: "warn" };
   }
 }
 
-/**
- * What a connection row says beside its chip: for a login this device lacks,
- * the setup step to take; for any other error, the provider's own words plus
- * its fix when it named one.
- */
-export function connectionDetailFor(
-  entry: Pick<UiConnectionEntry, "status" | "error_type" | "error_message" | "remediation">,
-): string {
-  if (entry.status === "PROFILE_MISSING") {
-    const fix = entry.remediation ? ` To use it here, ${entry.remediation}, then check again.` : "";
-    return `This connection uses a login that is not set up on this device.${fix}`;
-  }
+/** What a row says under its name line, and the raw error behind See details. */
+export interface RowProblem extends UserFacingError {
+  /** True for a check that failed; false for a setup step the user takes,
+   * which the notice's own Check again confirms. */
+  isFailedCheck: boolean;
+}
+
+const MAY_BE_MISSING_SENTENCE = "Workspaces on it may be missing from the list.";
+
+function rawErrorText(entry: Pick<UiProviderEntry, "error_type" | "error_message">): string {
   if (!entry.error_message) return "";
-  const text = `${entry.error_type ?? ""}: ${entry.error_message}`;
-  return entry.remediation ? `${text} (fix: ${entry.remediation})` : text;
+  return entry.error_type ? `${entry.error_type}: ${entry.error_message}` : entry.error_message;
+}
+
+/** A failed check's row text: the provider's own reason, which is often all
+ * the user needs to fix it, what it means for the list, and the fix the
+ * provider named. */
+function failedCheckMessage(
+  entry: Pick<UiProviderEntry, "error_message" | "error_reason" | "remediation">,
+  subject: "account" | "connection" | "provider",
+): string {
+  const reason = (entry.error_reason || entry.error_message || "").trim();
+  const reasonSentence = reason === "" ? `Couldn't check this ${subject}.` : asSentence(reason);
+  const fix = entry.remediation ? ` To fix it, *${entry.remediation}*.` : "";
+  return `${reasonSentence} ${MAY_BE_MISSING_SENTENCE}${fix}`;
+}
+
+/**
+ * What a provider instance row says when its last check failed, or null when
+ * it has nothing to say. `subject` names the row the way its section does: an
+ * account's Imbue Cloud row is the account, a row under this computer's own
+ * providers is a provider.
+ */
+export function providerRowProblemFor(
+  entry: Pick<UiProviderEntry, "status" | "error_type" | "error_message" | "error_reason" | "remediation">,
+  subject: "account" | "provider",
+): RowProblem | null {
+  if (entry.status !== "ERROR") return null;
+  return {
+    message: failedCheckMessage(entry, subject),
+    details: rawErrorText(entry),
+    isFailedCheck: true,
+  };
+}
+
+/**
+ * What a connection row says under its name line, or null when it has
+ * nothing to say: for a login this computer lacks, the setup step to take;
+ * for any other failed check, the provider's reason and its fix. The raw
+ * error, with its type, goes behind See details either way.
+ */
+export function connectionRowProblemFor(
+  entry: Pick<UiConnectionEntry, "status" | "error_type" | "error_message" | "error_reason" | "remediation">,
+): RowProblem | null {
+  if (entry.status === "PROFILE_MISSING") {
+    const fix = entry.remediation ? ` To use it here, *${entry.remediation}, then check again*.` : "";
+    return {
+      message: `This connection uses a login that is not set up on this computer.${fix}`,
+      details: rawErrorText(entry),
+      isFailedCheck: false,
+    };
+  }
+  if (entry.status !== "ERROR") return null;
+  return {
+    message: failedCheckMessage(entry, "connection"),
+    details: rawErrorText(entry),
+    isFailedCheck: true,
+  };
+}
+
+/** The providers panel's collapsed header: how many rows, and how many of
+ * them need the user's attention. */
+export function providersSummaryFor(rowCount: number, attentionCount: number): string {
+  const rows = `${rowCount} ${rowCount === 1 ? "provider" : "providers"}`;
+  if (attentionCount === 0) return rows;
+  return `${rows}, ${attentionCount} ${attentionCount === 1 ? "needs" : "need"} attention`;
+}
+
+/**
+ * The error for a refused or failed connection removal. A refusal (409) says
+ * what is in the way, which the user can act on, so its sentence stays
+ * visible; anything else gets the fallback sentence.
+ */
+export function connectionRemovalErrorFor(outcome: RequestOutcome): UserFacingError {
+  const whatFailed = "Couldn't remove this connection";
+  return outcome.status === 409
+    ? errorFromSentenceResponse(whatFailed, outcome)
+    : errorFromResponse(whatFailed, outcome);
 }
 
 interface RemoveControl {
@@ -96,10 +171,10 @@ export function removeControlFor(
     };
   }
   if (entry.workspace_count > 0) {
-    const noun = entry.workspace_count === 1 ? "machine" : "machines";
+    const isOne = entry.workspace_count === 1;
     return {
       isEnabled: false,
-      tooltip: `In use by ${entry.workspace_count} ${noun} — destroy them first.`,
+      tooltip: `In use by ${entry.workspace_count} ${isOne ? "workspace" : "workspaces"}. Remove ${isOne ? "it" : "them"} first.`,
     };
   }
   return { isEnabled: true, tooltip: "Remove this connection" };
@@ -191,16 +266,14 @@ export class ProvidersStore {
     return options;
   }
 
-  /** Every provider instance with an error verdict, for the panel's collapsed summary. */
-  errorCount(): number {
-    let count = this.deviceProviders.filter(
-      (entry) => entry.status === "ERROR",
-    ).length;
+  /** Every row whose chip asks something of the user (an error or warning
+   * tone), for the panel's collapsed summary. */
+  attentionCount(): number {
+    const needsAttention = (chip: StatusChip): boolean => chip.tone === "error" || chip.tone === "warn";
+    let count = this.deviceProviders.filter((entry) => needsAttention(providerStatusChipFor(entry.status))).length;
     for (const account of this.accounts) {
-      if (account.imbue_cloud?.status === "ERROR") count += 1;
-      count += account.connections.filter(
-        (entry) => entry.status === "ERROR",
-      ).length;
+      if (account.imbue_cloud !== null && needsAttention(providerStatusChipFor(account.imbue_cloud.status))) count += 1;
+      count += account.connections.filter((entry) => needsAttention(connectionStatusChipFor(entry.status))).length;
     }
     return count;
   }

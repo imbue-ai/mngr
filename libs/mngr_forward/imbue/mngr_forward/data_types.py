@@ -83,6 +83,50 @@ class SystemInterfaceBackendFailureReason(UpperCaseStrEnum):
     STALLED = auto()
 
 
+class ProxyAnswerReason(UpperCaseStrEnum):
+    """Why the proxy answered an agent-origin request itself instead of forwarding the backend's answer.
+
+    Carried on every such 502/503/504 as the ``X-Mngr-Forward-Reason`` header
+    and on the page served to a browser, so a client can tell the conditions
+    apart (and tell the proxy's own answer from a backend's).
+
+    - ``DISCOVERY_PENDING``: discovery has not reported yet, so no agent is
+      known for any origin.
+    - ``UNKNOWN_AGENT``: discovery has reported and holds no agent for the
+      origin.
+    - ``NO_ROUTE``: the agent is known but the origin has no backend route,
+      and no stopped events stream explains it: the agent's events stream
+      (which delivers routes) is running, or the proxy observes none
+      (``--no-observe``).
+    - ``NO_ROUTE_EVENTS_STOPPED``: the same, while the agent's events stream
+      is not running, so routes it would deliver cannot arrive yet.
+    - ``LOCAL_CONNECTION_FAILED``: this device could not build its own end of
+      the connection to the agent's host (``TUNNEL_SETUP_FAILED``).
+    - ``UNREACHABLE``: the connection to the agent's host failed beyond this
+      device, or the backend's address is one the proxy may not dial.
+    - ``NOT_LISTENING``: the agent's host refused the connection to the
+      backend's port: the host is up and nothing serves the port.
+    - ``NOT_ANSWERING``: the backend did not answer before any response
+      header arrived, for a reason the proxy did not resolve further.
+    - ``CONNECTION_LOST``: the backend's response broke off after its headers.
+    - ``TIMED_OUT``: the connection to the backend could not be made, or the
+      backend did not answer, within the proxy's time budget.
+    - ``POOL_EXHAUSTED``: the proxy's own connection pool had no free slot.
+    """
+
+    DISCOVERY_PENDING = auto()
+    UNKNOWN_AGENT = auto()
+    NO_ROUTE = auto()
+    NO_ROUTE_EVENTS_STOPPED = auto()
+    LOCAL_CONNECTION_FAILED = auto()
+    UNREACHABLE = auto()
+    NOT_LISTENING = auto()
+    NOT_ANSWERING = auto()
+    CONNECTION_LOST = auto()
+    TIMED_OUT = auto()
+    POOL_EXHAUSTED = auto()
+
+
 class BackendUrl(NonEmptyStr):
     """A resolved HTTP(S) backend URL the plugin should byte-forward to."""
 

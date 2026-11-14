@@ -791,7 +791,7 @@ def click_in_chrome(chrome: Page, selector: str, *, timeout: float = 30_000) -> 
 
 # A workspace origin is [<service labels>.]host-<hex>.localhost: mngr_forward
 # prefixes a service's labels onto the workspace coordinate, so the coordinate
-# is not the first label. Mirrors WORKSPACE_ORIGIN_FAMILY in WorkspaceFrame.ts.
+# is not the first label. Mirrors WORKSPACE_ORIGIN_FAMILY in frontend/src/models/workspaces.ts.
 _WORKSPACE_COORDINATE_RE = re.compile(r"//(?:[a-z0-9_-]+\.)*((?:agent|host)-[a-f0-9]+)\.localhost")
 
 

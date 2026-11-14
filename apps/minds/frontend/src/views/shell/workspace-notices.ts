@@ -47,6 +47,7 @@ export function surfaceNoticeBand(
     {
       isRestartAppAvailable: electronBridge.isDesktop,
       unreachableProviderLabel,
+      isBackendUnreachable: entry?.is_backend_unreachable ?? false,
       deviceEnvironment: shell.stores.health.appEnvironmentCondition(),
       // So the band can tell the user's own bounce, which narrates itself,
       // from the app's unattended start, which must not hide the device.

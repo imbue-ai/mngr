@@ -2,9 +2,11 @@ import m from "mithril";
 import { RequestsStore } from "../../models/requests";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ShellState } from "./shell-state";
+import { LocalPageNotice } from "./LocalPageNotice";
 import { NoticeBand } from "./NoticeBand";
 import { Shell } from "./Shell";
 import { ToastLayer } from "./ToastLayer";
+import { RecoveryModal } from "../recovery/RecoveryModal";
 import { UpdateApplyModal } from "../components/UpdateApplyModal";
 import { WebLoginModal } from "../components/WebLoginModal";
 import { WorkspaceFrame } from "./WorkspaceFrame";
@@ -423,6 +425,28 @@ describe("Shell app-overlay backdrop", () => {
     ).toBeUndefined();
   });
 
+  it("leaves the network notice to a kept recovery page, which places its own", () => {
+    const localNotices = (root: AnyVnode): AnyVnode[] =>
+      collectVnodes(root).filter((vnode) => vnode.tag === LocalPageNotice);
+    const { state: overRecovery } = makeShell({
+      pageRouteBehindOverlay: `/agents/${WORKSPACE_ID}/recovery?workspace=${WORKSPACE_ID}`,
+    } as Partial<ShellState>);
+    const keptRecovery = renderShell(overRecovery, HELP_PATH, m("div#help-form"), {
+      workspaceParam: null,
+      behindContent: m("div#recovery-page"),
+    });
+    expect(localNotices(keptRecovery)).toHaveLength(0);
+
+    // Home under the same modal has no notice of its own, so the Shell keeps it.
+    const { state: overHome } = makeShell({
+      currentRouteSearch: () => "",
+    } as Partial<ShellState>);
+    const home = renderShell(overHome, HELP_PATH, m("div#help-form"), {
+      workspaceParam: null,
+    });
+    expect(localNotices(home)).toHaveLength(1);
+  });
+
   it("still floats over the live machine when no page was remembered", () => {
     // The same modal opened from inside a machine (or from its recovery card
     // as a modal): that machine is the surface, and it stays mounted.
@@ -818,8 +842,41 @@ describe("Shell notice band wiring", () => {
 
     const band = collectVnodes(root).find((vnode) => vnode.tag === NoticeBand);
     expect(attrsOf(band as AnyVnode).payload).toMatchObject({
-      message: "This network blocks the connection to your workspaces.",
+      message: "This network won't let Imbue Studio reach your workspaces. Try a different network.",
     });
+  });
+
+  it("leaves a band that would only open the recovery card to the open card, and keeps one offering anything else", () => {
+    const bandUnderOpenCard = (discoveryHealth: string): AnyVnode | undefined => {
+      const { state } = makeShell({
+        stores: {
+          requests: { hasPendingForWorkspace: () => false },
+          accounts: { labelFor: () => "This device" },
+          workspaces: {
+            workspaces: [],
+            toAgentScopedId: (anyId: string) => anyId,
+            entryByAnyId: () => null,
+          },
+          health: {
+            statusFor: () => "stuck",
+            discoveryHealth,
+            appEnvironmentCondition: () => "NONE",
+            recoveryKindFor: () => null,
+          },
+          updates: updatesStoreStub("UP_TO_DATE"),
+        },
+        isRecoveryModalOpenFor: () => true,
+        isRecoveryModalAutoRaised: () => false,
+      } as unknown as Partial<ShellState>);
+      const root = renderShell(state, `/workspace/${WORKSPACE_ID}`, m("div#content"));
+      expect(collectVnodes(root).some((vnode) => vnode.tag === RecoveryModal)).toBe(true);
+      return collectVnodes(root).find((vnode) => vnode.tag === NoticeBand);
+    };
+
+    // A stuck machine's band offers only "Open recovery", which is already open.
+    expect(bandUnderOpenCard("healthy")).toBeUndefined();
+    // Discovery dying offers an app restart the card does not.
+    expect(attrsOf(bandUnderOpenCard("blocked") as AnyVnode).payload).toMatchObject({ key: "discovery-blocked" });
   });
 
   it.each([

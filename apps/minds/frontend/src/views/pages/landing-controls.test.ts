@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   backupsControlFor,
   healthBadgeLabelFor,
+  isOutageExplainedByDevice,
   isMachineStateKnown,
   keyStateChipFor,
   lifecycleConfirmation,
-  livenessBadgeLabelFor,
+  lifecycleFailureError,
+  livenessBadgeFor,
   mindControlsFor,
   remoteLocationBadgeFor,
   remoteStateChipFor,
@@ -116,17 +118,32 @@ describe("rowClickActionFor", () => {
   });
 });
 
-describe("livenessBadgeLabelFor", () => {
-  it("says Maintenance for a held machine that is stopped or stopping, and the lifecycle label otherwise", () => {
-    expect(livenessBadgeLabelFor("STOPPED", "maintenance")).toBe("Maintenance");
-    expect(livenessBadgeLabelFor("STOPPING", "maintenance")).toBe("Maintenance");
-    expect(livenessBadgeLabelFor("STARTING", "maintenance")).toBe("Starting…");
-    expect(livenessBadgeLabelFor("STOPPED", "retired")).toBe("Retired");
-    expect(livenessBadgeLabelFor("STOPPING", "retired")).toBe("Retired");
-    expect(livenessBadgeLabelFor("STARTING", "retired")).toBe("Starting…");
-    expect(livenessBadgeLabelFor("STOPPED", "idle")).toBe("Stopped");
-    expect(livenessBadgeLabelFor("STOPPED", "")).toBe("Stopped");
-    expect(livenessBadgeLabelFor("WEIRD", "")).toBe("Status unknown");
+describe("livenessBadgeFor", () => {
+  const label = (liveness: string, stopKind: string) => livenessBadgeFor(liveness, stopKind).label;
+
+  it("names a hold for a held machine that is stopped or stopping, and the lifecycle label otherwise", () => {
+    expect(label("STOPPED", "maintenance")).toBe("Maintenance");
+    expect(label("STOPPING", "maintenance")).toBe("Maintenance");
+    expect(label("STARTING", "maintenance")).toBe("Starting…");
+    expect(label("STOPPED", "retired")).toBe("Retired");
+    expect(label("STOPPING", "retired")).toBe("Retired");
+    expect(label("STARTING", "retired")).toBe("Starting…");
+    expect(label("STOPPED", "suspension")).toBe("Suspended");
+    expect(label("STOPPED", "unknown")).toBe("Unavailable");
+    expect(label("STOPPED", "idle")).toBe("Stopped");
+    expect(label("STOPPED", "")).toBe("Stopped");
+    expect(label("WEIRD", "")).toBe("Status unknown");
+  });
+
+  it("says on the badge why a held row has no Start", () => {
+    expect(livenessBadgeFor("STOPPED", "retired").tooltip).toContain("Its backups are still available from the Backups button.");
+    // A tooltip is a plain attribute, so the sentence reaches it without its
+    // markup.
+    expect(livenessBadgeFor("STOPPED", "suspension").tooltip).toBe(
+      "This account is suspended. If you believe this is a mistake, contact support@imbue.com.",
+    );
+    expect(livenessBadgeFor("STOPPED", "unknown").tooltip).toContain("Imbue Cloud is holding this workspace stopped");
+    expect(livenessBadgeFor("STOPPED", "owner").tooltip).toBe("");
   });
 });
 
@@ -197,12 +214,32 @@ describe("healthBadgeLabelFor", () => {
     // Same start, one step later: it reported that it booted nothing, so the
     // machine is unresponsive and no restart failed. Only a start that really
     // booted the host keeps the restart framing.
-    expect(healthBadgeLabelFor("recovery_failed", true, null, false)).toBe("Not responding");
-    expect(healthBadgeLabelFor("recovery_failed", false, null, false)).toBe("Restart failed");
+    expect(healthBadgeLabelFor("recovery_failed", true, "restart", false)).toBe("Not responding");
+    expect(healthBadgeLabelFor("recovery_failed", false, "restart", false, "STEP_FAILED")).toBe("Restart failed");
   });
 
-  it("keeps the still-checking state distinct from both", () => {
-    expect(healthBadgeLabelFor("stuck", false, null, false)).toBe("Server not responding");
+  it("names a failed recovery after the recovery that ran", () => {
+    // The app's own start never took the machine down, so it failed to
+    // reconnect; only the user's restart failed as a restart.
+    expect(healthBadgeLabelFor("recovery_failed", false, "start", false, "NOT_ANSWERING_AFTER_START")).toBe(
+      "Couldn't reconnect",
+    );
+    expect(healthBadgeLabelFor("recovery_failed", false, "restart", false, "NOT_ANSWERING_AFTER_START")).toBe(
+      "Restart failed",
+    );
+  });
+
+  it("does not blame a restart for a recovery that failed before it ran anything", () => {
+    expect(healthBadgeLabelFor("recovery_failed", false, "restart", false, "WORKSPACE_NOT_FOUND")).toBe(
+      "Not responding",
+    );
+    expect(healthBadgeLabelFor("recovery_failed", false, "restart", false, "WORKER_NOT_STARTED")).toBe(
+      "Not responding",
+    );
+  });
+
+  it("calls a workspace that stopped answering not responding, without naming a server", () => {
+    expect(healthBadgeLabelFor("stuck", false, null, false)).toBe("Not responding");
   });
 
   it("names this device wherever the machine's own reading would blame the machine", () => {
@@ -223,6 +260,86 @@ describe("healthBadgeLabelFor", () => {
   });
 });
 
+describe("lifecycleFailureError", () => {
+  const MAINTENANCE_BODY = {
+    error: "Could not start the workspace host: This workspace is undergoing maintenance and will be back shortly.",
+  };
+
+  it("gives a held start Imbue Cloud's own sentence, with no report to file", () => {
+    const failure = lifecycleFailureError("start", "Fox", "maintenance", { status: 502, body: MAINTENANCE_BODY });
+    expect(failure.error.message).toBe("This workspace is undergoing maintenance and will be back shortly.");
+    expect(failure.isHold).toBe(true);
+    expect(failure.error.details).toContain("Could not start the workspace host");
+  });
+
+  it("tells a suspended owner the account is suspended, though the refusal reads as maintenance", () => {
+    const failure = lifecycleFailureError("start", "Fox", "suspension", { status: 502, body: MAINTENANCE_BODY });
+    expect(failure.error.message).toBe(
+      "This account is suspended. *If you believe this is a mistake, contact support@imbue.com.*",
+    );
+  });
+
+  it("says the retired sentence for a retired workspace", () => {
+    const failure = lifecycleFailureError("start", "Fox", "retired", {
+      status: 502,
+      body: {
+        error:
+          "Could not start the workspace host: This workspace has been retired and cannot be started again. " +
+          "Download its data from its backups, or contact support if it has none.",
+      },
+    });
+    expect(failure.error.message).toContain("has been retired");
+    expect(failure.isHold).toBe(true);
+  });
+
+  it("names any other failure, keeping mngr's verdict behind See details", () => {
+    const failure = lifecycleFailureError("stop", "Fox", "", {
+      status: 502,
+      body: { error: "Could not stop the workspace host: Error: host lock held" },
+    });
+    expect(failure.error.message).toBe(
+      'Couldn\'t stop "Fox". Try again. If this persists, report a bug.',
+    );
+    expect(failure.error.message).not.toContain("provider");
+    expect(failure.error.details).toBe("HTTP 502\nCould not stop the workspace host: Error: host lock held");
+    expect(failure.isHold).toBe(false);
+  });
+
+  it("leads with the provider's own reason when the provider is what failed", () => {
+    const failure = lifecycleFailureError("start", "Fox", "", {
+      status: 502,
+      body: {
+        error: "Could not start the workspace host: Error: Provider 'docker' is not available: Cannot connect to Docker daemon",
+        provider_reason: "Cannot connect to Docker daemon",
+      },
+    });
+    expect(failure.error.message).toBe('Couldn\'t start "Fox". Cannot connect to Docker daemon.');
+    expect(failure.error.details).toContain("Provider 'docker' is not available");
+    expect(failure.isHold).toBe(false);
+  });
+
+  it("says the app didn't respond when the request got no answer", () => {
+    const failure = lifecycleFailureError("start", "Fox", "", {
+      status: 0,
+      body: { error: "Could not reach the app server." },
+    });
+    expect(failure.error.message).toBe("Imbue Studio didn't respond. Try again in a moment.");
+    expect(failure.isHold).toBe(false);
+  });
+});
+
+describe("isOutageExplainedByDevice", () => {
+  it("lets this device's lost network explain only the workspaces that need the network", () => {
+    expect(isOutageExplainedByDevice("OFFLINE", true)).toBe(true);
+    expect(isOutageExplainedByDevice("SSH_BLOCKED", true)).toBe(true);
+    // A workspace on this computer answers with the network down.
+    expect(isOutageExplainedByDevice("OFFLINE", false)).toBe(false);
+    // Unmeasured is not offline.
+    expect(isOutageExplainedByDevice("UNKNOWN", true)).toBe(false);
+    expect(isOutageExplainedByDevice("NONE", true)).toBe(false);
+  });
+});
+
 describe("remoteLocationBadgeFor", () => {
   it("names the provider for a cloud workspace, never a device", () => {
     expect(
@@ -239,55 +356,42 @@ describe("remoteLocationBadgeFor", () => {
 });
 
 describe("remoteStateChipFor", () => {
-  it("shows nothing for the plain state", () => {
+  const PROBLEM_STATES = ["unreachable", "error", "missing_connection", "no_credentials", "read_only"];
+  const ALL_STATES = ["connecting", "locked", ...PROBLEM_STATES];
+
+  it("shows nothing for the plain state or one this build does not know", () => {
     expect(remoteStateChipFor({ state: "" })).toBeNull();
     expect(remoteStateChipFor({ state: "", detail: null })).toBeNull();
+    expect(remoteStateChipFor({ state: "some_future_state" })).toBeNull();
   });
 
-  it("reports the access states with their tones", () => {
-    expect(remoteStateChipFor({ state: "connecting" })).toMatchObject({
-      label: "connecting…",
-      isImportant: false,
-    });
-    expect(remoteStateChipFor({ state: "unreachable" })).toMatchObject({
-      label: "unreachable",
-      isImportant: true,
-    });
-    expect(remoteStateChipFor({ state: "error" })).toMatchObject({
-      label: "sync error",
-      isImportant: true,
-    });
-    expect(remoteStateChipFor({ state: "locked" })).toMatchObject({ label: "locked", isImportant: false });
-    expect(remoteStateChipFor({ state: "missing_connection" })).toMatchObject({
-      label: "connection removed",
-      isImportant: true,
-    });
-    expect(remoteStateChipFor({ state: "no_credentials" })).toMatchObject({
-      label: "no credentials",
-      isImportant: true,
-    });
-    expect(remoteStateChipFor({ state: "read_only" })).toMatchObject({
-      label: "needs a newer app",
-      isImportant: true,
-    });
+  it("marks only the states that keep this computer from reaching the workspace as problems", () => {
+    for (const state of PROBLEM_STATES) expect(remoteStateChipFor({ state })?.isImportant).toBe(true);
+    expect(remoteStateChipFor({ state: "connecting" })?.isImportant).toBe(false);
+    expect(remoteStateChipFor({ state: "locked" })?.isImportant).toBe(false);
   });
 
-  it("puts the failure detail behind an error chip, and a generic line when the server sent none", () => {
-    expect(remoteStateChipFor({ state: "error", detail: "key dir missing: /keys/host-1" })?.title).toBe(
-      "key dir missing: /keys/host-1",
-    );
-    expect(remoteStateChipFor({ state: "error", detail: null })?.title).toContain("failed");
-    expect(remoteStateChipFor({ state: "error" })?.title).toContain("failed");
+  it("explains every state on hover in the workspace's terms, never the device's", () => {
+    for (const state of ALL_STATES) {
+      const tooltip = remoteStateChipFor({ state })?.tooltip ?? "";
+      expect(tooltip, state).toContain("workspace");
+      expect(tooltip, state).not.toMatch(/device/i);
+    }
   });
 
-  it("spells out the locked and removed-connection chips, and the rest in their long form", () => {
-    expect(remoteStateChipFor({ state: "locked" })?.title).toBe("Enter your master password to reach this machine");
-    expect(remoteStateChipFor({ state: "missing_connection" })?.title).toBe(
-      "The connection this machine runs on was removed; re-add it or remove this machine from the list",
-    );
-    for (const state of ["connecting", "unreachable", "no_credentials", "read_only"]) {
-      const chip = remoteStateChipFor({ state });
-      expect(chip?.title.length ?? 0).toBeGreaterThan(chip?.label.length ?? 0);
+  it("keeps a failed setup's server detail off the chip and behind See details", () => {
+    const detail = "Could not write the host access material: [Errno 13] Permission denied: '/keys/host-1'";
+    const chip = remoteStateChipFor({ state: "error", detail });
+    expect(chip?.label).not.toContain("Errno");
+    expect(chip?.tooltip).not.toContain("Errno");
+    expect(chip?.error?.message).not.toContain("Errno");
+    expect(chip?.error?.details).toBe(detail);
+    expect(remoteStateChipFor({ state: "error", detail: null })?.error?.details).toBe("");
+  });
+
+  it("offers a details view only for the failed setup", () => {
+    for (const state of ALL_STATES.filter((state) => state !== "error")) {
+      expect(remoteStateChipFor({ state })?.error, state).toBeNull();
     }
   });
 });

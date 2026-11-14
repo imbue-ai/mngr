@@ -13,7 +13,14 @@
 // pill, which takes no height from the workspace.
 
 import type { DiscoveryHealth, EnvironmentCondition, RecoveryKind, WorkspaceHealth } from "../../models/health";
-import { MAINTENANCE_MESSAGE, RETIRED_MESSAGE, isMaintenanceHold, isRetiredHold } from "../pages/landing-controls";
+import {
+  MAINTENANCE_MESSAGE,
+  RETIRED_MESSAGE,
+  SUSPENDED_MESSAGE,
+  isMaintenanceHold,
+  isRetiredHold,
+  isSuspensionHold,
+} from "../pages/landing-controls";
 
 /** What an action asks the shell to do. The views bind these; the decision
  * itself stays free of routing and IPC. */
@@ -33,7 +40,8 @@ export interface NoticePayload {
     | "workspace-recovering"
     | "workspace-restart-failed"
     | "workspace-maintenance"
-    | "workspace-retired";
+    | "workspace-retired"
+    | "workspace-suspended";
   variant: "info" | "warn" | "error";
   message: string;
   /** The buttons beside the message, the first the main one; empty for none. */
@@ -42,6 +50,9 @@ export interface NoticePayload {
 
 const DISCOVERY_BLOCKED_MESSAGE =
   "Imbue Studio lost contact with your workspaces and can't reconnect on its own. Your work is safe.";
+/** In a browser there is no button to restart the app with, so the line says
+ * where the app to restart is running. */
+const DISCOVERY_BLOCKED_BROWSER_REMEDY = "Restart the Imbue Studio app on the computer running it.";
 
 /** The conditions with a line to say: a measured, confirmed block. */
 type EnvironmentBlock = Exclude<EnvironmentCondition, "NONE" | "UNKNOWN">;
@@ -66,17 +77,19 @@ function isEnvironmentBlock(condition: EnvironmentCondition): condition is Envir
  */
 const ENVIRONMENT_BLOCKED_MESSAGE: Record<EnvironmentBlock, string> = {
   OFFLINE: "No network connection.",
-  SSH_BLOCKED: "This network blocks the connection to your workspaces.",
+  SSH_BLOCKED: "This network won't let Imbue Studio reach your workspaces. Try a different network.",
 };
 
 /** Restarting the app is a desktop affordance. In a browser there is no app to
- * restart, so the notice states the condition and offers nothing -- a button
- * that cannot act is worse than no button. */
+ * restart from here, so the notice offers no button -- a button that cannot act
+ * is worse than none -- and says where the app is running instead. */
 function discoveryBlockedNotice(isRestartAppAvailable: boolean): NoticePayload {
   return {
     key: "discovery-blocked",
     variant: "error",
-    message: DISCOVERY_BLOCKED_MESSAGE,
+    message: isRestartAppAvailable
+      ? DISCOVERY_BLOCKED_MESSAGE
+      : `${DISCOVERY_BLOCKED_MESSAGE} ${DISCOVERY_BLOCKED_BROWSER_REMEDY}`,
     actions: isRestartAppAvailable ? [{ label: "Restart Imbue Studio", kind: "restart-app" }] : [],
   };
 }
@@ -89,6 +102,8 @@ export interface NoticeBandContext {
   isRestartAppAvailable?: boolean;
   /** The provider hosting this machine, when discovery cannot reach it. */
   unreachableProviderLabel?: string | null;
+  /** Discovery cannot reach this machine's provider, named or not. */
+  isBackendUnreachable?: boolean;
   /** True of this device as a whole, before any machine has been convicted.
    * "UNKNOWN" while nothing has been measured, which withholds every blame
    * below it rather than clearing the device. */
@@ -152,6 +167,7 @@ export function noticeBandFor(
   const {
     isRestartAppAvailable = true,
     unreachableProviderLabel = null,
+    isBackendUnreachable = unreachableProviderLabel !== null,
     deviceEnvironment = "NONE",
     recoveryKind = null,
     isWorkspaceNetworkDependent = true,
@@ -169,6 +185,9 @@ export function noticeBandFor(
   }
   if (isRetiredHold(liveness, stopKind)) {
     return { key: "workspace-retired", variant: "info", message: RETIRED_MESSAGE, actions: [] };
+  }
+  if (isSuspensionHold(liveness, stopKind)) {
+    return { key: "workspace-suspended", variant: "info", message: SUSPENDED_MESSAGE, actions: [] };
   }
   const workspaceHealth: WorkspaceHealth = isStoppedOnPurpose ? "healthy" : reportedWorkspaceHealth;
   // This device's own condition outranks the backend's for the same reason
@@ -223,9 +242,11 @@ export function noticeBandFor(
       ? null
       : unreachableProviderLabel !== null
         ? `Can't connect to ${unreachableProviderLabel}`
-        : isDeviceCannotConnect
-          ? "Can't connect to this workspace from this device"
-          : null;
+        : isBackendUnreachable
+          ? "Can't reach this workspace right now"
+          : isDeviceCannotConnect
+            ? "Can't connect to this workspace from this device"
+            : null;
   if (explanation !== null) {
     return {
       key: "workspace-recovering",

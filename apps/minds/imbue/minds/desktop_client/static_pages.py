@@ -17,6 +17,9 @@ _PAGE_STYLE: Final[str] = (
     "p{color:#555;line-height:1.5}"
     "code{background:#ececec;border-radius:4px;padding:.1rem .35rem}"
     "a{color:#1a56db}"
+    "button{font:inherit;padding:.35rem .9rem;border-radius:6px;border:1px solid #ccc;background:#fff;cursor:pointer}"
+    "details{margin-top:1rem;text-align:left;color:#555}"
+    "pre{white-space:pre-wrap;word-break:break-word;background:#ececec;border-radius:4px;padding:.5rem}"
 )
 
 
@@ -36,8 +39,22 @@ def build_static_page_html(body_html: str, head_extra: str = "") -> str:
     )
 
 
-def build_error_page_html(title: str, message: str) -> str:
-    """A friendly full-page error document with a way back home."""
+def build_error_page_html(
+    title: str,
+    message: str,
+    details: str | None = None,
+    is_retry_offered: bool = False,
+    is_report_offered: bool = False,
+) -> str:
+    """A friendly full-page error document with a way back home.
+
+    ``details`` (the underlying error, for whoever reports it) is shown only
+    behind a collapsed "See details".
+    """
+    retry_html = '<button type="button" onclick="location.reload()">Try again</button> ' if is_retry_offered else ""
+    report_html = ' &middot; <a href="/help">Report a bug</a>' if is_report_offered else ""
+    details_html = f"<details><summary>See details</summary><pre>{escape(details)}</pre></details>" if details else ""
     return build_static_page_html(
-        f'<h1>{escape(title)}</h1><p>{escape(message)}</p><p><a href="/">Back to workspaces</a></p>'
+        f"<h1>{escape(title)}</h1><p>{escape(message)}</p>"
+        f'<p>{retry_html}<a href="/">Back to workspaces</a>{report_html}</p>{details_html}'
     )

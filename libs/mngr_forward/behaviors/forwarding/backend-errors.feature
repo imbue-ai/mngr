@@ -10,7 +10,7 @@ Feature: When the backend cannot answer
 
   @unavailable-503
   Scenario Outline: A backend that never delivers response headers answers 503, shaped for the caller
-    Before any response header arrives, a not-yet-known backend and one that cannot be reached are indistinguishable to the client -- each is a clean 503, and for a browser the styled loading page.
+    Before any response header arrives, a not-yet-known backend and one that cannot be reached share one status -- each is a clean 503, and for a browser the styled loading page; only the reason header (`unavailable-reason`) tells them apart.
 
     Given a known agent whose backend <condition>
     When a request <accept> arrives for that agent origin
@@ -22,6 +22,39 @@ Feature: When the backend cannot answer
       | is not yet known  | not accepting HTML | with a plain body and no redirect |
       | cannot be reached | accepting HTML     | with the loading page             |
       | cannot be reached | not accepting HTML | with a plain body and no redirect |
+
+  @unavailable-reason
+  Scenario Outline: The proxy's own 503 names why no backend answered
+    Given a signed-in request to an agent origin where <condition>
+    When the request arrives
+    Then the response is HTTP 503
+    And its X-Mngr-Forward-Reason header is "<reason>"
+
+    Examples:
+      | condition                                                            | reason                  |
+      | discovery has not reported yet                                       | DISCOVERY_PENDING       |
+      | discovery has reported and holds no agent for the origin             | UNKNOWN_AGENT           |
+      | the origin has no route and no stopped events stream explains it     | NO_ROUTE                |
+      | the origin has no route and the agent's events stream is not running | NO_ROUTE_EVENTS_STOPPED |
+
+  @request-sent-mark
+  Scenario Outline: The proxy's own gateway answers say whether the request reached the backend
+    A client may claim that nothing was changed only when the request never reached the backend.
+
+    Given a known agent whose backend <failure>
+    When a request arrives for that agent origin
+    Then the response is HTTP <status>
+    And its X-Mngr-Forward-Request-Sent header is "<sent>"
+
+    Examples:
+      | failure                                                     | status | sent |
+      | has no route                                                | 503    | no   |
+      | refuses the connection                                      | 503    | no   |
+      | accepts the request and then resets before answering        | 503    | yes  |
+      | resets after its response headers                           | 502    | yes  |
+      | cannot be dialed before the dial times out                  | 504    | no   |
+      | leaves the proxy no free connection slot                    | 504    | no   |
+      | accepts the request and never answers within the read budget | 504    | yes  |
 
   @loading-page-self-heals
   Scenario: The loading page waits and enters the agent on its own

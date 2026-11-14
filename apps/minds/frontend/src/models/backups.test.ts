@@ -600,11 +600,39 @@ describe("RecoveryModel", () => {
 
     deps.postResponses.push({
       status: 409,
-      body: { error: "another operation is running" },
+      body: {
+        error: "A restore is already in progress for this workspace.",
+        operation_kind: "BACKUP_RESTORE",
+      },
     });
     await model.dispatchRecovery();
     expect(model.isRecoveryRunning).toBe(false);
-    expect(model.recoveryError).toBe("another operation is running");
+    // The conflict is worded from the operation that holds the workspace, with
+    // the server's own sentence behind it.
+    expect(model.recoveryError?.message).toBe(
+      "Imbue Studio is already working on this workspace (restoring a backup). " +
+        "Wait for that to finish, then try again.",
+    );
+    expect(model.recoveryError?.details).toContain("A restore is already in progress");
+
+    deps.postResponses.push({
+      status: 503,
+      body: { error: "Could not start the recovery worker: group exited" },
+    });
+    await model.dispatchRecovery();
+    expect(model.recoveryError?.message).toBe(
+      "Imbue Studio couldn't restart this workspace. Try again. If this persists, report a bug.",
+    );
+    expect(model.recoveryError?.details).toBe(
+      "HTTP 503\nCould not start the recovery worker: group exited",
+    );
+
+    // A POST the app never answered dispatched nothing: there is no restart to follow.
+    deps.postResponses.push({ status: 0, body: null });
+    await model.dispatchRecovery();
+    expect(model.isRecoveryRunning).toBe(false);
+    expect(model.recoveryError?.message).toBe("Imbue Studio didn't respond. Try again in a moment.");
+    expect(deps.sources).toHaveLength(0);
 
     deps.postResponses.push({ status: 202, body: null });
     await model.dispatchRecovery();
@@ -615,7 +643,10 @@ describe("RecoveryModel", () => {
     });
     deps.runScheduled();
     await settle();
-    expect(model.recoveryError).toBe("host did not come back");
+    expect(model.recoveryError?.details).toBe("host did not come back");
+    expect(model.recoveryError?.message).toBe(
+      "Imbue Studio couldn't restart this workspace. Try again. If this persists, report a bug.",
+    );
   });
 
   it("reads a declined start as neither a success nor a failure", async () => {
@@ -677,7 +708,7 @@ describe("RecoveryModel", () => {
     }
 
     expect(model.isRecoveryRunning).toBe(false);
-    expect(model.recoveryError).toContain("Lost contact with the recovery");
+    expect(model.isRecoveryFollowLost).toBe(true);
 
     // The restart poll is what has to stop -- a lost restart must not keep
     // asking about itself forever. The card's own state poll is a separate
@@ -706,7 +737,7 @@ describe("RecoveryModel", () => {
       deps.runScheduled();
       await settle();
     }
-    expect(model.recoveryError).toContain("Lost contact with the recovery");
+    expect(model.isRecoveryFollowLost).toBe(true);
     const streamCount = deps.sources.length;
 
     // The tracker goes on calling that same restart running -- it is the state
@@ -715,7 +746,7 @@ describe("RecoveryModel", () => {
     deps.recoveryInfoResponses.push({ ...info, health: "recovering" });
     deps.runScheduled();
     await settle();
-    expect(model.recoveryError).toContain("Lost contact with the recovery");
+    expect(model.isRecoveryFollowLost).toBe(true);
     expect(model.isRecoveryRunning).toBe(false);
     expect(deps.sources).toHaveLength(streamCount);
 
@@ -724,11 +755,13 @@ describe("RecoveryModel", () => {
     deps.recoveryInfoResponses.push(info);
     deps.runScheduled();
     await settle();
+    // That run has ended, so there is nothing left to have lost track of.
+    expect(model.isRecoveryFollowLost).toBe(false);
     deps.recoveryInfoResponses.push({ ...info, health: "recovering" });
     deps.runScheduled();
     await settle();
     expect(model.isRecoveryRunning).toBe(true);
-    expect(model.recoveryError).toBeNull();
+    expect(model.isRecoveryFollowLost).toBe(false);
     expect(deps.sources).toHaveLength(streamCount + 1);
   });
 
@@ -819,6 +852,26 @@ describe("RecoveryModel", () => {
     deps.runScheduled();
     await settle();
     expect(deps.sources).toHaveLength(1);
+  });
+
+  it("words an attached recovery's failure by the kind the tracker reported for it", async () => {
+    const deps = new FakeDeps();
+    const model = new RecoveryModel("agent-33", deps);
+    deps.recoveryInfoResponses.push(info);
+    await model.load();
+
+    // Another window's restart, attached to: this card never dispatched it.
+    deps.recoveryInfoResponses.push({ ...info, health: "recovering", recovery_kind: "restart" });
+    deps.runScheduled();
+    await settle();
+    expect(model.dispatchedRecoveryKind).toBeNull();
+
+    deps.getResponses.push({ status: "FAILED", is_done: false, error: "Start step failed" });
+    deps.runScheduled();
+    await settle();
+    expect(model.recoveryError?.message).toBe(
+      "Imbue Studio couldn't restart this workspace. Try again. If this persists, report a bug.",
+    );
   });
 
   it("drops a reading taken before the restart it was watching finished", async () => {

@@ -15,6 +15,7 @@ That event only enrolls the agent for active probing; it never abandons the requ
 
 Backend failures also surface as machine-readable events on the proxy's stdout stream, which an embedding consumer drives its recovery from rather than the HTTP responses its users never see directly.
 That stream decomposes a failure -- a connect error, an exhausted pool, a backend that listens but never answers -- into reasons a consumer can act on, where the HTTP status only says retry, lost, or timed out.
+The proxy's own answers also name their case to the requesting client, in the `X-Mngr-Forward-Reason` header (`unavailable-reason`), but only the stream reaches a consumer that did not make the request.
 
 That stdout contract is deliberately left unspecified in this corpus for now; it belongs to a planned stream area covering the whole envelope stream.
 Until that area lands, the payload shapes in `imbue/mngr_forward/data_types.py` are the reference for the stream.

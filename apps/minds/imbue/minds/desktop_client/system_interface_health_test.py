@@ -13,6 +13,7 @@ from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import BackendFailureRecorder
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.system_interface_health import ProbeGracePurpose
+from imbue.minds.desktop_client.system_interface_health import RecoveryFailureCause
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
 from imbue.minds.desktop_client.testing import make_sleep_tracker
@@ -206,7 +207,7 @@ def test_outage_onset_spans_the_episode_rather_than_the_failure_run() -> None:
     # Neither restart outcome ends the outage: the machine still is not answering.
     tracker.mark_recovering(aid, HostRecoveryKind.START)
     assert tracker.get_outage_started_wall_at(aid) == onset
-    tracker.mark_recovery_failed(aid, "the start step failed")
+    tracker.mark_recovery_failed(aid, "the start step failed", RecoveryFailureCause.STEP_FAILED)
     assert tracker.get_outage_started_wall_at(aid) == onset
 
     # The machine answering does.
@@ -303,7 +304,7 @@ def test_a_forwarded_answer_clears_a_convicted_machine_like_a_probe_success() ->
     tracker.add_on_change_callback(lambda a, h: seen.append((a, h)))
     _drive_to_stuck(tracker, stuck_aid)
     tracker.mark_recovering(failed_aid, HostRecoveryKind.RESTART)
-    tracker.mark_recovery_failed(failed_aid, "the readiness wait timed out")
+    tracker.mark_recovery_failed(failed_aid, "the readiness wait timed out", RecoveryFailureCause.STEP_FAILED)
 
     tracker.record_forwarded_answer(stuck_aid)
     tracker.record_forwarded_answer(failed_aid)
@@ -389,7 +390,9 @@ def test_a_forwarded_answer_counts_for_a_start_whose_progress_a_sleep_invalidate
 
     assert tracker.get_health(aid) is AgentHealth.HEALTHY
     assert tracker.was_seen_answering_during_recovery(aid)
-    assert not tracker.mark_recovery_failed(aid, "the start never returned"), "the answer must outrank the failure"
+    assert not tracker.mark_recovery_failed(aid, "the start never returned", RecoveryFailureCause.STEP_FAILED), (
+        "the answer must outrank the failure"
+    )
 
 
 def test_a_forwarded_answer_for_an_untracked_machine_changes_nothing() -> None:
@@ -511,7 +514,7 @@ def test_mark_recovery_failed_sets_state_and_carries_error() -> None:
     tracker.add_on_change_callback(lambda _a, h: seen.append(h))
 
     tracker.mark_recovering(aid, HostRecoveryKind.RESTART)
-    tracker.mark_recovery_failed(aid, "mngr start exited 1")
+    tracker.mark_recovery_failed(aid, "mngr start exited 1", RecoveryFailureCause.STEP_FAILED)
 
     assert tracker.get_health(aid) == AgentHealth.RECOVERY_FAILED
     assert tracker.get_last_recovery_error(aid) == "mngr start exited 1"
@@ -525,8 +528,8 @@ def test_mark_recovery_failed_refires_with_updated_reason() -> None:
     seen: list[AgentHealth] = []
     tracker.add_on_change_callback(lambda _a, h: seen.append(h))
 
-    tracker.mark_recovery_failed(aid, "first reason")
-    tracker.mark_recovery_failed(aid, "second reason")
+    tracker.mark_recovery_failed(aid, "first reason", RecoveryFailureCause.STEP_FAILED)
+    tracker.mark_recovery_failed(aid, "second reason", RecoveryFailureCause.STEP_FAILED)
 
     assert tracker.get_last_recovery_error(aid) == "second reason"
     assert seen == [AgentHealth.RECOVERY_FAILED, AgentHealth.RECOVERY_FAILED]
@@ -537,7 +540,7 @@ def test_success_clears_recovery_failed_and_error() -> None:
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     aid = AgentId.generate()
 
-    tracker.mark_recovery_failed(aid, "boom")
+    tracker.mark_recovery_failed(aid, "boom", RecoveryFailureCause.STEP_FAILED)
     tracker.record_probe_success(aid)
 
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
@@ -549,7 +552,7 @@ def test_mark_recovering_clears_prior_recovery_error() -> None:
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     aid = AgentId.generate()
 
-    tracker.mark_recovery_failed(aid, "old failure")
+    tracker.mark_recovery_failed(aid, "old failure", RecoveryFailureCause.STEP_FAILED)
     tracker.mark_recovering(aid, HostRecoveryKind.RESTART)
 
     assert tracker.get_health(aid) == AgentHealth.RECOVERING
@@ -576,7 +579,11 @@ def test_a_recorded_backend_outage_outlives_the_attempt_but_not_the_episode() ->
     before = datetime.now(timezone.utc)
 
     tracker.record_backend_outage(aid, "docker", "Docker Desktop is manually paused.")
-    tracker.mark_recovery_failed(aid, "This workspace's backend is unreachable, so the restart could not run: paused")
+    tracker.mark_recovery_failed(
+        aid,
+        "This workspace's backend is unreachable, so the restart could not run: paused",
+        RecoveryFailureCause.STEP_FAILED,
+    )
 
     outage = tracker.get_backend_outage(aid)
     assert outage is not None
@@ -677,7 +684,7 @@ def test_snapshot_probe_targets_includes_suspect_stuck_and_recovery_failed() -> 
 
     tracker.record_failure(suspect)
     tracker.mark_stuck(stuck)
-    tracker.mark_recovery_failed(recovery_failed, "boom")
+    tracker.mark_recovery_failed(recovery_failed, "boom", RecoveryFailureCause.STEP_FAILED)
     tracker.mark_recovering(recovering, HostRecoveryKind.RESTART)
     tracker.record_failure(recovered)
     tracker.record_probe_success(recovered)
@@ -1152,7 +1159,7 @@ def test_a_fresh_recovery_attempt_trusts_its_own_progress_again() -> None:
     record_sleep_of(sleep_tracker, clock, seconds=731.0)
     assert tracker.snapshot_probe_targets() == frozenset({aid})
 
-    tracker.mark_recovery_failed(aid, "start failed")
+    tracker.mark_recovery_failed(aid, "start failed", RecoveryFailureCause.STEP_FAILED)
     tracker.mark_recovering(aid, HostRecoveryKind.START)
 
     assert tracker.snapshot_probe_targets() == frozenset()
@@ -1177,7 +1184,7 @@ def test_a_probe_that_recovered_a_machine_mid_recovery_outranks_the_recovery_fai
 
     tracker.add_on_change_callback(lambda _a, h: seen.append(h))
 
-    assert not tracker.mark_recovery_failed(aid, "mngr start exited 1")
+    assert not tracker.mark_recovery_failed(aid, "mngr start exited 1", RecoveryFailureCause.STEP_FAILED)
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
     assert tracker.get_last_recovery_error(aid) is None
     assert seen == []
@@ -1205,9 +1212,13 @@ def test_a_forwarded_answer_mid_recovery_outranks_the_recovery_failure() -> None
     tracker.record_forwarded_answer(answered_aid)
 
     with capture_loguru(level="INFO") as log_output:
-        assert not tracker.mark_recovery_failed(answered_aid, "the readiness wait timed out")
+        assert not tracker.mark_recovery_failed(
+            answered_aid, "the readiness wait timed out", RecoveryFailureCause.STEP_FAILED
+        )
         # The control: the same failure, on the machine nothing reported answering.
-        assert tracker.mark_recovery_failed(unanswered_aid, "the readiness wait timed out")
+        assert tracker.mark_recovery_failed(
+            unanswered_aid, "the readiness wait timed out", RecoveryFailureCause.STEP_FAILED
+        )
 
     assert tracker.get_health(answered_aid) is AgentHealth.HEALTHY
     assert tracker.get_last_recovery_error(answered_aid) is None
@@ -1226,11 +1237,11 @@ def test_the_next_recovery_attempt_can_fail_normally_again() -> None:
     tracker.mark_recovering(aid, HostRecoveryKind.START)
     record_sleep_of(sleep_tracker, clock, seconds=731.0)
     tracker.record_probe_success(aid)
-    tracker.mark_recovery_failed(aid, "mngr start exited 1")
+    tracker.mark_recovery_failed(aid, "mngr start exited 1", RecoveryFailureCause.STEP_FAILED)
 
     tracker.mark_recovering(aid, HostRecoveryKind.START)
 
-    assert tracker.mark_recovery_failed(aid, "mngr start exited 1 again")
+    assert tracker.mark_recovery_failed(aid, "mngr start exited 1 again", RecoveryFailureCause.STEP_FAILED)
     assert tracker.get_health(aid) == AgentHealth.RECOVERY_FAILED
     assert tracker.get_last_recovery_error(aid) == "mngr start exited 1 again"
 

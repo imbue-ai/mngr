@@ -25,6 +25,7 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.ui_models import UiWorkspaceStoppedMessage
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
+from imbue.mngr.errors import parse_provider_unavailable_reason
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
@@ -71,6 +72,10 @@ class MindHostActionOutcome(FrozenModel):
     is_successful: bool = Field(description="True when the host transition completed")
     failure_reason: str | None = Field(
         default=None, description="What mngr reported when the action failed; None on success"
+    )
+    provider_reason: str | None = Field(
+        default=None,
+        description="The workspace's provider's own reason, when the action failed because it is unavailable",
     )
 
 
@@ -219,6 +224,11 @@ def perform_mind_host_action(
         # unreachable. They are kept -- a caller on another host has no other
         # copy of them.
         failure_reason = _lead_with_error_lines(finished.stderr)
+        provider_reason = (
+            parse_provider_unavailable_reason(finished.stderr, info.provider_name)
+            if info is not None and info.provider_name
+            else None
+        )
         logger.warning(
             "Host {} for {} failed (rc={}): {}",
             action.value,
@@ -230,7 +240,9 @@ def perform_mind_host_action(
             backend_resolver.clear_host_state_override(host_id)
             backend_resolver.clear_host_lifecycle_transition(host_id)
         _restore_unattended_recovery_after_failed_stop(health_tracker, action, workspace_agent_id)
-        return MindHostActionOutcome(is_successful=False, failure_reason=failure_reason)
+        return MindHostActionOutcome(
+            is_successful=False, failure_reason=failure_reason, provider_reason=provider_reason
+        )
 
     if host_id is not None:
         match action:

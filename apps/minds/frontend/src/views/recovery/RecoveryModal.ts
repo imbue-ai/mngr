@@ -12,7 +12,7 @@
 
 import m from "mithril";
 import { DialogCloseButton } from "../components/Modal";
-import { Notice } from "../components/Notice";
+import { ErrorNotice } from "../components/ErrorDisplay";
 import { Spinner } from "../components/Spinner";
 import { RecoveryPanel } from "./RecoveryCard";
 import { browserLifecycleDeps, RecoveryModel } from "../../models/backups";
@@ -82,8 +82,14 @@ export function RecoveryModal(): m.Component<RecoveryModalAttrs> {
                 // dismissible, and an error state must not be the one place
                 // that shows no way out.
                 m(DialogCloseButton, { onClose }),
-                m("div", { class: "type-heading pr-10" }, "Workspace recovery"),
-                m(Notice, { variant: "error" }, model.loadError),
+                m("div", { class: "flex items-center gap-2 type-heading pr-10" }, [
+                  m(Spinner, { size: "sm" }),
+                  m("span", "Workspace recovery"),
+                ]),
+                m(ErrorNotice, {
+                  id: "recovery-load-error",
+                  error: model.loadError,
+                }),
               ],
             )
           : model.info === null

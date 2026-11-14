@@ -46,6 +46,7 @@ from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
 from imbue.minds.desktop_client.minds_config import WorkspaceAutoUpdateMode
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
+from imbue.minds.desktop_client.system_interface_health import RecoveryFailureCause
 from imbue.minds.desktop_client.update_status import IN_FLIGHT_ACTIVITIES
 from imbue.minds.desktop_client.update_status import KernelFixActivity
 from imbue.minds.desktop_client.update_status import KernelSecurityStatus
@@ -294,6 +295,10 @@ class UiProviderEntry(FrozenModel):
     status: ProviderPanelStatus = Field(description="Panel status bucket")
     error_type: str | None = Field(default=None, description="Discovery error type for errored providers")
     error_message: str | None = Field(default=None, description="Discovery error message for errored providers")
+    error_reason: str | None = Field(
+        default=None, description="The error reduced to the provider's own reason, for errored providers"
+    )
+    remediation: str | None = Field(default=None, description="The provider's fix for its error, when it named one")
 
 
 class UiConnectionEntry(FrozenModel):
@@ -311,6 +316,9 @@ class UiConnectionEntry(FrozenModel):
     status: ConnectionPanelStatus = Field(description="Discovery's verdict, or why the connection is unusable here")
     error_type: str | None = Field(default=None, description="Discovery error type for errored connections")
     error_message: str | None = Field(default=None, description="Discovery error message for errored connections")
+    error_reason: str | None = Field(
+        default=None, description="The error reduced to the provider's own reason, for errored connections"
+    )
     remediation: str | None = Field(
         default=None,
         description="The command that sets up the missing login (PROFILE_MISSING), or the provider's fix for an error",
@@ -485,10 +493,19 @@ class UiHealthMessage(FrozenModel):
             "answered -- so the badge says so rather than blaming a restart that never ran."
         ),
     )
+    recovery_failure_cause: RecoveryFailureCause | None = Field(
+        default=None,
+        description=(
+            "Which step of the recovery failed, present for RECOVERY_FAILED. It also says whether any "
+            "command ran, so a recovery that failed before touching the machine is not badged as a "
+            "failed restart."
+        ),
+    )
     recovery_kind: HostRecoveryKind | None = Field(
         default=None,
         description=(
-            "Which recovery is in flight, or None outside one. Only RESTART stops the machine, and it "
+            "Which recovery is in flight or (for RECOVERY_FAILED) which one failed, or None outside "
+            "one. Only RESTART stops the machine, and it "
             "only ever comes from the user's own click, so it is the one that makes 'Restarting' an "
             "honest claim; a START may no-op against a machine that is already up. Carried here "
             "because the machines list has to make the same call the recovery card does, off the same "

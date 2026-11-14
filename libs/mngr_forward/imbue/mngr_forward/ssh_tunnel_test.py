@@ -328,7 +328,7 @@ def test_create_ssh_client_refusal_names_one_path_when_the_candidates_coincide(t
 
     The docker provider does exactly that, so listing both candidates
     unconditionally renders "at X or X" -- and this text is quoted verbatim
-    behind the recovery card's "Error details", where a path repeated back to the
+    behind the recovery card's "See details", where a path repeated back to the
     user reads as two places checked when only one was.
     """
     key_path = tmp_path / "ssh_key"

@@ -32,7 +32,7 @@ import { FormLabel, Select } from "../components/FormControls";
 import { PageNarrowContainer } from "../components/Layout";
 import { Icon16 } from "../components/Icon";
 import { StatusBadge } from "../components/StatusBadge";
-import { keyStateChipFor, livenessBadgeLabelFor, rowClickActionFor } from "./landing-controls";
+import { keyStateChipFor, livenessBadgeFor, rowClickActionFor } from "./landing-controls";
 import { slowStartNotice } from "./create/ComputeNotices";
 import { PRESET_TITLES, PresetCards } from "./create/PresetCards";
 import { PrerequisiteNotice } from "./create/PrerequisiteNotice";
@@ -323,8 +323,8 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
     // here (this page has no liveness tracker, so an unknown reading is
     // common and not actionable from a template picker).
     const isBadged = liveness === "STOPPED" || liveness === "STOPPING" || liveness === "STARTING";
-    const livenessLabel =
-      (entry.supports_shutdown ?? false) && isBadged ? livenessBadgeLabelFor(liveness, entry.stop_kind ?? "") : null;
+    const livenessBadge =
+      (entry.supports_shutdown ?? false) && isBadged ? livenessBadgeFor(liveness, entry.stop_kind ?? "") : null;
     // A cloud machine this device holds no key for, or one an operator holds
     // stopped, cannot be opened: the row says why (the chip or the badge) in
     // place of the chevron and offers no click. This page has no health
@@ -353,7 +353,9 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
       },
       [
         m("span", { class: "flex-1 min-w-0 truncate font-semibold text-primary pl-1" }, entry.name),
-        livenessLabel ? m(StatusBadge, livenessLabel) : null,
+        livenessBadge === null
+          ? null
+          : m(StatusBadge, { "data-tooltip": livenessBadge.tooltip || undefined }, livenessBadge.label),
         keyChip === null
           ? m("span", { class: "text-tertiary shrink-0" }, m(Icon16, { name: "chevron-right" }))
           : m(

@@ -249,7 +249,7 @@ The probe answers the substrate questions the drill assumes: that
 `time.monotonic()` stops during a sleep, that Python deadlines freeze with it,
 what releases a blocked SSH read, and how long a cached idle connection stalls
 on its first use after the wake. Point it at a workspace's container sshd,
-using the "connect over SSH" command from the workspace's recovery card:
+using the SSH command under "Connection details" on the workspace's recovery card:
 
 ```
 uv run --script scripts/sleep_wake_probe.py 'ssh -i ~/.minds/... -p 22021 user@host' --auto-sleep --sleep-minutes 4

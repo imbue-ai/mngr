@@ -8,45 +8,11 @@ import type { PermissionResolutionEntry } from "./WorkspaceFrame";
 import {
   FrameLinkHandling,
   WORKSPACE_FRAME_ALLOW,
-  WORKSPACE_ORIGIN_FAMILY,
   buildEmbedHandlers,
   fetchPermissionResolutionEntries,
   pushResolutionSnapshot,
   requestIdFromMessage,
 } from "./WorkspaceFrame";
-
-describe("WORKSPACE_ORIGIN_FAMILY", () => {
-  it("accepts the canonical agent-keyed content origins", () => {
-    expect(
-      WORKSPACE_ORIGIN_FAMILY.test(
-        "agent-0f3c2b71a4de49b1a2c3d4e5f6a7b8c9.localhost",
-      ),
-    ).toBe(true);
-    expect(
-      WORKSPACE_ORIGIN_FAMILY.test(
-        "system_interface-x1y2.agent-0f3c2b71a4de49b1a2c3d4e5f6a7b8c9.localhost",
-      ),
-    ).toBe(true);
-  });
-
-  it("still accepts a legacy host-keyed origin awaiting the redirect heal", () => {
-    expect(
-      WORKSPACE_ORIGIN_FAMILY.test(
-        "host-0f3c2b71a4de49b1a2c3d4e5f6a7b8c9.localhost",
-      ),
-    ).toBe(true);
-  });
-
-  it("rejects origins outside the workspace families", () => {
-    expect(WORKSPACE_ORIGIN_FAMILY.test("localhost")).toBe(false);
-    expect(WORKSPACE_ORIGIN_FAMILY.test("evil-agent-abc.example.com")).toBe(
-      false,
-    );
-    expect(
-      WORKSPACE_ORIGIN_FAMILY.test("agent-abc.localhost.example.com"),
-    ).toBe(false);
-  });
-});
 
 describe("WORKSPACE_FRAME_ALLOW", () => {
   it("delegates the clipboard, fullscreen, and an audio input to every workspace page", () => {

@@ -38,6 +38,7 @@ from imbue.minds.desktop_client.mngr_command import run_mngr_capturing
 from imbue.minds.desktop_client.mngr_command import run_mngr_to_completion
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
+from imbue.minds.desktop_client.system_interface_health import RecoveryFailureCause
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import ManualClock
 from imbue.minds.desktop_client.testing import PUBLIC_SSH_ENDPOINTS
@@ -63,6 +64,7 @@ from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationSt
 from imbue.minds.desktop_client.workspace_recovery import HOST_ACCESS_REJECTED_REASON
 from imbue.minds.desktop_client.workspace_recovery import HostRecoveryTrigger
 from imbue.minds.desktop_client.workspace_recovery import ProviderErrorConnectivityTrigger
+from imbue.minds.desktop_client.workspace_recovery import ProviderOutageAccount
 from imbue.minds.desktop_client.workspace_recovery import RecoveryDispatchOutcome
 from imbue.minds.desktop_client.workspace_recovery import RecoveryReadinessOutcome
 from imbue.minds.desktop_client.workspace_recovery import RecoveryReadinessResult
@@ -77,7 +79,7 @@ from imbue.minds.desktop_client.workspace_recovery import _did_start_boot_a_host
 from imbue.minds.desktop_client.workspace_recovery import _in_band_provider_outage_reason
 from imbue.minds.desktop_client.workspace_recovery import _is_discovery_fresh
 from imbue.minds.desktop_client.workspace_recovery import _log_recovery_step_failure_context
-from imbue.minds.desktop_client.workspace_recovery import _provider_error_message_for_workspace
+from imbue.minds.desktop_client.workspace_recovery import _provider_outage_for_workspace
 from imbue.minds.desktop_client.workspace_recovery import _report_recovery_step_failure
 from imbue.minds.desktop_client.workspace_recovery import dispatch_host_recovery
 from imbue.minds.desktop_client.workspace_recovery import is_network_dependent_provider
@@ -430,7 +432,7 @@ def test_run_mngr_falls_back_to_the_stderr_tail_when_mngr_printed_no_verdict(tmp
 # provider-error attribution
 
 
-def test_provider_error_message_for_workspace_keys_on_this_workspaces_provider() -> None:
+def test_provider_outage_for_workspace_keys_on_this_workspaces_provider() -> None:
     """The provider error message is attributed by exact provider name.
 
     This is the per-provider keying that keeps a docker machine's recovery from
@@ -442,16 +444,17 @@ def test_provider_error_message_for_workspace_keys_on_this_workspaces_provider()
             type_name="ProviderUnavailableError",
             message="could not reach Imbue Cloud",
             provider_name=ProviderInstanceName("imbue_cloud_acme"),
+            remediation="sign in again",
         ),
     }
-    matched = _provider_error_message_for_workspace(errors, "imbue_cloud_acme", True)
-    assert matched == "could not reach Imbue Cloud"
+    matched = _provider_outage_for_workspace(errors, "imbue_cloud_acme", True)
+    assert matched == ProviderOutageAccount(reason="could not reach Imbue Cloud", remediation="sign in again")
     # The same error is withheld while no snapshot at/after the outage onset
     # backs it: it is a property of one snapshot, like the host state.
-    assert _provider_error_message_for_workspace(errors, "imbue_cloud_acme", False) is None
+    assert _provider_outage_for_workspace(errors, "imbue_cloud_acme", False) is None
 
 
-def test_provider_error_message_for_workspace_ignores_other_providers() -> None:
+def test_provider_outage_for_workspace_ignores_other_providers() -> None:
     """An error for a different provider is never blamed on this machine."""
     errors = {
         ProviderInstanceName("imbue_cloud_acme"): DiscoveryError(
@@ -460,10 +463,10 @@ def test_provider_error_message_for_workspace_ignores_other_providers() -> None:
             provider_name=ProviderInstanceName("imbue_cloud_acme"),
         ),
     }
-    assert _provider_error_message_for_workspace(errors, "docker", True) is None
+    assert _provider_outage_for_workspace(errors, "docker", True) is None
 
 
-def test_provider_error_message_for_workspace_is_none_when_provider_unknown() -> None:
+def test_provider_outage_for_workspace_is_none_when_provider_unknown() -> None:
     """Pre-discovery (provider unknown), we cannot attribute any error to this machine."""
     errors = {
         ProviderInstanceName("imbue_cloud_acme"): DiscoveryError(
@@ -472,10 +475,10 @@ def test_provider_error_message_for_workspace_is_none_when_provider_unknown() ->
             provider_name=ProviderInstanceName("imbue_cloud_acme"),
         ),
     }
-    assert _provider_error_message_for_workspace(errors, None, True) is None
+    assert _provider_outage_for_workspace(errors, None, True) is None
 
 
-def test_provider_error_message_for_workspace_reduces_the_generic_shape_to_its_reason() -> None:
+def test_provider_outage_for_workspace_reduces_the_generic_shape_to_its_reason() -> None:
     """A snapshot carrying mngr's whole generic message yields just the reason.
 
     Discovery records an error's ``__cause__`` when it has one, so a provider
@@ -493,7 +496,7 @@ def test_provider_error_message_for_workspace_reduces_the_generic_shape_to_its_r
             provider_name=ProviderInstanceName("docker"),
         ),
     }
-    assert _provider_error_message_for_workspace(errors, "docker", True) == reason
+    assert _provider_outage_for_workspace(errors, "docker", True) == ProviderOutageAccount(reason=reason)
 
 
 # recovery worker
@@ -522,6 +525,8 @@ def test_run_host_recovery_sequence_fails_when_system_services_agent_is_unresolv
 
     assert tracker.get_health(workspace_agent) == AgentHealth.RECOVERY_FAILED
     assert "system-services" in (tracker.get_last_recovery_error(workspace_agent) or "")
+    # Nothing was run against the workspace, so no surface may call this a failed restart.
+    assert tracker.get_last_recovery_failure_cause(workspace_agent) is RecoveryFailureCause.WORKSPACE_NOT_FOUND
     record = registry.get(workspace_agent)
     assert record is not None and record.status == WorkspaceOperationStatus.FAILED
     assert len(error_records) == 1, error_records
@@ -709,6 +714,8 @@ def test_run_host_recovery_sequence_fails_when_start_command_errors(tmp_path: Pa
 
     assert tracker.get_health(workspace_agent) == AgentHealth.RECOVERY_FAILED
     assert "Start step" in (tracker.get_last_recovery_error(workspace_agent) or "")
+    assert tracker.get_last_recovery_failure_cause(workspace_agent) is RecoveryFailureCause.STEP_FAILED
+    assert tracker.get_recovery_kind(workspace_agent) is HostRecoveryKind.RESTART
     assert len(error_records) == 1, error_records
 
 
@@ -749,6 +756,7 @@ def test_run_host_recovery_sequence_fails_and_reports_when_interface_never_answe
     assert tracker.get_health(workspace_agent) == AgentHealth.RECOVERY_FAILED
     recovery_error = tracker.get_last_recovery_error(workspace_agent) or ""
     assert "did not respond" in recovery_error
+    assert tracker.get_last_recovery_failure_cause(workspace_agent) is RecoveryFailureCause.NOT_ANSWERING_AFTER_START
     # The verdict names what the probes actually got back, and so does the log:
     # a refused connection here, which is what tells this apart from a timeout
     # or a non-200 the plugin answered with.
@@ -1901,6 +1909,7 @@ def test_backend_unreachable_verdict_covers_a_trusted_rejected_host() -> None:
 
     assert verdict is not None
     assert verdict.reason == HOST_ACCESS_REJECTED_REASON
+    assert verdict.is_access_rejected
 
 
 def test_backend_unreachable_verdict_withholds_an_untrusted_rejected_host() -> None:
@@ -1945,6 +1954,7 @@ def test_backend_unreachable_verdict_does_not_trust_a_host_state_only_a_timed_ou
     verdict = read_backend_unreachable_verdict(workspace_agent, backend_resolver=resolver, tracker=tracker)
     assert verdict is not None
     assert verdict.reason == HOST_ACCESS_REJECTED_REASON
+    assert verdict.is_access_rejected
 
 
 def test_backend_unreachable_verdict_does_not_trust_a_host_the_completed_poll_could_not_read() -> None:
@@ -1971,6 +1981,7 @@ def test_backend_unreachable_verdict_does_not_trust_a_host_the_completed_poll_co
     verdict = read_backend_unreachable_verdict(workspace_agent, backend_resolver=resolver, tracker=tracker)
     assert verdict is not None
     assert verdict.reason == HOST_ACCESS_REJECTED_REASON
+    assert verdict.is_access_rejected
 
 
 def test_run_host_recovery_sequence_reports_the_backend_when_the_start_is_rejected_there(tmp_path: Path) -> None:
@@ -2005,6 +2016,7 @@ def test_run_host_recovery_sequence_reports_the_backend_when_the_start_is_reject
     message = tracker.get_last_recovery_error(workspace_agent) or ""
     assert reason in message
     assert "Start step" not in message
+    assert tracker.get_last_recovery_failure_cause(workspace_agent) is RecoveryFailureCause.PROVIDER_UNREACHABLE
     assert len(error_records) == 1, error_records
 
 
@@ -2184,7 +2196,9 @@ def test_device_verdict_outranks_the_recovery_episodes_own_conclusion(tmp_path: 
     tracker.mark_recovering(workspace_agent, HostRecoveryKind.START)
     assert read_device_cannot_connect_verdict(workspace_agent, tracker=tracker) is not None
 
-    tracker.mark_recovery_failed(workspace_agent, "The system interface did not respond.")
+    tracker.mark_recovery_failed(
+        workspace_agent, "The system interface did not respond.", RecoveryFailureCause.STEP_FAILED
+    )
     assert tracker.get_health(workspace_agent) == AgentHealth.RECOVERY_FAILED
     assert read_device_cannot_connect_verdict(workspace_agent, tracker=tracker) is not None
 

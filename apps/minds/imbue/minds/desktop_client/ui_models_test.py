@@ -185,6 +185,7 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "NotificationKind",
             "NotificationOutcome",
             "ProviderPanelStatus",
+            "RecoveryFailureCause",
             "RemoteTileState",
             "UiAccountEntry",
             "UiAccountProvidersEntry",

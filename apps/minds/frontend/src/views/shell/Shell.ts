@@ -24,6 +24,7 @@ import {
   isWorkspaceOverlayPath,
   overlayBehindWorkspaceId,
   popoutFromPath,
+  recoveryWorkspaceIdFromPath,
 } from "./classify";
 import { PopoutChrome } from "./PopoutChrome";
 import { surfaceNoticeBand } from "./workspace-notices";
@@ -232,6 +233,14 @@ export function Shell(): m.Component<ShellAttrs> {
         isAppOverlay && behindContent !== null && behindContent !== undefined;
       const surfaceWorkspaceId =
         workspaceParam ?? (isPageKeptBehind ? null : behindWorkspaceId);
+      // The page painted in the local slot: the kept page under an app modal
+      // (the router builds it from the same remembered route), else Home
+      // under one, else the routed page.
+      const paintedPagePath = isAppOverlay
+        ? isPageKeptBehind
+          ? (shell.pageRouteBehindOverlay ?? "").split("?")[0]
+          : "/"
+        : routePath;
       const localScrollClass =
         "bg-surface-primary overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable]";
 
@@ -254,7 +263,11 @@ export function Shell(): m.Component<ShellAttrs> {
               // the page the router remembered, else Home; otherwise the routed
               // page is the surface itself.
               [
-                m(LocalPageNotice),
+                // The recovery page places its own, beside the card that may
+                // say this device's condition itself.
+                recoveryWorkspaceIdFromPath(paintedPagePath) === null
+                  ? m(LocalPageNotice, { isDeviceConditionShown: false })
+                  : null,
                 isAppOverlay
                   ? isPageKeptBehind
                     ? behindContent
@@ -411,7 +424,13 @@ export function Shell(): m.Component<ShellAttrs> {
           : m(PopoutChrome, { shell, workspaceAnyId: popout.workspaceAnyId, windowId: popout.windowId }),
         popout === null ? m(SidebarMenu, { shell }) : null,
         popout === null ? m(AccountSwitcherMenu, { shell }) : null,
-        band !== null
+        // The open recovery card says what such a band says, and the band's
+        // own button would only open it.
+        band !== null &&
+        !(
+          isRecoveryOpen &&
+          band.actions.some((action) => action.kind === "open-recovery")
+        )
           ? m(NoticeBand, {
               shell,
               payload: band,

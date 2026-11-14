@@ -21,6 +21,10 @@ import {
   recoveryRoute,
 } from "../../models/create";
 import { onboardingProgress } from "../../models/onboarding";
+import { showErrorDialog, titledError } from "../../models/errorDialog";
+import { errorFromException, errorFromResponse, fallbackErrorSentence } from "../../models/errors";
+import type { ErrorAction, RequestOutcome } from "../../models/errors";
+import { defaultFetchJson } from "../../models/workspaceOptions";
 import { webLogin } from "../../models/webLogin";
 import type { UiAccountEntry, UiWorkspaceEntry } from "../../channel/messages";
 import type {
@@ -30,13 +34,17 @@ import type {
 } from "../../generated/ui";
 import type {
   ConnectionOwnerOption,
+  RowProblem,
   StatusChip,
 } from "../../models/providers";
 import {
   accountSectionTitleFor,
-  connectionDetailFor,
+  connectionRemovalErrorFor,
+  connectionRowProblemFor,
   connectionStatusChipFor,
   editControlFor,
+  providerRowProblemFor,
+  providersSummaryFor,
   providerStatusChipFor,
   removeControlFor,
 } from "../../models/providers";
@@ -48,6 +56,7 @@ import {
 } from "./create/CloudAccountsModal";
 import { Button, ButtonLink } from "../components/Button";
 import { Card } from "../components/Card";
+import { ErrorNotice, updateAppActions } from "../components/ErrorDisplay";
 import { Icon16 } from "../components/Icon";
 import { PageContainer } from "../components/Layout";
 import { Notice } from "../components/Notice";
@@ -56,9 +65,11 @@ import {
   backupsControlFor,
   healthBadgeLabelFor,
   isMachineStateKnown,
+  isOutageExplainedByDevice,
   keyStateChipFor,
   lifecycleConfirmation,
-  livenessBadgeLabelFor,
+  lifecycleFailureError,
+  livenessBadgeFor,
   mindControlsFor,
   remoteLocationBadgeFor,
   remoteStateChipFor,
@@ -78,7 +89,7 @@ import {
 } from "../../models/updates";
 
 const BADGE_CLASS =
-  "inline-flex items-center px-2 py-0.5 rounded-md type-label";
+  "inline-flex items-center px-1.5 py-0.5 rounded-md type-helper font-semibold";
 
 // The update badge is the only pill in a row that does something, so it is a
 // real <button> with a border, hover fill, press scale, focus ring and chevron.
@@ -109,7 +120,7 @@ interface LandingState {
   removedHostIds: Set<string>;
   /** Connection instances whose removal is in flight or done, so Remove cannot be pressed twice. */
   removingConnectionInstances: Set<string>;
-  /** Connection instances whose "Check now" is in flight, so it cannot be pressed twice. */
+  /** Connection instances whose "Check again" is in flight, so it cannot be pressed twice. */
   recheckingConnectionInstances: Set<string>;
   isProvidersOpen: boolean;
   isExtrasFailed: boolean;
@@ -277,7 +288,12 @@ export const LandingPage: m.ClosureComponent = () => {
       })
       .catch((error: unknown) => {
         console.error("Failed to load the connection form defaults", error);
-        window.alert("Could not load the connection form. Please try again.");
+        showErrorDialog(
+          titledError(
+            "Couldn't open the connection form",
+            errorFromException("Couldn't open the connection form", error),
+          ),
+        );
       });
   }
 
@@ -288,7 +304,17 @@ export const LandingPage: m.ClosureComponent = () => {
       // The server lists the backends in its own order; the first is the modal's opening pick.
       const backend = defaults.connection_backends[0];
       if (backend === undefined) {
-        window.alert("No cloud backend is available to add a connection for.");
+        showErrorDialog({
+          title: "Couldn't add a connection",
+          error: {
+            // The form defaults are kept once fetched, so opening the form again finds the same empty list.
+            message: fallbackErrorSentence(
+              "Imbue Studio couldn't find a cloud provider to add one for",
+              { isRetryable: false },
+            ),
+            details: "",
+          },
+        });
         return;
       }
       state.connectionModal.openForBackend(
@@ -311,9 +337,17 @@ export const LandingPage: m.ClosureComponent = () => {
         entry.backend,
       );
       if (backend === null) {
-        window.alert(
-          "This connection's provider is not known to this version of the app.",
-        );
+        showErrorDialog({
+          title: `Couldn't edit "${entry.alias}"`,
+          error: {
+            message:
+              "This connection's provider isn't supported by this version of Imbue Studio. " +
+              "*Update Imbue Studio to edit it.*",
+            details: "",
+          },
+          actions: updateAppActions(),
+          isBugReportOffered: false,
+        });
         return;
       }
       state.connectionModal.openForEdit(
@@ -386,30 +420,26 @@ export const LandingPage: m.ClosureComponent = () => {
       });
   }
 
-  /** Re-check a connection whose login was set up outside the app: bounce discovery and wait for the next frame. */
+  /** Re-check a connection after the user fixed it outside the app: bounce discovery and wait for the next frame. */
   function recheckConnection(entry: UiConnectionEntry): void {
     if (state.recheckingConnectionInstances.has(entry.instance)) return;
     state.recheckingConnectionInstances.add(entry.instance);
-    fetch(
+    void defaultFetchJson(
       `/api/v1/desktop/cloud-accounts/${encodeURIComponent(entry.instance)}/recheck`,
-      { method: "POST", credentials: "same-origin" },
-    )
-      .then(async (response) => {
-        if (!response.ok) {
-          const body = (await response.json().catch(() => null)) as {
-            error?: string;
-          } | null;
-          window.alert(body?.error ?? "Could not re-check the connection.");
-        }
-      })
-      .catch((error: unknown) => {
-        console.error("Failed to re-check connection", entry.instance, error);
-        window.alert("Could not re-check the connection.");
-      })
-      .finally(() => {
-        state.recheckingConnectionInstances.delete(entry.instance);
-        m.redraw();
-      });
+      { method: "POST" },
+    ).then((outcome) => {
+      state.recheckingConnectionInstances.delete(entry.instance);
+      if (!outcome.ok) {
+        console.error("Failed to re-check connection", entry.instance, outcome.status, outcome.body);
+        showErrorDialog(
+          titledError(
+            "Couldn't check this connection again",
+            errorFromResponse("Couldn't check this connection again", outcome),
+          ),
+        );
+      }
+      m.redraw();
+    });
   }
 
   function removeConnection(entry: UiConnectionEntry): void {
@@ -428,29 +458,22 @@ export const LandingPage: m.ClosureComponent = () => {
     if (!isConfirmed || state.removingConnectionInstances.has(entry.instance))
       return;
     state.removingConnectionInstances.add(entry.instance);
-    fetch(
+    void defaultFetchJson(
       `/api/v1/desktop/cloud-accounts/${encodeURIComponent(entry.instance)}`,
-      {
-        method: "DELETE",
-        credentials: "same-origin",
-      },
-    )
-      .then(async (response) => {
-        if (!response.ok) {
-          state.removingConnectionInstances.delete(entry.instance);
-          const body = (await response.json().catch(() => null)) as {
-            error?: string;
-          } | null;
-          window.alert(body?.error ?? "Could not remove the connection.");
-        }
-        m.redraw();
-      })
-      .catch((error: unknown) => {
-        console.error("Failed to remove connection", entry.instance, error);
+      { method: "DELETE" },
+    ).then((outcome) => {
+      if (!outcome.ok) {
         state.removingConnectionInstances.delete(entry.instance);
-        window.alert("Could not remove the connection.");
-        m.redraw();
-      });
+        console.error("Failed to remove connection", entry.instance, outcome.status, outcome.body);
+        showErrorDialog(
+          titledError(
+            `Couldn't remove "${entry.alias}"`,
+            connectionRemovalErrorFor(outcome),
+          ),
+        );
+      }
+      m.redraw();
+    });
   }
 
   function rowClick(entry: UiWorkspaceEntry): void {
@@ -462,29 +485,55 @@ export const LandingPage: m.ClosureComponent = () => {
     shell.enterWorkspaceOrRecover(entry, liveness);
   }
 
+  function startMind(entry: UiWorkspaceEntry): void {
+    void state.tracker.start(entry.id).then((result) => {
+      if (!result.isOk) showLifecycleFailure("start", entry, result.outcome);
+    });
+  }
+
   function stopMind(entry: UiWorkspaceEntry): void {
     const isApplying = getAppContext().stores.updates.isApplying(entry.id);
     const question = lifecycleConfirmation("stop", entry.name, isApplying);
     if (question !== null && !window.confirm(question)) return;
-    void state.tracker.stop(entry.id).then((isOk) => {
-      if (!isOk)
-        window.alert(
-          `Could not stop "${entry.name}". Check the workspace's provider and try again.`,
-        );
+    void state.tracker.stop(entry.id).then((result) => {
+      if (!result.isOk) showLifecycleFailure("stop", entry, result.outcome);
+    });
+  }
+
+  function showLifecycleFailure(action: "start" | "stop", entry: UiWorkspaceEntry, outcome: RequestOutcome): void {
+    const failure = lifecycleFailureError(action, entry.name, entry.stop_kind ?? "", outcome);
+    const retry = action === "start" ? () => startMind(entry) : () => stopMind(entry);
+    showErrorDialog({
+      // A hold is a refusal that stands, so its title says the workspace
+      // can't be started rather than that an attempt failed.
+      ...titledError(
+        failure.isHold
+          ? `Can't ${action} "${entry.name}"`
+          : `Couldn't ${action} "${entry.name}"`,
+        failure.error,
+      ),
+      // A hold is explained in full by its own sentence; there is nothing to
+      // report, and trying again meets the same hold.
+      actions: failure.isHold ? [] : [{ label: "Try again", onclick: retry }],
+      isBugReportOffered: !failure.isHold,
+      workspaceAgentId: entry.id,
     });
   }
 
   function livenessBadge(liveness: MindLiveness, stopKind: string): m.Children {
     if (liveness === "RUNNING") return null;
-    const label = livenessBadgeLabelFor(liveness, stopKind);
+    const badge = livenessBadgeFor(liveness, stopKind);
     const tone =
       liveness === "STOPPING" || liveness === "STARTING"
         ? "bg-warning/15 text-warning"
         : "bg-fill-subtle text-primary";
     return m(
       "span",
-      { class: `${BADGE_CLASS} ${tone} landing-mind-state-badge` },
-      label,
+      {
+        class: `${BADGE_CLASS} ${tone} landing-mind-state-badge`,
+        "data-tooltip": badge.tooltip || undefined,
+      },
+      badge.label,
     );
   }
 
@@ -533,11 +582,18 @@ export const LandingPage: m.ClosureComponent = () => {
     if (!isMachineStateKnown(getAppContext().stores.health.discoveryHealth))
       return null;
     const healthStore = getAppContext().stores.health;
+    // Likewise while this device is offline or on a network that blocks the
+    // connection: every workspace it has to reach over the network reads
+    // unhealthy for this device's reason, which the page's notice names once.
+    if (isOutageExplainedByDevice(healthStore.appEnvironmentCondition(), entry.is_network_dependent ?? true)) {
+      return null;
+    }
     const label = healthBadgeLabelFor(
       healthStore.statusFor(entry.id),
       healthStore.isRecoveryANoOpFor(entry.id),
       healthStore.recoveryKindFor(entry.id),
       entry.is_device_cannot_connect ?? false,
+      healthStore.recoveryFailureCauseFor(entry.id),
     );
     if (label === null) return null;
     return m(
@@ -859,13 +915,7 @@ export const LandingPage: m.ClosureComponent = () => {
                 "data-tooltip": "Start workspace",
                 onclick: (event: MouseEvent) => {
                   event.stopPropagation();
-                  void state.tracker.start(entry.id).then((isOk) => {
-                    if (!isOk) {
-                      window.alert(
-                        `Could not start "${entry.name}". Check the workspace's provider and try again.`,
-                      );
-                    }
-                  });
+                  startMind(entry);
                 },
               },
               m(Icon16, { name: "play" }),
@@ -1019,14 +1069,34 @@ export const LandingPage: m.ClosureComponent = () => {
         ),
         chip === null
           ? null
-          : m(
-              "span",
-              {
-                class: `${BADGE_CLASS} bg-fill-subtle ${chip.isImportant ? "text-important" : "text-secondary"}`,
-                title: chip.title,
-              },
-              chip.label,
-            ),
+          : chip.error !== null
+            ? m(
+                "button",
+                {
+                  type: "button",
+                  class: `${BADGE_CLASS} bg-fill-subtle text-important cursor-pointer border-0`,
+                  "data-tooltip": chip.tooltip,
+                  "data-remote-state": tile.state,
+                  onclick: () => {
+                    if (chip.error !== null)
+                      showErrorDialog({
+                        title: `Can't reach "${entry.name}" from here`,
+                        error: chip.error,
+                        workspaceAgentId: entry.id,
+                      });
+                  },
+                },
+                chip.label,
+              )
+            : m(
+                "span",
+                {
+                  class: `${BADGE_CLASS} bg-fill-subtle ${chip.isImportant ? "text-important" : "text-secondary"}`,
+                  "data-tooltip": chip.tooltip,
+                  "data-remote-state": tile.state,
+                },
+                chip.label,
+              ),
         backupsButton(entry, ""),
         m(
           Button,
@@ -1064,39 +1134,44 @@ export const LandingPage: m.ClosureComponent = () => {
     );
   }
 
-  /** The row's detail text beside its chip, or the empty spacer that keeps the controls right-aligned. */
-  function detailSpan(text: string): m.Children {
-    if (!text) return m("span", { class: "flex-1" });
-    return m(
-      "span",
-      { class: "flex-1 type-helper text-primary truncate", title: text },
-      text,
-    );
-  }
-
-  function errorDetail(
-    entry: Pick<UiProviderEntry, "error_type" | "error_message">,
+  /** A row of the panel: its one-line header (name, chip, controls), and
+   * under it, across the card's width, what the row's problem is with the raw
+   * error behind See details. A failed check offers a report; a login to set
+   * up is the user's step, confirmed by the notice's own Check again. */
+  function panelRow(
+    rowAttrs: Record<string, string>,
+    header: m.Children[],
+    problem: RowProblem | null,
+    problemId: string,
+    problemActions: ErrorAction[] = [],
   ): m.Children {
-    if (!entry.error_message) return detailSpan("");
-    return detailSpan(`${entry.error_type ?? ""}: ${entry.error_message}`);
+    return m(Card, { padding: "tight", ...rowAttrs }, [
+      m("div", { class: "flex items-center gap-1.5" }, header),
+      problem === null
+        ? null
+        : m(ErrorNotice, {
+            id: problemId,
+            error: problem,
+            tone: problem.isFailedCheck ? "error" : "warn",
+            isBugReportOffered: problem.isFailedCheck,
+            actions: problemActions,
+            extra: "mt-1",
+          }),
+    ]);
   }
 
-  function providerRow(entry: UiProviderEntry): m.Children {
-    return m(
-      Card,
-      {
-        layout: "row",
-        extra: "px-4 py-2 gap-1.5",
-        "data-provider-name": entry.name,
-      },
+  function providerRow(entry: UiProviderEntry, subject: "account" | "provider"): m.Children {
+    return panelRow(
+      { "data-provider-name": entry.name },
       [
         m("span", { class: "font-semibold text-primary" }, entry.name),
         entry.backend
           ? m("span", { class: "type-helper text-secondary" }, entry.backend)
           : null,
         statusChipBadge(providerStatusChipFor(entry.status)),
-        errorDetail(entry),
       ],
+      providerRowProblemFor(entry, subject),
+      `provider-problem-${entry.name}`,
     );
   }
 
@@ -1110,13 +1185,8 @@ export const LandingPage: m.ClosureComponent = () => {
     const isRechecking = state.recheckingConnectionInstances.has(entry.instance);
     const placement =
       entry.placement.default_region ?? entry.placement.default_zone ?? "";
-    return m(
-      Card,
-      {
-        layout: "row",
-        extra: "px-4 py-2 gap-1.5",
-        "data-connection-instance": entry.instance,
-      },
+    return panelRow(
+      { "data-connection-instance": entry.instance },
       [
         m("span", { class: "font-semibold text-primary" }, entry.alias),
         m(
@@ -1133,20 +1203,7 @@ export const LandingPage: m.ClosureComponent = () => {
           entry.identifier,
         ),
         statusChipBadge(connectionStatusChipFor(entry.status)),
-        detailSpan(connectionDetailFor(entry)),
-        entry.status === "PROFILE_MISSING"
-          ? m(
-              Button,
-              {
-                variant: "secondary",
-                disabled: isRechecking || isRemoving,
-                title: "Check again whether the login is set up on this device",
-                "data-connection-recheck": entry.instance,
-                onclick: () => recheckConnection(entry),
-              },
-              isRechecking ? "Checking…" : "Check now",
-            )
-          : null,
+        m("span", { class: "flex-1" }),
         m(
           Button,
           {
@@ -1168,6 +1225,24 @@ export const LandingPage: m.ClosureComponent = () => {
           "Remove",
         ),
       ],
+      connectionRowProblemFor(entry),
+      `connection-problem-${entry.instance}`,
+      entry.status === "PROFILE_MISSING" || entry.status === "ERROR"
+        ? [
+            {
+              id: `connection-recheck-${entry.instance}`,
+              label: "Check again",
+              isBusy: isRechecking,
+              isDisabled: isRemoving,
+              tooltip: isRemoving
+                ? "Removing this connection"
+                : entry.status === "PROFILE_MISSING"
+                  ? "Check again whether the login is set up on this computer"
+                  : "Check this connection again",
+              onclick: () => recheckConnection(entry),
+            },
+          ]
+        : [],
     );
   }
 
@@ -1177,7 +1252,7 @@ export const LandingPage: m.ClosureComponent = () => {
       label: accountSectionTitleFor(entry),
     };
     const rows: m.Children[] = [];
-    if (entry.imbue_cloud !== null) rows.push(providerRow(entry.imbue_cloud));
+    if (entry.imbue_cloud !== null) rows.push(providerRow(entry.imbue_cloud, "account"));
     for (const connection of entry.connections)
       rows.push(connectionRow(connection, owner));
     return m("div", { class: "mt-3", "data-account-section": entry.user_id }, [
@@ -1219,7 +1294,7 @@ export const LandingPage: m.ClosureComponent = () => {
       m(
         "div",
         { class: "flex flex-col gap-1.5" },
-        entries.map((entry) => providerRow(entry)),
+        entries.map((entry) => providerRow(entry, "provider")),
       ),
     ]);
   }
@@ -1339,21 +1414,20 @@ export const LandingPage: m.ClosureComponent = () => {
 
       return m(PageContainer, [
         state.isExtrasFailed
-          ? m(
-              Notice,
-              { variant: "error", extra: "mb-4", id: "landing-extras-error" },
-              m("div", { class: "flex items-center justify-between gap-3" }, [
-                m(
-                  "span",
+          ? m(ErrorNotice, {
+              id: "landing-extras-error",
+              error: {
+                message:
                   "Could not load workspace details. Some rows may be missing or incomplete.",
-                ),
-                m(
-                  Button,
-                  { variant: "secondary", onclick: () => loadExtras(state) },
-                  "Retry",
-                ),
-              ]),
-            )
+                details: "",
+              },
+              actions: [
+                {
+                  label: "Retry",
+                  onclick: () => loadExtras(state),
+                },
+              ],
+            })
           : null,
         hasRows
           ? m("div", [
@@ -1481,17 +1555,7 @@ export const LandingPage: m.ClosureComponent = () => {
               [
                 m(
                   "span",
-                  (() => {
-                    const rowCount = providersStore.rowCount();
-                    const errorCount = providersStore.errorCount();
-                    const providerWord =
-                      rowCount === 1 ? "provider" : "providers";
-                    const errorSuffix =
-                      errorCount > 0
-                        ? ` (${errorCount} ${errorCount === 1 ? "error" : "errors"})`
-                        : "";
-                    return `${rowCount} ${providerWord}${errorSuffix}`;
-                  })(),
+                  providersSummaryFor(providersStore.rowCount(), providersStore.attentionCount()),
                 ),
                 m(
                   "span",

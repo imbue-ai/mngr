@@ -46,6 +46,7 @@ from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
+from imbue.minds.desktop_client.system_interface_health import RecoveryFailureCause
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_DESTROYED
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
@@ -90,7 +91,12 @@ class RecoveryInfoResponse(FrozenModel):
     health: AgentHealth = Field(description="Current tracker health state")
     health_error: str = Field(description="Last recovery error, empty when none")
     recovery_kind: HostRecoveryKind | None = Field(
-        description="Which recovery is in flight (only RESTART stops the machine); None outside one"
+        description=(
+            "Which recovery is in flight, or which one failed (only RESTART stops the machine); None outside one"
+        )
+    )
+    recovery_failure_cause: RecoveryFailureCause | None = Field(
+        default=None, description="Which step of the failed recovery failed; None unless RECOVERY_FAILED"
     )
     ssh_command: str = Field(description="Copy-pasteable SSH command for the host, empty when unknown")
     is_host_offline: bool = Field(description="Whether discovery currently reads the host as stopped/stopping/crashed")
@@ -111,8 +117,18 @@ class RecoveryInfoResponse(FrozenModel):
     is_backend_unreachable: bool = Field(
         description="Whether the provider hosting this machine is unreachable or rejecting us"
     )
-    provider_label: str = Field(description="Friendly provider name, empty unless the backend is unreachable")
+    provider_label: str = Field(
+        description="Friendly provider name, empty unless the backend is unreachable and the provider is named"
+    )
     unreachable_reason: str = Field(description="The provider's own error, empty unless the backend is unreachable")
+    unreachable_remediation: str = Field(
+        default="",
+        description="The concise next step the provider named for its error, empty when it named none",
+    )
+    is_access_rejected: bool = Field(
+        default=False,
+        description="Whether the backend is unreachable because the machine refused this device's connection key",
+    )
     is_device_cannot_connect: bool = Field(
         description="Whether this device, rather than the machine, is what cannot make the connection"
     )
@@ -381,12 +397,15 @@ def _handle_recovery_info(workspace_id: str) -> Response:
         health=tracker.get_health(resolved_id) if tracker is not None else AgentHealth.HEALTHY,
         health_error=(tracker.get_last_recovery_error(resolved_id) or "") if tracker is not None else "",
         recovery_kind=tracker.get_recovery_kind(resolved_id) if tracker is not None else None,
+        recovery_failure_cause=tracker.get_last_recovery_failure_cause(resolved_id) if tracker is not None else None,
         ssh_command=build_ssh_command(backend_resolver, resolved_id),
         is_host_offline=_is_host_offline(backend_resolver, resolved_id),
         device_environment=read_environment_condition(state.connectivity_detector, backend_resolver, resolved_id),
         is_backend_unreachable=backend_verdict is not None,
         provider_label=backend_verdict.provider_label if backend_verdict is not None else "",
         unreachable_reason=backend_verdict.reason if backend_verdict is not None else "",
+        unreachable_remediation=(backend_verdict.remediation or "") if backend_verdict is not None else "",
+        is_access_rejected=backend_verdict is not None and backend_verdict.is_access_rejected,
         is_device_cannot_connect=device_verdict is not None,
         device_error_detail=device_verdict.detail if device_verdict is not None else "",
     )

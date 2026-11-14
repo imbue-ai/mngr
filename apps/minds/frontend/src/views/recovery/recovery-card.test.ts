@@ -2,7 +2,9 @@ import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   RecoveryCardBody,
-  RecoveryTroubleshooting,
+  RecoveryConnectionDetails,
+  isDeviceConditionShownOnCard,
+  plainRecoveryProgress,
   recoveryBusyActionLabel,
   recoveryHeading,
 } from "./RecoveryCard";
@@ -13,15 +15,18 @@ import {
 } from "../../models/backups";
 import { healthBadgeLabelFor } from "../pages/landing-controls";
 import { Button } from "../components/Button";
+import { ErrorNotice } from "../components/ErrorDisplay";
+import type { UserFacingError } from "../../models/errors";
 import type { RecoveryKind } from "../../models/health";
+import type { AnyVnode } from "../../testing";
 import {
   allText,
   attrsOf,
+  byId,
   collectVnodes,
   renderDeep,
   renderRoot,
   renderedText,
-  type AnyVnode,
 } from "../../testing";
 
 /** Deps that answer nothing and schedule nothing: these tests render a state,
@@ -123,13 +128,6 @@ function openSectionLabeled(rendered: m.Vnode, label: string): void {
   if (trigger === undefined)
     throw new Error(`no collapsible section labeled ${label}`);
   (attrsOf(trigger).onclick as () => void)();
-}
-
-/** What the card says once its "Error details" section has been opened. */
-function cardTextWithErrorDetailsOpen(info: RecoveryInfo): string {
-  const draw = mounted(RecoveryCardBody, { model: modelShowing(info) });
-  openSectionLabeled(draw(), "Error details");
-  return renderedText(draw());
 }
 
 /** Press the button reading `label`, so a test can assert what a click does
@@ -252,7 +250,27 @@ describe("RecoveryCardBody", () => {
       "In progress work will be interrupted, but saved data will not be lost.",
     );
     expect(text).toContain("Restart workspace");
-    expect(text).toContain("Report a problem");
+    expect(text).toContain("Report a bug");
+    expect(text).not.toContain("Report a problem");
+  });
+
+  it("puts the restart in the failure it answers, and dispatches it from there", () => {
+    let dispatched = 0;
+    const model = modelShowing(UNRESPONSIVE);
+    model.dispatchRecovery = async () => {
+      dispatched += 1;
+    };
+    const tree = renderDeep(renderRoot(RecoveryCardBody, { model }));
+    const notice = byId(tree, "recovery-error-0");
+    expect(notice).toBeDefined();
+    const restart = collectVnodes(notice).find(
+      (vnode) => vnode.tag === "button" && allText(vnode).trim() === "Restart workspace",
+    );
+    expect(restart).toBeDefined();
+    (attrsOf(restart as AnyVnode).onclick as () => void)();
+    expect(dispatched).toBe(1);
+    // No second row of buttons under it.
+    expect(renderedText(tree as m.Vnode).match(/Restart workspace/g)).toHaveLength(1);
   });
 
   it("offers a working restart on a machine it cannot classify yet", () => {
@@ -266,26 +284,87 @@ describe("RecoveryCardBody", () => {
 
   it("names the backend and withholds the restart when the backend is unreachable", () => {
     // The restart is dispatched through the same provider, so offering it here
-    // would be offering an action that cannot work. The provider's own error is
-    // shown verbatim rather than collapsed into copy Imbue Studio authored.
-    const text = renderCard({
+    // would be offering an action that cannot work. With no fix of its own to
+    // name, the provider's error is the only clue to what to do, so it shows.
+    const info = {
       ...UNRESPONSIVE,
       is_backend_unreachable: true,
       provider_label: "Docker",
       unreachable_reason:
         "Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
-    });
+    };
+    const text = renderCard(info);
 
     expect(text).toContain("my-machine unreachable: Can't connect to Docker");
-    expect(text).toContain(
-      "Imbue Studio will reconnect you to your workspace as soon as it can be reached again.",
-    );
     expect(text).toContain(
       "Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
     );
     expect(text).not.toContain("Restart workspace");
     // A card with no remedy still has to let the user say something about it.
-    expect(text).toContain("Report a problem");
+    expect(text).toContain("Report a bug");
+  });
+
+  it("tells the user the provider's own fix, with its error behind See details", () => {
+    const info = {
+      ...UNRESPONSIVE,
+      is_backend_unreachable: true,
+      provider_label: "Docker",
+      unreachable_reason:
+        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
+      unreachable_remediation: "start Docker",
+    };
+    const text = renderCard(info);
+
+    expect(text).toContain("my-machine unreachable: Can't connect to Docker");
+    // The fix is set apart, so its asterisks are markup rather than text.
+    expect(text).toContain("start Docker");
+    expect(text).not.toContain("*start Docker*");
+    expect(text).not.toContain("Cannot connect to the Docker daemon");
+    expect(offeredDetails(modelShowing(info))).toContain(
+      "Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
+    );
+  });
+
+  it("names the workspace, not a component, when the provider has no name", () => {
+    const text = renderCard({
+      ...UNRESPONSIVE,
+      is_backend_unreachable: true,
+      provider_label: "",
+      unreachable_reason: "boom",
+    });
+
+    expect(text).toContain("Can't reach my-machine right now");
+    expect(text).not.toContain("machine backend");
+  });
+
+  it("still says something when the provider reported an error with no text", () => {
+    const text = renderCard({
+      ...UNRESPONSIVE,
+      is_backend_unreachable: true,
+      provider_label: "Docker",
+      unreachable_reason: "",
+    });
+
+    expect(text).toContain(
+      "Imbue Studio can't reach the service that runs this workspace right now.",
+    );
+  });
+
+  it("says plainly that the machine refused this device's connection", () => {
+    const sentence =
+      "This workspace's machine is refusing Imbue Studio's connection, and Imbue Studio can't fix that from here. " +
+      "Report a bug so we can restore access.";
+    const text = renderCard({
+      ...UNRESPONSIVE,
+      is_backend_unreachable: true,
+      provider_label: "Imbue Cloud",
+      unreachable_reason: sentence,
+      is_access_rejected: true,
+    });
+
+    expect(text).toContain(sentence);
+    expect(text).toContain("Report a bug");
+    expect(text).not.toContain("Try again");
   });
 
   it("still reports a machine that is answering, whatever its provider's last poll did", () => {
@@ -317,12 +396,7 @@ describe("RecoveryCardBody", () => {
 
     expect(text).toContain("Can't connect to my-machine from this device");
     expect(text).toContain("This device has no network connection.");
-    expect(text).toContain(
-      "Imbue Studio will reconnect to your workspace as soon as it does.",
-    );
-    expect(text).toContain("Waiting for network");
     expect(text).not.toContain("Restart workspace");
-    expect(text).toContain("Report a problem");
   });
 
   it("tells a user on an SSH-blocking network what is actually wrong", () => {
@@ -334,10 +408,13 @@ describe("RecoveryCardBody", () => {
       device_environment: "SSH_BLOCKED",
     });
 
+    // Said once, with nothing left over to put behind See details. The fix is
+    // set apart from the condition, so the two are separate runs of text.
     expect(text).toContain(
-      "This network blocks the connection Imbue Studio uses to reach your workspaces (SSH).",
+      "This network blocks the connection Imbue Studio uses (SSH), even though web pages still load.",
     );
-    expect(text).toContain("Try another network or a VPN.");
+    expect(text).toContain("Try a different network, such as a phone hotspot.");
+    expect(text).not.toContain("See details");
     expect(text).not.toContain("This device has no network connection.");
     expect(text).not.toContain("Restart workspace");
   });
@@ -388,7 +465,6 @@ describe("RecoveryCardBody", () => {
 
     expect(text).toContain("Restarting my-machine...");
     expect(text).not.toContain("This device has no network connection.");
-    expect(text).not.toContain("Waiting for network");
   });
 
   it("explains the device over the app's own unattended start", () => {
@@ -405,7 +481,6 @@ describe("RecoveryCardBody", () => {
         device_environment: "OFFLINE",
       });
       expect(text).toContain("This device has no network connection.");
-      expect(text).toContain("Waiting for network");
       expect(text).not.toContain("Reconnecting to my-machine...");
     }
   });
@@ -424,7 +499,7 @@ describe("RecoveryCardBody", () => {
       unreachable_reason: "The read operation timed out",
     });
     expect(text).not.toContain("Can't connect to Imbue Cloud");
-    expect(text).not.toContain("Waiting for network");
+    expect(text).not.toContain("from this device");
     expect(text).toContain("my-machine isn't responding yet.");
   });
 
@@ -447,7 +522,7 @@ describe("RecoveryCardBody", () => {
     // The click flips the model at once; info.health only moves on the next 2s
     // poll, and a read already in flight can land after it still saying stuck.
     // Reading the server's health alone would swap the spinner and the log
-    // lines for "Waiting for network..." over a restart that is running.
+    // lines for the device's condition over a restart that is running.
     const info: RecoveryInfo = {
       ...UNRESPONSIVE,
       health: "stuck",
@@ -462,7 +537,7 @@ describe("RecoveryCardBody", () => {
     const text = renderCard(info, model);
 
     expect(text).toContain("Restarting my-machine...");
-    expect(text).not.toContain("Waiting for network");
+    expect(text).not.toContain("This device has no network connection.");
   });
 
   it("shows why a start was declined, without an error and without a success", () => {
@@ -486,10 +561,8 @@ describe("RecoveryCardBody", () => {
     expect(text).toContain("my-machine is stopped.");
     expect(text).not.toContain("unresponsive");
     expect(text).not.toContain("Nothing further is needed here");
-    // No error to detail: the troubleshooting block stays off the card.
-    expect(renderedText(renderRoot(RecoveryTroubleshooting, { model }))).toBe(
-      "",
-    );
+    // A declined start is not a failure: no error notice.
+    expect(text).not.toContain("Try again. If this persists");
   });
 
   it("returns the machine to its normal states once it answers again", () => {
@@ -502,7 +575,7 @@ describe("RecoveryCardBody", () => {
     });
 
     expect(text).toContain("my-machine is responding again.");
-    expect(text).not.toContain("Waiting for network");
+    expect(text).not.toContain("This device has no network connection.");
   });
 
   it("reads a recovery nobody started here as busy, not as an idle machine", async () => {
@@ -570,17 +643,17 @@ describe("RecoveryCardBody", () => {
       "the connection failed on this device, before reaching it",
     );
     expect(text).toContain("Restart Imbue Studio");
-    // The verbatim error is offered rather than shown: it sits behind "Error
+    // The verbatim error is offered rather than shown: it sits behind "See
     // details", shut, so it does not push the remedy off the card.
-    expect(text).toContain("Error details");
+    expect(text).toContain("See details");
     expect(text).not.toContain(
       "No known_hosts file at /keys/known_hosts; refusing to connect",
     );
-    expect(cardTextWithErrorDetailsOpen(info)).toContain(
+    expect(offeredDetails(modelShowing(info))).toContain(
       "No known_hosts file at /keys/known_hosts; refusing to connect",
     );
     expect(text).not.toContain("Restart workspace");
-    expect(text).toContain("Report a problem");
+    expect(text).toContain("Report a bug");
   });
 
   it("offers no app restart in a browser, where there is no app to restart", () => {
@@ -599,8 +672,8 @@ describe("RecoveryCardBody", () => {
     expect(text).toContain(
       "the connection failed on this device, before reaching it",
     );
-    expect(text).toContain("Error details");
-    expect(text).toContain("Report a problem");
+    expect(text).toContain("See details");
+    expect(text).toContain("Report a bug");
     expect(text).not.toContain("Restart Imbue Studio");
     expect(text).not.toContain(
       "Restarting Imbue Studio rebuilds the connection",
@@ -670,7 +743,7 @@ describe("RecoveryCardBody", () => {
     // The same window as above, with a device block still recorded: the machine
     // has answered, so the block is stale and the card is one confirmation away
     // from leaving. Rendering the wait here would replace a restart that just
-    // succeeded with an indefinite "Waiting for network".
+    // succeeded with an indefinite wait for the network.
     const model = modelShowing({
       ...UNRESPONSIVE,
       health: "stuck",
@@ -683,7 +756,6 @@ describe("RecoveryCardBody", () => {
     // No evidence of which recovery this is here, so the busy label is the
     // weakest honest one -- what matters is that it narrates the recovery.
     expect(text).toContain("Reconnecting...");
-    expect(text).not.toContain("Waiting for network");
     expect(text).not.toContain("This device has no network connection.");
   });
 
@@ -753,126 +825,216 @@ function buttonVariants(rendered: m.Vnode): [string, unknown][] {
     .map((vnode) => [allText(vnode.children).trim(), attrsOf(vnode).variant]);
 }
 
-/** What the troubleshooting block puts on screen for a given reading. */
-function renderTroubleshooting(
-  info: RecoveryInfo,
-  recoveryError: string | null = null,
-): string {
-  const model = modelShowing(info);
-  model.recoveryError = recoveryError;
-  return renderedText(
-    renderDeep(renderRoot(RecoveryTroubleshooting, { model })) as m.Vnode,
-  );
+/** Every text the card keeps behind a "See details", collected from the
+ * errors it draws (a shut See details draws none of it). */
+function offeredDetails(model: RecoveryModel): string {
+  const found: string[] = [];
+  function walk(node: unknown): void {
+    if (Array.isArray(node)) {
+      node.forEach(walk);
+      return;
+    }
+    if (node === null || typeof node !== "object") return;
+    const vnode = node as { tag?: unknown; attrs?: Record<string, unknown>; children?: unknown };
+    if (vnode.tag === ErrorNotice) {
+      const error = vnode.attrs?.error as UserFacingError | undefined;
+      found.push(error?.details ?? "");
+      return;
+    }
+    if (typeof vnode.tag === "function") {
+      const instance = (vnode.tag as () => m.Component)();
+      walk((instance.view as (v: m.Vnode) => m.Children).call(instance, vnode as m.Vnode));
+      return;
+    }
+    walk(vnode.children);
+  }
+  walk(renderRoot(RecoveryCardBody, { model }));
+  return found.join("\n");
 }
 
-/** The block with the section reading `label` opened, as a reader who pressed
- * it would see it. */
-function renderTroubleshootingOpened(
-  label: string,
-  info: RecoveryInfo,
-  recoveryError: string | null = null,
-): string {
-  const model = modelShowing(info);
-  model.recoveryError = recoveryError;
-  const draw = mounted(RecoveryTroubleshooting, { model });
-  openSectionLabeled(draw(), label);
-  return renderedText(draw());
-}
-
-describe("RecoveryTroubleshooting", () => {
-  it("stays off the card entirely when there is nothing in it", () => {
-    // The restart button is what almost everyone came for; an empty block
-    // between it and the bottom of the panel is pure noise.
-    expect(renderTroubleshooting(UNRESPONSIVE)).toBe("");
-  });
-
-  it("carries the restart error the tracker holds and the one this card's dispatch reported", () => {
-    const info = {
-      ...UNRESPONSIVE,
-      health_error: "Start step of host restart failed: ssh: dead",
-    };
-    const dispatchError = "Could not start the restart (HTTP 409).";
-
-    expect(renderTroubleshooting(info, dispatchError)).toContain(
-      "Troubleshooting",
-    );
-    const opened = renderTroubleshootingOpened(
-      "Error details",
-      info,
-      dispatchError,
-    );
-    expect(opened).toContain("ssh: dead");
-    expect(opened).toContain(dispatchError);
-  });
-
-  it("states a failure once when both sources are reporting the same one", () => {
-    // Every server-side restart failure hands the identical message to the
-    // tracker and to the operation record, so the card was rendering the same
-    // sentence twice and reading as two separate faults.
-    const message =
-      "Start step of host restart failed: exited 1: Agent not found";
-    const text = renderTroubleshootingOpened(
-      "Error details",
-      { ...UNRESPONSIVE, health_error: message },
-      message,
-    );
-    expect(text.split(message).length - 1).toBe(1);
-  });
-
-  it("ties each section's summary to the block it opens, for a screen reader", () => {
+describe("recovery failures on the card", () => {
+  it("says what failed in a sentence of its own, with the stored reason behind See details", () => {
     const model = modelShowing({
       ...UNRESPONSIVE,
-      health_error: "boom",
-      ssh_command: "ssh -i k -p 22 user@h",
+      recovery_kind: "start",
+      recovery_failure_cause: "NOT_ANSWERING_AFTER_START",
+      health_error:
+        "The system interface did not respond within 300s of the host recovery (last probe: HTTP 502).",
     });
-    const root = renderDeep(renderRoot(RecoveryTroubleshooting, { model }));
+    const text = renderCard(model.info as RecoveryInfo, model);
 
-    const triggers = collectVnodes(root).filter(
-      (vnode) => attrsOf(vnode)["aria-expanded"] !== undefined,
+    expect(text).toContain(
+      "Imbue Studio tried to bring this workspace back, but it still isn't answering. " +
+        "Try again. If this persists, report a bug.",
     );
-    expect(triggers).toHaveLength(2);
-    for (const trigger of triggers) {
-      const attrs = attrsOf(trigger);
-      expect(attrs["aria-expanded"]).toBe("false");
-      // Shut, so there is no panel yet -- but the summary still says which one
-      // it opens, and the id it names is the one that will carry the block.
-      expect(attrs["aria-controls"]).toBe(
-        `${String(attrs.id)}`.replace("-trigger", "-panel"),
-      );
+    expect(text).not.toContain("system interface");
+    expect(offeredDetails(model)).toContain("The system interface did not respond within 300s");
+  });
+
+  it.each([
+    ["STEP_FAILED", "Imbue Studio couldn't start this workspace."],
+    ["PROVIDER_UNREACHABLE", "so it couldn't start it."],
+    ["WORKSPACE_NOT_FOUND", "so it couldn't start it."],
+  ] as const)("does not call the app's own start a restart (%s)", (cause, sentence) => {
+    const text = renderCard({
+      ...UNRESPONSIVE,
+      recovery_kind: "start",
+      recovery_failure_cause: cause,
+      health_error: "Start step of host recovery failed: exited 1",
+    });
+
+    expect(text).toContain(sentence);
+    expect(text).not.toContain("couldn't restart");
+  });
+
+  it("shows a refused restart above the buttons rather than in a closed section", () => {
+    const model = modelShowing({ ...UNRESPONSIVE, health: "stuck" });
+    model.recoveryError = {
+      message:
+        "Imbue Studio is already working on this workspace (restoring a backup). Wait for that to finish, then try again.",
+      details: "HTTP 409\nA restore is already in progress for this workspace.",
+    };
+
+    const text = renderCard(model.info as RecoveryInfo, model);
+
+    expect(text).toContain("Imbue Studio is already working on this workspace (restoring a backup).");
+    expect(text).not.toContain("HTTP 409");
+  });
+
+  it("states one failure once when this card's restart and the workspace's state report it alike", () => {
+    const reason = "Start step of host recovery failed: exited 1";
+    const model = modelShowing({
+      ...UNRESPONSIVE,
+      recovery_kind: "restart",
+      recovery_failure_cause: "STEP_FAILED",
+      health_error: reason,
+    });
+    model.recoveryError = {
+      message: "Imbue Studio couldn't restart this workspace. Try again. If this persists, report a bug.",
+      details: reason,
+    };
+
+    const text = renderCard(model.info as RecoveryInfo, model);
+
+    expect(text.split("Imbue Studio couldn't restart this workspace.").length - 1).toBe(1);
+  });
+
+  it("states a restart the app could not begin once, though the refusal wraps the reason in its status", async () => {
+    const reason = "Could not start the recovery worker: group exited";
+    const model = new RecoveryModel("agent-33", {
+      ...IDLE_DEPS,
+      postJson: async () => ({ status: 503, body: { error: reason } }),
+    });
+    model.info = { ...UNRESPONSIVE, health: "stuck" };
+    await model.dispatchRecovery("restart");
+    model.info = {
+      ...UNRESPONSIVE,
+      recovery_kind: "restart",
+      recovery_failure_cause: "WORKER_NOT_STARTED",
+      health_error: reason,
+    };
+
+    const text = renderCard(model.info, model);
+
+    expect(text.split("Imbue Studio couldn't restart this workspace.").length - 1).toBe(1);
+  });
+
+  it("says visibly when it lost track of a recovery, calling only a restart a restart", () => {
+    const model = modelShowing({ ...UNRESPONSIVE, health: "stuck" });
+    model.isRecoveryFollowLost = true;
+    model.followedRecoveryKind = "restart";
+
+    expect(renderCard(model.info as RecoveryInfo, model)).toContain(
+      "Imbue Studio lost track of this restart. The workspace may still be coming back",
+    );
+
+    // The app's own start, attached to rather than dispatched here.
+    model.followedRecoveryKind = "start";
+    const attachedStart = renderCard(model.info as RecoveryInfo, model);
+    expect(attachedStart).toContain("Imbue Studio lost track of its attempt to reconnect to this workspace.");
+    expect(attachedStart).not.toContain("lost track of this restart");
+  });
+
+  it("lists the restart's progress plainly, keeping the log lines behind a See details", () => {
+    const lines = [
+      "Starting host recovery.",
+      "Stopping the system-services agent.",
+      "Starting the system-services agent.",
+      "Waiting for the system interface to respond.",
+    ];
+
+    expect(plainRecoveryProgress(lines)).toEqual([
+      "Stopping the workspace.",
+      "Starting the workspace.",
+      "Waiting for the workspace to answer.",
+    ]);
+    const model = modelShowing({ ...UNRESPONSIVE, health: "recovering" });
+    model.logLines = lines;
+    const text = renderCard(model.info as RecoveryInfo, model);
+    expect(text).toContain("Stopping the workspace.");
+    expect(text).not.toContain("system-services");
+    expect(text).toContain("See details");
+  });
+
+  it("puts the attempt's log behind the same See details as the verdict once it fails", () => {
+    const model = modelShowing({
+      ...UNRESPONSIVE,
+      health: "recovery_failed",
+      recovery_kind: "restart",
+      recovery_failure_cause: "NOT_ANSWERING_AFTER_START",
+      health_error: "The system interface did not respond within 300s.",
+    });
+    model.logLines = ["Starting host recovery.", "Stopping the system-services agent."];
+
+    const details = offeredDetails(model);
+
+    // One See details holds both: what went wrong, and how far the attempt got.
+    expect(details).toContain("The system interface did not respond within 300s.");
+    expect(details).toContain("Restart log:");
+    expect(details).toContain("Stopping the system-services agent.");
+    expect(renderCard(model.info as RecoveryInfo, model)).not.toContain(
+      "system-services",
+    );
+  });
+});
+
+describe("isDeviceConditionShownOnCard", () => {
+  it("is true exactly when the card states this device's condition in place of its own", () => {
+    // The recovery page hides its app-wide network notice on this, so it must
+    // agree with what the card draws.
+    const blocked = { ...UNRESPONSIVE, health: "stuck", device_environment: "SSH_BLOCKED" } as RecoveryInfo;
+    expect(isDeviceConditionShownOnCard(modelShowing(blocked))).toBe(true);
+    expect(renderCard(blocked)).toContain("This network blocks the connection Imbue Studio uses (SSH)");
+
+    // A machine that answers, one the network cannot explain, and the user's
+    // own restart all leave the condition unsaid on the card.
+    const unsaid: RecoveryInfo[] = [
+      { ...blocked, health: "healthy" },
+      { ...blocked, device_environment: "NONE" },
+      { ...blocked, health: "recovering", recovery_kind: "restart" },
+    ];
+    for (const info of unsaid) {
+      expect(isDeviceConditionShownOnCard(modelShowing(info))).toBe(false);
+      expect(renderCard(info)).not.toContain("This network blocks the connection");
     }
+    const loading = new RecoveryModel("agent-33", IDLE_DEPS);
+    expect(isDeviceConditionShownOnCard(loading)).toBe(false);
+  });
+});
+
+describe("RecoveryConnectionDetails", () => {
+  it("offers the connection command collapsed", () => {
+    const model = modelShowing({ ...UNRESPONSIVE, ssh_command: "ssh -i k -p 22 user@h" });
+    const draw = mounted(RecoveryConnectionDetails, { model });
+
+    expect(renderedText(draw())).toContain("Connection details");
+    expect(renderedText(draw())).not.toContain("ssh -i k");
+    openSectionLabeled(draw(), "Connection details");
+    expect(renderedText(draw())).toContain("connect to this workspace's machine from a terminal");
   });
 
-  it("names its summary back from the block, once that block is open", () => {
-    const model = modelShowing({ ...UNRESPONSIVE, health_error: "boom" });
-    const draw = mounted(RecoveryTroubleshooting, { model });
-    openSectionLabeled(draw(), "Error details");
-
-    const opened = collectVnodes(draw());
-    const panel = opened.find((vnode) => attrsOf(vnode).role === "region");
-    expect(panel).toBeDefined();
-    expect(attrsOf(panel as AnyVnode)["aria-labelledby"]).toBe(
-      "recovery-errors-trigger",
-    );
-    expect(allText(panel)).toContain("boom");
-    expect(
-      attrsOf(
-        collectVnodes(draw()).find(
-          (vnode) => attrsOf(vnode).id === "recovery-errors-trigger",
-        ) as AnyVnode,
-      )["aria-expanded"],
-    ).toBe("true");
-  });
-
-  it("offers the SSH block only for a machine whose host coordinates are known", () => {
-    const withSsh = renderTroubleshootingOpened("Connect over SSH", {
-      ...UNRESPONSIVE,
-      ssh_command: "ssh -i k -p 22 user@h",
-    });
-    expect(withSsh).toContain("connect to the machine's host from a terminal");
-    const withoutSsh = renderTroubleshooting({
-      ...UNRESPONSIVE,
-      health_error: "boom",
-    });
-    expect(withoutSsh).not.toContain("Connect over SSH");
+  it("stays off the card for a machine whose host coordinates are unknown", () => {
+    const model = modelShowing(UNRESPONSIVE);
+    expect(renderedText(renderDeep(renderRoot(RecoveryConnectionDetails, { model })) as m.Vnode)).toBe("");
   });
 });

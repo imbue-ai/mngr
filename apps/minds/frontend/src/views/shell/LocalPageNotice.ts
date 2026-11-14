@@ -13,12 +13,18 @@ import { Notice } from "../components/Notice";
 import { electronBridge } from "../../electron-bridge";
 import { localPageNoticeFor } from "./notice-band";
 
-export function LocalPageNotice(): m.Component {
+interface LocalPageNoticeAttrs {
+  /** The page says this device's own condition itself (the recovery card). */
+  isDeviceConditionShown: boolean;
+}
+
+export function LocalPageNotice(): m.Component<LocalPageNoticeAttrs> {
   return {
-    view() {
+    view(vnode) {
       const health = getAppContext().stores.health;
       const payload = localPageNoticeFor(health.discoveryHealth, electronBridge.isDesktop, health.appEnvironmentCondition());
       if (payload === null) return null;
+      if (payload.key === "environment-blocked" && vnode.attrs.isDeviceConditionShown) return null;
       // Aligned to the page container rather than the full scroll width, so
       // it reads as part of the page's own column alongside the notices the
       // pages render themselves.

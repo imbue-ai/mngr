@@ -48,6 +48,7 @@ from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import make_discovered_provider
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
@@ -138,6 +139,32 @@ def test_build_providers_state_payload_lists_device_providers_sorted_with_their_
     assert by_name["docker"].status is ProviderPanelStatus.OK and by_name["docker"].backend == "docker"
     assert by_name["vultr"].status is ProviderPanelStatus.ERROR
     assert by_name["vultr"].error_type == "RuntimeError" and by_name["vultr"].error_message == "api down"
+
+
+def test_build_providers_state_payload_reduces_a_provider_error_to_its_reason_and_carries_its_fix() -> None:
+    """A row shows the provider's own reason, not mngr's wrapper around it, and the fix the provider named."""
+    errored = ProviderInstanceName("docker")
+    reason = "Cannot connect to Docker daemon: connection refused"
+    resolver = MngrCliBackendResolver()
+    seed_provider_snapshots(
+        resolver,
+        providers=(),
+        error_by_provider_name={
+            errored: DiscoveryError(
+                type_name="ProviderUnavailableError",
+                message=str(ProviderUnavailableError(errored, reason)),
+                provider_name=errored,
+                remediation="start Docker",
+            ),
+        },
+        last_snapshot_at=datetime.now(timezone.utc),
+    )
+
+    (entry,) = _build_providers_state_payload(resolver, None, None, None).device_providers
+
+    assert entry.error_reason == reason
+    assert entry.remediation == "start Docker"
+    assert entry.error_message is not None and entry.error_message != reason
 
 
 def test_build_providers_state_payload_puts_the_account_instance_under_its_account(tmp_path: Path) -> None:

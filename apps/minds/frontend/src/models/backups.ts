@@ -13,9 +13,16 @@
 // Everything network- or timer-shaped is injected so vitest drives the state
 // machines synchronously; pages construct with the browser defaults.
 
-import { readResponseBody, routeSentenceFromBody } from "./errors";
-import type { RequestOutcome } from "./errors";
-import type { EnvironmentCondition, RecoveryKind } from "./health";
+import type { EnvironmentCondition, RecoveryFailureCause, RecoveryKind } from "./health";
+import type { RequestOutcome, UserFacingError } from "./errors";
+import {
+  errorFromResponse,
+  fallbackErrorSentence,
+  operationKindFromBody,
+  readResponseBody,
+  responseDetails,
+  routeSentenceFromBody,
+} from "./errors";
 
 export const BACKUP_HISTORY_PAGE_SIZE = 15;
 
@@ -1076,16 +1083,25 @@ export interface RecoveryInfo {
   workspace_name: string;
   health: string;
   health_error: string;
-  /** Which recovery is in flight. A full stop+start bounce is only ever
-   * dispatched by the user's own click, so "restart" is what makes "Restarting"
-   * an honest claim rather than a guess. Null outside a recovery. */
+  /** Which recovery is in flight, or which one failed. A full stop+start
+   * bounce is only ever dispatched by the user's own click, so "restart" is
+   * what makes "Restarting" an honest claim rather than a guess. Null outside a
+   * recovery. */
   recovery_kind: RecoveryKind | null;
+  /** Which step of a failed recovery failed; null unless health is recovery_failed. */
+  recovery_failure_cause?: RecoveryFailureCause | null;
   ssh_command: string;
   is_host_offline: boolean;
   device_environment: EnvironmentCondition;
   is_backend_unreachable: boolean;
   provider_label: string;
   unreachable_reason: string;
+  /** The concise next step the provider named for its error ("start Docker"),
+   * "" when it named none. */
+  unreachable_remediation?: string;
+  /** Whether the machine refused this device's connection key, rather than the
+   * provider reporting an error of its own. */
+  is_access_rejected?: boolean;
   is_device_cannot_connect: boolean;
   device_error_detail: string;
 }
@@ -1096,6 +1112,80 @@ interface RecoveryStatusPayload {
   error?: string | null;
   warning?: string | null;
 }
+
+/** The workspace operations the app runs one at a time (WorkspaceOperationKind). */
+type WorkspaceOperationKind = "RECOVERY" | "BACKUP_UPDATE" | "BACKUP_CONFIGURE" | "BACKUP_RESTORE";
+
+/** What each operation that can hold the workspace is doing, for the sentence
+ * that refuses a restart while it runs. */
+const OPERATION_IN_PROGRESS_PHRASES: Record<WorkspaceOperationKind, string> = {
+  RECOVERY: "bringing it back",
+  BACKUP_UPDATE: "updating its backup software",
+  BACKUP_CONFIGURE: "changing its backup settings",
+  BACKUP_RESTORE: "restoring a backup",
+};
+
+function isWorkspaceOperationKind(value: string): value is WorkspaceOperationKind {
+  return Object.prototype.hasOwnProperty.call(OPERATION_IN_PROGRESS_PHRASES, value);
+}
+
+/** The error for a restart (or start) the app refused to begin. */
+export function recoveryDispatchError(kind: RecoveryKind, outcome: RequestOutcome): UserFacingError {
+  const operationKind = operationKindFromBody(outcome.body);
+  if (outcome.status === 409 && operationKind !== null) {
+    const doing = isWorkspaceOperationKind(operationKind)
+      ? OPERATION_IN_PROGRESS_PHRASES[operationKind]
+      : "with something else";
+    return {
+      message: `Imbue Studio is already working on this workspace (${doing}). Wait for that to finish, then try again.`,
+      details: responseDetails(outcome),
+    };
+  }
+  const whatFailed =
+    kind === "start" ? "Imbue Studio couldn't start this workspace" : "Imbue Studio couldn't restart this workspace";
+  return errorFromResponse(whatFailed, outcome);
+}
+
+/**
+ * The sentence for a recovery that failed, by the step that failed and the
+ * kind of recovery that ran. The app's own start is not called a restart: it
+ * only starts the workspace, and may find it already running.
+ */
+export function recoveryFailureSentence(
+  cause: RecoveryFailureCause | null,
+  kind: RecoveryKind | null,
+): string {
+  const verb = kind === "restart" ? "restart" : "start";
+  switch (cause) {
+    case "PROVIDER_UNREACHABLE":
+      return fallbackErrorSentence(
+        `Imbue Studio couldn't reach the service that runs this workspace, so it couldn't ${verb} it`,
+      );
+    case "WORKSPACE_NOT_FOUND":
+      return fallbackErrorSentence(
+        `Imbue Studio lost track of this workspace, so it couldn't ${verb} it`,
+      );
+    case "LOST_AFTER_START":
+      return fallbackErrorSentence(
+        "Imbue Studio started this workspace, then lost track of it, so it can't tell whether it's back",
+      );
+    case "NOT_ANSWERING_AFTER_START":
+      return fallbackErrorSentence(
+        "Imbue Studio tried to bring this workspace back, but it still isn't answering",
+      );
+    case "STEP_FAILED":
+    case "WORKER_NOT_STARTED":
+    case "WORKER_CRASHED":
+    case null:
+      return fallbackErrorSentence(`Imbue Studio couldn't ${verb} this workspace`);
+  }
+}
+
+/** What the recovery card shows when it cannot read the workspace's state. */
+export const RECOVERY_LOAD_ERROR: UserFacingError = {
+  message: "Imbue Studio can't read this workspace's status right now.",
+  details: "The workspace's recovery state could not be read from Imbue Studio.",
+};
 
 /** What a declined start says when the app reported no reason of its own. */
 const RECOVERY_DECLINED_FALLBACK_MESSAGE =
@@ -1116,7 +1206,7 @@ const RECOVERY_DECLINED_FALLBACK_MESSAGE =
 export class RecoveryModel {
   readonly workspaceAnyId: string;
   info: RecoveryInfo | null = null;
-  loadError: string | null = null;
+  loadError: UserFacingError | null = null;
   isRecoveryRunning = false;
   /** Which recovery *this model dispatched*, or null when the one it is
    * following was dispatched elsewhere and only attached to. A surface
@@ -1124,7 +1214,14 @@ export class RecoveryModel {
    * from the click, while an unattended or other-window dispatch is only ever
    * as good as what the tracker publishes about it. */
   dispatchedRecoveryKind: RecoveryKind | null = null;
-  recoveryError: string | null = null;
+  /** Which recovery this model is following: its own dispatch's kind, or the
+   * tracker's word for one it attached to (null when the tracker gave none). */
+  followedRecoveryKind: RecoveryKind | null = null;
+  /** Why this card's own restart was refused or failed. */
+  recoveryError: UserFacingError | null = null;
+  /** Whether this card stopped following a restart whose status it could not
+   * read; the workspace's own state above keeps updating. */
+  isRecoveryFollowLost = false;
   /** The reason a start was refused before it changed anything (an operator
    * holds the machine): an outcome that is neither a success -- the machine is
    * not answering -- nor a failure of the machine or this device. */
@@ -1157,7 +1254,7 @@ export class RecoveryModel {
     // and without the poll the surface would hold that error until the window
     // was reloaded, while the machine recovered behind it.
     if (payload === null) {
-      this.loadError = "Could not load this workspace's recovery state.";
+      this.loadError = RECOVERY_LOAD_ERROR;
     } else {
       this.applyInfo(payload);
     }
@@ -1208,6 +1305,9 @@ export class RecoveryModel {
       this.recoveryNotice = null;
     if (payload.health !== "recovering") {
       this.isRecoveryFollowAbandoned = false;
+      // The run it lost track of has ended; the heading now says where the
+      // workspace ended up.
+      this.isRecoveryFollowLost = false;
       return;
     }
     if (
@@ -1220,8 +1320,10 @@ export class RecoveryModel {
     // Attached, not dispatched: this model has no first-hand account of what
     // was run, so a surface must take the tracker's word for which it was.
     this.dispatchedRecoveryKind = null;
+    this.followedRecoveryKind = payload.recovery_kind;
     this.isRecoverySucceeded = false;
     this.recoveryError = null;
+    this.isRecoveryFollowLost = false;
     this.recoveryNotice = null;
     this.logLines = [];
     this.consecutiveRecoveryPollFailures = 0;
@@ -1282,7 +1384,9 @@ export class RecoveryModel {
     if (agentId === null || this.isRecoveryRunning) return;
     this.isRecoveryRunning = true;
     this.dispatchedRecoveryKind = kind;
+    this.followedRecoveryKind = kind;
     this.recoveryError = null;
+    this.isRecoveryFollowLost = false;
     this.recoveryNotice = null;
     this.isRecoverySucceeded = false;
     this.consecutiveRecoveryPollFailures = 0;
@@ -1300,12 +1404,10 @@ export class RecoveryModel {
     // The card may have gone away while the POST was in flight; a stopped model
     // must not open a log stream nothing will ever close.
     if (this.isStopped) return;
-    if (result.status >= 400) {
+    // Status 0 is a POST the app's own server never answered: nothing was dispatched.
+    if (result.status === 0 || result.status >= 400) {
       this.isRecoveryRunning = false;
-      this.recoveryError = routeSentenceFromBody(
-        result.body,
-        `Could not start the recovery (HTTP ${result.status}).`,
-      );
+      this.recoveryError = recoveryDispatchError(kind, result);
       this.deps.redraw();
       return;
     }
@@ -1342,9 +1444,7 @@ export class RecoveryModel {
         // No longer "reload to find out": the card's own state poll is a
         // separate loop, still running against the same origin, and it is what
         // reports where the machine ended up.
-        this.recoveryError =
-          "Lost contact with the recovery; its status could not be read for several minutes. " +
-          "The workspace's state above is still being checked.";
+        this.isRecoveryFollowLost = true;
         this.deps.redraw();
         return;
       }
@@ -1366,7 +1466,12 @@ export class RecoveryModel {
     } else if (payload.is_done === true) {
       this.isRecoverySucceeded = true;
     } else {
-      this.recoveryError = payload.error ?? "The recovery failed.";
+      // The card words this from the step that failed once the workspace's
+      // state reports it; until then it has only the operation's own account.
+      this.recoveryError = {
+        message: recoveryFailureSentence(null, this.followedRecoveryKind),
+        details: payload.error ?? "",
+      };
     }
     this.deps.redraw();
   }

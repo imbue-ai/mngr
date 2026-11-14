@@ -245,7 +245,9 @@ def test_authenticate_with_invalid_code_returns_403(tmp_path: Path) -> None:
     )
 
     assert response.status_code == 403
-    assert "invalid or has already been used" in response.text
+    assert "has already been used or has expired" in response.text
+    # The printed-URL instruction is kept, but only behind See details.
+    assert "<details><summary>See details</summary><pre>If you started Imbue Studio from a terminal" in response.text
     # No session is established: the refusal sets no session cookie.
     assert not any(SESSION_COOKIE_NAME in header for header in response.headers.getlist("Set-Cookie"))
 
@@ -275,7 +277,7 @@ def test_authenticate_code_cannot_be_reused(tmp_path: Path) -> None:
         follow_redirects=False,
     )
     assert second_response.status_code == 403
-    assert "invalid or has already been used" in second_response.text
+    assert "has already been used or has expired" in second_response.text
     # No new session is established by the refused re-use.
     assert not any(SESSION_COOKIE_NAME in header for header in second_response.headers.getlist("Set-Cookie"))
 
@@ -612,6 +614,8 @@ def test_unhandled_exception_returns_500_with_message(tmp_path: Path) -> None:
     response = client.get("/explode")
     assert response.status_code == 500
     assert "test boom" in response.text
+    # A fetch keeps the raw text for its own error display's details.
+    assert "Something went wrong" not in response.text
 
 
 # Workspace-list / destroying-marker derivation helpers

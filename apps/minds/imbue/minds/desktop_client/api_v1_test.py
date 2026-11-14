@@ -119,6 +119,7 @@ from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import ChatInWorkspaceResolver
 from imbue.minds.desktop_client.testing import FAKE_BACKUP_USER_SEGMENT
+from imbue.minds.desktop_client.testing import SYSTEM_SERVICES_PROVIDER_NAME
 from imbue.minds.desktop_client.testing import blocking_release_wait_body
 from imbue.minds.desktop_client.testing import build_resolver_with_system_services
 from imbue.minds.desktop_client.testing import capture_error_logs
@@ -130,6 +131,7 @@ from imbue.minds.desktop_client.testing import restic_backup_a_file
 from imbue.minds.desktop_client.testing import trace_spans_named
 from imbue.minds.desktop_client.testing import wait_until_synced
 from imbue.minds.desktop_client.testing import write_fake_mngr_pair_script
+from imbue.minds.desktop_client.testing import write_stub_mngr
 from imbue.minds.desktop_client.ui_models import UiNotificationEntry
 from imbue.minds.desktop_client.workspace_create import CreateOnCreatedCallback
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
@@ -153,6 +155,7 @@ from imbue.minds.testing import stub_mngr_host_dir
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
@@ -1829,6 +1832,33 @@ def test_start_workspace_does_not_broadcast_workspace_stopped(
 
     assert response.status_code == 200
     assert client_queue.empty()
+
+
+def test_start_its_provider_refused_answers_with_the_providers_own_reason(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """A failed Start carries the provider's bare reason as ``provider_reason``, which the dialog leads with."""
+    agent_id = AgentId()
+    resolver = build_resolver_with_system_services(
+        agent_id, AgentId(), workspace_certified_data={"labels": {"is_primary": "true"}}
+    )
+    reason = "Cannot connect to Docker daemon: connection refused"
+    wrapped = str(ProviderUnavailableError(SYSTEM_SERVICES_PROVIDER_NAME, reason))
+    provider_down_mngr = write_stub_mngr(tmp_path, "mngr", f"cat >&2 <<'MSG'\nError: {wrapped}\nMSG\nexit 1")
+    client = _build_client(
+        tmp_path,
+        resolver,
+        root_concurrency_group=root_concurrency_group,
+        mngr_binary=provider_down_mngr,
+        mngr_host_dir=tmp_path / "host",
+    )
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/start", headers=_auth_header())
+
+    assert response.status_code == 502
+    body = json.loads(response.data)
+    assert body["provider_reason"] == reason
+    assert wrapped in body["error"]
 
 
 def test_workspace_refresh_broadcasts_to_every_ui_connection(tmp_path: Path) -> None:
@@ -4803,6 +4833,8 @@ def test_workspace_restart_conflicts_with_a_running_backup_operation(
 
     assert response.status_code == 409
     assert "backup software update is already in progress" in json.loads(response.data)["error"]
+    # The desktop words the conflict from the operation it names.
+    assert json.loads(response.data)["operation_kind"] == "BACKUP_UPDATE"
     # The running backup operation's record was not replaced.
     record = registry.get(agent_id)
     assert record is not None
@@ -5902,7 +5934,10 @@ def test_delete_connection_refuses_while_a_workspace_uses_it_then_removes_its_bl
     refused = busy_parts.client.delete(f"/api/v1/desktop/cloud-accounts/{instance_name}", headers=_auth_header())
     assert refused.status_code == 409
     assert json.loads(refused.data)["code"] == "connection_in_use"
-    assert "1 active workspace" in json.loads(refused.data)["error"]
+    # The app shows this sentence as is, so it names no internal instance.
+    refusal = json.loads(refused.data)["error"]
+    assert "1 active workspace." in refusal
+    assert instance_name not in refusal
     assert instance_name in tomllib.loads(parts.settings_path.read_text())["providers"]
 
     removed = parts.client.delete(f"/api/v1/desktop/cloud-accounts/{instance_name}", headers=_auth_header())

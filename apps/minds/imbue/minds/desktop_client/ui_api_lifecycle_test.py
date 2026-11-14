@@ -24,6 +24,7 @@ from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
+from imbue.minds.desktop_client.system_interface_health import RecoveryFailureCause
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import build_resolver_with_provider_backend
 from imbue.minds.desktop_client.testing import build_resolver_with_system_services
@@ -253,10 +254,15 @@ def test_recovery_info_carries_the_live_tracker_state_for_the_card(tmp_path: Pat
     payload = json.loads(client.get(f"/ui/api/workspaces/{_DESTROYED_AGENT_ID}/recovery-info").data)
     assert payload["health"] == "recovering"
 
-    tracker.mark_recovery_failed(agent_id, "Start step of host recovery failed: exited 1")
+    tracker.mark_recovery_failed(
+        agent_id, "Start step of host recovery failed: exited 1", RecoveryFailureCause.STEP_FAILED
+    )
     payload = json.loads(client.get(f"/ui/api/workspaces/{_DESTROYED_AGENT_ID}/recovery-info").data)
     assert payload["health"] == "recovery_failed"
     assert payload["health_error"] == "Start step of host recovery failed: exited 1"
+    # The card words the failure from its step and the kind of recovery that ran.
+    assert payload["recovery_failure_cause"] == "STEP_FAILED"
+    assert payload["recovery_kind"] == "restart"
 
 
 def test_recovery_info_picks_up_a_provider_error_that_lands_after_the_card_opened(tmp_path: Path) -> None:
@@ -275,13 +281,17 @@ def test_recovery_info_picks_up_a_provider_error_that_lands_after_the_card_opene
     assert payload["unreachable_reason"] == ""
 
     record_provider_discovery_error(
-        resolver, "docker", "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
+        resolver,
+        "docker",
+        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
+        remediation="start Docker",
     )
 
     payload = json.loads(client.get(f"/ui/api/workspaces/{_DESTROYED_AGENT_ID}/recovery-info").data)
     assert payload["is_backend_unreachable"] is True
     assert payload["provider_label"] == "Docker"
     assert payload["unreachable_reason"] == "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
+    assert payload["unreachable_remediation"] == "start Docker"
 
 
 def test_recovery_info_reports_the_backend_a_recovery_was_already_rejected_at(tmp_path: Path) -> None:
@@ -299,6 +309,7 @@ def test_recovery_info_reports_the_backend_a_recovery_was_already_rejected_at(tm
     tracker.mark_recovery_failed(
         agent_id,
         "This workspace's backend is unreachable, so the recovery could not run: Docker Desktop is manually paused.",
+        RecoveryFailureCause.PROVIDER_UNREACHABLE,
     )
     client, _ = _build_lifecycle_client(tmp_path, backend_resolver=resolver, tracker=tracker)
 
@@ -308,6 +319,7 @@ def test_recovery_info_reports_the_backend_a_recovery_was_already_rejected_at(tm
     assert payload["is_backend_unreachable"] is True
     assert payload["provider_label"] == "Docker"
     assert payload["unreachable_reason"] == "Docker Desktop is manually paused."
+    assert payload["unreachable_remediation"] == ""
 
 
 def test_recovery_info_reports_a_dead_network_for_a_machine_it_can_explain(
@@ -456,8 +468,6 @@ def test_build_ssh_command_is_empty_without_ssh_info() -> None:
     assert build_ssh_command(resolver, AgentId()) == ""
 
 
-# -- _resolve_workspace_coordinate_to_agent_id ------------------------------
-#
 # Workspace content URLs are keyed by host id while Imbue Studio's records stay
 # agent-keyed; the resolver translates between the two coordinates for the
 # recovery page.

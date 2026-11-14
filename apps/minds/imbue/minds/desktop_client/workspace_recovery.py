@@ -91,6 +91,7 @@ from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.system_interface_health import AgentFailureLogGate
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
+from imbue.minds.desktop_client.system_interface_health import RecoveryFailureCause
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.workspace_lifecycle import HOST_START_TIMEOUT_SECONDS
 from imbue.minds.desktop_client.workspace_lifecycle import HOST_STOP_TIMEOUT_SECONDS
@@ -119,14 +120,12 @@ from imbue.mngr_imbue_cloud.errors import workspace_hold_message_in
 from imbue.mngr_imbue_cloud.primitives import InvalidImbueCloudAccount
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
 
-# Stand-in provider name for the "Can't connect to ..." headline, for a provider
-# discovery has not named yet (or does not recognise).
-_DEFAULT_PROVIDER_LABEL: Final[str] = "the machine backend"
 # Reason shown for the UNAUTHENTICATED host state. Discovery carries only the
 # host state (``DiscoveredHost`` has no failure_reason field), so there is no
 # provider error to show verbatim; this covers the class of causes instead.
 HOST_ACCESS_REJECTED_REASON: Final[str] = (
-    "This workspace's access to the machine host was rejected. You may need to recreate the workspace or contact support."
+    "This workspace's machine is refusing Imbue Studio's connection, and Imbue Studio can't fix that from here. "
+    "Report a bug so we can restore access."
 )
 # How long a single workspace probe through the plugin is allowed to hang.
 # Short and snappy so a wedged workspace doesn't gate the recovery UI.
@@ -632,6 +631,7 @@ def _record_recovery_failure(
     registry: WorkspaceOperationRegistryInterface,
     workspace_agent_id: AgentId,
     message: str,
+    cause: RecoveryFailureCause,
 ) -> None:
     """Fail the recovery in both the tracker and the operation registry, or in neither.
 
@@ -640,7 +640,7 @@ def _record_recovery_failure(
     answering mid-recovery) ends the operation as a success with ``message`` as
     its caveat rather than standing as a failure in one store only.
     """
-    if tracker.mark_recovery_failed(workspace_agent_id, message):
+    if tracker.mark_recovery_failed(workspace_agent_id, message, cause):
         registry.fail(workspace_agent_id, message)
         return
     registry.complete_with_warning(workspace_agent_id, message)
@@ -684,12 +684,14 @@ def _report_recovery_step_failure(
     display_info = backend_resolver.get_agent_display_info(workspace_agent_id)
     provider_name = display_info.provider_name if display_info is not None else None
     message = f"{step_label} step of host recovery failed: {exc}"
+    cause = RecoveryFailureCause.STEP_FAILED
     reason = None
     if provider_name is not None:
         reason = _in_band_provider_outage_reason(exc, provider_name)
         if reason is not None:
             tracker.record_backend_outage(workspace_agent_id, provider_name, reason)
             message = f"This workspace's backend is unreachable, so the recovery could not run: {reason}"
+            cause = RecoveryFailureCause.PROVIDER_UNREACHABLE
     device_block = read_environment_block(connectivity_detector, backend_resolver, workspace_agent_id)
     is_blocked_by_device = device_block is not EnvironmentBlock.NONE
     if is_blocked_by_device:
@@ -713,7 +715,7 @@ def _report_recovery_step_failure(
         exc,
         "" if exc.output_tail is None else f"\nsubprocess output:\n{exc.output_tail}",
     )
-    _record_recovery_failure(tracker, registry, workspace_agent_id, message)
+    _record_recovery_failure(tracker, registry, workspace_agent_id, message, cause)
 
 
 def _log_recovery_step_failure_context(
@@ -1062,7 +1064,9 @@ class RecoveryWorkerFailureHandler(MutableModel):
 
     def __call__(self, exc: BaseException) -> None:
         message = f"The recovery worker failed unexpectedly: {exc}"
-        _record_recovery_failure(self.tracker, self.registry, self.workspace_agent_id, message)
+        _record_recovery_failure(
+            self.tracker, self.registry, self.workspace_agent_id, message, RecoveryFailureCause.WORKER_CRASHED
+        )
 
 
 class RecoveryDispatchOutcome(UpperCaseStrEnum):
@@ -1181,7 +1185,9 @@ def dispatch_host_recovery(
         # quiet, so a recovery that never even spawned must report itself.
         logger.opt(exception=exc).error("Failed to spawn recovery worker for {}: {}", workspace_agent_id, exc)
         message = f"Could not start the recovery worker: {exc}"
-        _record_recovery_failure(tracker, registry, workspace_agent_id, message)
+        _record_recovery_failure(
+            tracker, registry, workspace_agent_id, message, RecoveryFailureCause.WORKER_NOT_STARTED
+        )
         return RecoveryDispatchOutcome.SPAWN_FAILED
     return RecoveryDispatchOutcome.DISPATCHED
 
@@ -1664,7 +1670,9 @@ def run_host_recovery_sequence(
     if services_agent_id is None:
         message = "Could not locate the system-services agent for this workspace."
         logger.error("Host recovery of {} failed: {}", workspace_agent_id, message)
-        _record_recovery_failure(tracker, registry, workspace_agent_id, message)
+        _record_recovery_failure(
+            tracker, registry, workspace_agent_id, message, RecoveryFailureCause.WORKSPACE_NOT_FOUND
+        )
         return
 
     # Read before the stop step, so both commands address the same machine. The
@@ -1805,7 +1813,7 @@ def run_host_recovery_sequence(
     if display_info is None:
         message = "The workspace is unknown to discovery after the start, so its recovery cannot be confirmed."
         logger.error("Host recovery of {} failed: {}", workspace_agent_id, message)
-        _record_recovery_failure(tracker, registry, workspace_agent_id, message)
+        _record_recovery_failure(tracker, registry, workspace_agent_id, message, RecoveryFailureCause.LOST_AFTER_START)
         return
 
     tracker.mark_awaiting_readiness(workspace_agent_id)
@@ -1854,15 +1862,37 @@ def run_host_recovery_sequence(
             workspace_agent_id,
             message,
         )
-        _record_recovery_failure(tracker, registry, workspace_agent_id, message)
+        _record_recovery_failure(
+            tracker, registry, workspace_agent_id, message, RecoveryFailureCause.NOT_ANSWERING_AFTER_START
+        )
 
 
-def _provider_error_message_for_workspace(
+def provider_error_reason(error: DiscoveryError, provider_name: str) -> str:
+    """A provider's discovery error reduced to the reason a user can read.
+
+    Discovery records an error's ``__cause__`` when it has one, so a provider
+    that raised ``ProviderUnavailableError`` without a ``from`` clause surfaces
+    mngr's whole generic wrapper (naming the provider and trailing an internal
+    marker sentence) where its neighbours surface a bare reason.
+    """
+    return parse_provider_unavailable_reason(error.message, provider_name) or error.message
+
+
+class ProviderOutageAccount(FrozenModel):
+    """A provider's own account of why it cannot be reached."""
+
+    reason: str = Field(description="The provider's own error message")
+    remediation: str | None = Field(
+        default=None, description="The concise next step the provider named for the error, when it named one"
+    )
+
+
+def _provider_outage_for_workspace(
     provider_errors: Mapping[ProviderInstanceName, DiscoveryError],
     provider_name: str | None,
     is_classification_trustworthy: bool,
-) -> str | None:
-    """Map this workspace's provider error message (if any) from the discovery snapshot.
+) -> ProviderOutageAccount | None:
+    """Map this workspace's provider outage (if any) from the discovery snapshot.
 
     ``get_provider_errors()`` keys per-provider discovery errors by provider
     name, so attribution to *this* workspace's provider is exact. Returns None in
@@ -1902,7 +1932,10 @@ def _provider_error_message_for_workspace(
         return None
     for name, error in provider_errors.items():
         if str(name) == provider_name and error.type_name != PROVIDER_DISCOVERY_TIMEOUT_ERROR_TYPE_NAME:
-            return parse_provider_unavailable_reason(error.message, provider_name) or error.message
+            return ProviderOutageAccount(
+                reason=provider_error_reason(error, provider_name),
+                remediation=error.remediation,
+            )
     return None
 
 
@@ -1947,13 +1980,13 @@ def _recorded_backend_outage_reason(
     return outage.reason
 
 
-def _passive_provider_error_message(
+def _passive_provider_outage(
     backend_resolver: BackendResolverInterface,
     tracker: SystemInterfaceHealthTracker | None,
     agent_id: AgentId,
     provider_name: str | None,
     is_classification_trustworthy: bool,
-) -> str | None:
+) -> ProviderOutageAccount | None:
     """This workspace's backend outage, from the evidence already in hand, or None.
 
     The one place the two passive accounts of the same backend are ranked, so the
@@ -1961,7 +1994,7 @@ def _passive_provider_error_message(
     :func:`read_backend_unreachable_verdict` exists to guarantee. A backend a
     command has already been rejected at (:func:`_recorded_backend_outage_reason`)
     outranks the resolver's surfaced error
-    (:func:`_provider_error_message_for_workspace`): it is the more recent
+    (:func:`_provider_outage_for_workspace`): it is the more recent
     observation of the two, and it is readable at all only while it stays that
     way.
 
@@ -1969,9 +2002,10 @@ def _passive_provider_error_message(
     observed after this poll's snapshot -- so its single caller prefers it over
     whatever this returns.
     """
-    return _recorded_backend_outage_reason(
-        backend_resolver, tracker, agent_id, provider_name
-    ) or _provider_error_message_for_workspace(
+    recorded_reason = _recorded_backend_outage_reason(backend_resolver, tracker, agent_id, provider_name)
+    if recorded_reason is not None:
+        return ProviderOutageAccount(reason=recorded_reason)
+    return _provider_outage_for_workspace(
         backend_resolver.get_provider_errors(), provider_name, is_classification_trustworthy
     )
 
@@ -1979,8 +2013,17 @@ def _passive_provider_error_message(
 class BackendUnreachableVerdict(FrozenModel):
     """The machine's backend is unreachable, with the provider's own account of why."""
 
-    provider_label: str = Field(description="Friendly provider name for the 'Can't connect to ...' headline")
+    provider_label: str = Field(
+        description="Friendly provider name for the 'Can't connect to ...' headline; empty when the provider is unnamed"
+    )
     reason: str = Field(description="The provider's verbatim error, or the canned access-rejected reason")
+    remediation: str | None = Field(
+        default=None, description="The concise next step the provider named for its error, when it named one"
+    )
+    is_access_rejected: bool = Field(
+        default=False,
+        description="Whether ``reason`` is the canned access-rejected sentence rather than the provider's",
+    )
 
 
 def read_backend_unreachable_verdict(
@@ -2013,21 +2056,27 @@ def read_backend_unreachable_verdict(
     # host state cannot disagree about whether this workspace's provider has been
     # re-observed since the outage began.
     classification_is_trustworthy = is_recovery_classification_trustworthy(backend_resolver, tracker, agent_id)
-    provider_error_message = _passive_provider_error_message(
+    provider_outage = _passive_provider_outage(
         backend_resolver, tracker, agent_id, provider_name, classification_is_trustworthy
     )
-    if provider_error_message is not None:
-        reason = provider_error_message
+    remediation: str | None = None
+    if provider_outage is not None:
+        reason = provider_outage.reason
+        remediation = provider_outage.remediation
+        is_access_rejected = False
     elif classification_is_trustworthy and host_state_enum is HostState.UNAUTHENTICATED:
         # Discovery carries only the host state (``DiscoveredHost`` has no
         # failure_reason), so there is no verbatim error to show here -- the
         # canned text covers the class of causes instead.
         reason = HOST_ACCESS_REJECTED_REASON
+        is_access_rejected = True
     else:
         return None
     return BackendUnreachableVerdict(
-        provider_label=friendly_provider_label(provider_name) or _DEFAULT_PROVIDER_LABEL,
+        provider_label=friendly_provider_label(provider_name),
         reason=reason,
+        remediation=remediation,
+        is_access_rejected=is_access_rejected,
     )
 
 

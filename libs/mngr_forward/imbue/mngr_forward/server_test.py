@@ -57,12 +57,15 @@ from imbue.mngr_forward.cookie import create_session_cookie
 from imbue.mngr_forward.cookie import create_subdomain_auth_token
 from imbue.mngr_forward.cookie import verify_session_cookie
 from imbue.mngr_forward.data_types import ForwardServiceStrategy
+from imbue.mngr_forward.data_types import ProxyAnswerReason
 from imbue.mngr_forward.embedding import EmbedderOrigin
 from imbue.mngr_forward.envelope import EnvelopeWriter
 from imbue.mngr_forward.errors import MngrForwardError
 from imbue.mngr_forward.primitives import CookieSigningKey
 from imbue.mngr_forward.primitives import MNGR_FORWARD_SESSION_COOKIE_NAME
 from imbue.mngr_forward.primitives import OneTimeCode
+from imbue.mngr_forward.proxy_pages import PROXY_REASON_HEADER
+from imbue.mngr_forward.proxy_pages import REQUEST_SENT_HEADER
 from imbue.mngr_forward.request_headers import NO_REQUEST_HEADERS
 from imbue.mngr_forward.request_headers import RequestHeadersFileReader
 from imbue.mngr_forward.resolver import ForwardResolver
@@ -83,6 +86,7 @@ from imbue.mngr_forward.server import _is_loopback_url
 from imbue.mngr_forward.server import _never_refused
 from imbue.mngr_forward.server import _sanitize_next_url
 from imbue.mngr_forward.server import _select_ws_receive_payload
+from imbue.mngr_forward.server import _was_request_sent
 from imbue.mngr_forward.server import create_forward_app
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
@@ -120,6 +124,11 @@ def _register_default_service(resolver: ForwardResolver, service_url: str) -> Ag
     resolver.add_known_agent(instance_key)
     resolver.update_services(instance_key, {"system_interface": service_url}, {})
     return instance_key
+
+
+def _is_waiting_page(body: str) -> bool:
+    """Whether ``body`` is the proxy's own loading page (the 503 a browser is shown)."""
+    return "mngr-forward-page-config" in body and '"status": 503' in body
 
 
 def _agent_origin(
@@ -1628,7 +1637,7 @@ def test_subdomain_forward_routes_loopback_without_tunnel_to_recovery(
 
     # HTML callers get the styled auto-refreshing loader, not raw 502 text.
     assert response.status_code == 503
-    assert "Loading workspace" in response.text
+    assert _is_waiting_page(response.text)
     assert captured == [], "request must NOT be forwarded to anything when loopback fallback is refused"
     # The failure envelope is what lets a consumer drive its recovery flow.
     lines = _envelope_lines(envelope_output)
@@ -1698,7 +1707,7 @@ def test_subdomain_forward_returns_retry_page_on_backend_connect_error(tmp_path:
     # HTML navigations get the auto-refresh retry page so the user lands on
     # something useful instead of a hard 502.
     assert html_response.status_code == 503
-    assert "Loading workspace" in html_response.text
+    assert _is_waiting_page(html_response.text)
     # The loader re-attempts the workspace by polling in the background and
     # reloading once it answers (rather than a focus-stealing meta refresh).
     assert "fetch(" in html_response.text
@@ -1751,10 +1760,10 @@ def test_unavailable_backend_answers_503_shaped_for_the_caller(
 
     assert response.status_code == 503
     if accepts_html:
-        assert "Loading workspace" in response.text
+        assert _is_waiting_page(response.text)
     else:
         # A plain body, and no redirect: 503 is not a 3xx and carries no Location.
-        assert "Loading workspace" not in response.text
+        assert not _is_waiting_page(response.text)
         assert "location" not in {header_name.lower() for header_name in response.headers}
 
 
@@ -1792,7 +1801,7 @@ def test_loading_page_self_heals_once_the_backend_answers(tmp_path: Path) -> Non
         loading = client.get("/", headers=html_headers)
         # The page notices on its own and reloads itself when the backend answers.
         assert loading.status_code == 503
-        assert "Loading workspace" in loading.text
+        assert _is_waiting_page(loading.text)
         assert "fetch(" in loading.text
         assert "location.reload" in loading.text
 
@@ -2463,7 +2472,7 @@ def test_subdomain_forward_emits_failure_on_ssh_tunnel_setup_error(
 
     # HTML callers get the styled auto-refreshing loader, not raw 502 text.
     assert html_response.status_code == 503
-    assert "Loading workspace" in html_response.text
+    assert _is_waiting_page(html_response.text)
     # The failure envelope is what lets a consumer drive its recovery flow.
     lines = _envelope_lines(envelope_output)
     assert len(lines) == 1
@@ -2823,6 +2832,33 @@ def _arm_reset_on_close(conn: socket_module.socket) -> None:
     conn.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_LINGER, struct.pack("ii", 1, 0))
 
 
+def _drain_request(conn: socket_module.socket) -> None:
+    """Read one whole HTTP/1.1 request, its ``Content-Length`` body included.
+
+    A request body can arrive in a later segment than the head. Left unread, a
+    reset discards the backend's own answer on the proxy's side before the
+    proxy reads it, so a reset meant to come after the headers would read as
+    one before them.
+    """
+    received = b""
+    while b"\r\n\r\n" not in received:
+        chunk = conn.recv(65536)
+        if not chunk:
+            return
+        received += chunk
+    head, _, body = received.partition(b"\r\n\r\n")
+    content_length = 0
+    for line in head.split(b"\r\n")[1:]:
+        name, _, value = line.partition(b":")
+        if name.strip().lower() == b"content-length":
+            content_length = int(value.strip())
+    while len(body) < content_length:
+        chunk = conn.recv(65536)
+        if not chunk:
+            return
+        body += chunk
+
+
 @contextmanager
 def _failing_backend(mode: _BackendFailureMode) -> Generator[int, None, None]:
     """Serve one loopback connection that fails in ``mode``, yielding the port to point a backend URL at."""
@@ -2842,7 +2878,7 @@ def _failing_backend(mode: _BackendFailureMode) -> Generator[int, None, None]:
         with conn:
             # Drain the request so a reset below is this backend's own choice
             # rather than a side effect of closing on unread data.
-            conn.recv(65536)
+            _drain_request(conn)
             match mode:
                 case _BackendFailureMode.RESET_BEFORE_HEADERS:
                     _arm_reset_on_close(conn)
@@ -3144,7 +3180,7 @@ def test_service_origin_unregistered_service_serves_loading_page(tmp_path: Path)
         )
 
     assert response.status_code == 503
-    assert "Loading workspace" in response.text
+    assert _is_waiting_page(response.text)
 
 
 def test_goto_with_service_param_redirects_to_service_origin(
@@ -4257,7 +4293,7 @@ def test_subdomain_forward_distinguishes_pool_exhaustion_from_backend_timeout(tm
         assert payload["type"] == "system_interface_backend_failure"
         assert payload["reason"] == "POOL_EXHAUSTED"
         # ``POOL_EXHAUSTED`` is a device-side reason, and a device-side detail is
-        # what the recovery card expands verbatim behind "Error details".
+        # what the recovery card expands verbatim behind "See details".
         # ``PoolTimeout`` stringifies empty, so without a description of its own
         # the class-name fallback would put the bare word in front of a user.
         assert "PoolTimeout" not in payload["detail"]
@@ -4892,3 +4928,183 @@ def test_signed_out_visitor_to_agent_origin_ends_at_sign_in(tmp_path: Path) -> N
         home = client.get("/")
     assert home.status_code == 200
     assert "Sign in" in home.text
+
+
+def _free_loopback_port() -> int:
+    """A loopback port nothing is listening on (bound once, then released)."""
+    with socket_module.socket(socket_module.AF_INET, socket_module.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+@pytest.mark.parametrize(
+    "failure_mode, expected_status, expected_reason, expected_sent",
+    [
+        (None, 503, ProxyAnswerReason.NOT_ANSWERING, "no"),
+        (_BackendFailureMode.RESET_BEFORE_HEADERS, 503, ProxyAnswerReason.NOT_ANSWERING, "yes"),
+        (_BackendFailureMode.RESET_AFTER_HEADERS, 502, ProxyAnswerReason.CONNECTION_LOST, "yes"),
+    ],
+)
+@pytest.mark.witnesses("forwarding.request-sent-mark")
+def test_request_sent_mark_tells_a_refused_dial_from_a_dropped_request(
+    tmp_path: Path,
+    method: str,
+    failure_mode: _BackendFailureMode | None,
+    expected_status: int,
+    expected_reason: ProxyAnswerReason,
+    expected_sent: str,
+) -> None:
+    """Against a real socket: a dial nothing accepted never sent the request; a connection that
+    took the request (a POST's body included) and then dropped, before or after answering, did."""
+    preauth = "preauth-sent-mark-4471"
+    headers = {"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}", "accept": "application/json"}
+    content = b"do-it" if method == "POST" else None
+    if failure_mode is None:
+        app, _envelope_output = _make_loopback_backend_app(tmp_path, _free_loopback_port(), preauth)
+        with TestClient(app, base_url=_agent_origin(port=18424), follow_redirects=False) as client:
+            response = client.request(method, "/api/act", headers=headers, content=content)
+    else:
+        with _failing_backend(failure_mode) as port:
+            app, _envelope_output = _make_loopback_backend_app(tmp_path, port, preauth)
+            with TestClient(app, base_url=_agent_origin(port=18424), follow_redirects=False) as client:
+                response = client.request(method, "/api/act", headers=headers, content=content)
+
+    assert response.status_code == expected_status
+    assert response.headers[PROXY_REASON_HEADER] == expected_reason.value
+    assert response.headers[REQUEST_SENT_HEADER] == expected_sent
+
+
+@pytest.mark.parametrize(
+    "raised, expected_reason, expected_sent",
+    [
+        (httpx2.ConnectTimeout, ProxyAnswerReason.TIMED_OUT, "no"),
+        (httpx2.PoolTimeout, ProxyAnswerReason.POOL_EXHAUSTED, "no"),
+        (httpx2.ReadTimeout, ProxyAnswerReason.TIMED_OUT, "yes"),
+        (httpx2.WriteTimeout, ProxyAnswerReason.TIMED_OUT, "yes"),
+    ],
+)
+@pytest.mark.witnesses("forwarding.request-sent-mark", partial="the timeout variants of the mark")
+def test_request_sent_mark_on_timeouts(
+    tmp_path: Path, raised: type[Exception], expected_reason: ProxyAnswerReason, expected_sent: str
+) -> None:
+    """A dial or pool wait that timed out never sent the request; a read or write that timed out did."""
+    preauth = "preauth-sent-timeout-5582"
+    instance_key = _make_test_instance_key()
+    app, _captured, _env_out, mock_client = _make_forward_app_with_capture(
+        tmp_path, instance_key, preauth, raise_error=raised
+    )
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.get(
+            "/api/state",
+            headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}", "accept": "application/json"},
+        )
+
+    assert response.status_code == 504
+    assert response.headers[PROXY_REASON_HEADER] == expected_reason.value
+    assert response.headers[REQUEST_SENT_HEADER] == expected_sent
+
+
+def test_request_sent_mark_says_no_when_the_host_refused_the_backend_channel() -> None:
+    """A channel the agent's host refused never carried the request, whatever exception reports it."""
+    assert _was_request_sent(httpx2.RemoteProtocolError("closed"), lambda: True) is False
+    assert _was_request_sent(httpx2.ReadError(""), lambda: True) is False
+    assert _was_request_sent(httpx2.RemoteProtocolError("closed"), _never_refused) is True
+
+
+@pytest.mark.parametrize(
+    "origin_labels, is_discovery_reported, is_agent_known, is_stream_manager_attached, expected_reason",
+    [
+        ((), False, False, False, ProxyAnswerReason.DISCOVERY_PENDING),
+        ((), True, False, False, ProxyAnswerReason.UNKNOWN_AGENT),
+        (("notyet",), True, True, False, ProxyAnswerReason.NO_ROUTE),
+        (("notyet",), True, True, True, ProxyAnswerReason.NO_ROUTE_EVENTS_STOPPED),
+    ],
+)
+@pytest.mark.witnesses("forwarding.unavailable-reason")
+@pytest.mark.witnesses("forwarding.request-sent-mark", partial="the no-route row only")
+def test_unroutable_request_is_marked_with_why_and_as_never_sent(
+    tmp_path: Path,
+    origin_labels: tuple[str, ...],
+    is_discovery_reported: bool,
+    is_agent_known: bool,
+    is_stream_manager_attached: bool,
+    expected_reason: ProxyAnswerReason,
+) -> None:
+    """With no agent or no route to forward to, the 503 names which, and the request was never sent."""
+    preauth = "preauth-unroutable-6693"
+    app, _auth_store, resolver = _make_forward_app(
+        tmp_path, preauth_cookie_value=preauth, is_stream_manager_attached=is_stream_manager_attached
+    )
+    if is_discovery_reported:
+        resolver.update_known_agents(())
+    if is_agent_known:
+        _register_default_service(resolver, "http://stub-default-service")
+    with TestClient(app, base_url=_agent_origin(*origin_labels), follow_redirects=False) as client:
+        html_response = client.get(
+            "/", headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}", "accept": "text/html"}
+        )
+        plain_response = client.get(
+            "/", headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}", "accept": "application/json"}
+        )
+
+    for response in (html_response, plain_response):
+        assert response.status_code == 503
+        assert response.headers[PROXY_REASON_HEADER] == expected_reason.value
+        assert response.headers[REQUEST_SENT_HEADER] == "no"
+    assert f'data-reason="{expected_reason.value}"' in html_response.text
+    assert _is_waiting_page(html_response.text)
+
+
+def test_backend_answer_carries_no_proxy_marks(tmp_path: Path) -> None:
+    """A 503 the backend itself sent is forwarded as-is, without the proxy's marks."""
+    preauth = "preauth-backend-503-7704"
+    instance_key = _make_test_instance_key()
+    app, _captured, _env_out, mock_client = _make_forward_app_with_capture(
+        tmp_path, instance_key, preauth, backend_status=503
+    )
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.get(
+            "/", headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}", "accept": "text/html"}
+        )
+
+    assert response.status_code == 503
+    assert response.text == "hi"
+    assert PROXY_REASON_HEADER not in response.headers
+    assert REQUEST_SENT_HEADER not in response.headers
+
+
+def test_dropped_connection_page_offers_a_retry_and_keeps_the_proxy_text_in_details(tmp_path: Path) -> None:
+    """A browser whose request broke off gets a page saying so, with the proxy's own text behind See details."""
+    preauth = "preauth-dropped-page-8815"
+    with _failing_backend(_BackendFailureMode.RESET_AFTER_HEADERS) as port:
+        app, _envelope_output = _make_loopback_backend_app(tmp_path, port, preauth)
+        with TestClient(app, base_url=_agent_origin(port=18424), follow_redirects=False) as client:
+            response = client.get(
+                "/", headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}", "accept": "text/html"}
+            )
+
+    assert response.status_code == 502
+    assert response.headers["content-type"].startswith("text/html")
+    assert '"status": 502' in response.text
+    assert "<summary>See details</summary><pre>Backend connection lost</pre>" in response.text
+
+
+def test_spent_sign_in_link_gets_a_page_back_to_the_requested_path(tmp_path: Path) -> None:
+    """A browser following a spent or forged sign-in link is offered the path it was going to."""
+    app, _auth_store, _resolver = _make_forward_app(tmp_path)
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
+        html_response = client.get(
+            "/_subdomain_auth",
+            params={"token": "not-a-real-token", "next": "/chat/1"},
+            headers={"accept": "text/html"},
+        )
+        plain_response = client.get("/_subdomain_auth", params={"token": "not-a-real-token", "next": "/chat/1"})
+
+    assert html_response.status_code == 403
+    assert "This link has expired." in html_response.text
+    assert 'href="/chat/1"' in html_response.text
+    assert plain_response.status_code == 403
+    assert plain_response.text == "Invalid or expired subdomain auth token"
