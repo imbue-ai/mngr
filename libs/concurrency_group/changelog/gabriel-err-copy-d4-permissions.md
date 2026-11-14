@@ -1,0 +1,1 @@
+Deflaked `test_get_reader_thread_stack_names_the_running_steps_without_paths`: it now samples the reader thread's stack once the thread is waiting for output, not as soon as the child has started. A sample taken during setup could land in a `@contextmanager` generator that yielded before the stack walk reached its caller, returning a one-frame stack.

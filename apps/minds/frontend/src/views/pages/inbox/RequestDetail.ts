@@ -8,13 +8,18 @@
 import m from "mithril";
 import type { InboxDetail } from "../../../models/inbox";
 import { InboxModel } from "../../../models/inbox";
-import { Notice } from "../../components/Notice";
+import { fallbackErrorSentence } from "../../../models/errors";
+import { ErrorNotice } from "../../components/ErrorDisplay";
 import { AccountsPermissionDetailView } from "./AccountsPermissionDetail";
 import { CustomServicePermissionDetailView } from "./CustomServicePermissionDetail";
 import { FileSharingPermissionDetailView } from "./FileSharingPermissionDetail";
 import { PredefinedPermissionDetailView } from "./PredefinedPermissionDetail";
 import { RemoteExecutionPermissionDetailView } from "./RemoteExecutionPermissionDetail";
 import { WorkspacePermissionDetailView } from "./WorkspacePermissionDetail";
+
+/** What failed for a request the page can't show. Opening it again fails the
+ * same way, so its sentence asks for no retry. */
+const UNSHOWABLE_WHAT_FAILED = "Imbue Studio couldn't show this request";
 
 /** The grant dialog for one request, by kind. */
 export function requestDetailView(model: InboxModel, detail: InboxDetail): m.Children {
@@ -32,23 +37,23 @@ export function requestDetailView(model: InboxModel, detail: InboxDetail): m.Chi
     case "remote_execution":
       return m(RemoteExecutionPermissionDetailView, { model, detail });
     case "unknown_scope":
-      return m("div", { class: "flex flex-col gap-3" }, [
-        m(
-          Notice,
-          { variant: "warn" },
-          `The requested scope '${detail.scope}' is not in the catalog, so there are no permissions to offer.`,
-        ),
-        m(
-          "button",
-          {
-            class: "self-start type-body text-secondary underline cursor-pointer",
-            onclick: () => model.deny(),
-          },
-          "Deny this request",
-        ),
-      ]);
+      // The gateway refuses a scope its catalog lacks when the agent files the
+      // request, so this is a bug: the generic error, and Deny to unblock the agent.
+      return m(ErrorNotice, {
+        id: "permissions-unknown-scope",
+        error: {
+          message: fallbackErrorSentence(UNSHOWABLE_WHAT_FAILED, { isRetryable: false }),
+          details: `Scope '${detail.scope}' is not in the catalog.`,
+        },
+        actions: [{ label: "Deny", id: "permissions-deny-btn", isDestructive: true, onclick: () => model.deny() }],
+      });
     case "unsupported":
-      return m(Notice, { variant: "error" }, detail.message);
+      // No handler owns this request, so a Deny would reach the same dead end; Close is the way out.
+      return m(ErrorNotice, {
+        id: "permissions-unsupported",
+        error: { message: fallbackErrorSentence(UNSHOWABLE_WHAT_FAILED, { isRetryable: false }), details: detail.message },
+        actions: [{ label: "Close", onclick: () => model.close() }],
+      });
     case "unavailable":
       return m("div", { class: "flex flex-col items-center justify-center gap-2 py-8 text-center" }, [
         m("p", { class: "type-heading text-primary" }, "This permission request is no longer available"),

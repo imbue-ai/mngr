@@ -10,11 +10,17 @@
 // and reverting, so a control never shows a state that was not stored.
 
 import m from "mithril";
+import { getAppContext } from "../../../app-context";
+import { AskAgentModel } from "../../../models/assistChat";
+import { remedyActions } from "../../components/errorRemedies";
+import { AskAgentFailure, askAgentActions } from "../../components/AskAgentButton";
+import type { ErrorAction, UserFacingError } from "../../../models/errors";
 import { Badge } from "../../components/Badge";
 import { Button } from "../../components/Button";
+import { ErrorNotice } from "../../components/ErrorDisplay";
+import { InlineError } from "../../components/errorDesign";
 import { TextInput } from "../../components/FormControls";
 import { Icon16 } from "../../components/Icon";
-import { markedLine, richErrorText } from "../../components/errorDesign";
 import { renderImplicitPermissionsHint } from "../../components/ImplicitPermissionsHint";
 import { SectionHeader } from "../../components/Layout";
 import { Modal } from "../../components/Modal";
@@ -27,6 +33,7 @@ import { electronBridge } from "../../../electron-bridge";
 import type { StatusBadgeVariant } from "../../components/StatusBadge";
 import { StatusBadge } from "../../components/StatusBadge";
 import type {
+  ErrorRemedy,
   FileSharingAccess,
   FolderSyncState,
   UiAvailableConnection,
@@ -117,8 +124,11 @@ function isLockedByAnotherWrite(model: PermissionsModel, rowKey: string): boolea
  * told us nothing about the credentials it takes, so there is nothing to ask
  * for. Shown on hover, in place of a button that could only fail. */
 function unconnectableTitle(displayName: string): string {
-  return `Imbue Studio can't work out which credentials ${displayName} needs, so it has to be connected another way.`;
+  return `Imbue Studio can't set up ${displayName} from here yet.`;
 }
+
+/** Why Add file and Add folder are greyed out on a desktop with no device id. */
+const CANNOT_SHARE_FILES_SENTENCE = "Imbue Studio can't share files from this computer.";
 
 export interface PermissionsTabAttrs {
   model: PermissionsModel;
@@ -150,6 +160,8 @@ interface PermissionsTabLocalState {
    * navigation to another workspace's pane, where the same service must not
    * pick the draft up. */
   desktopEgressDraft: { model: PermissionsModel; serviceName: string; route: string[] } | null;
+  /** The chat a refused change's "Ask the agent to request it again" starts. */
+  askAgent: AskAgentModel;
 }
 
 /** How often the pane re-reads while a sync is alive.
@@ -169,6 +181,9 @@ export function PermissionsTab(): m.Component<PermissionsTabAttrs> {
     disconnectSectionId: null,
     folderSyncPollTimer: null,
     desktopEgressDraft: null,
+    askAgent: new AskAgentModel({
+      onStarted: (workspaceAgentId) => getAppContext().shell.enterWorkspace(workspaceAgentId),
+    }),
   };
 
   return {
@@ -238,21 +253,32 @@ function renderBody(
       "Loading permissions...",
     ]);
   }
-  if (model.status === "load_failed") {
-    return m("div", { class: "mt-6 shrink-0 flex flex-col gap-3 items-start" }, [
-      m(Notice, { variant: "warn" }, `Permissions can't be loaded right now: ${model.errorMessage}`),
-      m(Button, { variant: "secondary", onclick: () => void model.load() }, "Try again"),
-    ]);
+  const tryAgain: ErrorAction = { label: "Try again", onclick: () => void model.load() };
+  if (model.status === "load_failed" && model.loadError !== null) {
+    return m(ErrorNotice, {
+      id: "ws-perm-load-error",
+      error: model.loadError,
+      actions: [tryAgain],
+      workspaceAgentId: model.agentId,
+      extra: "mt-6 shrink-0",
+    });
   }
   const data = model.data;
   if (data === null || data.permissions_unavailable) {
-    // The gateway (or the machine's host) is unreachable: say so rather than
+    // The gateway (or the machine's host) is unreachable: say why rather than
     // rendering an empty tree that reads as "nothing is granted".
-    return m(
-      "div",
-      { class: "mt-6 shrink-0" },
-      m(Notice, { variant: "warn" }, "Permissions can't be loaded right now. Try again in a moment."),
-    );
+    const notice = data?.unavailable_notice ?? null;
+    const error: UserFacingError = {
+      message: notice?.message ?? "Permissions can't be loaded right now. Try again in a moment.",
+      details: notice?.detail ?? "",
+    };
+    return m(ErrorNotice, {
+      id: "ws-perm-unavailable",
+      error,
+      actions: unavailableActions(notice?.remedy ?? null, tryAgain),
+      workspaceAgentId: model.agentId,
+      extra: "mt-6 shrink-0",
+    });
   }
 
   // Waiting on you is a section like any other: what is selected is whatever
@@ -262,7 +288,7 @@ function renderBody(
     disarmRevoke(local);
     local.disconnectSectionId = null;
     local.desktopEgressDraft = null;
-    model.clearErrorMessage();
+    model.clearWriteError();
     onSelectSection(section);
   };
 
@@ -271,12 +297,21 @@ function renderBody(
       navLabel: "Permission sections",
       nav: renderNav(data.connections, data.waiting_requests, selected, selectSection),
       content: [
-        model.errorMessage
-          ? m(
-              "div",
-              { id: "ws-perm-error", class: "mb-3 shrink-0", role: "alert" },
-              markedLine({ isInline: true }, richErrorText(model.errorMessage)),
-            )
+        renderStaleRefreshNotice(model),
+        model.writeError !== null && local.disconnectSectionId === null
+          ? m(ErrorNotice, {
+              id: "ws-perm-error",
+              error: model.writeError,
+              actions: writeErrorActions(model, local),
+              workspaceAgentId: model.agentId,
+              footer: m(AskAgentFailure, {
+                id: ASK_AGENT_ID,
+                model: local.askAgent,
+                workspaceAgentId: model.agentId,
+                isBoxed: false,
+              }),
+              extra: "shrink-0",
+            })
           : null,
         renderSelectedPanel(model, local, data, machineName, selected, selectSection, onReviewRequest),
       ],
@@ -285,10 +320,54 @@ function renderBody(
       // bottom edge when scrolled to the end.
       contentExtra: "flex flex-col pb-8",
     }),
-    // Fixed-position when open and nothing at all when closed, so it rides
-    // beside the pane rather than as a third column inside it.
-    renderConnectFailurePopup(model),
   ];
+}
+
+/** The buttons over a pane that could not be read. The remedy the server names
+ * leads; Try again follows it as secondary, since the permission service can
+ * come back by itself but the remedy is the sure fix. A pane a newer Imbue
+ * Studio wrote gets no Try again at all: it reads the same until this one
+ * updates. */
+function unavailableActions(remedy: ErrorRemedy | null, tryAgain: ErrorAction): ErrorAction[] {
+  const remedies = remedyActions(remedy);
+  if (remedy === "UPDATE_APP") return remedies;
+  if (remedies.length === 0) return [tryAgain];
+  return [...remedies, tryAgain];
+}
+
+/** The id of a refused change's "Ask the agent to request it again". */
+const ASK_AGENT_ID = "ws-perm-ask-agent";
+
+/** The buttons a refused change offers: the remedy its refusal names. */
+function writeErrorActions(model: PermissionsModel, local: PermissionsTabLocalState): ErrorAction[] {
+  const sentence = model.writeError?.message ?? "";
+  const reason = model.writeErrorReason;
+  return remedyActions(model.writeErrorRemedy, {
+    askAgent: () =>
+      askAgentActions({
+        id: ASK_AGENT_ID,
+        model: local.askAgent,
+        workspaceAgentId: model.agentId,
+        description:
+          `Imbue Studio refused a permission change the user made in the Permissions tab: "${sentence}" ` +
+          "Request that permission again so the user can approve it." +
+          (reason ? ` Imbue Studio's reason: ${reason}` : ""),
+        label: "Ask the agent to request it again",
+      }),
+  });
+}
+
+/** Said over a pane whose background re-read failed: what is on screen is the
+ * last view that loaded, and may no longer be what the workspace holds. */
+function renderStaleRefreshNotice(model: PermissionsModel): m.Children {
+  if (model.refreshError === null) return null;
+  return m(ErrorNotice, {
+    id: "ws-perm-stale",
+    error: model.refreshError,
+    actions: [{ label: "Try again", onclick: () => void model.retryRefresh() }],
+    workspaceAgentId: model.agentId,
+    extra: "shrink-0",
+  });
 }
 
 /** Pending permission requests from this machine's agents, oldest first (the
@@ -543,7 +622,7 @@ function renderConnectionPanel(
               "data-perm-disconnect": connection.service_name,
               disabled: isDisconnectBusy || isDisconnectLocked,
               onclick: () => {
-                model.clearErrorMessage();
+                model.clearWriteError();
                 disarmRevoke(local);
                 local.disconnectSectionId = connectionSectionId(connection);
               },
@@ -600,7 +679,18 @@ function renderDisconnectDialog(
               : ` from ${machineLabel}, whose agents won't be able to use it until you connect it again. ` +
                 "Every other workspace keeps its own sign-in.",
           ]),
-          model.errorMessage ? m(Notice, { variant: "error", role: "alert" }, model.errorMessage) : null,
+          model.writeError !== null
+            ? m(
+                "div",
+                { class: "mb-4" },
+                m(ErrorNotice, {
+                  id: "ws-perm-disconnect-error",
+                  error: model.writeError,
+                  actions: remedyActions(model.writeErrorRemedy),
+                  workspaceAgentId: model.agentId,
+                }),
+              )
+            : null,
           m("div", { class: "flex justify-end gap-3" }, [
             m(
               Button,
@@ -653,7 +743,7 @@ function renderRevokeAllButton(
       "data-perm-revoke-all": connection.service_name,
       disabled: isBusy || isLockedByAnotherWrite(model, rowKey),
       onclick: () => {
-        model.clearErrorMessage();
+        model.clearWriteError();
         if (!isArmed) {
           armRevoke(local, rowKey);
           return;
@@ -767,38 +857,6 @@ function renderCatalogList(
   );
 }
 
-/** A failed connection attempt, raised over the pane.
- *
- * What a service says when it refuses a sign-in is usually a errand somewhere
- * else -- "ask an administrator of your Zoom account to grant you the developer
- * privilege, then try again" -- and runs to several lines. It gets a popup so
- * it is read rather than skimmed past: the inline banner sits at the top of a
- * pane the user has often scrolled away from, and the click that triggered this
- * was somewhere further down. Dismissal is the user's alone. */
-function renderConnectFailurePopup(model: PermissionsModel): m.Children {
-  return m(
-    Modal,
-    {
-      isOpen: model.alertMessage !== "",
-      onClose: () => model.dismissAlert(),
-      id: "ws-perm-alert",
-    },
-    [
-      m("h2", { class: "type-heading-lg text-primary" }, "Couldn't connect"),
-      m(
-        "p",
-        { class: "mt-2 type-body text-secondary whitespace-pre-line", role: "alert" },
-        model.alertMessage,
-      ),
-      m(
-        "div",
-        { class: "mt-5 flex justify-end" },
-        m(Button, { variant: "secondary", onclick: () => model.dismissAlert() }, "Close"),
-      ),
-    ],
-  );
-}
-
 function renderCatalogAction(
   model: PermissionsModel,
   service: UiAvailableConnection,
@@ -825,7 +883,7 @@ function renderCatalogAction(
       {
         ...attrs,
         onclick: () => {
-          model.clearErrorMessage();
+          model.clearWriteError();
           if (isFormOpen) {
             model.closeCredentialForm();
             return;
@@ -836,15 +894,16 @@ function renderCatalogAction(
       actionLabel,
     );
   }
+  const connect = (): void => {
+    void model.connectService(service.service_name, connect).then((section) => {
+      if (section !== null) selectSection(section);
+    });
+  };
   return m(
     Button,
     {
       ...attrs,
-      onclick: () => {
-        void model.connectService(service.service_name).then((section) => {
-          if (section !== null) selectSection(section);
-        });
-      },
+      onclick: connect,
     },
     isBusy ? "Waiting for sign-in..." : actionLabel,
   );
@@ -907,8 +966,14 @@ function renderCredentialForm(
             m("span", { class: "type-helper text-tertiary" }, "How this account is labelled in Imbue Studio."),
           ])
         : null,
-      model.credentialErrorMessage
-        ? m(Notice, { variant: "error", role: "alert" }, model.credentialErrorMessage)
+      model.credentialError !== null
+        ? m(ErrorNotice, {
+            id: "ws-perm-credential-error",
+            error: model.credentialError,
+            actions: remedyActions(model.credentialErrorRemedy),
+            isBugReportOffered: model.isCredentialErrorReportable,
+            workspaceAgentId: model.agentId,
+          })
         : null,
       m("div", { class: "flex items-center gap-2" }, [
         m(
@@ -1059,7 +1124,11 @@ function renderSyncChoice(model: PermissionsModel, row: UiSharedPath, isSynced: 
       sync === null || sync.message === ""
         ? null
         : m("div", { class: "flex items-start justify-between gap-3" }, [
-            m("p", { class: "type-helper text-important m-0 min-w-0" }, sync.message),
+            m(
+              "div",
+              { class: "min-w-0" },
+              m(InlineError, { message: sync.message }),
+            ),
             sync.state !== "FAILED"
               ? null
               : m(
@@ -1186,6 +1255,10 @@ function renderAddSharedPath(model: PermissionsModel): m.Children {
   // over what is on screen.
   const isAdding = model.isRowBusy(ADD_SHARED_PATH_ROW_KEY);
   const isAddLocked = isLockedByAnotherWrite(model, ADD_SHARED_PATH_ROW_KEY);
+  // A desktop with no device id cannot name the computer a file is on, so it
+  // has nothing it can share.
+  const canShareFiles = model.data?.can_share_files ?? true;
+  const addTitle = !canShareFiles ? CANNOT_SHARE_FILES_SENTENCE : isAddLocked ? PANE_BUSY_TITLE : null;
   return m("div", { class: "mt-4 flex flex-col items-end gap-2" }, [
     m("div", { class: "flex items-center gap-2" }, [
       isAdding ? m(Spinner, { size: "sm" }) : null,
@@ -1194,8 +1267,8 @@ function renderAddSharedPath(model: PermissionsModel): m.Children {
         {
           variant: "secondary",
           id: "add-shared-file",
-          disabled: isAdding || isAddLocked,
-          ...(isAddLocked ? { title: PANE_BUSY_TITLE } : {}),
+          disabled: isAdding || isAddLocked || !canShareFiles,
+          ...(addTitle === null ? {} : { title: addTitle }),
           onclick: () => void addSharedPath(model, "file"),
         },
         "Add file",
@@ -1205,8 +1278,8 @@ function renderAddSharedPath(model: PermissionsModel): m.Children {
         {
           variant: "secondary",
           id: "add-shared-folder",
-          disabled: isAdding || isAddLocked,
-          ...(isAddLocked ? { title: PANE_BUSY_TITLE } : {}),
+          disabled: isAdding || isAddLocked || !canShareFiles,
+          ...(addTitle === null ? {} : { title: addTitle }),
           onclick: () => void addSharedPath(model, "directory"),
         },
         "Add folder",
@@ -1215,7 +1288,7 @@ function renderAddSharedPath(model: PermissionsModel): m.Children {
     m(
       "p",
       { class: "type-helper text-tertiary" },
-      "Or tell an agent to request access to a local file or directory.",
+      canShareFiles ? "Or tell an agent to request access to a local file or directory." : CANNOT_SHARE_FILES_SENTENCE,
     ),
   ]);
 }

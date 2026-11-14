@@ -1347,8 +1347,8 @@ export class ShellState {
    * is stripped with a history-REPLACING route set, so Back from wherever the
    * gesture leads never returns to a URL that would re-run it, and then the
    * review popup opens over the workspace if the request is still pending.
-   * A resolved or unknown id just leaves the workspace on screen -- the hop
-   * itself is still the right landing for a stale click.
+   * A resolved or unknown id leaves the workspace on screen -- the hop
+   * itself is still the right landing for a stale click -- with a line saying so.
    *
    * The actual ``m.route.set`` calls are queued past this render (see the
    * inline comment) rather than issued here: this method runs from inside
@@ -1388,6 +1388,10 @@ export class ShellState {
         // machine. Re-read fresh: the request may have resolved while this
         // microtask was queued.
         this.openInbox({ selected: review });
+      } else {
+        // Answered, withdrawn or no longer listed: the click still lands on
+        // the workspace, and says why nothing opened over it.
+        this.notificationsUi?.showTransientToast("That request is no longer waiting for you.", "");
       }
     });
   }

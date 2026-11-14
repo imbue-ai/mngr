@@ -612,7 +612,14 @@ def test_run_background_shutdown_event_already_set() -> None:
 
 def test_get_reader_thread_stack_names_the_running_steps_without_paths() -> None:
     process = run_background(["sleep", LONG_SLEEP_SECONDS])
-    assert poll_until(lambda: not process.is_finished(), timeout=5.0)
+    # Sample once the reader thread is parked waiting for output. Mid-setup it can be inside a
+    # @contextmanager generator, and if that generator yields before the walk reaches its caller,
+    # the suspended frame's f_back is None and only the generator's own frame comes back.
+    assert poll_until(
+        lambda: "imbue.concurrency_group.subprocess_utils._wait_for_output_or_wakeup"
+        in (process.get_reader_thread_stack() or ()),
+        timeout=5.0,
+    )
 
     stack = process.get_reader_thread_stack()
 

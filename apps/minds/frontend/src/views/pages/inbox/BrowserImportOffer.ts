@@ -10,12 +10,16 @@
 // keeps the import for later.
 
 import m from "mithril";
-import { isChromeProfileUnreadable } from "../../../models/browserImport";
+import { isBrowserImportRetryUseful } from "../../../models/browserImport";
 import type { InboxModel } from "../../../models/inbox";
 import { Button } from "../../components/Button";
-import { browserImportFailureNotice } from "../../components/UnreadableChromeProfileNotice";
+import {
+  browserImportFailureNotice,
+  browserImportFailureShownErrors,
+} from "../../components/UnreadableChromeProfileNotice";
 import { Modal } from "../../components/Modal";
 import { Spinner } from "../../components/Spinner";
+import { variantBesideErrors } from "../../components/variantBesideErrors";
 
 export interface BrowserImportOfferAttrs {
   model: InboxModel;
@@ -39,16 +43,11 @@ function actions(model: InboxModel): m.Children {
   const outcome = browserImport.outcome;
   if (outcome !== null && !outcome.is_success) {
     // The import did not happen; the sign-in the click was for still can.
-    // When the OS refused to read the profile, trying again is no use until
-    // the permission has been granted (on a Mac, with a relaunch), so the
-    // retry is left out.
-    const isProfileUnreadable = isChromeProfileUnreadable(outcome);
     return [
       browserImportFailureNotice(browserImport, "browser-import-error"),
       m("div", { class: "flex flex-wrap items-center justify-end gap-2" }, [
-        isProfileUnreadable
-          ? null
-          : m(
+        isBrowserImportRetryUseful(outcome)
+          ? m(
               Button,
               {
                 variant: "secondary",
@@ -57,11 +56,15 @@ function actions(model: InboxModel): m.Children {
                 onclick: () => void model.acceptBrowserImport(),
               },
               "Try again",
-            ),
+            )
+          : null,
         m(
           Button,
           {
-            variant: "primary",
+            variant: variantBesideErrors(
+              "primary",
+              browserImportFailureShownErrors(browserImport),
+            ),
             id: "browser-import-continue",
             onclick: () => model.declineBrowserImport(),
           },

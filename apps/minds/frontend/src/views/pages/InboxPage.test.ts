@@ -6,10 +6,11 @@ import { InboxModel } from "../../models/inbox";
 import type { PredefinedPermissionDetail } from "../../models/inbox";
 import { jsonResponse, settle } from "../../testing";
 import { ShellState } from "../shell/shell-state";
+import { ErrorNotice } from "../components/ErrorDisplay";
 import { PredefinedPermissionDetailView } from "./inbox/PredefinedPermissionDetail";
 import { InboxPage } from "./InboxPage";
 import type { AnyVnode } from "../../testing";
-import { allText, attrsOf, collectVnodes } from "../../testing";
+import { allText, attrsOf, collectVnodes, renderDeep } from "../../testing";
 
 // Latchkey requests are filed by the workspace's system-services sibling, so a
 // request's own agent_id is NEVER the workspace id. Fixtures keep them distinct
@@ -69,6 +70,7 @@ interface Harness {
   detailUrls: string[];
   sent: [string, string][];
   closeCount: () => number;
+  remove: () => void;
 }
 
 /** Mount the popup page over stubbed inbox endpoints and a real ShellState, and
@@ -77,7 +79,7 @@ interface Harness {
 async function mountPopup(
   cards: (typeof CARD_A)[],
   selected: string | null,
-  options: { displayed?: string | null } = {},
+  options: { displayed?: string | null; isListDown?: boolean } = {},
 ): Promise<Harness> {
   const detailUrls: string[] = [];
   vi.stubGlobal("fetch", (url: string) => {
@@ -89,6 +91,7 @@ async function mountPopup(
     }
     if (url.endsWith("/grant")) return Promise.resolve(jsonResponse({ outcome: "GRANTED" }));
     if (url.endsWith("/deny")) return Promise.resolve(jsonResponse({ ok: true }));
+    if (options.isListDown === true) return Promise.resolve(jsonResponse({ error: "boom" }, 503));
     return Promise.resolve(jsonResponse({ cards }));
   });
   vi.spyOn(m, "redraw").mockImplementation(() => undefined);
@@ -123,6 +126,7 @@ async function mountPopup(
     detailUrls,
     sent,
     closeCount: () => closeCount,
+    remove: () => (instance.onremove as unknown as () => void).call(instance),
   };
 }
 
@@ -153,6 +157,22 @@ describe("the request popup's body", () => {
     expect(dialogs).toHaveLength(1);
     expect(allText(root)).not.toContain("beta");
     expect(allText(root)).not.toContain("Gmail");
+  });
+
+  it("shows a list that would not load as still trying, with Report a bug as the way out", async () => {
+    // The model asks again on its own timer, so nothing has failed yet; the
+    // list may never come back, so the notice still ends in something to press.
+    const { render, remove } = await mountPopup([], null, { isListDown: true });
+    const root = render();
+
+    const notice = collectVnodes(root).find((vnode) => vnode.tag === ErrorNotice);
+    if (notice === undefined) throw new Error("no error notice");
+    expect(attrsOf(notice).error).toEqual({ message: "Imbue Studio couldn't load your requests.", details: "" });
+    expect(attrsOf(notice).isBugReportOffered).not.toBe(false);
+    expect(attrsOf(notice).isRetrying).toBe(true);
+    expect(allText(renderDeep(root))).toContain("Still trying");
+    expect(allText(root)).not.toContain("You're all caught up");
+    remove();
   });
 
   it("says the queue is empty rather than showing a blank card", async () => {

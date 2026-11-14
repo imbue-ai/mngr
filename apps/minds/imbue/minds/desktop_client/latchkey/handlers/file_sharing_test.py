@@ -31,6 +31,7 @@ from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissio
 from imbue.minds.desktop_client.latchkey.handlers.file_sharing import FileSharingGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.messaging import format_resolution_notice
+from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.latchkey.response_events import load_response_events
 from imbue.minds.desktop_client.latchkey.testing import FixedHostBackendResolver
@@ -545,7 +546,10 @@ def test_grant_returns_502_when_gateway_rejects(tmp_path: Path) -> None:
 
     response = client.post(f"/requests/{event.request_id}/grant")
     assert response.status_code == 502
-    assert "gateway" in response.get_json()["error"].lower()
+    assert response.get_json()["error"] == (
+        "Imbue Studio couldn't record this permission just now. Try again. If this persists, report a bug."
+    )
+    assert "boom" in response.get_json()["detail"]
     # No response event written; the request stays pending.
     assert load_response_events(tmp_path) == []
     assert sender.sent_messages == []
@@ -695,6 +699,46 @@ def test_grant_hands_the_spliced_policy_to_the_workspaces_own_machine(tmp_path: 
     assert carried == [str(agent_id)]
 
 
+def test_grant_the_machine_refuses_ends_the_request_and_tells_the_agent(tmp_path: Path) -> None:
+    """The gateway consumed the record on approve, so the agent is told rather than left waiting forever."""
+
+    def refuse(workspace_agent_id: str) -> None:
+        raise MachineOperationError(f"machine of {workspace_agent_id} is unreachable", None)
+
+    handler, sender = _make_file_sharing_handler(
+        tmp_path,
+        lambda _req: httpx2.Response(200, json={"request_id": "evt-abc", "applied": {}}),
+        push_permissions_to_machine=refuse,
+    )
+    agent_id = AgentId()
+    event = create_file_sharing_permission_request(
+        agent_id=str(agent_id), path="/home/user/data.txt", access="READ", rationale="need data"
+    )
+    client = _build_authenticated_client(
+        tmp_path,
+        handler,
+        StaticPendingRequests(pending=(event,)),
+        backend_resolver=FixedHostBackendResolver(
+            url_by_agent_and_service={}, fixed_host_id=HostId(), known_agent_ids=(agent_id,)
+        ),
+    )
+
+    response = client.post(f"/requests/{event.request_id}/grant")
+
+    assert response.status_code == 502
+    body = response.get_json()
+    assert body["error"].startswith(
+        "Imbue Studio couldn't apply this permission to the workspace, and the request can't be approved again"
+    )
+    assert "unreachable" in body["detail"]
+    assert body["is_request_resolved"] is True
+    assert [(e.request_event_id, e.status) for e in load_response_events(tmp_path)] == [
+        (event.request_id, str(RequestStatus.DENIED))
+    ]
+    assert len(sender.sent_messages) == 1
+    assert "couldn't apply it to your workspace" in sender.sent_messages[0][1]
+
+
 def test_grant_with_sync_starts_one_and_tells_the_agent_where_the_copy_lands(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
@@ -748,7 +792,8 @@ def test_grant_refuses_a_sync_it_cannot_start_before_granting_anything(
     response = client.post(f"/requests/{event.request_id}/grant", data={"file_path": str(shared_file), "sync": "true"})
 
     assert response.status_code == 400, response.text
-    assert "Only folders can be synced" in response.get_json()["error"]
+    assert response.get_json()["error"].startswith("This folder can't be kept in sync, so nothing was shared.")
+    assert "Only folders can be synced" in response.get_json()["detail"]
     assert gateway_called is False
     assert load_response_events(tmp_path) == []
     assert sender.sent_messages == []
@@ -834,7 +879,8 @@ def test_grant_refuses_a_sync_when_this_build_cannot_run_one(tmp_path: Path) -> 
     response = client.post(f"/requests/{event.request_id}/grant", data={"file_path": str(folder), "sync": "true"})
 
     assert response.status_code == 400, response.text
-    assert "unavailable in this build" in response.get_json()["error"]
+    assert response.get_json()["error"].startswith("This folder can't be kept in sync, so nothing was shared.")
+    assert "unavailable in this build" in response.get_json()["detail"]
 
 
 def test_detail_carries_the_sync_ask_and_whether_the_path_can_be_synced(

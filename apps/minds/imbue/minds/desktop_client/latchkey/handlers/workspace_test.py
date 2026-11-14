@@ -250,7 +250,8 @@ def test_grant_returns_502_when_gateway_rejects(tmp_path: Path) -> None:
 
     response = client.post(f"/requests/{event.request_id}/grant", data={"permissions": PERM_WORKSPACES_DESTROY})
     assert response.status_code == 502
-    assert "gateway" in response.get_json()["error"].lower()
+    assert response.get_json()["error"].startswith("Imbue Studio couldn't record this permission just now.")
+    assert "returned" in response.get_json()["detail"]
     # The request stays pending: no response event, no agent notification.
     assert load_response_events(tmp_path) == []
     assert sender.sent_messages == []

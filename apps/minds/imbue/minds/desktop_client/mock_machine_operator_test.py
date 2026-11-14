@@ -36,13 +36,13 @@ class RecordingMachineOperator(MachineOperator):
 
     def push_permissions_and_desktop_egress_rules(self, workspace_agent_id: str) -> None:
         if self.push_refusal:
-            raise MachineOperationError(self.push_refusal)
+            raise MachineOperationError(self.push_refusal, None)
         self.pushed_with_desktop_egress_rules_agent_ids.append(workspace_agent_id)
 
     def refresh(self, workspace_agent_id: str) -> None:
         self.refreshed_agent_ids.append(workspace_agent_id)
         if self.refresh_refusal:
-            raise MachineOperationError(self.refresh_refusal)
+            raise MachineOperationError(self.refresh_refusal, None)
 
 
 def build_recording_machine_operator(

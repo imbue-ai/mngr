@@ -2,12 +2,15 @@ import json
 import shlex
 from collections.abc import Callable
 from collections.abc import Iterator
+from collections.abc import Mapping
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
 import pytest
 from flask.testing import FlaskClient
 from pydantic import Field
+from pydantic import JsonValue
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -20,6 +23,7 @@ from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
+from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientNotInitializedError
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.handlers.account_choices import NEW_ACCOUNT_FORM_VALUE
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
@@ -39,6 +43,7 @@ from imbue.minds.desktop_client.latchkey.handlers.predefined import _parse_proxy
 from imbue.minds.desktop_client.latchkey.handlers.predefined import describe_credential_inputs
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.permission_toggles import DesktopEgressRouteThroughThisComputer
+from imbue.minds.desktop_client.latchkey.response_events import RequestResponseEvent
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.latchkey.response_events import load_response_events
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
@@ -74,6 +79,8 @@ from imbue.mngr_latchkey.desktop_egress import desktop_egress_scope_key
 from imbue.mngr_latchkey.desktop_egress import list_desktop_egress_grants
 from imbue.mngr_latchkey.desktop_egress import parse_desktop_egress_rules
 from imbue.mngr_latchkey.desktop_egress import serialize_desktop_egress_rules
+from imbue.mngr_latchkey.encryption_key import encryption_key_path
+from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
@@ -207,6 +214,7 @@ def _make_latchkey_with_status(
     auth_set_exit: int = 0,
     auth_set_stderr: str = "",
     connected_credential_status: str = "valid",
+    services_info_online_exit: int = 0,
 ) -> Latchkey:
     """Build a ``Latchkey`` backed by one stateful fake binary.
 
@@ -222,7 +230,9 @@ def _make_latchkey_with_status(
     set`` (storing whatever ``--account`` named) makes every later ``services
     info`` report that account with ``connected_credential_status`` -- what
     real latchkey does once credentials exist, and what the grant flow reads
-    back to learn which account it just connected.
+    back to learn which account it just connected. A non-zero
+    ``services_info_online_exit`` makes every ``services info`` probe without
+    ``--offline`` fail with that exit code.
     """
     binary = tmp_path / "latchkey"
     auth_recording = tmp_path / "auth_latchkey_report.jsonl"
@@ -243,6 +253,8 @@ def _make_latchkey_with_status(
         f"marker = {str(signed_in_marker)!r}\n"
         "argv = sys.argv[1:]\n"
         "if argv[:2] == ['services', 'info']:\n"
+        f"    if {services_info_online_exit} != 0 and '--offline' not in argv:\n"
+        f"        sys.exit({services_info_online_exit})\n"
         "    if os.path.exists(marker):\n"
         "        with open(marker) as f:\n"
         "            credentials[f.read()] = {'credentialType': 'oauth',\n"
@@ -529,8 +541,10 @@ def test_grant_failed_browser_flow_stays_pending_without_denying(tmp_path: Path)
 
     # A failed sign-in is a FAILED outcome, not a denial.
     assert result.outcome == GrantOutcome.FAILED
-    assert "sign-in" in result.message.lower()
-    assert "user cancelled" in result.message
+    assert result.message == (
+        "Signing in to Slack didn't finish, so nothing was granted. *Try approving again* -- a sign-in window will open."
+    )
+    assert "user cancelled" in result.detail
     # latchkey_permissions.json must NOT have been written.
     assert not permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).exists()
     # No response event was appended, so the request is not auto-denied and
@@ -719,8 +733,10 @@ def test_grant_returns_an_empty_form_when_the_example_has_no_parameters(tmp_path
     assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
     assert result.manual_credentials is not None
     assert result.manual_credentials.parameters == ()
-    assert "cannot work out what it would need typed in" in result.message
-    assert "latchkey" not in result.message
+    assert (
+        result.message
+        == "Imbue Studio can't set up Slack from here yet. You can deny this request -- the agent is told."
+    )
     assert _read_set_recording(tmp_path) == []
 
 
@@ -947,9 +963,9 @@ def test_grant_re_shows_the_form_when_the_credential_command_fails(tmp_path: Pat
     )
 
     assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
-    assert result.message == (
-        "Slack rejected those credentials: The provided access key ID doesn't look like an AWS "
-        "access key ID (expected to start with AKIA or ASIA)."
+    assert result.message == "Imbue Studio couldn't store those Slack credentials. *Check them and approve again.*"
+    assert result.detail == (
+        "The provided access key ID doesn't look like an AWS access key ID (expected to start with AKIA or ASIA)."
     )
     assert result.manual_credentials is not None
     assert len(result.manual_credentials.parameters) == 2
@@ -979,7 +995,7 @@ def test_grant_reports_a_generic_failure_when_the_command_says_nothing_useful(tm
     )
 
     assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
-    assert result.message == "Storing the Slack credentials failed."
+    assert result.message == "Imbue Studio couldn't store those Slack credentials. *Check them and approve again.*"
     assert "latchkey" not in result.message
 
 
@@ -1173,7 +1189,10 @@ def test_detail_payload_keeps_the_unusable_form_when_the_service_has_no_browser_
     assert payload.is_browser_auth_supported is False
     assert payload.manual_credentials is not None
     assert payload.manual_credentials.parameters == ()
-    assert "does not support browser sign-in" in payload.manual_credentials.message
+    assert (
+        payload.manual_credentials.message
+        == "Imbue Studio can't set up Slack from here yet. You can deny this request -- the agent is told."
+    )
 
 
 def test_grant_with_typed_credentials_stores_them_instead_of_opening_a_browser(tmp_path: Path) -> None:
@@ -2226,7 +2245,7 @@ def test_grant_is_not_recorded_when_the_machine_would_not_take_it(tmp_path: Path
 
     def refuse(workspace_agent_id: str, service_name: str, account: str) -> None:
         del workspace_agent_id, service_name, account
-        raise MachineOperationError("that workspace is unreachable")
+        raise MachineOperationError("that workspace is unreachable", None)
 
     handler = _build_handler(tmp_path, credential_status="valid", carry_grant_to_machine=refuse)
     host_id = HostId()
@@ -2243,7 +2262,11 @@ def test_grant_is_not_recorded_when_the_machine_would_not_take_it(tmp_path: Path
     )
 
     assert result.outcome == GrantOutcome.FAILED
-    assert "unreachable" in result.message
+    assert result.message == (
+        "Imbue Studio couldn't apply this permission to the workspace, so the agent can't use Slack yet. The "
+        "request is still waiting -- try approving again."
+    )
+    assert "unreachable" in result.detail
     # No verdict was recorded, so the request stays pending for the user to retry.
     assert load_response_events(tmp_path) == []
 
@@ -2264,6 +2287,7 @@ def _build_workspace_client(
     pending: tuple[StreamedPermissionRequest, ...] = (),
     device_id: str = _THIS_DEVICE_ID,
     is_machine_of_its_own: bool = True,
+    answered: tuple[RequestResponseEvent, ...] = (),
 ) -> FlaskClient:
     """A desktop client whose state resolves ``agent_id`` to ``host_id``.
 
@@ -2281,7 +2305,7 @@ def _build_workspace_client(
     return _build_authenticated_client(
         tmp_path,
         handler,
-        StaticPendingRequests(pending=pending),
+        StaticPendingRequests(pending=pending, answered=answered),
         backend_resolver=_workspace_resolver(agent_id, host_id),
         device_id=device_id,
     )
@@ -2337,8 +2361,8 @@ def _grant_slack_read(
     agent_id: AgentId,
     host_id: HostId,
     desktop_egress: DesktopEgressDecision,
-) -> tuple[GrantOutcome, str]:
-    """Approve ``slack-read-all`` for the default account, and return the outcome and its message."""
+) -> tuple[GrantOutcome, str, str]:
+    """Approve ``slack-read-all`` for the default account, and return the outcome, its message and its detail."""
     with client.application.app_context():
         result = handler.grant(
             request_event_id="evt-abc",
@@ -2350,7 +2374,7 @@ def _grant_slack_read(
             manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
             desktop_egress=desktop_egress,
         )
-    return result.outcome, result.message
+    return result.outcome, result.message, result.detail
 
 
 def _post_grant(
@@ -2611,7 +2635,7 @@ def test_grant_puts_this_computer_first_on_the_route_and_appends_the_route_note(
     client = _build_workspace_client(tmp_path, handler, agent_id, host_id)
     _write_rules_copy(handler, host_id, {"slack": build_desktop_egress_route((_OTHER_DEVICE_ID, "self"))})
 
-    outcome, message = _grant_slack_read(handler, client, agent_id, host_id, _PUT_THIS_COMPUTER_FIRST)
+    outcome, message, _detail = _grant_slack_read(handler, client, agent_id, host_id, _PUT_THIS_COMPUTER_FIRST)
 
     assert outcome == GrantOutcome.GRANTED
     note = (
@@ -2650,7 +2674,7 @@ def test_grant_reads_the_machine_before_the_sign_in_whose_account_it_carries_wit
     host_id = HostId()
     client = _build_workspace_client(tmp_path, handler, agent_id, host_id)
 
-    outcome, _message = _grant_slack_read(handler, client, agent_id, host_id, _PUT_THIS_COMPUTER_FIRST)
+    outcome, _message, _detail = _grant_slack_read(handler, client, agent_id, host_id, _PUT_THIS_COMPUTER_FIRST)
 
     assert outcome == GrantOutcome.GRANTED
     assert sign_in_counts_at_refresh == [0]
@@ -2676,7 +2700,7 @@ def test_grant_leaves_a_route_that_already_names_this_computer_as_it_is(tmp_path
         handler, host_id, {"slack": build_desktop_egress_route((_OTHER_DEVICE_ID, _THIS_DEVICE_ID))}
     )
 
-    outcome, message = _grant_slack_read(handler, client, agent_id, host_id, _PUT_THIS_COMPUTER_FIRST)
+    outcome, message, _detail = _grant_slack_read(handler, client, agent_id, host_id, _PUT_THIS_COMPUTER_FIRST)
 
     assert outcome == GrantOutcome.GRANTED
     assert message.endswith(
@@ -2705,7 +2729,7 @@ def test_grant_appends_the_note_of_a_decision_that_sets_no_route(tmp_path: Path)
     client = _build_workspace_client(tmp_path, handler, agent_id, host_id)
     note = " The proxy you asked for was not set up: the test says so."
 
-    outcome, message = _grant_slack_read(
+    outcome, message, _detail = _grant_slack_read(
         handler, client, agent_id, host_id, DesktopEgressDecision(is_this_computer_put_first=False, note=note)
     )
 
@@ -2735,7 +2759,7 @@ def test_grant_without_a_route_decision_leaves_the_rules_copy_alone_and_does_not
     client = _build_workspace_client(tmp_path, handler, agent_id, host_id)
     rules_json = _write_rules_copy(handler, host_id, {"slack": build_desktop_egress_route((_OTHER_DEVICE_ID,))})
 
-    outcome, message = _grant_slack_read(handler, client, agent_id, host_id, NO_DESKTOP_EGRESS_CHANGE)
+    outcome, message, _detail = _grant_slack_read(handler, client, agent_id, host_id, NO_DESKTOP_EGRESS_CHANGE)
 
     assert outcome == GrantOutcome.GRANTED
     assert "leave from" not in message
@@ -2759,10 +2783,11 @@ def test_grant_fails_and_stays_pending_when_the_route_cannot_be_set_for_the_work
     host_id = HostId()
     client = _build_workspace_client(tmp_path, handler, agent_id, host_id, is_machine_of_its_own=False)
 
-    outcome, message = _grant_slack_read(handler, client, agent_id, host_id, _PUT_THIS_COMPUTER_FIRST)
+    outcome, message, detail = _grant_slack_read(handler, client, agent_id, host_id, _PUT_THIS_COMPUTER_FIRST)
 
     assert outcome == GrantOutcome.FAILED
-    assert "does not run on a machine of its own" in message
+    assert message.startswith("Imbue Studio couldn't send Slack's requests through this computer")
+    assert "does not run on a machine of its own" in detail
     assert load_response_events(tmp_path) == []
     assert _deleted_request_ids(handler) == ()
     assert _recorded_mngr_argvs(handler) == []
@@ -2778,7 +2803,7 @@ def test_grant_fails_and_stays_pending_when_the_machine_would_not_take_the_grant
 ) -> None:
     def refuse(workspace_agent_id: str, service: str, account: str) -> None:
         del workspace_agent_id, service, account
-        raise MachineOperationError("that workspace is unreachable")
+        raise MachineOperationError("that workspace is unreachable", None)
 
     carried: list[tuple[str, str, str]] = []
     handler = _build_handler(
@@ -2792,10 +2817,11 @@ def test_grant_fails_and_stays_pending_when_the_machine_would_not_take_the_grant
     client = _build_workspace_client(tmp_path, handler, agent_id, host_id)
     _write_rules_copy(handler, host_id, {"slack": build_desktop_egress_route((_OTHER_DEVICE_ID,))})
 
-    outcome, message = _grant_slack_read(handler, client, agent_id, host_id, _PUT_THIS_COMPUTER_FIRST)
+    outcome, message, detail = _grant_slack_read(handler, client, agent_id, host_id, _PUT_THIS_COMPUTER_FIRST)
 
     assert outcome == GrantOutcome.FAILED
-    assert "unreachable" in message
+    assert message.startswith("Imbue Studio couldn't send Slack's requests through this computer")
+    assert "unreachable" in detail
     assert load_response_events(tmp_path) == []
     assert _deleted_request_ids(handler) == ()
     assert _recorded_mngr_argvs(handler) == []
@@ -2815,7 +2841,7 @@ def test_grant_fails_and_stays_pending_when_the_machine_would_not_take_the_grant
 def test_grant_fails_and_stays_pending_when_the_machine_cannot_be_read_before_the_route_is_set(tmp_path: Path) -> None:
     def refuse(workspace_agent_id: str) -> None:
         del workspace_agent_id
-        raise MachineOperationError("that workspace is unreachable")
+        raise MachineOperationError("that workspace is unreachable", None)
 
     carried: list[tuple[str, str, str]] = []
     carried_with_rules: list[tuple[str, str, str]] = []
@@ -2830,10 +2856,11 @@ def test_grant_fails_and_stays_pending_when_the_machine_cannot_be_read_before_th
     host_id = HostId()
     client = _build_workspace_client(tmp_path, handler, agent_id, host_id)
 
-    outcome, message = _grant_slack_read(handler, client, agent_id, host_id, _PUT_THIS_COMPUTER_FIRST)
+    outcome, message, detail = _grant_slack_read(handler, client, agent_id, host_id, _PUT_THIS_COMPUTER_FIRST)
 
     assert outcome == GrantOutcome.FAILED
-    assert "unreachable" in message
+    assert message.startswith("Imbue Studio couldn't send Slack's requests through this computer")
+    assert "unreachable" in detail
     assert load_response_events(tmp_path) == []
     assert _deleted_request_ids(handler) == ()
     assert _recorded_mngr_argvs(handler) == []
@@ -2865,7 +2892,8 @@ def test_apply_grant_request_fails_the_approval_when_the_gateway_cannot_be_asked
 
     assert status_code == 200, body
     assert body["outcome"] == "FAILED"
-    assert body["message"].startswith("Could not set the route through the latchkey gateway: ")
+    assert body["message"].startswith("Imbue Studio couldn't send Slack's requests through this computer")
+    assert body["detail"] != ""
     # The grant is written to the copy here before the route is tried; nothing reaches the machine, and the
     # request stays pending for a retry.
     assert _set_rule_keys(handler) == [account_scope_key("slack-api", "")]
@@ -3136,7 +3164,8 @@ def test_apply_grant_request_rejects_the_proxy_for_a_workspace_that_cannot_be_ro
     status_code, body = _post_grant(client, event, "true")
 
     assert status_code == 400, body
-    assert "does not run on a machine of its own" in body["error"]
+    assert body["error"].startswith("This workspace can't send its requests through this computer any more.")
+    assert "does not run on a machine of its own" in body["detail"]
     assert _set_rule_keys(handler) == []
     assert not _rules_copy_path(handler, host_id).exists()
     assert carried_with_rules == []
@@ -3161,7 +3190,8 @@ def test_apply_grant_request_rejects_a_proxy_choice_for_a_request_that_asked_for
     status_code, body = _post_grant(client, event, raw_proxy)
 
     assert status_code == 400, body
-    assert "asked for no proxy" in body["error"]
+    assert body["error"].startswith("Something went wrong approving this request.")
+    assert "asked for no proxy" in body["detail"]
     assert _set_rule_keys(handler) == []
     assert not _rules_copy_path(handler, host_id).exists()
     assert carried_with_rules == []
@@ -3186,12 +3216,146 @@ def test_apply_grant_request_rejects_a_proxy_field_that_is_not_one_of_the_switch
     status_code, body = _post_grant(client, event, raw_proxy)
 
     assert status_code == 400, body
-    assert "must be 'true' or 'false'" in body["error"]
+    assert body["error"].startswith("Something went wrong approving this request.")
+    assert "must be 'true' or 'false'" in body["detail"]
     # Refused before anything was granted: no rule, no route, no verdict.
     assert _set_rule_keys(handler) == []
     assert not _rules_copy_path(handler, host_id).exists()
     assert carried_with_rules == []
     assert load_response_events(tmp_path) == []
+
+
+def test_grant_names_unticked_consent_rather_than_a_failed_sign_in(tmp_path: Path) -> None:
+    handler = _build_handler(
+        tmp_path,
+        credential_status="missing",
+        auth_browser_exit=1,
+        auth_browser_stderr=(
+            "Error: Slack login did not grant all the permissions it asked for. Not granted: channels:read. "
+            "Run the login again and allow every permission it requests."
+        ),
+    )
+
+    result = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=AgentId(),
+        host_id=HostId(),
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+        account_choice="",
+        manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
+    )
+
+    assert result.outcome == GrantOutcome.FAILED
+    assert result.message == (
+        "Slack wasn't given all the access this needs. Approve again and allow everything on Slack's sign-in page."
+    )
+    assert "Not granted: channels:read" in result.detail
+
+
+class _RefusingGatewayClient(FakeLatchkeyGatewayClient):
+    """A gateway whose permission writes fail with ``error``."""
+
+    error: LatchkeyGatewayClientError
+
+    def set_permission_rule(
+        self,
+        permissions_file_path: Path,
+        rule_key: str,
+        granted_permissions: Sequence[str],
+        schemas: Mapping[str, JsonValue] | None = None,
+    ) -> None:
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_sentence", "expected_remedy"),
+    [
+        (
+            LatchkeyGatewayClientNotInitializedError("LatchkeyGatewayClient is not initialized yet."),
+            "Imbue Studio's permission service isn't running, so this couldn't be saved.",
+            "RESTART_APP",
+        ),
+        (
+            LatchkeyGatewayClientError("POST http://127.0.0.1:1/permissions failed: [Errno 61] Connection refused"),
+            "Imbue Studio couldn't save this permission just now. *Try approving again in a moment.*",
+            None,
+        ),
+    ],
+)
+def test_apply_grant_request_words_a_gateway_failure_for_the_user(
+    tmp_path: Path, error: LatchkeyGatewayClientError, expected_sentence: str, expected_remedy: str | None
+) -> None:
+    handler = _build_handler(tmp_path, credential_status="valid", gateway_client=_RefusingGatewayClient(error=error))
+    agent_id = AgentId()
+    host_id = HostId()
+    event = _create_slack_request(agent_id, proxy=False)
+    client = _build_workspace_client(tmp_path, handler, agent_id, host_id, pending=(event,))
+
+    status_code, body = _post_grant(client, event, None)
+
+    assert status_code == 502, body
+    assert body["error"].startswith(expected_sentence)
+    assert body["detail"] == str(error)
+    assert body.get("remedy") == expected_remedy
+    assert load_response_events(tmp_path) == []
+
+
+def _build_unconnectable_slack_handler(tmp_path: Path, credential_status: str) -> LatchkeyPermissionGrantHandler:
+    """Slack as a service with no browser sign-in whose credential command yields no form."""
+    return _build_handler(
+        tmp_path,
+        credential_status=credential_status,
+        auth_options_json=json.dumps(["set"]),
+        set_credentials_example="latchkey auth set slack",
+    )
+
+
+@pytest.mark.parametrize(
+    ("credential_status", "is_told_it_cannot_be_set_up"),
+    [
+        # Nothing on the machine either: the dialog offered only Deny.
+        ("missing", True),
+        # A usable account was preselected with Approve beside it, so the user chose to deny.
+        ("valid", False),
+    ],
+)
+def test_deny_of_a_service_with_no_way_in_tells_the_agent_why_only_when_the_dialog_offered_only_deny(
+    tmp_path: Path, credential_status: str, is_told_it_cannot_be_set_up: bool
+) -> None:
+    handler = _build_unconnectable_slack_handler(tmp_path, credential_status=credential_status)
+    agent_id = AgentId()
+    event = _create_slack_request(agent_id, proxy=False)
+    client = _build_workspace_client(tmp_path, handler, agent_id, HostId(), pending=(event,))
+
+    response = client.post(f"/requests/{event.request_id}/deny")
+
+    assert response.status_code == 200, response.text
+    notice = _nudge_text(_wait_for_recorded_mngr_argvs(handler)[0])
+    assert ("Imbue Studio can't tell which credentials it needs" in notice) == is_told_it_cannot_be_set_up
+    assert "was denied" in notice
+
+
+def test_deny_goes_through_when_latchkey_cannot_read_the_machine_store(tmp_path: Path) -> None:
+    """Which message the agent hears must not decide whether the Deny happens at all."""
+    handler = _build_unconnectable_slack_handler(tmp_path, credential_status="missing")
+    # A key file other users can read is one latchkey refuses to load.
+    load_or_create_encryption_key(handler.latchkey.latchkey_directory)
+    encryption_key_path(handler.latchkey.latchkey_directory).chmod(0o644)
+    agent_id = AgentId()
+    event = _create_slack_request(agent_id, proxy=False)
+    client = _build_workspace_client(
+        tmp_path, handler, agent_id, HostId(), pending=(event,), is_machine_of_its_own=False
+    )
+
+    response = client.post(f"/requests/{event.request_id}/deny")
+
+    assert response.status_code == 200, response.text
+    assert [(recorded.request_event_id, recorded.status) for recorded in load_response_events(tmp_path)] == [
+        (event.request_id, str(RequestStatus.DENIED))
+    ]
+    assert "was denied" in _nudge_text(_wait_for_recorded_mngr_argvs(handler)[0])
 
 
 # Implicit permissions: the handshake every grant carries

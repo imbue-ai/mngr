@@ -42,6 +42,8 @@ from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_REMO
 from imbue.minds.desktop_client.latchkey.gateway_client import RemoteExecutionRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
+from imbue.minds.desktop_client.latchkey.handlers.resolution import gateway_approval_failure_response
+from imbue.minds.desktop_client.latchkey.handlers.resolution import resolve_after_failed_push
 from imbue.minds.desktop_client.latchkey.handlers.resolution import resolve_request
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
@@ -229,18 +231,18 @@ class RemoteExecutionGrantHandler(RequestEventHandler):
             self.gateway_client.approve_permission_request(request_event_id)
         except LatchkeyGatewayClientError as e:
             logger.warning("Could not approve remote-execution request {} via gateway: {}", request_event_id, e)
-            return make_json_error_response(
-                f"Could not approve the request through the latchkey gateway: {e}",
-                status_code=502,
-            )
+            return gateway_approval_failure_response(e)
         # A remote workspace's machine enforces its own copy of the policy, so
-        # the edit is pushed there before the grant is called done; a machine
-        # that will not take it leaves the request unresolved here.
+        # the edit is pushed there before the grant is called done. The gateway
+        # has already consumed the pending record, so a machine that will not
+        # take it ends the request: the agent is told the approval did not reach
+        # it, never that it may do something it may not.
         try:
             self.push_permissions_to_machine(str(parsed_agent_id))
         except MachineOperationError as e:
-            logger.warning("Could not apply the remote-execution grant on the machine of {}: {}", parsed_agent_id, e)
-            return make_json_error_response(str(e), status_code=502)
+            return resolve_after_failed_push(
+                self.mngr_message_sender, self.data_dir, request_event_id, parsed_agent_id, e
+            )
 
         logger.info("Allowed the agents of {} to {} on this computer", parsed_agent_id, _describe_request(program))
         message = _format_granted_message(socket.gethostname(), program)

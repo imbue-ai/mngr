@@ -21,6 +21,7 @@ const DETAIL: FileSharingPermissionDetail = {
   is_sync_requested: true,
   sync_conflict: "NEWER",
   sync_unavailable_reason: "",
+  is_edited_path_shareable: true,
 };
 
 function makeModel(detail: FileSharingPermissionDetail): InboxModel {

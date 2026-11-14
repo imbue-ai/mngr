@@ -57,6 +57,7 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import resolve_workspace_display_name
 from imbue.minds.desktop_client.folder_sync import FolderSyncManager
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
+from imbue.minds.desktop_client.latchkey.failure_copy import NO_DEVICE_ID_SENTENCE
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
@@ -64,6 +65,8 @@ from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_FILE
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.recovery import maybe_recover_host_permissions
+from imbue.minds.desktop_client.latchkey.handlers.resolution import gateway_approval_failure_response
+from imbue.minds.desktop_client.latchkey.handlers.resolution import resolve_after_failed_push
 from imbue.minds.desktop_client.latchkey.handlers.resolution import resolve_request
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
@@ -205,6 +208,12 @@ def _format_sync_declined_note() -> str:
     return " The synchronized copy you asked for was not enabled."
 
 
+_SYNC_REFUSED_SENTENCE: Final[str] = (
+    "This folder can't be kept in sync, so nothing was shared. Turn off \"Keep a synchronized copy in the "
+    'workspace" and approve again, or choose another folder.'
+)
+
+
 def _parse_sync_choice(form: Mapping[str, str]) -> _SyncChoice:
     """The dialog's sync choice, or the no-sync default when the form carries none.
 
@@ -322,6 +331,7 @@ class FileSharingGrantHandler(RequestEventHandler):
             is_sync_supported=manager is not None,
             is_sync_requested=payload.sync is not None,
             sync_conflict=FolderSyncConflict.NEWER if payload.sync is None else payload.sync.conflict,
+            is_edited_path_shareable=bool(get_state().device_id),
             sync_unavailable_reason=(
                 "" if manager is None else manager.reason_sync_is_unavailable(workspace_agent_id, payload.path)
             ),
@@ -374,16 +384,26 @@ class FileSharingGrantHandler(RequestEventHandler):
             manager = get_state().folder_sync_manager
             if manager is None:
                 return make_json_error_response(
-                    "Keeping a shared path in sync is unavailable in this build.", status_code=400
+                    _SYNC_REFUSED_SENTENCE,
+                    status_code=400,
+                    detail="Keeping a shared path in sync is unavailable in this build.",
                 )
             unavailable_reason = manager.reason_sync_is_unavailable(workspace_agent_id, effective_path)
             if unavailable_reason:
-                return make_json_error_response(unavailable_reason, status_code=400)
+                return make_json_error_response(_SYNC_REFUSED_SENTENCE, status_code=400, detail=unavailable_reason)
 
         # Only send an override to the gateway when the user actually
         # changed the path; otherwise the gateway grants the path the
         # request named.
         override_path = effective_path if effective_path != payload.path else None
+        if override_path is not None and not get_state().device_id:
+            # An edited path is granted under this desktop's device id, and a
+            # build without one cannot name the desktop the file is on.
+            return make_json_error_response(
+                NO_DEVICE_ID_SENTENCE,
+                status_code=400,
+                detail="This desktop has no device id, so it cannot share an edited path.",
+            )
         try:
             self.gateway_client.approve_permission_request(
                 request_event_id,
@@ -395,23 +415,19 @@ class FileSharingGrantHandler(RequestEventHandler):
                 request_event_id,
                 e,
             )
-            return make_json_error_response(
-                f"Could not approve file-sharing request through the latchkey gateway: {e}",
-                status_code=502,
-            )
+            return gateway_approval_failure_response(e)
         # A remote workspace's machine enforces its own copy of the policy the
         # gateway just spliced the grant into, so the edit is pushed to it
-        # before the grant is called done. A machine that will not take it
-        # leaves the request unresolved: the reader is told what happened, and
-        # the agent is left to ask again rather than being told it may read a
-        # file its gateway will not let it read.
+        # before the grant is called done. The gateway has already consumed the
+        # pending record, so a machine that will not take it ends the request:
+        # the agent is told the approval did not reach it, never that it may do
+        # something it may not.
         try:
             self.push_permissions_to_machine(permission_request.agent_id)
         except MachineOperationError as e:
-            logger.warning(
-                "Could not apply the file-sharing grant on the machine of {}: {}", permission_request.agent_id, e
+            return resolve_after_failed_push(
+                self.mngr_message_sender, self.data_dir, request_event_id, parsed_agent_id, e
             )
-            return make_json_error_response(str(e), status_code=502)
 
         message = _format_granted_message(
             effective_path, str(payload.access), get_state().device_id
@@ -487,7 +503,9 @@ class FileSharingGrantHandler(RequestEventHandler):
         if not sync_choice.enabled:
             return _format_sync_declined_note() if is_requested else ""
         if manager is None:
-            return " Keeping it in sync was asked for but is unavailable in this build."
+            # Unreachable: an Approve that asks for a sync in a build without
+            # one is refused before anything is granted.
+            return ""
         try:
             status = start_shared_path_sync(manager, workspace_agent_id, file_path, sync_choice.conflict)
         except FolderSyncError as e:

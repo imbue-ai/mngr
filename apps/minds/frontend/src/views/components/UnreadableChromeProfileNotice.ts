@@ -2,7 +2,7 @@
 // read, and the way out. On a Mac the user grants Full Disk Access by hand in
 // System Settings and relaunches the app, since no API can ask for it;
 // elsewhere the profile's own file permissions are what to fix. Shown in
-// place of latchkey's own sentence wherever the import's outcome is shown;
+// place of the generic failure notice wherever the import's outcome is shown;
 // `browserImportFailureNotice` makes that choice for every such surface.
 
 import m from "mithril";
@@ -12,8 +12,9 @@ import {
   type BrowserImportResult,
   isChromeProfileUnreadable,
 } from "../../models/browserImport";
-import { Button } from "./Button";
-import { Notice } from "./Notice";
+import type { ErrorAction } from "../../models/errors";
+import { ErrorNotice, relaunchAppActions } from "./ErrorDisplay";
+import type { ShownError } from "./variantBesideErrors";
 
 export interface UnreadableChromeProfileNoticeAttrs {
   model: BrowserImportModel;
@@ -21,8 +22,8 @@ export interface UnreadableChromeProfileNoticeAttrs {
 }
 
 /** Why the last import did not happen, or null when it did (or none ran):
- * what to do about it when the OS refused to read the profile, latchkey's
- * own sentence under `errorNoticeId` otherwise. */
+ * what to do about it when the OS refused to read the profile, the error
+ * display under `errorNoticeId` otherwise. */
 export function browserImportFailureNotice(
   browserImport: BrowserImportModel,
   errorNoticeId: string,
@@ -32,20 +33,30 @@ export function browserImportFailureNotice(
   if (isChromeProfileUnreadable(outcome)) {
     return m(UnreadableChromeProfileNotice, { model: browserImport, outcome });
   }
-  return m(
-    Notice,
-    { variant: "error", role: "alert", id: errorNoticeId },
-    outcome.detail,
-  );
+  if (browserImport.error === null) return null;
+  // A computer with no Chrome to import from is not a bug to report.
+  return m(ErrorNotice, {
+    id: errorNoticeId,
+    error: browserImport.error,
+    isBugReportOffered: !outcome.is_chrome_missing,
+  });
 }
 
-function fullDiskAccessGuidance(model: BrowserImportModel): m.Children {
+const FULL_DISK_ACCESS_SUMMARY =
+  "Imbue Studio needs Full Disk Access to read Chrome's cookies.";
+const FILE_PERMISSIONS_SUMMARY =
+  "Imbue Studio could not read Google Chrome's profile.";
+
+/** Which of the two refusals the notice's sentence names. */
+function unreadableProfileSummary(outcome: BrowserImportResult): string {
+  return outcome.is_full_disk_access_needed
+    ? FULL_DISK_ACCESS_SUMMARY
+    : FILE_PERMISSIONS_SUMMARY;
+}
+
+function fullDiskAccessSteps(model: BrowserImportModel): m.Children {
   return [
-    m(
-      "p",
-      { class: "font-semibold" },
-      "Imbue Studio needs Full Disk Access to read Chrome's cookies.",
-    ),
+    m("p", { class: "m-0 font-semibold" }, FULL_DISK_ACCESS_SUMMARY),
     m(
       "p",
       { class: "mt-1" },
@@ -62,22 +73,6 @@ function fullDiskAccessGuidance(model: BrowserImportModel): m.Children {
         "Quit and reopen Imbue Studio, then run the import again from Settings > Browser cookies.",
       ),
     ]),
-    electronBridge.canOpenFullDiskAccessSettings
-      ? m(
-          "div",
-          { class: "mt-2" },
-          m(
-            Button,
-            {
-              variant: "secondary",
-              size: "md",
-              id: "browser-import-open-full-disk-access",
-              onclick: () => void model.openFullDiskAccessSettings(),
-            },
-            "Open System Settings",
-          ),
-        )
-      : null,
     model.isFullDiskAccessSettingsOpenFailed
       ? m(
           "p",
@@ -88,13 +83,9 @@ function fullDiskAccessGuidance(model: BrowserImportModel): m.Children {
   ];
 }
 
-function filePermissionsGuidance(outcome: BrowserImportResult): m.Children {
+function filePermissionsSteps(): m.Children {
   return [
-    m(
-      "p",
-      { class: "font-semibold" },
-      "Imbue Studio could not read Google Chrome's profile.",
-    ),
+    m("p", { class: "m-0 font-semibold" }, FILE_PERMISSIONS_SUMMARY),
     m(
       "p",
       { class: "mt-1" },
@@ -109,25 +100,82 @@ function filePermissionsGuidance(outcome: BrowserImportResult): m.Children {
       ),
       m("li", "Run the import again from Settings > Browser cookies."),
     ]),
-    m("p", { class: "type-helper mt-2 wrap-anywhere" }, outcome.detail),
   ];
+}
+
+/** The way to the Full Disk Access list, where the shell can open it. Gone once
+ * opening it has failed: the steps then say to open it by hand, and pressing
+ * again would fail the same way. */
+function openSettingsActions(model: BrowserImportModel): ErrorAction[] {
+  if (
+    !electronBridge.canOpenFullDiskAccessSettings ||
+    model.isFullDiskAccessSettingsOpenFailed
+  )
+    return [];
+  return [
+    {
+      label: "Open System Settings",
+      id: "browser-import-open-full-disk-access",
+      onclick: () => void model.openFullDiskAccessSettings(),
+    },
+  ];
+}
+
+/** Open System Settings leads until the list is open, or has to be opened by
+ * hand; the grant then applies only once the app is reopened, so Reopen leads
+ * and the list stays a press away behind it. */
+function fullDiskAccessActions(model: BrowserImportModel): ErrorAction[] {
+  const openSettings = openSettingsActions(model);
+  const isListOpenedOrManual =
+    model.isFullDiskAccessSettingsOpened || openSettings.length === 0;
+  if (!isListOpenedOrManual) return openSettings;
+  return [...relaunchAppActions(), ...openSettings];
+}
+
+/** The failure notice for the last import as the rule beside it weighs it --
+ * the sentence it shows and the buttons it leads with -- so a panel's own
+ * buttons can step down beside it (see variantBesideErrors). The generic
+ * notice draws no buttons of its own. */
+export function browserImportFailureShownErrors(
+  browserImport: BrowserImportModel,
+): ShownError[] {
+  const outcome = browserImport.outcome;
+  if (outcome === null || outcome.is_success) return [];
+  if (isChromeProfileUnreadable(outcome)) {
+    return [
+      {
+        message: unreadableProfileSummary(outcome),
+        actions: outcome.is_full_disk_access_needed
+          ? fullDiskAccessActions(browserImport)
+          : [],
+      },
+    ];
+  }
+  return browserImport.error === null
+    ? []
+    : [{ message: browserImport.error.message }];
 }
 
 export function UnreadableChromeProfileNotice(): m.Component<UnreadableChromeProfileNoticeAttrs> {
   return {
     view(vnode) {
       const { model, outcome } = vnode.attrs;
-      return m(
-        Notice,
-        {
-          variant: "warn",
-          role: "alert",
-          id: "browser-import-unreadable-profile",
+      const isFullDiskAccessNeeded = outcome.is_full_disk_access_needed;
+      // The steps are the fix, so there is no Report a bug; latchkey's reason
+      // (which names the profile's path) stays behind See details.
+      return m(ErrorNotice, {
+        id: "browser-import-unreadable-profile",
+        tone: "warn",
+        error: {
+          message: unreadableProfileSummary(outcome),
+          details: outcome.detail,
         },
-        outcome.is_full_disk_access_needed
-          ? fullDiskAccessGuidance(model)
-          : filePermissionsGuidance(outcome),
-      );
+        content: isFullDiskAccessNeeded
+          ? fullDiskAccessSteps(model)
+          : filePermissionsSteps(),
+        isBugReportOffered: false,
+        actions: isFullDiskAccessNeeded ? fullDiskAccessActions(model) : [],
+      });
     },
   };
 }

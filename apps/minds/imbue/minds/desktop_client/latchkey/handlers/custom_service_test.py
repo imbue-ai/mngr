@@ -46,6 +46,7 @@ from imbue.mngr_latchkey.account_scopes import account_scope_key
 from imbue.mngr_latchkey.account_scopes import build_account_scope_schema
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyServiceInfo
 from imbue.mngr_latchkey.core import ServiceAccountCredential
 from imbue.mngr_latchkey.core import read_registered_services
@@ -87,6 +88,10 @@ class _StubLatchkey(Latchkey):
     )
     is_auth_set_successful: bool = Field(default=True)
     auth_set_calls: list[tuple[str, tuple[str, ...]]] = Field(default_factory=list)
+    is_store_readable: bool = Field(default=True)
+    # What latchkey reports for a generic registered service, which is what a
+    # custom service with no browser sign-in is.
+    set_credentials_example: str = Field(default='latchkey auth set {service_name} -H "Authorization: Bearer <token>"')
 
     def auth_browser(
         self,
@@ -100,6 +105,9 @@ class _StubLatchkey(Latchkey):
         return (True, "") if self.is_sign_in_successful else (False, "the window was closed")
 
     def services_info(self, service_name: str, *, is_offline: bool = False) -> LatchkeyServiceInfo | None:
+        if not self.is_store_readable:
+            # What latchkey raises when the store's encryption key cannot be loaded.
+            raise LatchkeyError("encryption key unreadable")
         return LatchkeyServiceInfo(
             credential_status=CredentialStatus.VALID,
             accounts=tuple(
@@ -107,9 +115,7 @@ class _StubLatchkey(Latchkey):
                 for account in self.accounts_after_sign_in
             ),
             auth_options=frozenset({"browser"}),
-            # What latchkey reports for a generic registered service, which is
-            # what a custom service with no browser sign-in is.
-            set_credentials_example=f'latchkey auth set {service_name} -H "Authorization: Bearer <token>"',
+            set_credentials_example=self.set_credentials_example.format(service_name=service_name),
             is_system_browser_login_supported=service_name in self.system_browser_services,
         )
 
@@ -391,6 +397,53 @@ def test_deny_records_the_denial_and_registers_nothing(tmp_path: Path) -> None:
     ]
 
 
+def test_deny_goes_through_when_latchkey_cannot_read_the_machine_store(tmp_path: Path) -> None:
+    """Which message the agent hears must not decide whether the Deny happens at all."""
+    harness = _Harness(
+        tmp_path, latchkey=_StubLatchkey(latchkey_directory=tmp_path / "latchkey", is_store_readable=False)
+    )
+    # Registered with no sign-in, so the deny asks latchkey whether a credential form could be built.
+    harness.register()
+    agent_id = AgentId()
+    event = _make_event(agent_id, has_login=False)
+    client = _build_authenticated_client(tmp_path, harness.handler, StaticPendingRequests(pending=(event,)))
+
+    response = client.post(f"/requests/{event.request_id}/deny")
+
+    assert response.status_code == 200, response.text
+    assert [entry.status for entry in load_response_events(tmp_path)] == ["DENIED"]
+    assert [chat_id for chat_id, _ in harness.sender.sent_messages] == [str(agent_id)]
+
+
+@pytest.mark.parametrize(
+    ("set_credentials_example", "is_told_it_cannot_be_set_up"),
+    [
+        ("latchkey auth set {service_name}", True),
+        ('latchkey auth set {service_name} -H "Authorization: Bearer <token>"', False),
+    ],
+)
+def test_deny_tells_the_agent_why_only_when_the_dialog_offered_only_deny(
+    tmp_path: Path, set_credentials_example: str, is_told_it_cannot_be_set_up: bool
+) -> None:
+    harness = _Harness(
+        tmp_path,
+        latchkey=_StubLatchkey(
+            latchkey_directory=tmp_path / "latchkey", set_credentials_example=set_credentials_example
+        ),
+    )
+    harness.register()
+    agent_id = AgentId()
+    event = _make_event(agent_id, has_login=False)
+    client = _build_authenticated_client(tmp_path, harness.handler, StaticPendingRequests(pending=(event,)))
+
+    response = client.post(f"/requests/{event.request_id}/deny")
+
+    assert response.status_code == 200, response.text
+    [(_, notice)] = harness.sender.sent_messages
+    assert ("Imbue Studio can't tell which credentials it needs" in notice) == is_told_it_cannot_be_set_up
+    assert [entry.status for entry in load_response_events(tmp_path)] == ["DENIED"]
+
+
 def test_grant_refuses_a_domain_that_is_no_longer_acceptable(tmp_path: Path) -> None:
     # The record was validated when the gateway created it, but it has been on
     # disk since; re-validating means a request that should never have been
@@ -480,7 +533,10 @@ def test_rejected_credentials_re_ask_rather_than_fail(tmp_path: Path) -> None:
     body = response.get_json()
     assert response.status_code == 200
     assert body["outcome"] == "NEEDS_MANUAL_CREDENTIALS"
-    assert "valid token" in body["message"]
+    assert body["message"] == (
+        "Imbue Studio couldn't store those credentials for api.example.com. *Check them and approve again.*"
+    )
+    assert body["detail"] == "that doesn't look like a valid token"
     assert load_response_events(tmp_path) == []
     assert harness.sender.sent_messages == []
 
@@ -498,7 +554,7 @@ def test_the_credential_form_carries_the_agents_instructions_on_every_ask(tmp_pa
     rejected = _grant(client, event.request_id, json.dumps({"token": "wrong"})).get_json()
 
     assert first["manual_credentials"]["instructions"] == instructions
-    assert "valid token" in rejected["message"]
+    assert rejected["detail"] == "that doesn't look like a valid token"
     assert rejected["manual_credentials"]["instructions"] == instructions
 
 
@@ -542,7 +598,7 @@ def test_a_grant_that_cannot_be_queued_for_the_machine_stays_pending(tmp_path: P
     # A machine that does not take the grant means the grant did not happen:
     # no response event, no nudge, and Approve can be retried.
     def refuse(workspace_agent_id: str, service_name: str, account: str) -> None:
-        raise MachineOperationError("the machine is unreachable")
+        raise MachineOperationError("the machine is unreachable", None)
 
     harness = _Harness(tmp_path, carry_grant_to_machine=refuse)
     event = _make_event(AgentId())
@@ -551,7 +607,10 @@ def test_a_grant_that_cannot_be_queued_for_the_machine_stays_pending(tmp_path: P
     response = _grant(client, event.request_id)
 
     assert response.status_code == 502
-    assert "unreachable" in response.get_json()["error"]
+    assert response.get_json()["error"] == (
+        "Connected to api.example.com here, but the workspace didn't take the change. Try approving again."
+    )
+    assert "unreachable" in response.get_json()["detail"]
     # The record stays with the gateway too, so the request is still pending there.
     assert harness.gateway.deleted_request_ids == ()
     assert load_response_events(tmp_path) == []

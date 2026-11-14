@@ -14,6 +14,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.latchkey.permission_overview import SELF_SCOPE
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_account_for_workspace
+from imbue.minds.desktop_client.latchkey.permission_toggles import CredentialsNotStoredError
 from imbue.minds.desktop_client.latchkey.permission_toggles import DesktopEgressRouteThroughThisComputer
 from imbue.minds.desktop_client.latchkey.permission_toggles import DesktopEgressSetting
 from imbue.minds.desktop_client.latchkey.permission_toggles import PermissionToggleError
@@ -1756,10 +1757,11 @@ def test_connect_service_with_credentials_reports_what_the_service_refused(tmp_p
         ),
     )
 
-    with pytest.raises(PermissionToggleError) as failure:
+    with pytest.raises(CredentialsNotStoredError) as failure:
         _connect_aws(latchkey)
 
-    assert str(failure.value) == "AWS rejected those credentials: that does not look like an AWS access key ID"
+    assert str(failure.value) == ("Imbue Studio couldn't store those AWS credentials. Check them and try again.")
+    assert failure.value.explanation == "that does not look like an AWS access key ID"
     # Nothing was stored, so the pane still offers AWS under Add connection.
     assert latchkey.accounts_by_service == {}
 
@@ -1795,7 +1797,7 @@ def test_connect_service_with_credentials_says_so_when_the_probe_did_not_report(
 
     latchkey = _UnreachableProbeLatchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent")
 
-    with pytest.raises(PermissionToggleError, match="could not ask latchkey how AWS connects"):
+    with pytest.raises(PermissionToggleError, match="couldn't check how AWS connects"):
         _connect_aws(latchkey)
     assert latchkey.auth_set_calls == []
 
@@ -1836,7 +1838,7 @@ def test_connect_service_with_credentials_refuses_an_unusable_command(tmp_path: 
         credential_example_by_service={"aws": "latchkey auth set-nocurl aws"},
     )
 
-    with pytest.raises(PermissionToggleError, match="cannot work out which credentials"):
+    with pytest.raises(PermissionToggleError, match="can't tell what details AWS needs"):
         _connect_aws(latchkey)
     assert latchkey.auth_set_calls == []
 

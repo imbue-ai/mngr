@@ -9,6 +9,7 @@ import { electronBridge } from "../../../electron-bridge";
 import type { FileSharingPermissionDetail as Detail, InboxModel } from "../../../models/inbox";
 import { collapseSharePathHome } from "../../../models/inbox";
 import { Button } from "../../components/Button";
+import { InlineError } from "../../components/errorDesign";
 import { renderFolderSyncSetting } from "../../components/FolderSyncSetting";
 import { Icon16 } from "../../components/Icon";
 import { PermissionsShell } from "./PermissionsShell";
@@ -97,9 +98,20 @@ export function FileSharingPermissionDetailView(): m.Component<FileSharingPermis
           ]),
           model.isSharePathHintShown()
             ? m(
-                "p",
-                { id: "file-sharing-path-hint", class: "type-helper text-important" },
-                "This path is outside the folders that can be shared.",
+                "div",
+                { id: "file-sharing-path-hint" },
+                m(InlineError, {
+                  message: "This path is outside the folders that can be shared.",
+                }),
+              )
+            : null,
+          model.isEditedPathUnshareable()
+            ? m(
+                "div",
+                { id: "file-sharing-device-hint" },
+                m(InlineError, {
+                  message: "Imbue Studio can't share files from this computer.",
+                }),
               )
             : null,
           m(

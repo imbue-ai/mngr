@@ -86,6 +86,10 @@ class PermissionOverviewError(Exception):
     """Raised for caller-facing programming errors (e.g. revoking an unknown service)."""
 
 
+class WorkspaceHostUnresolvedError(PermissionOverviewError):
+    """Raised when the app has not located the machine a workspace runs on yet, so nothing about it can change."""
+
+
 class GrantedPermission(FrozenModel):
     """A single granted permission plus its plain-English description for a tooltip."""
 
@@ -408,7 +412,7 @@ def revoke_service_account_for_workspace(
         raise PermissionOverviewError(f"Unknown service '{service_name}'.")
     host_id = resolve_workspace_host_id(backend_resolver, workspace_agent_id)
     if host_id is None:
-        raise PermissionOverviewError(
+        raise WorkspaceHostUnresolvedError(
             f"Could not resolve host for workspace '{workspace_agent_id}'; cannot revoke.",
         )
     _revoke_service_account_at_path(

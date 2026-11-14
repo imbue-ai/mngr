@@ -392,7 +392,7 @@ function browserImportPanel(model: SettingsModel): m.Children {
             BROWSER_IMPORT_SUCCESS_MESSAGE,
           )
         : null,
-      browserImportFailureNotice(browserImport, "browser-import-result"),
+      browserImportFailureNotice(browserImport, "browser-import-error"),
     ]),
     m(
       "p",

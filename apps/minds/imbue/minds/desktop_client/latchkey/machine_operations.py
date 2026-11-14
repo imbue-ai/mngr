@@ -41,6 +41,7 @@ method is a no-op and the local edit is the whole change.
 
 from collections.abc import Generator
 from contextlib import contextmanager
+from typing import Final
 
 from loguru import logger
 from pydantic import ConfigDict
@@ -49,8 +50,12 @@ from pydantic import Field
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.latchkey.machine_access import MACHINE_EXCHANGE_FAILURES
 from imbue.minds.desktop_client.latchkey.machine_access import MachineAccess
+from imbue.minds.desktop_client.latchkey.machine_access import MachineUnreachableError
+from imbue.minds.desktop_client.ui_models import ErrorRemedy
+from imbue.minds.desktop_client.user_facing_failure import UserFacingFailure
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.devices import DesktopDeviceId
+from imbue.mngr_latchkey.migrations.interface import PermissionsFormatNewerError
 from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationContext
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
 from imbue.mngr_latchkey.remote.credentials import read_host_desktop_egress_rules
@@ -63,13 +68,43 @@ from imbue.mngr_latchkey.store import LatchkeyStoreError
 PERMISSIONS_FAILURE_DESCRIPTION = "apply the permission change on that workspace"
 
 
+# What a workspace whose permissions a newer Imbue Studio wrote is told: only a newer one can read them.
+PERMISSIONS_FORMAT_NEWER_FAILURE: Final[UserFacingFailure] = UserFacingFailure(
+    message=(
+        "This workspace's permissions were changed by a newer Imbue Studio. Update Imbue Studio to see and "
+        "change them here."
+    ),
+    remedy=ErrorRemedy.UPDATE_APP,
+)
+
+
 class MachineOperationError(Exception):
     """Raised when a change did not reach the machine that owns it.
 
     Terminal by the time it is raised: nothing retries behind the user's back,
     so whatever was asked for has not happened on the machine and the caller
-    has to say so.
+    has to say so. The message is the technical account; ``explained_failure``
+    is the sentence for a cause that explains itself to the user (the machine
+    could not be located, its permissions are in a newer format), and None when
+    the caller's own sentence for the action it attempted is the right one.
     """
+
+    def __init__(self, message: str, explained_failure: UserFacingFailure | None) -> None:
+        super().__init__(message)
+        self.explained_failure = explained_failure
+
+
+def _explained_failure(cause: Exception) -> UserFacingFailure | None:
+    if isinstance(cause, MachineUnreachableError):
+        return cause.failure
+    if isinstance(cause, PermissionsFormatNewerError):
+        return PERMISSIONS_FORMAT_NEWER_FAILURE
+    return None
+
+
+def describe_machine_failure(error: MachineOperationError, sentence: str) -> UserFacingFailure:
+    """The failure to show for ``error``: its own explanation when it has one, else ``sentence``."""
+    return error.explained_failure or UserFacingFailure(message=sentence, remedy=None)
 
 
 def connect_failure_description(service_name: str) -> str:
@@ -202,7 +237,8 @@ class MachineOperator(MutableModel):
             if permissions_json is None:
                 raise MachineOperationError(
                     f"Could not {failure_description}: this computer has no copy of the permissions of host "
-                    f"{machine.host_id}."
+                    f"{machine.host_id}.",
+                    None,
                 )
             machine.connect_service_with_permissions_and_desktop_egress_rules(
                 service_name,
@@ -261,18 +297,19 @@ class MachineOperator(MutableModel):
         try:
             return read_host_permissions(self.access.latchkey.plugin_data_dir, host_id)
         except LatchkeyStoreError as e:
-            raise MachineOperationError(f"Could not {failure_description}: {e}") from e
+            raise MachineOperationError(f"Could not {failure_description}: {e}", None) from e
 
     def _host_desktop_egress_rules(self, host_id: HostId, failure_description: str) -> str:
         try:
             desktop_egress_rules_json = read_host_desktop_egress_rules(self.access.latchkey.plugin_data_dir, host_id)
         except LatchkeyStoreError as e:
-            raise MachineOperationError(f"Could not {failure_description}: {e}") from e
+            raise MachineOperationError(f"Could not {failure_description}: {e}", None) from e
         if desktop_egress_rules_json is None:
             # The caller writes the copy immediately before pushing it.
             raise MachineOperationError(
                 f"Could not {failure_description}: this computer has no copy of the desktop egress rules "
-                f"of host {host_id}."
+                f"of host {host_id}.",
+                None,
             )
         return desktop_egress_rules_json
 
@@ -302,4 +339,4 @@ class MachineOperator(MutableModel):
                 yield machine
         except MACHINE_EXCHANGE_FAILURES as e:
             logger.warning("Could not {} for workspace {}: {}", failure_description, workspace_agent_id, e)
-            raise MachineOperationError(f"Could not {failure_description}: {e}") from e
+            raise MachineOperationError(f"Could not {failure_description}: {e}", _explained_failure(e)) from e

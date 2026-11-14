@@ -187,8 +187,9 @@ describe("NotificationsPage", () => {
       entry("n1", { is_resolved: true, outcome: "approved" }),
       entry("n2", { is_resolved: true, outcome: "denied" }),
       entry("n3", { is_resolved: true, outcome: "closed" }),
+      entry("n4", { is_resolved: true, outcome: "unlisted" }),
     ]);
-    for (const id of ["n1", "n2", "n3"]) {
+    for (const id of ["n1", "n2", "n3", "n4"]) {
       const row = rowFor(root, id);
       expect(row.tag).toBe("div");
       expect(attrsOf(row).onclick).toBeUndefined();
@@ -205,10 +206,13 @@ describe("NotificationsPage", () => {
     const chipOutcomes = collectVnodes(root)
       .map((vnode) => attrsOf(vnode)["data-outcome"])
       .filter((outcome) => outcome !== undefined);
-    expect(chipOutcomes).toEqual(["approved", "denied", "closed"]);
+    expect(chipOutcomes).toEqual(["approved", "denied", "closed", "unlisted"]);
     expect(allText(rowFor(root, "n1"))).toContain("Approved");
     expect(allText(rowFor(root, "n2"))).toContain("Denied");
     expect(allText(rowFor(root, "n3"))).toContain("Closed");
+    // Still pending, so not "Closed": the agent is still waiting on it.
+    expect(allText(rowFor(root, "n4"))).toContain("Still waiting");
+    expect(allText(rowFor(root, "n4"))).not.toContain("Closed");
   });
 
   it("clears one row from its X without opening it, and clears everything from the header", () => {

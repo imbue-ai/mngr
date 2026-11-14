@@ -42,9 +42,6 @@ const HOP_MOVE_CLASS =
 
 const DEVICE_ID_CLASS = "font-mono";
 
-const THIS_COMPUTER_UNKNOWN_TITLE =
-  "This computer's id is not known, so requests cannot be sent through it.";
-
 type HopMoveDirection = "up" | "down";
 
 const HOP_MOVE_ATTR: Record<HopMoveDirection, string> = {
@@ -349,8 +346,7 @@ export function renderDesktopEgressRouteSetting(
           isOn: mode !== "OFF",
           isBusy,
           isDisabled: isDisabled || cannotTurnOn,
-          title:
-            lockedTitle ?? (cannotTurnOn ? THIS_COMPUTER_UNKNOWN_TITLE : null),
+          title: lockedTitle,
           // A custom route is also "on"; the name says the switch alone does
           // not describe it, and the summary spells it out.
           label:

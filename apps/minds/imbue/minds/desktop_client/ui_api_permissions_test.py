@@ -21,15 +21,19 @@ from imbue.minds.desktop_client.folder_sync_settings import FolderSyncDirection
 from imbue.minds.desktop_client.folder_sync_store import FolderSyncRecord
 from imbue.minds.desktop_client.folder_sync_store import FolderSyncStore
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
+from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientNotInitializedError
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.machine_latchkey import machine_latchkey_for_host
+from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
+from imbue.minds.desktop_client.latchkey.machine_operations import PERMISSIONS_FORMAT_NEWER_FAILURE
 from imbue.minds.desktop_client.latchkey.permission_overview import SELF_SCOPE
 from imbue.minds.desktop_client.latchkey.testing import FakeAccountsLatchkey
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.minds.desktop_client.latchkey.testing import build_permission_grant_handler
 from imbue.minds.desktop_client.latchkey.testing import seed_connector_grant
+from imbue.minds.desktop_client.mock_machine_operator_test import RecordingMachineOperator
 from imbue.minds.desktop_client.mock_machine_operator_test import build_recording_machine_operator
 from imbue.minds.desktop_client.testing import StaticPendingRequests
 from imbue.minds.desktop_client.testing import create_accounts_permission_request
@@ -38,6 +42,7 @@ from imbue.minds.desktop_client.testing import create_predefined_permission_requ
 from imbue.minds.desktop_client.testing import create_workspace_permission_request
 from imbue.minds.desktop_client.testing import wait_until_synced
 from imbue.minds.desktop_client.testing import write_fake_mngr_pair_script
+from imbue.minds.desktop_client.user_facing_failure import UserFacingFailure
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.account_scopes import account_scope_key
@@ -68,6 +73,8 @@ _SHARED_PATH_PERMISSION: str = f"minds-file-server-read-{_DEVICE_ID}:/Users/me/n
 # must leave it exactly where it was.
 _BASELINE_PERMISSION: str = "minds-api-proxy-call-agent-123"
 _AWS_CREDENTIALS = {"access-key-id": "AKIAEXAMPLE", "secret-access-key": "s3cret"}
+
+_CHANGE_NOT_SAVED = "Imbue Studio couldn't save that change. Try again. If this persists, report a bug."
 
 
 class _UnreachableGatewayClient(FakeLatchkeyGatewayClient):
@@ -221,7 +228,8 @@ def test_writes_reject_a_body_that_is_not_a_json_object(tmp_path: Path, path: st
     response = client.post(f"/ui/api/workspaces/{agent_id}/{path}", json=["not", "an", "object"])
 
     assert response.status_code == 400
-    assert json.loads(response.data) == {"error": "Invalid JSON body"}
+    # The permission routes word it for the user and keep the reason as the detail; the sync routes say it bare.
+    assert "Invalid JSON body" in json.loads(response.data).values()
     assert latchkey.auth_set_calls == []
     assert latchkey.cleared_calls == []
 
@@ -365,7 +373,8 @@ def test_connector_toggle_rejects_an_unknown_scope(tmp_path: Path) -> None:
     )
 
     assert response.status_code == 400
-    assert "nope-api" in json.loads(response.data)["error"]
+    assert json.loads(response.data)["error"] == _CHANGE_NOT_SAVED
+    assert "nope-api" in json.loads(response.data)["detail"]
 
 
 def test_connector_toggle_rejects_a_body_without_enabled(tmp_path: Path) -> None:
@@ -452,7 +461,8 @@ def test_self_toggle_rejects_another_desktops_shared_path(tmp_path: Path) -> Non
     )
 
     assert response.status_code == 400
-    assert "host-other-desktop-7c1e" in json.loads(response.data)["error"]
+    assert json.loads(response.data)["error"] == _CHANGE_NOT_SAVED
+    assert "host-other-desktop-7c1e" in json.loads(response.data)["detail"]
     assert load_permissions(permissions_path).rules == policy.rules
 
 
@@ -631,7 +641,9 @@ def test_connector_disconnect_reports_a_refused_clear_as_502(tmp_path: Path) -> 
     )
 
     assert response.status_code == 502
-    assert "keychain is locked" in json.loads(response.data)["error"]
+    body = json.loads(response.data)
+    assert body["error"] == "Imbue Studio couldn't disconnect Slack. Try again. If this persists, report a bug."
+    assert "keychain is locked" in body["detail"]
     assert load_permissions(permissions_path_for_host(latchkey.plugin_data_dir, host_id)).rules == (
         {account_scope_key("slack-api", _ACCOUNT): ["slack-chat-read"]},
     )
@@ -687,6 +699,27 @@ def test_connector_disconnect_reports_a_gateway_failure_as_502(tmp_path: Path) -
     assert latchkey.cleared_calls == [("slack", _ACCOUNT)]
 
 
+def test_connector_disconnect_rejects_a_workspace_that_cannot_be_resolved(tmp_path: Path) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    client = _build_client(tmp_path, latchkey, (), host_id)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/connector-disconnect",
+        json={"service_name": "slack", "account": _ACCOUNT},
+    )
+
+    assert response.status_code == 409
+    assert json.loads(response.data) == {
+        "error": (
+            "Imbue Studio hasn't located the machine this workspace runs on yet, so the change wasn't saved. "
+            "Try again in a moment."
+        ),
+        "detail": f"Could not resolve host for workspace '{agent_id}'; cannot reach its credentials.",
+    }
+    assert latchkey.cleared_calls == []
+
+
 def test_workspace_permissions_carry_how_each_service_is_connected(tmp_path: Path) -> None:
     """Each offered service says whether connecting signs in or asks for credentials."""
     agent_id, host_id = AgentId(), HostId()
@@ -734,7 +767,7 @@ def test_connect_credentials_stores_them_and_returns_the_new_connection(tmp_path
     assert [entry["service_name"] for entry in payload["available_connections"]] == ["github"]
 
 
-def test_connect_credentials_reports_a_refused_credential_as_400(tmp_path: Path) -> None:
+def test_connect_credentials_reports_a_refused_credential_as_422(tmp_path: Path) -> None:
     agent_id, host_id = AgentId(), HostId()
     latchkey = _latchkey(tmp_path)
     latchkey.auth_set_result = (
@@ -748,10 +781,11 @@ def test_connect_credentials_reports_a_refused_credential_as_400(tmp_path: Path)
         json={"service_name": "aws", "value_by_parameter_name": _AWS_CREDENTIALS},
     )
 
-    assert response.status_code == 400
-    # The service's own explanation is kept; its usage lines are not.
+    assert response.status_code == 422
+    # The service's own explanation goes behind See details; its usage lines are dropped.
     assert json.loads(response.data) == {
-        "error": "AWS rejected those credentials: that does not look like an AWS access key ID"
+        "error": "Imbue Studio couldn't store those AWS credentials. Check them and try again.",
+        "detail": "that does not look like an AWS access key ID",
     }
 
 
@@ -780,7 +814,8 @@ def test_connect_credentials_rejects_an_unknown_service(tmp_path: Path) -> None:
     )
 
     assert response.status_code == 400
-    assert "Unknown service" in json.loads(response.data)["error"]
+    assert json.loads(response.data)["error"] == _CHANGE_NOT_SAVED
+    assert "Unknown service" in json.loads(response.data)["detail"]
 
 
 def test_connect_credentials_rejects_a_malformed_body(tmp_path: Path) -> None:
@@ -991,7 +1026,7 @@ def test_desktop_egress_route_rejects_a_malformed_body(tmp_path: Path, body: dic
     response = client.post(f"/ui/api/workspaces/{agent_id}/permissions/desktop-egress-route", json=body)
 
     assert response.status_code == 400
-    assert json.loads(response.data) == {"error": "service_name and route are required."}
+    assert json.loads(response.data) == {"error": _CHANGE_NOT_SAVED, "detail": "service_name and route are required."}
     assert not desktop_egress_rules_path_for_host(latchkey.plugin_data_dir, host_id).exists()
     assert operator.pushed_with_desktop_egress_rules_agent_ids == []
 
@@ -1017,9 +1052,10 @@ def test_desktop_egress_route_rejects_hops_that_do_not_form_a_route(
     response = _post_desktop_egress_route(client, agent_id, "slack", hops)
 
     assert response.status_code == 400
-    error = json.loads(response.data)["error"]
-    assert error.startswith("Not a desktop egress route: ")
-    assert problem in error
+    assert json.loads(response.data)["error"] == _CHANGE_NOT_SAVED
+    detail = json.loads(response.data)["detail"]
+    assert detail.startswith("Not a desktop egress route: ")
+    assert problem in detail
     assert not desktop_egress_rules_path_for_host(latchkey.plugin_data_dir, host_id).exists()
     assert _desktop_egress_grant_targets(latchkey, host_id) == []
     assert operator.pushed_with_desktop_egress_rules_agent_ids == []
@@ -1034,7 +1070,7 @@ def test_desktop_egress_route_rejects_an_unknown_service(tmp_path: Path) -> None
     response = _post_desktop_egress_route(client, agent_id, "no-such-service", [_DEVICE_ID])
 
     assert response.status_code == 400
-    assert json.loads(response.data) == {"error": "Unknown service 'no-such-service'."}
+    assert json.loads(response.data) == {"error": _CHANGE_NOT_SAVED, "detail": "Unknown service 'no-such-service'."}
     assert not desktop_egress_rules_path_for_host(latchkey.plugin_data_dir, host_id).exists()
     assert operator.pushed_with_desktop_egress_rules_agent_ids == []
 
@@ -1046,8 +1082,11 @@ def test_desktop_egress_route_through_a_desktop_is_refused_for_a_workspace_on_th
 
     response = _post_desktop_egress_route(client, agent_id, "slack", [_DEVICE_ID])
 
-    assert response.status_code == 400
-    assert "machine of its own" in json.loads(response.data)["error"]
+    assert response.status_code == 409
+    assert (
+        json.loads(response.data)["error"] == "This workspace can't send its requests through this computer any more."
+    )
+    assert "machine of its own" in json.loads(response.data)["detail"]
     # Nothing was granted: the refusal comes before the first write.
     assert not permissions_path_for_host(latchkey.plugin_data_dir, host_id).exists()
     assert not desktop_egress_rules_path_for_host(latchkey.plugin_data_dir, host_id).exists()
@@ -1078,9 +1117,13 @@ def test_desktop_egress_route_rejects_a_workspace_that_cannot_be_resolved(tmp_pa
 
     response = _post_desktop_egress_route(client, agent_id, "slack", [_DEVICE_ID])
 
-    assert response.status_code == 400
+    assert response.status_code == 409
     assert json.loads(response.data) == {
-        "error": f"Could not resolve host for workspace '{agent_id}'; cannot change permissions."
+        "error": (
+            "Imbue Studio hasn't located the machine this workspace runs on yet, so the change wasn't saved. "
+            "Try again in a moment."
+        ),
+        "detail": f"Could not resolve host for workspace '{agent_id}'; cannot change permissions.",
     }
     assert not desktop_egress_rules_path_for_host(latchkey.plugin_data_dir, host_id).exists()
     assert operator.pushed_with_desktop_egress_rules_agent_ids == []
@@ -1094,8 +1137,8 @@ def test_desktop_egress_route_through_a_desktop_is_refused_without_a_device_id(t
 
     response = _post_desktop_egress_route(client, agent_id, "slack", [_DEVICE_ID])
 
-    assert response.status_code == 400
-    assert "does not know this computer's device id" in json.loads(response.data)["error"]
+    assert response.status_code == 409
+    assert "does not know this computer's device id" in json.loads(response.data)["detail"]
     assert _desktop_egress_grant_targets(latchkey, host_id) == []
     assert not desktop_egress_rules_path_for_host(latchkey.plugin_data_dir, host_id).exists()
     assert operator.pushed_with_desktop_egress_rules_agent_ids == []
@@ -1110,7 +1153,10 @@ def test_desktop_egress_route_reports_a_machine_that_would_not_take_it_as_502(tm
     response = _post_desktop_egress_route(client, agent_id, "slack", [_DEVICE_ID])
 
     assert response.status_code == 502
-    assert json.loads(response.data) == {"error": "Could not reach that workspace: it is asleep"}
+    assert json.loads(response.data) == {
+        "error": "Imbue Studio couldn't apply that change to the workspace. Try again.",
+        "detail": "Could not reach that workspace: it is asleep",
+    }
 
 
 def test_workspace_permissions_lists_this_computer_first_then_the_other_desktops_its_routes_name(
@@ -1347,7 +1393,10 @@ def test_connector_toggle_reports_a_machine_that_cannot_be_read_as_502_and_chang
     )
 
     assert response.status_code == 502
-    assert "it is asleep" in json.loads(response.data)["error"]
+    # The user reads our sentence; the machine's own words go behind See details.
+    body = json.loads(response.data)
+    assert "it is asleep" not in body["error"]
+    assert "it is asleep" in body["detail"]
     assert operator.pushed_agent_ids == []
     config = load_permissions(permissions_path_for_host(latchkey.plugin_data_dir, host_id))
     assert config.rules == ({account_scope_key("slack-api", _ACCOUNT): ["slack-chat-read"]},)
@@ -2061,7 +2110,10 @@ def test_connect_browser_reports_a_sign_in_that_did_not_complete(tmp_path: Path)
     )
 
     assert response.status_code == 502
-    assert "the browser was closed" in json.loads(response.data)["error"]
+    assert json.loads(response.data) == {
+        "error": "Imbue Studio couldn't finish signing in to Slack.",
+        "detail": "the browser was closed",
+    }
 
 
 def test_connect_browser_rejects_an_unknown_service(tmp_path: Path) -> None:
@@ -2076,6 +2128,109 @@ def test_connect_browser_rejects_an_unknown_service(tmp_path: Path) -> None:
 
     assert response.status_code == 400
     assert latchkey.added_account_calls == []
+
+
+class _UnreadableMachineOperator(RecordingMachineOperator):
+    """An operator whose read of the workspace's machine fails, with or without a cause that explains itself."""
+
+    explained_failure: UserFacingFailure | None = Field(
+        default=None, description="What the failure explains to the user, when its cause does"
+    )
+
+    def refresh(self, workspace_agent_id: str) -> None:
+        raise MachineOperationError("Could not read the permissions of that workspace: asleep", self.explained_failure)
+
+
+@pytest.mark.parametrize(
+    "explained_failure,expected_message,expected_remedy",
+    [
+        (
+            None,
+            "Imbue Studio couldn't get this workspace's permissions from its machine. Try again in a moment.",
+            None,
+        ),
+        (PERMISSIONS_FORMAT_NEWER_FAILURE, PERMISSIONS_FORMAT_NEWER_FAILURE.message, "UPDATE_APP"),
+    ],
+)
+def test_workspace_permissions_says_why_the_machine_could_not_be_read(
+    tmp_path: Path,
+    explained_failure: UserFacingFailure | None,
+    expected_message: str,
+    expected_remedy: str | None,
+) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    operator = _UnreadableMachineOperator(
+        access=build_recording_machine_operator(latchkey).access, explained_failure=explained_failure
+    )
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator)
+
+    payload = json.loads(client.get(f"/ui/api/workspaces/{agent_id}/permissions").data)
+
+    assert payload["permissions_unavailable"] is True
+    assert payload["unavailable_notice"] == {
+        "message": expected_message,
+        "detail": "Could not read the permissions of that workspace: asleep",
+        "remedy": expected_remedy,
+    }
+
+
+class _NotStartedGatewayClient(FakeLatchkeyGatewayClient):
+    """Gateway double for a permission service that never came up."""
+
+    def get_permissions_config(self, permissions_file_path: Path) -> LatchkeyPermissionsConfig:
+        raise LatchkeyGatewayClientNotInitializedError("LatchkeyGatewayClient is not initialized yet.")
+
+
+def test_workspace_permissions_offers_a_restart_when_the_permission_service_never_started(tmp_path: Path) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    client = _build_client(
+        tmp_path, _latchkey(tmp_path), (agent_id,), host_id, gateway_client=_NotStartedGatewayClient()
+    )
+
+    payload = json.loads(client.get(f"/ui/api/workspaces/{agent_id}/permissions").data)
+
+    notice = payload["unavailable_notice"]
+    assert notice["message"].startswith("Imbue Studio's permission service isn't running")
+    assert notice["remedy"] == "RESTART_APP"
+    assert notice["detail"] == "LatchkeyGatewayClient is not initialized yet."
+
+
+def test_connect_browser_names_access_left_unticked_on_the_consent_screen(tmp_path: Path) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path, accounts_by_service={})
+    consent_refusal = "Slack login did not grant all the permissions it asked for. Not granted: chat:write"
+    latchkey.sign_in_result = (False, consent_refusal)
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/connect-browser",
+        json={"service_name": "slack"},
+    )
+
+    assert response.status_code == 502
+    assert json.loads(response.data) == {
+        "error": "Slack wasn't given all the access this needs.",
+        "detail": consent_refusal,
+    }
+
+
+def test_sharing_a_path_is_refused_on_a_desktop_without_a_device_id(tmp_path: Path) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    shared = tmp_path / "pictures"
+    shared.mkdir()
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, device_id="")
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/shared-path",
+        json={"path": str(shared), "access": "READ"},
+    )
+
+    assert response.status_code == 400
+    assert json.loads(response.data)["error"] == "Imbue Studio can't share files from this computer."
+    assert not permissions_path_for_host(latchkey.plugin_data_dir, host_id).exists()
+    assert json.loads(client.get(f"/ui/api/workspaces/{agent_id}/permissions").data)["can_share_files"] is False
 
 
 @pytest.mark.witnesses(

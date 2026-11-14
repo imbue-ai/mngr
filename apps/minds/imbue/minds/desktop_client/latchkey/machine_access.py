@@ -41,7 +41,11 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.latchkey.failure_copy import MACHINE_STORE_UNREADABLE_SENTENCE
 from imbue.minds.desktop_client.latchkey.permission_overview import resolve_workspace_host_id
+from imbue.minds.desktop_client.provider_display import friendly_provider_label
+from imbue.minds.desktop_client.ui_models import ErrorRemedy
+from imbue.minds.desktop_client.user_facing_failure import UserFacingFailure
 from imbue.minds.primitives import DeviceId
 from imbue.mngr.api.providers import close_provider_instances_for_context
 from imbue.mngr.api.providers import get_provider_instance
@@ -80,8 +84,47 @@ class MachineUnreachableError(Exception):
     """Raised when a workspace's machine could not be reached, or refused what it was asked.
 
     Always something the user is waiting on the answer to, so it carries the
-    machine's own reason and is shown where they clicked.
+    machine's own reason (the message, kept for See details) and the sentence the
+    user is told in its place.
     """
+
+    def __init__(self, message: str, failure: UserFacingFailure) -> None:
+        super().__init__(message)
+        self.failure = failure
+
+
+_MACHINE_STORE_UNREADABLE: Final[UserFacingFailure] = UserFacingFailure(
+    message=MACHINE_STORE_UNREADABLE_SENTENCE, remedy=None
+)
+_PROVIDER_NOT_KNOWN_YET: Final[UserFacingFailure] = UserFacingFailure(
+    message="Imbue Studio is still locating the machine this workspace runs on. Try again in a moment.",
+    remedy=None,
+)
+_WORKSPACE_NOT_KNOWN: Final[UserFacingFailure] = UserFacingFailure(
+    message="Imbue Studio doesn't know this workspace any more. Close this and open it from your workspaces list.",
+    remedy=None,
+)
+_NO_REMOTE_MACHINE: Final[UserFacingFailure] = UserFacingFailure(
+    message=(
+        "Imbue Studio can't reach this workspace's machine to manage its permissions. "
+        "Its setup on this computer is out of date."
+    ),
+    remedy=None,
+)
+_PROVIDER_SETTINGS_UNREADABLE: Final[UserFacingFailure] = UserFacingFailure(
+    message=(
+        "Imbue Studio couldn't read its settings for where your workspaces run, so it can't make this change. "
+        "*Restart Imbue Studio and try again.* If this persists, report a bug."
+    ),
+    remedy=ErrorRemedy.RESTART_APP,
+)
+
+
+def _provider_account_missing(provider_name: str) -> UserFacingFailure:
+    return UserFacingFailure(
+        message=f"Imbue Studio can't find the {friendly_provider_label(provider_name)} account this workspace runs on.",
+        remedy=None,
+    )
 
 
 # Everything one exchange with a machine can fail with: the machine unreachable
@@ -165,7 +208,9 @@ class MachineAccess(MutableModel):
         try:
             return host_id if has_machine_of_its_own(self.latchkey.plugin_data_dir, host_id) else None
         except LatchkeyStoreError as e:
-            raise MachineUnreachableError(f"Could not open the machine store of host {host_id}: {e}") from e
+            raise MachineUnreachableError(
+                f"Could not open the machine store of host {host_id}: {e}", _MACHINE_STORE_UNREADABLE
+            ) from e
 
     @contextmanager
     def open_machine(self, workspace_agent_id: str, host_id: HostId) -> Generator[MachineCredentials, None, None]:
@@ -183,12 +228,15 @@ class MachineAccess(MutableModel):
         try:
             provider = self._provider_for(provider_name)
         except (MngrError, OSError) as e:
-            raise MachineUnreachableError(f"Could not reach the machine of host {host_id}: {e}") from e
+            raise MachineUnreachableError(
+                f"Could not reach the machine of host {host_id}: {e}", _provider_account_missing(provider_name)
+            ) from e
         with self._opened_outer_host(provider, provider_name, host_id) as outer:
             if outer is None or outer.is_local:
                 raise MachineUnreachableError(
                     f"Workspace {workspace_agent_id} is recorded as having a machine of its own, but provider "
-                    f"{provider_name} offers no remote machine for host {host_id}."
+                    f"{provider_name} offers no remote machine for host {host_id}.",
+                    _NO_REMOTE_MACHINE,
                 )
             yield MachineCredentials(host=outer, latchkey=self.latchkey, host_id=host_id)
 
@@ -234,12 +282,14 @@ class MachineAccess(MutableModel):
         try:
             parsed = AgentId(workspace_agent_id)
         except ValueError as e:
-            raise MachineUnreachableError(f"'{workspace_agent_id}' is not a workspace this app knows.") from e
+            raise MachineUnreachableError(
+                f"'{workspace_agent_id}' is not a workspace this app knows.", _WORKSPACE_NOT_KNOWN
+            ) from e
         info = self.backend_resolver.get_agent_display_info(parsed)
         if info is None or not info.provider_name:
             raise MachineUnreachableError(
-                f"Imbue Studio does not know which provider workspace {workspace_agent_id} runs on yet, so it cannot "
-                "reach its machine. Try again in a moment."
+                f"Imbue Studio does not know which provider workspace {workspace_agent_id} runs on yet.",
+                _PROVIDER_NOT_KNOWN_YET,
             )
         return info.provider_name
 
@@ -355,5 +405,6 @@ def _load_provider_context(concurrency_group: ConcurrencyGroup) -> MngrContext:
         return load_config(get_or_create_plugin_manager(), concurrency_group, strict=False)
     except (MngrError, OSError) as e:
         raise MachineUnreachableError(
-            f"Could not load the mngr settings that name your workspaces' machines: {e}"
+            f"Could not load the mngr settings that name your workspaces' machines: {e}",
+            _PROVIDER_SETTINGS_UNREADABLE,
         ) from e

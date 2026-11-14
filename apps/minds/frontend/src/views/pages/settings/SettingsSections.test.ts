@@ -23,13 +23,16 @@ import type { AnyVnode } from "../../../testing";
 import {
   allText,
   attrsOf,
+  browserImportOutcome,
   byId,
+  chromeMissingOutcome,
   classTokensOf,
   collectText,
   collectVnodes,
   renderDeep,
   renderRoot,
   renderedText,
+  setFailedImport,
   unreadableChromeProfileOutcome,
   withMindsNative,
 } from "../../../testing";
@@ -1245,16 +1248,21 @@ describe("the Browser cookies panel", () => {
 
   it("states what the last run came back with", () => {
     const succeeded = browserImportModel();
-    succeeded.browserImport.outcome = { is_success: true, detail: "", error_code: null, is_full_disk_access_needed: false };
+    succeeded.browserImport.outcome = browserImportOutcome();
     expect(panelText(succeeded)).toContain("Imported your Chrome cookies.");
 
     const failed = browserImportModel();
-    failed.browserImport.outcome = {
-      is_success: false,
-      detail: "Google Chrome is not installed.",
-      error_code: null, is_full_disk_access_needed: false,
-    };
-    expect(panelText(failed)).toContain("Google Chrome is not installed.");
+    setFailedImport(
+      failed.browserImport,
+      browserImportOutcome({
+        is_success: false,
+        message: "Imbue Studio couldn't import your Chrome cookies.",
+        detail: "Error: closed",
+      }),
+    );
+    const shown = allText(renderDeep(renderRoot(SettingsSections, { model: failed })));
+    expect(shown).toContain("Imbue Studio couldn't import your Chrome cookies.");
+    expect(shown).toContain("See details");
   });
 
   it("explains Full Disk Access, with a way to the list, when macOS refused the import", async () => {
@@ -1272,5 +1280,17 @@ describe("the Browser cookies panel", () => {
       (attrsOf(openButton!).onclick as () => void)();
       expect(openFullDiskAccessSettings).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it("says Chrome wasn't found, with no Report a bug, and keeps the import there for after Chrome is set up", () => {
+    const model = browserImportModel();
+    setFailedImport(model.browserImport, chromeMissingOutcome());
+
+    const shown = allText(renderDeep(renderRoot(SettingsSections, { model })));
+
+    expect(shown).toContain("Imbue Studio couldn't find Google Chrome's cookies on this computer.");
+    expect(shown).toContain("See details");
+    expect(shown).not.toContain("Report a bug");
+    expect(attrsOf(runButton(model)!).disabled).toBe(false);
   });
 });

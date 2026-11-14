@@ -205,6 +205,7 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "UiDesktopEgressSetting",
             "UiDiscoveryHealthMessage",
             "UiEnvironmentMessage",
+            "UiFailureNotice",
             "UiFolderSyncDiscardCopyRequest",
             "UiFolderSyncRetryRequest",
             "UiFolderSyncRow",

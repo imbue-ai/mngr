@@ -16,7 +16,7 @@ import m from "mithril";
 import { getAppContext } from "../../app-context";
 import { InboxModel } from "../../models/inbox";
 import { Icon16 } from "../components/Icon";
-import { Notice } from "../components/Notice";
+import { ErrorNotice } from "../components/ErrorDisplay";
 import { Spinner } from "../components/Spinner";
 import { BrowserImportOffer } from "./inbox/BrowserImportOffer";
 import { requestDetailView } from "./inbox/RequestDetail";
@@ -99,6 +99,17 @@ function detailPane(model: InboxModel): m.Children {
   return m("p", { class: "py-8 text-center type-body text-secondary" }, "You're all caught up — no pending requests.");
 }
 
+/** Why the pending list didn't load. The model re-asks on a timer, so this
+ * reads as a warning that is still trying rather than as a failure; it may
+ * never come back, so Report a bug stays the way out. */
+function listErrorNotice(message: string): m.Children {
+  return m(ErrorNotice, {
+    id: "request-popup-list-error",
+    error: { message, details: "" },
+    isRetrying: true,
+  });
+}
+
 /** The request the URL names, or null for "whatever is pending". A named id is
  * selected even when it is not in the pending list, so a stale link says the
  * request is gone instead of silently swapping in a different one the user
@@ -119,10 +130,11 @@ function InboxPageComponent(): m.Component {
     oninit() {
       const { shell, stores } = getAppContext();
       const activeModel = new InboxModel({
-        // The request is answered, so the review is over: back to the pane it
-        // was opened from (on its list while other requests are still waiting,
-        // on Add connection once none are), or, opened from the chat, back to
-        // the machine the card is in.
+        // The review is over (the request is answered, or the user closed one
+        // the page can't show): back to the pane it was opened from (on its
+        // list while other requests are still waiting, on Add connection once
+        // none are), or, opened from the chat, back to the machine the card is
+        // in.
         onClose: () => {
           if (!shell.returnToPanelAfterRequest()) shell.closeAppOverlay();
         },
@@ -165,9 +177,7 @@ function InboxPageComponent(): m.Component {
       return m("div#request-popup", { class: "flex flex-col gap-3" }, [
         eyebrow(activeModel),
         m("div#request-popup-detail", { class: "min-h-0" }, [
-          activeModel.listErrorMessage !== null
-            ? m("div", { class: "mb-3" }, m(Notice, { variant: "error" }, activeModel.listErrorMessage))
-            : null,
+          activeModel.listErrorMessage !== null ? listErrorNotice(activeModel.listErrorMessage) : null,
           detailPane(activeModel),
         ]),
         m(BrowserImportOffer, { model: activeModel }),

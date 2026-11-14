@@ -80,6 +80,7 @@ from imbue.minds.desktop_client.latchkey.permission_overview import FILE_SHARING
 from imbue.minds.desktop_client.latchkey.permission_overview import FILE_SHARING_WRITE_LABEL
 from imbue.minds.desktop_client.latchkey.permission_overview import SELF_SCOPE
 from imbue.minds.desktop_client.latchkey.permission_overview import ServiceSignInOptions
+from imbue.minds.desktop_client.latchkey.permission_overview import WorkspaceHostUnresolvedError
 from imbue.minds.desktop_client.latchkey.permission_overview import account_label
 from imbue.minds.desktop_client.latchkey.permission_overview import parse_workspace_permission
 from imbue.minds.desktop_client.latchkey.permission_overview import probe_service_sign_in_options
@@ -172,6 +173,34 @@ _LEADING_VERBS: Final[frozenset[str]] = frozenset(
 
 class PermissionToggleError(Exception):
     """Raised for caller-facing problems (unknown scope/permission, unresolvable workspace)."""
+
+
+class WorkspaceHostUnresolvedToggleError(PermissionToggleError, WorkspaceHostUnresolvedError):
+    """Raised for a change to a workspace whose machine the app has not located yet."""
+
+
+class PermissionDefinitionGoneError(PermissionToggleError):
+    """Raised for re-enabling a permission whose definition is no longer in the workspace's file."""
+
+
+class DesktopEgressUnsupportedError(PermissionToggleError):
+    """Raised for a route through a desktop on a workspace that can no longer have one; the message says why."""
+
+
+class MachineStoreUnreadableError(PermissionToggleError):
+    """Raised when this computer's copy of a workspace machine's store cannot be opened."""
+
+
+class CredentialEntryError(PermissionToggleError):
+    """Raised when typed-in credentials cannot connect a service; the message is already worded for the user."""
+
+
+class CredentialsNotStoredError(CredentialEntryError):
+    """Raised when latchkey would not store the typed-in credentials: the values themselves are the likely fix."""
+
+    def __init__(self, message: str, explanation: str) -> None:
+        super().__init__(message)
+        self.explanation = explanation
 
 
 class ClassifiedPermission(FrozenModel):
@@ -647,7 +676,7 @@ def _has_machine_of_its_own(data_dir: Path, host_id: HostId) -> bool:
     try:
         return has_machine_of_its_own(data_dir, host_id)
     except LatchkeyStoreError as e:
-        raise PermissionToggleError(f"Could not open the machine store of host '{host_id}': {e}") from e
+        raise MachineStoreUnreadableError(f"Could not open the machine store of host '{host_id}': {e}") from e
 
 
 @pure
@@ -791,7 +820,7 @@ def build_workspace_permissions_view(
     """
     host_id = resolve_workspace_host_id(backend_resolver, workspace_agent_id)
     if host_id is None:
-        raise PermissionToggleError(
+        raise WorkspaceHostUnresolvedToggleError(
             f"Could not resolve host for workspace '{workspace_agent_id}'; cannot load permissions.",
         )
     config = gateway_client.get_permissions_config(permissions_path_for_host(latchkey.plugin_data_dir, host_id))
@@ -1127,7 +1156,7 @@ def apply_connector_toggle(
         raise PermissionToggleError(f"Unknown scope '{scope}'.")
     host_id = resolve_workspace_host_id(backend_resolver, workspace_agent_id)
     if host_id is None:
-        raise PermissionToggleError(
+        raise WorkspaceHostUnresolvedToggleError(
             f"Could not resolve host for workspace '{workspace_agent_id}'; cannot change permissions.",
         )
     path = permissions_path_for_host(latchkey.plugin_data_dir, host_id)
@@ -1193,7 +1222,7 @@ def apply_desktop_egress_route(
         raise PermissionToggleError(f"Unknown service '{service_name}'.")
     host_id = resolve_workspace_host_id(backend_resolver, workspace_agent_id)
     if host_id is None:
-        raise PermissionToggleError(
+        raise WorkspaceHostUnresolvedToggleError(
             f"Could not resolve host for workspace '{workspace_agent_id}'; cannot change permissions.",
         )
     data_dir = latchkey.plugin_data_dir
@@ -1201,7 +1230,7 @@ def apply_desktop_egress_route(
     if route != SELF_ONLY_DESKTOP_EGRESS_ROUTE:
         unsupported_reason = describe_why_workspace_desktop_egress_is_unsupported(data_dir, host_id, device_id)
         if unsupported_reason is not None:
-            raise PermissionToggleError(unsupported_reason)
+            raise DesktopEgressUnsupportedError(unsupported_reason)
 
     config = gateway_client.get_permissions_config(path)
     infos_by_service_name = services_catalog.as_mapping()
@@ -1255,13 +1284,13 @@ def put_this_computer_first_on_desktop_egress_route(
         raise PermissionToggleError(f"Unknown service '{service_name}'.")
     host_id = resolve_workspace_host_id(backend_resolver, workspace_agent_id)
     if host_id is None:
-        raise PermissionToggleError(
+        raise WorkspaceHostUnresolvedToggleError(
             f"Could not resolve host for workspace '{workspace_agent_id}'; cannot change permissions.",
         )
     data_dir = latchkey.plugin_data_dir
     unsupported_reason = describe_why_workspace_desktop_egress_is_unsupported(data_dir, host_id, device_id)
     if unsupported_reason is not None:
-        raise PermissionToggleError(unsupported_reason)
+        raise DesktopEgressUnsupportedError(unsupported_reason)
     current_route = desktop_egress_route_for_service(
         _load_desktop_egress_rules_copy(
             data_dir,
@@ -1329,11 +1358,11 @@ def connect_service_with_credentials(
         # Everything below is read off this probe; without an answer there is
         # no way to tell a credentials service from a browser one, and the
         # wrong guess would reject what the user just typed.
-        raise PermissionToggleError(
-            f"Imbue Studio could not ask latchkey how {display_name} connects. Try again in a moment.",
+        raise CredentialEntryError(
+            f"Imbue Studio couldn't check how {display_name} connects. Try again in a moment.",
         )
     if service_info.is_browser_auth_supported:
-        raise PermissionToggleError(f"{display_name} is connected by signing in, not by entering credentials.")
+        raise CredentialEntryError(f"{display_name} is connected by signing in, not by entering credentials.")
     try:
         parsed_command = _parse_service_credential_command(
             service_name,
@@ -1341,8 +1370,8 @@ def connect_service_with_credentials(
             custom_service_credential_header(read_registered_services(latchkey.latchkey_directory), service_name),
         )
     except CredentialCommandError as e:
-        raise PermissionToggleError(
-            f"Imbue Studio cannot work out which credentials {display_name} needs: {e}."
+        raise CredentialEntryError(
+            f"Imbue Studio can't tell what details {display_name} needs, so it can't be connected here yet."
         ) from e
 
     # Which account the credentials land under is decided from what latchkey
@@ -1351,22 +1380,19 @@ def connect_service_with_credentials(
     is_account_name_required = bool(service_info.accounts)
     account = account_name.strip() if is_account_name_required else DEFAULT_ACCOUNT
     if is_account_name_required and not account:
-        raise PermissionToggleError(f"Enter a name for the new {display_name} account.")
+        raise CredentialEntryError(f"Enter a name for the new {display_name} account.")
     try:
         argv = build_credential_command_argv(parsed_command, value_by_parameter_name, account)
     except CredentialCommandError as e:
-        raise PermissionToggleError(f"The {display_name} credentials are incomplete: {e}.") from e
+        raise CredentialEntryError(f"The {display_name} credentials are incomplete: {e}.") from e
 
     is_success, detail = latchkey.auth_set_credentials(service_name, argv)
     if is_success:
         return account
-    # The service itself usually says which value it did not like; its usage
-    # lines (and any crash noise) are not worth showing.
-    described_failure = describe_credential_command_failure(detail)
-    raise PermissionToggleError(
-        f"{display_name} rejected those credentials: {described_failure}"
-        if described_failure
-        else f"Storing the {display_name} credentials failed."
+    raise CredentialsNotStoredError(
+        f"Imbue Studio couldn't store those {display_name} credentials. Check them and try again.",
+        # Which value the service did not like, without latchkey's usage lines.
+        explanation=describe_credential_command_failure(detail),
     )
 
 
@@ -1410,7 +1436,7 @@ def compute_self_permissions(
                 "workspace, and you approve it there."
             )
         if permission not in config.schemas:
-            raise PermissionToggleError(
+            raise PermissionDefinitionGoneError(
                 f"Permission '{permission}' cannot be re-enabled because its definition is gone; "
                 "ask the agent to request it again.",
             )
@@ -1450,7 +1476,7 @@ def apply_self_toggle(
     """
     host_id = resolve_workspace_host_id(backend_resolver, workspace_agent_id)
     if host_id is None:
-        raise PermissionToggleError(
+        raise WorkspaceHostUnresolvedToggleError(
             f"Could not resolve host for workspace '{workspace_agent_id}'; cannot change permissions.",
         )
     path = permissions_path_for_host(latchkey.plugin_data_dir, host_id)

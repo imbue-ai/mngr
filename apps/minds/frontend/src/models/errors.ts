@@ -297,6 +297,14 @@ function isKnownRemedy(value: string): value is ErrorRemedy {
   return Object.hasOwn(KNOWN_REMEDIES, value);
 }
 
+/** Whether a refused answer to a permission request says the request has a
+ * verdict all the same (answered elsewhere, or closed by the failure itself),
+ * so nothing can answer it any more. */
+export function isRequestResolvedFromBody(body: ResponseBody): boolean {
+  if (body === null || body instanceof TextResponseBody) return false;
+  return body.is_request_resolved === true;
+}
+
 /** The error for a call that threw (a bridge call, a parse): the fallback
  * sentence, with what was thrown as the details. */
 export function errorFromException(

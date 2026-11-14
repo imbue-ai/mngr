@@ -168,7 +168,7 @@ from imbue.minds.desktop_client.turn_credentials import TurnCredentialBroker
 from imbue.minds.desktop_client.ui_api import create_ui_blueprint
 from imbue.minds.desktop_client.ui_api import serve_spa_index
 from imbue.minds.desktop_client.ui_api_inbox import build_notification_card
-from imbue.minds.desktop_client.ui_api_inbox import displayable_pending_requests
+from imbue.minds.desktop_client.ui_api_inbox import displayable_among
 from imbue.minds.desktop_client.ui_api_inbox import primary_agent_ids_by_workspace_name
 from imbue.minds.desktop_client.ui_api_inbox import workspace_name_for_request
 from imbue.minds.desktop_client.ui_api_updates import build_workspace_updates_message
@@ -2106,6 +2106,13 @@ def _handle_request_deny(
     )
 
 
+# What the request popup says when a grant or deny stops at a route guard: none of
+# them is something the user could have done differently, so the reason goes to See details.
+_REQUEST_ACTION_FAILED_SENTENCE: Final[str] = (
+    "Imbue Studio couldn't answer this request. Try again. If this persists, report a bug."
+)
+
+
 def _dispatch_request_action(
     request_id: str,
     action: str,
@@ -2123,26 +2130,31 @@ def _dispatch_request_action(
     that cannot be read fails the grant and leaves the request pending.
     """
     if not _is_request_authenticated():
-        return make_json_error_response("Not authenticated", status_code=403)
+        return make_json_error_response(_REQUEST_ACTION_FAILED_SENTENCE, status_code=403, detail="Not authenticated")
     pending: PendingRequestsInterface | None = get_state().pending_requests
     if pending is None:
-        return make_json_error_response("Pending requests unavailable", status_code=500)
+        return make_json_error_response(
+            _REQUEST_ACTION_FAILED_SENTENCE, status_code=500, detail="Pending requests unavailable"
+        )
     # Reject a second grant/deny on an already-resolved request so a stale
     # (e.g. cached) form cannot re-apply side effects. Checked before the
     # pending lookup: a resolved request may still be listed by the gateway
     # when its deny-time DELETE failed.
     if pending.is_resolved(request_id):
-        return make_json_error_response("This request has already been approved or denied.", status_code=409)
+        return make_json_error_response(
+            "This request was already answered.", status_code=409, is_request_resolved=True
+        )
     permission_request = pending.get_pending(request_id)
     if permission_request is None:
-        return make_json_error_response("Request not found", status_code=404)
+        return make_json_error_response(_REQUEST_ACTION_FAILED_SENTENCE, status_code=404, detail="Request not found")
 
     handlers: tuple[RequestEventHandler, ...] = get_state().request_event_handlers
     handler = find_handler_for_event(handlers, permission_request)
     if handler is None:
         return make_json_error_response(
-            f"No handler registered for request type '{permission_request.request_type}'",
+            _REQUEST_ACTION_FAILED_SENTENCE,
             status_code=400,
+            detail=f"No handler registered for request type '{permission_request.request_type}'",
         )
     # A verdict given over the local socket is an agent acting for the user, so
     # say which one in the log; the verdict record carries the same label.
@@ -2171,7 +2183,9 @@ def _dispatch_request_action(
         return handler.apply_grant_request(request, permission_request)
     if action == "deny":
         return handler.apply_deny_request(request, permission_request)
-    return make_json_error_response(f"Unsupported action '{action}'", status_code=500)
+    return make_json_error_response(
+        _REQUEST_ACTION_FAILED_SENTENCE, status_code=500, detail=f"Unsupported action '{action}'"
+    )
 
 
 def _ui_workspace_entry_from_legacy_dict(entry: Mapping[str, str]) -> UiWorkspaceEntry:
@@ -2265,7 +2279,8 @@ def _derive_ui_requests_and_notifications_messages(
     """
     with app.app_context():
         state = get_state()
-        displayable_requests = displayable_pending_requests(state.pending_requests, backend_resolver)
+        all_pending = state.pending_requests.list_pending() if state.pending_requests is not None else ()
+        displayable_requests = displayable_among(all_pending, backend_resolver)
         payload = _build_requests_payload(displayable_requests, backend_resolver)
         requests_message = UiRequestsMessage(
             count=payload["count"],
@@ -2273,7 +2288,9 @@ def _derive_ui_requests_and_notifications_messages(
             workspace_agent_ids=tuple(payload["workspace_agent_ids"]),
             workspace_agent_id_by_request_id=payload["workspace_agent_id_by_request_id"],
         )
-        return requests_message, _reconcile_notification_feed(state, displayable_requests, backend_resolver)
+        return requests_message, _reconcile_notification_feed(
+            state, all_pending, displayable_requests, backend_resolver
+        )
 
 
 # How a recorded response's status becomes a feed outcome. A status outside
@@ -2287,18 +2304,25 @@ _RESOLVED_OUTCOME_BY_RESPONSE_STATUS: Final[dict[str, NotificationOutcome]] = {
 
 def _reconcile_notification_feed(
     state: DesktopClientState,
+    all_pending: Sequence[StreamedPermissionRequest],
     displayable_requests: Sequence[StreamedPermissionRequest],
     backend_resolver: BackendResolverInterface,
 ) -> UiNotificationsMessage:
     """Reconcile the notification feed against the displayable pending requests.
 
     Uses the same card derivation as the inbox list, so a feed entry renders
-    exactly like its inbox row.
+    exactly like its inbox row. A request in ``all_pending`` but not among the
+    displayable ones is still pending with its workspace unlisted, so its entry
+    reads as still waiting rather than closed.
     """
     feed = state.notification_feed
     if feed is None:
         return UiNotificationsMessage(entries=(), unresolved_count=0)
     pending_view = state.pending_requests
+    displayable_request_ids = {req.request_id for req in displayable_requests}
+    unlisted_request_ids = frozenset(
+        req.request_id for req in all_pending if req.request_id not in displayable_request_ids
+    )
     primary_agent_id_by_ws_name = primary_agent_ids_by_workspace_name(backend_resolver)
     pending_cards = tuple(
         build_notification_card(req, state.request_event_handlers, backend_resolver, primary_agent_id_by_ws_name)
@@ -2319,6 +2343,7 @@ def _reconcile_notification_feed(
         # partial or failed listing is not evidence that a workspace is
         # gone, and a flap must not destroy an unread message.
         known_workspace_agent_ids={str(aid) for aid in backend_resolver.list_restorable_workspace_ids()},
+        unlisted_request_ids=unlisted_request_ids,
     )
 
 

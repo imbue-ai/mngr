@@ -84,6 +84,10 @@ from pydantic import JsonValue
 from imbue.imbue_common.model_update import to_update
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import resolve_workspace_display_name
+from imbue.minds.desktop_client.latchkey.failure_copy import HOST_NOT_RESOLVED_FOR_APPROVAL_SENTENCE
+from imbue.minds.desktop_client.latchkey.failure_copy import PERMISSION_SERVICE_NOT_RUNNING_FOR_CHANGE
+from imbue.minds.desktop_client.latchkey.failure_copy import describe_gateway_failure
+from imbue.minds.desktop_client.latchkey.failure_copy import make_failure_response
 from imbue.minds.desktop_client.latchkey.gateway_client import CustomServiceRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
@@ -94,6 +98,7 @@ from imbue.minds.desktop_client.latchkey.handlers.recovery import maybe_recover_
 from imbue.minds.desktop_client.latchkey.handlers.resolution import resolve_request
 from imbue.minds.desktop_client.latchkey.machine_latchkey import machine_latchkey_for_host
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
+from imbue.minds.desktop_client.latchkey.machine_operations import describe_machine_failure
 from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
 from imbue.minds.desktop_client.latchkey.permission_overview import probe_system_browser_login_support
 from imbue.minds.desktop_client.latchkey.permission_overview import resolve_workspace_host_id
@@ -152,8 +157,15 @@ def _format_granted_message(base_api_url: str) -> str:
     )
 
 
+def _format_denied_cannot_set_up_message(base_api_url: str) -> str:
+    return (
+        f"Your request to store credentials for {base_api_url} was denied: it has no browser sign-in, and Imbue "
+        "Studio can't tell which credentials it needs, so the user cannot set it up from the permission dialog."
+    )
+
+
 def _format_denied_message(base_api_url: str) -> str:
-    return f"Your request to store credentials for {base_api_url} was denied. Nothing was stored."
+    return f"Your request to store credentials for {base_api_url} was denied."
 
 
 def _format_refused_sign_in_message(base_api_url: str, reason: str) -> str:
@@ -279,25 +291,28 @@ def _parse_typed_credentials(raw_values: str | None) -> dict[str, str]:
     return {str(key): str(value) for key, value in parsed.items()}
 
 
-def _needs_credentials(prompt: UiManualCredentialsPrompt, message: str | None = None) -> Response:
+def _connection_setup_failed_sentence(domain: str) -> str:
+    return f"Imbue Studio couldn't set up the connection to {domain}. Try again. If this persists, report a bug."
+
+
+def _needs_credentials(prompt: UiManualCredentialsPrompt, message: str | None = None, detail: str = "") -> Response:
     """Leave the request pending and (re-)show the credential form.
 
     Deliberately not an error outcome: nothing has gone wrong, the flow simply
     needs input it could not ask for before the service existed. ``message``
     replaces the prompt's instruction when an attempt was rejected, so the
-    dialog explains the failure instead of repeating the instruction.
+    dialog explains the failure instead of repeating the instruction, and
+    ``detail`` is latchkey's account of the rejection, behind See details.
     """
     shown = prompt if message is None else prompt.model_copy_update(to_update(prompt.field_ref().message, message))
-    return make_response(
-        content=json.dumps(
-            {
-                "outcome": "NEEDS_MANUAL_CREDENTIALS",
-                "message": shown.message,
-                "manual_credentials": shown.model_dump(mode="json"),
-            }
-        ),
-        media_type="application/json",
-    )
+    body: dict[str, JsonValue] = {
+        "outcome": "NEEDS_MANUAL_CREDENTIALS",
+        "message": shown.message,
+        "manual_credentials": shown.model_dump(mode="json"),
+    }
+    if detail:
+        body["detail"] = detail
+    return make_response(content=json.dumps(body), media_type="application/json")
 
 
 class CustomServiceGrantHandler(RequestEventHandler):
@@ -398,7 +413,9 @@ class CustomServiceGrantHandler(RequestEventHandler):
         host_id = resolve_workspace_host_id(get_state().backend_resolver, str(parsed_agent_id))
         if host_id is None:
             return make_json_error_response(
-                f"Could not resolve host for agent {parsed_agent_id}; cannot apply grant.", status_code=503
+                HOST_NOT_RESOLVED_FOR_APPROVAL_SENTENCE,
+                status_code=503,
+                detail=f"Could not resolve host for agent {parsed_agent_id}; cannot apply grant.",
             )
 
         # Re-validate the domain rather than trust the persisted record. This
@@ -409,7 +426,9 @@ class CustomServiceGrantHandler(RequestEventHandler):
             domain = validate_domain(payload.domain)
         except CustomServiceError as e:
             logger.warning("Refusing custom-service request {}: {}", request_event_id, e)
-            return make_json_error_response(f"This connection cannot be created: {e}", status_code=400)
+            return make_json_error_response(
+                _connection_setup_failed_sentence(payload.domain), status_code=400, detail=str(e)
+            )
         service_name = custom_service_name(domain, payload.scheme)
 
         # The service belongs to the machine the agent runs on, like the
@@ -420,7 +439,7 @@ class CustomServiceGrantHandler(RequestEventHandler):
             machine_latchkey = machine_latchkey_for_host(self.latchkey, host_id)
         except PermissionOverviewError as e:
             logger.warning("Could not open the machine store for host {}: {}", host_id, e)
-            return make_json_error_response(f"Could not create the connection to {domain}: {e}", status_code=500)
+            return make_json_error_response(_connection_setup_failed_sentence(domain), status_code=500, detail=str(e))
 
         existing = self._existing_registration(machine_latchkey, service_name)
         if existing is None:
@@ -436,7 +455,9 @@ class CustomServiceGrantHandler(RequestEventHandler):
                 self._register_service(machine_latchkey, service_name, payload)
             except LatchkeyError as e:
                 logger.warning("Could not register custom service {}: {}", service_name, e)
-                return make_json_error_response(f"Could not create the connection to {domain}: {e}", status_code=500)
+                return make_json_error_response(
+                    _connection_setup_failed_sentence(domain), status_code=500, detail=str(e)
+                )
 
         if _sign_in_url(existing, payload) is not None:
             account = self._sign_in_with_browser(machine_latchkey, service_name)
@@ -468,18 +489,28 @@ class CustomServiceGrantHandler(RequestEventHandler):
                 machine_latchkey, service_name, typed_values, prompt, credential_header
             )
             if failure is not None:
-                # The values were rejected. Keep the form up with the reason in
-                # place of its instruction, exactly as the predefined flow does.
-                return _needs_credentials(prompt, message=failure)
+                # The values were rejected. Keep the form up with the instruction
+                # to fix them in place of its opening one, exactly as the
+                # predefined flow does.
+                return _needs_credentials(
+                    prompt,
+                    message=f"Imbue Studio couldn't store those credentials for {domain}. *Check them and approve again.*",
+                    detail=failure,
+                )
             account = DEFAULT_ACCOUNT
 
         try:
             self._write_grant(host_id, service_name, domain, payload.scheme, account)
         except LatchkeyGatewayClientError as e:
             logger.warning("Could not write the grant for custom-service request {}: {}", request_event_id, e)
-            return make_json_error_response(
-                f"Connected to {domain}, but the permission could not be written through the latchkey gateway: {e}",
+            return make_failure_response(
+                describe_gateway_failure(
+                    e,
+                    f"Imbue Studio couldn't save the permission for {domain} just now. *Try approving again in a moment.*",
+                    PERMISSION_SERVICE_NOT_RUNNING_FOR_CHANGE,
+                ),
                 status_code=502,
+                detail=str(e),
             )
 
         # A remote workspace's machine is where both halves of the grant count:
@@ -492,10 +523,12 @@ class CustomServiceGrantHandler(RequestEventHandler):
             self.carry_grant_to_machine(str(parsed_agent_id), service_name, account)
         except MachineOperationError as e:
             logger.warning("The workspace's machine did not take the custom-service grant for host {}: {}", host_id, e)
-            return make_json_error_response(
-                f"Connected to {domain} here, but the workspace's machine did not take the change: {e}. "
-                "You can try approving again.",
+            return make_failure_response(
+                describe_machine_failure(
+                    e, f"Connected to {domain} here, but the workspace didn't take the change. Try approving again."
+                ),
                 status_code=502,
+                detail=str(e),
             )
 
         # The record goes before the verdict is written, so a reconnect of the
@@ -523,11 +556,14 @@ class CustomServiceGrantHandler(RequestEventHandler):
         payload = permission_request.payload
         if not isinstance(payload, CustomServiceRequestPayload):
             return make_json_error_response("Unsupported request type", status_code=500)
-        return self._deny(
-            permission_request.request_id,
-            AgentId(permission_request.agent_id),
-            _format_denied_message(base_api_url_for_domain(payload.domain, payload.scheme)),
+        agent_id = AgentId(permission_request.agent_id)
+        base_api_url = base_api_url_for_domain(payload.domain, payload.scheme)
+        message = (
+            _format_denied_cannot_set_up_message(base_api_url)
+            if self._is_unconnectable_from_dialog(agent_id, payload)
+            else _format_denied_message(base_api_url)
         )
+        return self._deny(permission_request.request_id, agent_id, message)
 
     def _deny(self, request_event_id: str, agent_id: AgentId, message: str) -> Response:
         """Record the denial and tell the agent why. Nothing to undo: registration happens on approve."""
@@ -544,6 +580,27 @@ class CustomServiceGrantHandler(RequestEventHandler):
             content=json.dumps({"outcome": "DENIED", "message": message}),
             media_type="application/json",
         )
+
+    def _is_unconnectable_from_dialog(self, agent_id: AgentId, payload: CustomServiceRequestPayload) -> bool:
+        """Whether the dialog offered no way to connect the service: registered, no sign-in, and no form."""
+        machine_latchkey = self._machine_latchkey_for_dialog(get_state().backend_resolver, agent_id)
+        service_name = custom_service_name(payload.domain, payload.scheme)
+        existing = self._existing_registration(machine_latchkey, service_name)
+        if existing is None or _sign_in_url(existing, payload) is not None:
+            return False
+        try:
+            prompt = self._credential_prompt(
+                machine_latchkey,
+                service_name,
+                payload.domain,
+                _credential_header(existing, payload),
+                payload.credential_instructions,
+            )
+        except LatchkeyError as e:
+            # Only the agent's message depends on this; the Deny still goes through.
+            logger.warning("Could not check whether {} could be set up for {}: {}", service_name, agent_id, e)
+            return False
+        return not prompt.parameters
 
     def _untrusted_mcp_sign_in(self, domain: str, payload: CustomServiceRequestPayload) -> str | None:
         """Why an ``mcp`` sign-in about to be registered cannot be trusted, or ``None`` when it can (or there is none).
@@ -693,10 +750,7 @@ class CustomServiceGrantHandler(RequestEventHandler):
             logger.warning("Could not build a credential form for {}: {}", service_name, e)
             return UiManualCredentialsPrompt(
                 parameters=(),
-                message=(
-                    f"{domain} has no browser sign-in, and Imbue Studio cannot work out which credentials to "
-                    "ask for. It has to be connected some other way."
-                ),
+                message=f"Imbue Studio can't set up {domain} from here yet. You can deny this request -- the agent is told.",
             )
         return UiManualCredentialsPrompt(
             parameters=parsed.parameters,

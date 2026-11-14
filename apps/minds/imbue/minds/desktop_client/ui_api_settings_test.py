@@ -814,21 +814,36 @@ def test_browser_import_runs_latchkeys_import_once_and_counts_as_the_offer(tmp_p
     assert response.status_code == 200
     assert json.loads(response.data) == {
         "is_success": True,
+        "message": "",
         "detail": "",
         "error_code": None,
         "is_full_disk_access_needed": False,
+        "is_chrome_missing": False,
     }
     assert latchkey.import_chrome_call_count == 1
     assert minds_config.get_is_browser_import_offered() is True
 
 
-def test_a_failed_browser_import_answers_with_latchkeys_reason(tmp_path: Path) -> None:
+_CHROME_NOT_FOUND = "Imbue Studio couldn't find Google Chrome's cookies on this computer."
+
+
+@pytest.mark.parametrize(
+    "latchkey_reason,expected_message,is_chrome_missing",
+    [
+        ("Google Chrome is not installed in any of the standard locations.", _CHROME_NOT_FOUND, True),
+        ("Error: No default Google Chrome profile found at /home/me/.config/google-chrome.", _CHROME_NOT_FOUND, True),
+        (
+            "Error: The stored browser state is not valid JSON.",
+            "Imbue Studio couldn't import your Chrome cookies. Try again. If this persists, report a bug.",
+            False,
+        ),
+    ],
+)
+def test_a_failed_browser_import_says_why_and_keeps_latchkeys_reason(
+    tmp_path: Path, latchkey_reason: str, expected_message: str, is_chrome_missing: bool
+) -> None:
     latchkey = FakeLatchkey(latchkey_directory=tmp_path)
-    latchkey.configure(
-        import_chrome_result=ChromeImportOutcome(
-            is_success=False, detail="Google Chrome is not installed in any of the standard locations."
-        )
-    )
+    latchkey.configure(import_chrome_result=ChromeImportOutcome(is_success=False, detail=latchkey_reason))
     client = _build_client_with_latchkey(tmp_path, latchkey, MindsConfig(data_dir=tmp_path / "config"))
 
     response = client.post("/ui/api/settings/browser-import")
@@ -836,9 +851,11 @@ def test_a_failed_browser_import_answers_with_latchkeys_reason(tmp_path: Path) -
     assert response.status_code == 200
     assert json.loads(response.data) == {
         "is_success": False,
-        "detail": "Google Chrome is not installed in any of the standard locations.",
+        "message": expected_message,
+        "detail": latchkey_reason,
         "error_code": None,
         "is_full_disk_access_needed": False,
+        "is_chrome_missing": is_chrome_missing,
     }
 
 
@@ -860,6 +877,7 @@ def test_a_browser_import_denied_by_macos_answers_with_the_code_the_client_acts_
     assert body["error_code"] == "CHROME_PROFILE_NOT_READABLE"
     # The fix is macOS's Full Disk Access list only where the import ran on a Mac.
     assert body["is_full_disk_access_needed"] is (sys.platform == "darwin")
+    assert body["is_chrome_missing"] is False
 
 
 def test_full_disk_access_is_the_fix_only_for_an_unreadable_profile_on_a_mac() -> None:

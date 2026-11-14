@@ -23,6 +23,7 @@
 
 import m from "mithril";
 import type {
+  ErrorRemedy,
   FolderSyncConflict,
   FolderSyncState,
   FileSharingAccess,
@@ -40,9 +41,11 @@ import type {
   UiWorkspacePermissions,
 } from "../generated/ui";
 import type { FetchJson } from "./workspaceOptions";
-import { errorMessageFromBody, reasonFromBody } from "./errors";
-import type { ResponseBody } from "./errors";
+import type { RequestOutcome, RequestResult, ResponseBody, UserFacingError } from "./errors";
+import { errorFromSentenceResponse, reasonFromBody, refusalDetailFromBody, remedyFromBody, responseDetails } from "./errors";
 import { defaultFetchJson } from "./workspaceOptions";
+import type { ErrorDialogQueue } from "./errorDialog";
+import { errorDialogs } from "./errorDialog";
 import {
   forgetWarmedPermissionsOverview,
   readWarmedPermissionsOverview,
@@ -51,9 +54,24 @@ import {
 export type PermissionsLoadStatus =
   "idle" | "loading" | "load_failed" | "ready";
 
+/** What the pane says when it could not be read at all (the fallback
+ * sentence's subject). */
+const LOAD_WHAT_FAILED = "Permissions can't be loaded right now";
+
+/** A background re-read that failed: the pane on screen is the last one that
+ * loaded, and may no longer be what the workspace holds. */
+const STALE_REFRESH_SENTENCE =
+  "These permissions may be out of date -- Imbue Studio couldn't refresh them.";
+
+/** The subject of the fallback sentence for a refused write the server gave
+ * no sentence for. */
+const CHANGE_WHAT_FAILED = "Imbue Studio couldn't save that change";
+
 export interface PermissionsModelOptions {
   fetchJson?: FetchJson;
   redraw?: () => void;
+  /** Where a failed connection attempt's dialog is raised. */
+  errorDialogs?: Pick<ErrorDialogQueue, "show">;
 }
 
 export const WAITING_SECTION = "waiting";
@@ -318,18 +336,19 @@ export class PermissionsModel {
   readonly agentId: string;
   status: PermissionsLoadStatus = "idle";
   data: UiWorkspacePermissions | null = null;
-  errorMessage = "";
-  /** A connection attempt's failure, raised as a popup rather than a line of
-   * text above the pane.
-   *
-   * These read differently from the rest: a service refusing a sign-in explains
-   * something only the user can act on somewhere else entirely ("ask an
-   * administrator of your Zoom account to grant you the developer privilege"),
-   * and it is several lines long. As a thin banner at the top of a pane the
-   * user has probably scrolled down, that is easy to miss outright. A load
-   * failure or a refused toggle stays inline: the first explains the empty pane
-   * it sits on, and the second belongs beside the row that would not move. */
-  alertMessage = "";
+  /** Why the pane could not be read at all; set while `status` is
+   * "load_failed". */
+  loadError: UserFacingError | null = null;
+  /** Why the last write was refused, shown above the pane. */
+  writeError: UserFacingError | null = null;
+  /** The button that refusal asks for, when the app can run its fix. */
+  writeErrorRemedy: ErrorRemedy | null = null;
+  /** That refusal's own reason, for passing on to the agent the remedy asks;
+   * "" when the route gave none. */
+  writeErrorReason = "";
+  /** Set when a re-read the user did not ask for failed: the pane on screen is
+   * the last one that loaded, and says so. */
+  refreshError: UserFacingError | null = null;
   /** Service whose credential form is open in Add connection, or null. */
   credentialFormServiceName: string | null = null;
   /** What the user typed into that form, keyed by parameter name. */
@@ -337,7 +356,12 @@ export class PermissionsModel {
   /** Name for the account those credentials will create, when one is needed. */
   credentialAccountName = "";
   /** Why the last credential submission was refused, shown inside the form. */
-  credentialErrorMessage = "";
+  credentialError: UserFacingError | null = null;
+  /** The button that refusal asks for, when the app can run its fix. */
+  credentialErrorRemedy: ErrorRemedy | null = null;
+  /** Whether that refusal offers a bug report: not when the values themselves
+   * were refused, since fixing them is the remedy. */
+  isCredentialErrorReportable = true;
   /** The clash rule a row's sync will start with, until it has one: the control
    * next to an off switch is client state, because there is nothing stored to
    * hold it. Once the sync runs, its own rule is what the row shows. */
@@ -345,6 +369,7 @@ export class PermissionsModel {
 
   private readonly fetchJsonImpl: FetchJson;
   private readonly redrawImpl: () => void;
+  private readonly errorDialogs: Pick<ErrorDialogQueue, "show">;
   private readonly busyRowKeys = new Set<string>();
   private writeChain: Promise<unknown> = Promise.resolve();
   /** The pending-request set the view on screen was built from, or null before
@@ -355,6 +380,7 @@ export class PermissionsModel {
     this.agentId = agentId;
     this.fetchJsonImpl = dependencies.fetchJson ?? defaultFetchJson;
     this.redrawImpl = dependencies.redraw ?? m.redraw;
+    this.errorDialogs = dependencies.errorDialogs ?? errorDialogs;
   }
 
   /** Start the first read. The tab mounts on every visit, so later calls are
@@ -382,24 +408,17 @@ export class PermissionsModel {
 
   /** Drop the last write's error. The left nav calls this on a section switch:
    * an error about a row that is no longer on screen is noise. */
-  clearErrorMessage(): void {
-    if (this.errorMessage === "") return;
-    this.errorMessage = "";
-    this.redrawImpl();
-  }
-
-  /** Dismiss the connection-failure popup. Only the user closes it: it holds
-   * something they have to go and act on, so it does not time out or clear
-   * itself on the next click the way the inline error does. */
-  dismissAlert(): void {
-    if (this.alertMessage === "") return;
-    this.alertMessage = "";
+  clearWriteError(): void {
+    if (this.writeError === null) return;
+    this.setWriteError(null);
     this.redrawImpl();
   }
 
   async load(): Promise<void> {
     this.status = "loading";
-    this.errorMessage = "";
+    this.loadError = null;
+    this.setWriteError(null);
+    this.refreshError = null;
     this.redrawImpl();
     // Started when the key was pointed at, so the first open usually spends a
     // read that has already happened rather than watching one. Spent on use:
@@ -411,10 +430,7 @@ export class PermissionsModel {
       warmed !== null ? await warmed : await this.fetchJsonImpl(this.apiBase());
     if (!result.ok) {
       this.status = "load_failed";
-      this.errorMessage = errorMessageFromBody(
-        result.body,
-        `HTTP ${result.status}`,
-      );
+      this.loadError = errorFromSentenceResponse(LOAD_WHAT_FAILED, result);
       this.redrawImpl();
       return;
     }
@@ -479,15 +495,22 @@ export class PermissionsModel {
     const result = await this.fetchJsonImpl(this.apiBase());
     if (!result.ok) {
       // Inline rather than silent: the pane is now knowingly out of date.
-      this.errorMessage =
-        "Could not refresh permissions: " +
-        errorMessageFromBody(result.body, `HTTP ${result.status}`);
+      this.refreshError = {
+        message: STALE_REFRESH_SENTENCE,
+        details: responseDetails(result),
+      };
       this.redrawImpl();
       return;
     }
     this.data = result.body as UiWorkspacePermissions;
-    this.errorMessage = "";
+    this.refreshError = null;
     this.redrawImpl();
+  }
+
+  /** The stale-pane notice's Try again: the same re-read, in the write queue
+   * like every other. */
+  async retryRefresh(): Promise<void> {
+    await this.enqueueWrite(() => this.reloadInPlace());
   }
 
   async toggleConnector(
@@ -500,7 +523,7 @@ export class PermissionsModel {
       connectorToggleRowKey(scope, account, permission),
       "connector-toggle",
       { scope, account, permission, enabled },
-      "Could not save the change: ",
+      CHANGE_WHAT_FAILED,
     );
   }
 
@@ -514,7 +537,14 @@ export class PermissionsModel {
       desktopEgressRowKey(serviceName),
       "desktop-egress-route",
       { service_name: serviceName, route },
-      "Could not save the change: ",
+      CHANGE_WHAT_FAILED,
+      this.apiBase(),
+      (outcome) => {
+        // A conflict means the pane is out of date (this workspace can no
+        // longer route through this computer, or its machine is not located
+        // right now), so the re-read shows what holds instead of the switch.
+        if (outcome.status === 409) void this.retryRefresh();
+      },
     );
   }
 
@@ -523,7 +553,7 @@ export class PermissionsModel {
       selfToggleRowKey(permission),
       "self-toggle",
       { permission, enabled },
-      "Could not save the change: ",
+      CHANGE_WHAT_FAILED,
     );
   }
 
@@ -536,7 +566,7 @@ export class PermissionsModel {
       revokeAllRowKey(serviceName, account),
       "connector-revoke-all",
       { service_name: serviceName, account },
-      `Could not revoke ${serviceLabel}: `,
+      `Imbue Studio couldn't turn off ${serviceLabel}`,
     );
   }
 
@@ -558,7 +588,7 @@ export class PermissionsModel {
       disconnectRowKey(connection.service_name, connection.account),
       "connector-disconnect",
       { service_name: connection.service_name, account: connection.account },
-      `Could not disconnect ${connection.account_label} from ${connection.display_name}: `,
+      `Imbue Studio couldn't disconnect ${connection.account_label} from ${connection.display_name}`,
     );
     if (!isDisconnected) return null;
     return resolvePermissionsSection(this.data, sectionId);
@@ -571,13 +601,17 @@ export class PermissionsModel {
    * caller can show it. A service may already own other accounts, so the added
    * one is identified by the ids that were not there before; when the reload
    * carries no new connection for the service the answer is null rather than
-   * some other account of the same service. */
-  async connectService(serviceName: string): Promise<string | null> {
+   * some other account of the same service. `retry` is what the failure
+   * dialog's Try again runs: a caller that acts on the answer passes the call
+   * that does, so a retried sign-in ends the same way. */
+  async connectService(
+    serviceName: string,
+    retry: () => void = () => void this.connectService(serviceName),
+  ): Promise<string | null> {
     const rowKey = connectServiceRowKey(serviceName);
     if (this.busyRowKeys.has(rowKey)) return null;
     this.busyRowKeys.add(rowKey);
-    this.errorMessage = "";
-    this.alertMessage = "";
+    this.setWriteError(null);
     this.redrawImpl();
     const sectionIdsBefore = new Set(
       (this.data?.connections ?? []).map(connectionSectionId),
@@ -591,9 +625,19 @@ export class PermissionsModel {
     );
     this.busyRowKeys.delete(rowKey);
     if (!result.ok) {
-      this.alertMessage =
-        "Could not connect: " +
-        errorMessageFromBody(result.body, `HTTP ${result.status}`);
+      // A dialog rather than a line above the pane: a service refusing a
+      // sign-in explains something only the user can act on somewhere else
+      // entirely ("ask an administrator of your Zoom account to grant you the
+      // developer privilege"), at several lines' length, and a banner at the top
+      // of a pane the user has scrolled down is easy to miss. Only the user
+      // closes it. A load failure or a refused toggle stays inline: the first
+      // explains the empty pane it sits on, the second belongs beside its row.
+      this.errorDialogs.show({
+        title: "Couldn't connect",
+        error: errorFromSentenceResponse("Imbue Studio couldn't finish signing in", result),
+        actions: [{ label: "Try again", onclick: retry }],
+        workspaceAgentId: this.agentId,
+      });
       this.redrawImpl();
       return null;
     }
@@ -613,7 +657,7 @@ export class PermissionsModel {
   openCredentialForm(serviceName: string): void {
     this.resetCredentialForm();
     this.credentialFormServiceName = serviceName;
-    this.errorMessage = "";
+    this.setWriteError(null);
     this.redrawImpl();
   }
 
@@ -632,8 +676,9 @@ export class PermissionsModel {
     const rowKey = connectServiceRowKey(serviceName);
     if (this.busyRowKeys.has(rowKey)) return null;
     this.busyRowKeys.add(rowKey);
-    this.credentialErrorMessage = "";
-    this.errorMessage = "";
+    this.credentialError = null;
+    this.credentialErrorRemedy = null;
+    this.setWriteError(null);
     this.redrawImpl();
     const sectionIdsBefore = new Set(
       (this.data?.connections ?? []).map(connectionSectionId),
@@ -651,20 +696,23 @@ export class PermissionsModel {
     );
     this.busyRowKeys.delete(rowKey);
     if (!result.ok) {
-      this.credentialErrorMessage = errorMessageFromBody(
-        result.body,
-        `HTTP ${result.status}`,
+      this.credentialError = errorFromSentenceResponse(
+        "Imbue Studio couldn't store those credentials",
+        result,
       );
+      this.credentialErrorRemedy = remedyFromBody(result.body);
+      // 422: the values themselves were refused, and the form is the fix.
+      this.isCredentialErrorReportable = result.status !== 422;
       this.redrawImpl();
       return null;
     }
     // The write answers with the refreshed view, so the new connection arrives
     // with the response rather than needing a re-read.
-    this.data = result.body as UiWorkspacePermissions;
-    this.status = "ready";
+    const view = result.body as UiWorkspacePermissions;
+    this.adoptView(view);
     this.resetCredentialForm();
     this.redrawImpl();
-    const added = (this.data.connections ?? []).find(
+    const added = (view.connections ?? []).find(
       (connection) =>
         connection.service_name === serviceName &&
         !sectionIdsBefore.has(connectionSectionId(connection)),
@@ -723,14 +771,18 @@ export class PermissionsModel {
       enabled,
       conflict: this.syncConflictFor(row),
     };
-    try {
-      this.data = await this.enqueueWrite(() => this.post("toggle", body, this.folderSyncBase()));
-      this.status = "ready";
-      this.errorMessage = "";
-    } catch (error) {
-      this.errorMessage =
-        (enabled ? "Could not start syncing: " : "Could not stop syncing: ") +
-        (error instanceof Error ? error.message : String(error));
+    const result = await this.enqueueWrite(() => this.post("toggle", body, this.folderSyncBase()));
+    if (result.ok) {
+      this.adoptView(result.body as UiWorkspacePermissions);
+      this.setWriteError(null);
+    } else {
+      this.setWriteError(
+        errorFromSentenceResponse(
+          enabled ? "Imbue Studio couldn't start syncing that folder" : "Imbue Studio couldn't stop syncing that folder",
+          result,
+        ),
+        result.body,
+      );
     }
     this.redrawImpl();
   }
@@ -743,37 +795,19 @@ export class PermissionsModel {
    * to retry would set the machine's copy aside and fetch it again for nothing.
    */
   async retrySync(row: UiSharedPath): Promise<void> {
-    const rowKey = folderSyncRetryRowKey(row.path);
-    if (this.busyRowKeys.has(rowKey)) return;
-    this.busyRowKeys.add(rowKey);
-    this.errorMessage = "";
-    this.redrawImpl();
     const body: UiFolderSyncRetryRequest = { path: row.path };
-    try {
-      const result = await this.enqueueWrite(() =>
-        this.fetchJsonImpl(`${this.folderSyncBase()}/retry`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        }),
-      );
-      if (result.ok) {
-        this.data = result.body as UiWorkspacePermissions;
-        this.status = "ready";
-      } else if (isSyncRecordMissing(result.body)) {
+    await this.writeFlip(
+      folderSyncRetryRowKey(row.path),
+      "retry",
+      body,
+      "Imbue Studio couldn't start syncing that folder again",
+      this.folderSyncBase(),
+      (outcome) => {
         // Nothing is left to retry: drop the row's sync so it offers the
         // switch, the one control that can bring it back.
-        this.errorMessage = errorMessageFromBody(result.body, "");
-        this.forgetRowSync(row.path);
-      } else {
-        this.errorMessage =
-          "Could not start syncing again: " +
-          errorMessageFromBody(result.body, `HTTP ${result.status}`);
-      }
-    } finally {
-      this.busyRowKeys.delete(rowKey);
-      this.redrawImpl();
-    }
+        if (isSyncRecordMissing(outcome.body)) this.forgetRowSync(row.path);
+      },
+    );
   }
 
   private forgetRowSync(path: string): void {
@@ -796,7 +830,7 @@ export class PermissionsModel {
       folderSyncDiscardCopyRowKey(row.path),
       "discard-copy",
       body,
-      "Could not delete that copy: ",
+      "Imbue Studio couldn't delete that copy",
       this.folderSyncBase(),
     );
   }
@@ -808,7 +842,7 @@ export class PermissionsModel {
       pathAccessRowKey(path),
       "shared-path",
       body,
-      "Could not share that path: ",
+      "Imbue Studio couldn't share that folder",
     );
   }
 
@@ -826,7 +860,7 @@ export class PermissionsModel {
       ADD_SHARED_PATH_ROW_KEY,
       "shared-path",
       body,
-      "Could not share that path: ",
+      "Imbue Studio couldn't share that folder",
     );
   }
 
@@ -837,7 +871,7 @@ export class PermissionsModel {
       pathRemoveRowKey(path),
       "shared-path-remove",
       body,
-      "Could not stop sharing: ",
+      "Imbue Studio couldn't stop sharing that folder",
     );
   }
 
@@ -894,7 +928,22 @@ export class PermissionsModel {
     this.credentialFormServiceName = null;
     this.credentialValues = {};
     this.credentialAccountName = "";
-    this.credentialErrorMessage = "";
+    this.credentialError = null;
+    this.credentialErrorRemedy = null;
+  }
+
+  /** Put the view a write answered with on screen: it is as fresh as a re-read,
+   * so a failed earlier re-read no longer makes the pane out of date. */
+  private adoptView(view: UiWorkspacePermissions): void {
+    this.data = view;
+    this.status = "ready";
+    this.refreshError = null;
+  }
+
+  private setWriteError(error: UserFacingError | null, refusalBody: ResponseBody = null): void {
+    this.writeError = error;
+    this.writeErrorRemedy = error === null ? null : remedyFromBody(refusalBody);
+    this.writeErrorReason = error === null ? "" : refusalDetailFromBody(refusalBody);
   }
 
   /** Resolves to whether the refreshed view was adopted, so a caller that has
@@ -904,45 +953,45 @@ export class PermissionsModel {
     rowKey: string,
     path: string,
     body: unknown,
-    errorPrefix: string,
+    whatFailed: string,
     baseUrl: string = this.apiBase(),
+    onRefused: (outcome: RequestOutcome) => void = () => undefined,
   ): Promise<boolean> {
     // A second click while this row's write runs is dropped rather than
     // queued, so the stored state never races itself.
     if (this.busyRowKeys.has(rowKey)) return false;
     this.busyRowKeys.add(rowKey);
-    this.errorMessage = "";
+    this.setWriteError(null);
     this.redrawImpl();
+    let result: RequestResult;
     try {
-      this.data = await this.enqueueWrite(() => this.post(path, body, baseUrl));
-      this.status = "ready";
-    } catch (error) {
-      // The last good view stays on screen: a refused write changed nothing.
-      this.errorMessage =
-        errorPrefix + (error instanceof Error ? error.message : String(error));
-      return false;
+      result = await this.enqueueWrite(() => this.post(path, body, baseUrl));
     } finally {
       this.busyRowKeys.delete(rowKey);
-      this.redrawImpl();
     }
+    if (!result.ok) {
+      // The last good view stays on screen.
+      // Every write is a switch or button the user can press again.
+      this.setWriteError(errorFromSentenceResponse(whatFailed, result), result.body);
+      onRefused(result);
+      this.redrawImpl();
+      return false;
+    }
+    this.adoptView(result.body as UiWorkspacePermissions);
+    this.redrawImpl();
     return true;
   }
 
-  private async post(
+  private post(
     path: string,
     body: unknown,
     baseUrl: string = this.apiBase(),
-  ): Promise<UiWorkspacePermissions> {
-    const result = await this.fetchJsonImpl(`${baseUrl}/${path}`, {
+  ): Promise<RequestResult> {
+    return this.fetchJsonImpl(`${baseUrl}/${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    if (!result.ok)
-      throw new Error(
-        errorMessageFromBody(result.body, `HTTP ${result.status}`),
-      );
-    return result.body as UiWorkspacePermissions;
   }
 
   /** Serialize writes: overlapping flips reach the server in click order and

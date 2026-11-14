@@ -15,6 +15,7 @@ from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperat
 from imbue.minds.desktop_client.latchkey.testing import FakeAccountsLatchkey
 from imbue.minds.desktop_client.latchkey.testing import FixedHostBackendResolver
 from imbue.minds.desktop_client.testing import device_id_for_test
+from imbue.minds.desktop_client.user_facing_failure import UserFacingFailure
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -95,7 +96,9 @@ class _RecordedAccess(MachineAccess):
     def open_machine(self, workspace_agent_id: str, host_id: HostId) -> Generator[MachineCredentials, None, None]:
         del workspace_agent_id, host_id
         if self.opening_refusal:
-            raise MachineUnreachableError(self.opening_refusal)
+            raise MachineUnreachableError(
+                self.opening_refusal, UserFacingFailure(message="The machine can't be reached.", remedy=None)
+            )
         yield self.machine
 
 

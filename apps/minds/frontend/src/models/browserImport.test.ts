@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  browserImportOutcome,
+  chromeMissingOutcome,
   jsonResponse,
   unreadableChromeProfileOutcome,
   withMindsNative,
@@ -70,25 +72,30 @@ describe("BrowserImportModel", () => {
     expect(model.isBusy).toBe(true);
     expect(model.outcome).toBeNull();
     resolveResponse(
-      jsonResponse({
-        is_success: true,
-        detail: "",
-        error_code: null,
-        is_full_disk_access_needed: false,
-      }),
+      jsonResponse(browserImportOutcome()),
     );
 
     await expect(run).resolves.toBe(true);
     expect(model.isBusy).toBe(false);
-    expect(model.outcome).toEqual({
-      is_success: true,
-      detail: "",
-      error_code: null,
-      is_full_disk_access_needed: false,
+    expect(model.outcome?.is_success).toBe(true);
+    expect(model.error).toBeNull();
+  });
+
+  it("shows the server's sentence for a failed import, with latchkey's reason behind See details", async () => {
+    const model = new BrowserImportModel(
+      async () => jsonResponse(chromeMissingOutcome()),
+      () => {},
+    );
+
+    await expect(model.run()).resolves.toBe(false);
+
+    expect(model.error).toEqual({
+      message: "Imbue Studio couldn't find Google Chrome's cookies on this computer.",
+      details: "Google Chrome is not installed in any of the standard locations.",
     });
   });
 
-  it("turns a refusal and a network failure into a failed outcome with the reason", async () => {
+  it("words a refusal and a network failure as ours, with what came back behind See details", async () => {
     const refused = new BrowserImportModel(
       async () =>
         jsonResponse(
@@ -98,12 +105,17 @@ describe("BrowserImportModel", () => {
       () => {},
     );
     await expect(refused.run()).resolves.toBe(false);
-    expect(refused.outcome).toEqual({
-      is_success: false,
-      detail: "Browser cookies are not configured on this desktop",
-      error_code: null,
-      is_full_disk_access_needed: false,
+    expect(refused.error).toEqual({
+      message: "Imbue Studio couldn't import your Chrome cookies. Try again. If this persists, report a bug.",
+      details: "HTTP 503\nBrowser cookies are not configured on this desktop",
     });
+    expect(refused.outcome).toEqual(
+      browserImportOutcome({
+        is_success: false,
+        message: refused.error?.message,
+        detail: refused.error?.details,
+      }),
+    );
 
     const offline = new BrowserImportModel(
       () => Promise.reject(new Error("offline")),
@@ -111,7 +123,21 @@ describe("BrowserImportModel", () => {
     );
     await expect(offline.run()).resolves.toBe(false);
     expect(offline.outcome?.is_success).toBe(false);
-    expect(offline.outcome?.detail).toContain("network error");
+    expect(offline.error?.message).toBe("Imbue Studio didn't respond. Try again in a moment.");
+  });
+
+  it("keeps a plain-text refusal behind See details, never as the sentence", async () => {
+    const model = new BrowserImportModel(
+      async () => new Response("Internal Server Error: KeyError('latchkey')", { status: 500 }),
+      () => {},
+    );
+
+    await expect(model.run()).resolves.toBe(false);
+
+    expect(model.error).toEqual({
+      message: "Imbue Studio couldn't import your Chrome cookies. Try again. If this persists, report a bug.",
+      details: "HTTP 500\nInternal Server Error: KeyError('latchkey')",
+    });
   });
 
   it("does not start a second run while one is in flight", async () => {
@@ -151,12 +177,7 @@ describe("BrowserImportModel", () => {
   it("forgets a failed settings open when a new run starts", async () => {
     const model = new BrowserImportModel(
       async () =>
-        jsonResponse({
-          is_success: true,
-          detail: "",
-          error_code: null,
-          is_full_disk_access_needed: false,
-        }),
+        jsonResponse(browserImportOutcome()),
       () => {},
     );
     model.isFullDiskAccessSettingsOpenFailed = true;
@@ -174,20 +195,10 @@ describe("isChromeProfileUnreadable", () => {
       isChromeProfileUnreadable(unreadableChromeProfileOutcome(false)),
     ).toBe(true);
     expect(
-      isChromeProfileUnreadable({
-        is_success: false,
-        detail: "Google Chrome is not installed.",
-        error_code: null,
-        is_full_disk_access_needed: false,
-      }),
+      isChromeProfileUnreadable(chromeMissingOutcome()),
     ).toBe(false);
     expect(
-      isChromeProfileUnreadable({
-        is_success: true,
-        detail: "",
-        error_code: null,
-        is_full_disk_access_needed: false,
-      }),
+      isChromeProfileUnreadable(browserImportOutcome()),
     ).toBe(false);
     expect(isChromeProfileUnreadable(null)).toBe(false);
   });

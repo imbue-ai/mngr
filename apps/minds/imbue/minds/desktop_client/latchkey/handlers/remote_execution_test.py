@@ -27,6 +27,7 @@ from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSe
 from imbue.minds.desktop_client.latchkey.handlers.messaging import format_resolution_notice
 from imbue.minds.desktop_client.latchkey.handlers.remote_execution import REMOTE_EXECUTION_DISABLED_CODE
 from imbue.minds.desktop_client.latchkey.handlers.remote_execution import RemoteExecutionGrantHandler
+from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.latchkey.response_events import load_response_events
 from imbue.minds.desktop_client.latchkey.testing import FixedHostBackendResolver
@@ -363,6 +364,45 @@ def test_grant_hands_the_spliced_policy_to_the_workspaces_own_machine(tmp_path: 
 
     assert response.status_code == 200
     assert carried == [str(agent_id)]
+
+
+def test_grant_the_machine_refuses_ends_the_request_and_tells_the_agent(tmp_path: Path) -> None:
+    """The gateway consumed the record on approve, so the agent is told rather than left waiting forever."""
+
+    def refuse(workspace_agent_id: str) -> None:
+        raise MachineOperationError(f"machine of {workspace_agent_id} is unreachable", None)
+
+    handler, sender = _make_handler(
+        tmp_path,
+        lambda _req: httpx2.Response(200, json={"request_id": "evt-abc", "applied": {}}),
+        push_permissions_to_machine=refuse,
+    )
+    agent_id = AgentId()
+    event = create_remote_execution_permission_request(agent_id=str(agent_id), rationale="install a tool")
+    client = _build_authenticated_client(
+        tmp_path,
+        handler,
+        StaticPendingRequests(pending=(event,)),
+        minds_config=make_minds_config_allowing_agent_command_execution(tmp_path / "config"),
+        backend_resolver=FixedHostBackendResolver(
+            url_by_agent_and_service={}, fixed_host_id=HostId(), known_agent_ids=(agent_id,)
+        ),
+    )
+
+    response = client.post(f"/requests/{event.request_id}/grant")
+
+    assert response.status_code == 502
+    body = response.get_json()
+    assert body["error"].startswith(
+        "Imbue Studio couldn't apply this permission to the workspace, and the request can't be approved again"
+    )
+    assert "unreachable" in body["detail"]
+    assert body["is_request_resolved"] is True
+    assert [(e.request_event_id, e.status) for e in load_response_events(tmp_path)] == [
+        (event.request_id, str(RequestStatus.DENIED))
+    ]
+    assert len(sender.sent_messages) == 1
+    assert "couldn't apply it to your workspace" in sender.sent_messages[0][1]
 
 
 @pytest.mark.witnesses(

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { jsonResponse, settle } from "../testing";
+import { chromeMissingOutcome, jsonResponse, settle } from "../testing";
 import type { InboxModelOptions } from "./inbox";
 import { forgetWarmedRequestDetails, warmRequestDetail } from "./requestDetailPrefetch";
 import {
@@ -168,6 +168,7 @@ const FILE_DETAIL: FileSharingPermissionDetail = {
   is_sync_requested: false,
   sync_conflict: "NEWER",
   sync_unavailable_reason: "",
+  is_edited_path_shareable: true,
 };
 
 describe("share path helpers", () => {
@@ -353,7 +354,7 @@ describe("InboxModel", () => {
     );
 
     await model.loadList();
-    expect(model.listErrorMessage).toContain("Could not load requests");
+    expect(model.listErrorMessage).toBe("Imbue Studio couldn't load your requests.");
     // The load attempt completed, so the page's live-refresh gate must open.
     expect(model.isListLoaded).toBe(true);
     expect(listCalls).toBe(1);
@@ -398,7 +399,7 @@ describe("InboxModel", () => {
 
     await model.loadList();
 
-    expect(model.listErrorMessage).toContain("Could not load requests");
+    expect(model.listErrorMessage).toBe("Imbue Studio couldn't load your requests.");
     expect(model.isListLoaded).toBe(true);
   });
 
@@ -440,6 +441,20 @@ describe("InboxModel", () => {
     expect(form?.get("file_path")).toBe("/home/user/doc.txt");
     expect(form?.get("sync")).toBe("true");
     expect(form?.get("sync_conflict")).toBe("THIS_COMPUTER");
+  });
+
+  it("holds Approve on an edited path when this desktop cannot share one", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () =>
+        jsonResponse({ detail: { ...FILE_DETAIL, is_edited_path_shareable: false } }),
+    });
+    await model.select("evt-a");
+    expect(model.isApproveAllowed()).toBe(true);
+
+    model.filePathValue = "~/other.txt";
+
+    expect(model.isEditedPathUnshareable()).toBe(true);
+    expect(model.isApproveAllowed()).toBe(false);
   });
 
   it("leaves the sync switch off when the agent did not ask, or the folder cannot be synced", async () => {
@@ -750,6 +765,7 @@ describe("InboxModel", () => {
     model.manualCredentialsFeedback = {
       prompt: { ...GITHUB_PROMPT, message: "GitHub did not accept that token." },
       isRejection: true,
+      details: "",
     };
 
     model.chooseBrowserSignIn();
@@ -771,14 +787,14 @@ describe("InboxModel", () => {
     await model.select("evt-a");
 
     // A sign-in that did not complete has nothing to say about typing a token in...
-    model.errorMessage = "Sign-in to GitHub did not complete.";
+    model.approvalError = { message: "The sign-in to GitHub didn't finish.", details: "" };
     model.chooseManualCredentialEntry();
-    expect(model.errorMessage).toBeNull();
+    expect(model.approvalError).toBeNull();
 
     // ...and a typed attempt's failure nothing about the sign-in.
-    model.errorMessage = "Could not apply grant through the latchkey gateway.";
+    model.approvalError = { message: "Imbue Studio couldn't save this permission just now.", details: "" };
     model.chooseBrowserSignIn();
-    expect(model.errorMessage).toBeNull();
+    expect(model.approvalError).toBeNull();
   });
 
   it("enables Approve once every credential input is filled in", async () => {
@@ -852,7 +868,7 @@ describe("InboxModel", () => {
     // The typed values survive so one field can be corrected and retried.
     expect(model.manualCredentialValues["access-key-id"]).toBe("AKIA-4471");
     expect(model.isApproveBusy).toBe(false);
-    expect(model.errorMessage).toBeNull();
+    expect(model.approvalError).toBeNull();
     expect(model.isApproveAllowed()).toBe(true);
   });
 
@@ -944,7 +960,7 @@ describe("InboxModel", () => {
 
     await model.approve();
 
-    expect(model.errorMessage).toBe("sign-in failed");
+    expect(model.approvalError?.message).toBe("sign-in failed");
     expect(model.takePendingFailureScroll()).toBe(true);
   });
 
@@ -959,7 +975,7 @@ describe("InboxModel", () => {
 
     await model.approve();
 
-    expect(model.errorMessage).toBe("sign-in failed");
+    expect(model.approvalError?.message).toBe("sign-in failed");
     expect(model.isApproveBusy).toBe(false);
   });
 
@@ -1092,7 +1108,7 @@ describe("InboxModel", () => {
 
     await model.approve();
 
-    expect(model.errorMessage).toBe("upstream refused");
+    expect(model.approvalError?.message).toBe("upstream refused");
     expect(resolved).toEqual([]);
   });
 
@@ -1116,6 +1132,223 @@ describe("InboxModel", () => {
 
     expect(closed).toBe(true);
     expect(model.selectedId).toBe("evt-a");
+  });
+
+  it("ends a request someone else already answered at once, with no bug report to file", async () => {
+    const gone: string[] = [];
+    const model = makeModel(
+      {
+        "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PREDEFINED_DETAIL }),
+        "POST /requests/evt-a/grant": () =>
+          jsonResponse({ error: "This request was already answered.", is_request_resolved: true }, 409),
+      },
+      undefined,
+      undefined,
+      { onGone: (requestId) => gone.push(requestId) },
+    );
+    await model.select("evt-a");
+
+    await model.approve();
+
+    expect(model.approvalError).toEqual({ message: "This request was already answered.", details: "HTTP 409" });
+    expect(model.isApprovalErrorReportable).toBe(false);
+    expect(model.isRequestGone).toBe(true);
+    expect(gone).toEqual(["evt-a"]);
+    expect(model.isApproveBusy).toBe(false);
+  });
+
+  it("leaves a request the popup was re-pointed at untouched by another's refused approval", async () => {
+    const gone: string[] = [];
+    let model: InboxModel | null = null;
+    model = makeModel(
+      {
+        "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PREDEFINED_DETAIL }),
+        "GET /ui/api/inbox/evt-b/detail": () =>
+          jsonResponse({ detail: { ...PREDEFINED_DETAIL, request_id: "evt-b" } }),
+        "POST /requests/evt-a/grant": () => {
+          void model?.select("evt-b");
+          return jsonResponse({ error: "This request was already answered.", is_request_resolved: true }, 409);
+        },
+      },
+      undefined,
+      undefined,
+      { onGone: (requestId) => gone.push(requestId) },
+    );
+    await model.select("evt-a");
+
+    await model.approve();
+
+    expect(gone).toEqual(["evt-a"]);
+    expect(model.selectedId).toBe("evt-b");
+    expect(model.isRequestGone).toBe(false);
+    expect(model.approvalError).toBeNull();
+  });
+
+  it("ends the request at once when the workspace refused an approval the gateway took, keeping the bug report", async () => {
+    // The verdict is already written, so nothing waits for the pending set to catch up.
+    let closed = false;
+    const model = makeModel(
+      {
+        "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PREDEFINED_DETAIL }),
+        "POST /requests/evt-a/grant": () =>
+          jsonResponse(
+            {
+              error: "Imbue Studio couldn't apply this permission to the workspace.",
+              detail: "push refused",
+              is_request_resolved: true,
+            },
+            502,
+          ),
+      },
+      () => {
+        closed = true;
+      },
+    );
+    await model.select("evt-a");
+
+    await model.approve();
+
+    expect(model.isRequestGone).toBe(true);
+    expect(model.isApproveAllowed()).toBe(false);
+    expect(model.isApprovalErrorReportable).toBe(true);
+    expect(closed).toBe(false);
+
+    model.close();
+    expect(closed).toBe(true);
+  });
+
+  it.each([
+    [true, "Imbue Studio couldn't answer this request. If this persists, report a bug."],
+    [false, "Imbue Studio couldn't answer this request. Try again. If this persists, report a bug."],
+  ])(
+    "asks for another try at a refused approval with no sentence only while the request can still be answered (ended: %s)",
+    async (isResolved, sentence) => {
+      const model = makeModel({
+        "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PREDEFINED_DETAIL }),
+        "POST /requests/evt-a/grant": () =>
+          jsonResponse({ detail: "push refused", ...(isResolved ? { is_request_resolved: true } : {}) }, 502),
+      });
+      await model.select("evt-a");
+
+      await model.approve();
+
+      expect(model.approvalError?.message).toBe(sentence);
+      expect(model.isApproveAllowed()).toBe(!isResolved);
+    },
+  );
+
+  it("keeps a request whose approval failed open to another try", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PREDEFINED_DETAIL }),
+      "POST /requests/evt-a/grant": () =>
+        jsonResponse({ error: "Imbue Studio couldn't record this permission just now." }, 502),
+    });
+    await model.select("evt-a");
+
+    await model.approve();
+
+    expect(model.isRequestGone).toBe(false);
+    expect(model.isApproveAllowed()).toBe(true);
+  });
+
+  it("never shows a plain-text refusal of Approve as the sentence, keeping it behind See details", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PREDEFINED_DETAIL }),
+      "POST /requests/evt-a/grant": () =>
+        new Response("Internal Server Error: KeyError('host')", { status: 500 }),
+    });
+    await model.select("evt-a");
+
+    await model.approve();
+
+    expect(model.approvalError).toEqual({
+      message: "Imbue Studio couldn't answer this request. Try again. If this persists, report a bug.",
+      details: "HTTP 500\nInternal Server Error: KeyError('host')",
+    });
+    expect(model.approvalRemedy).toBeNull();
+  });
+
+  it("offers the restart a refusal names when the permission service is not running", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PREDEFINED_DETAIL }),
+      "POST /requests/evt-a/grant": () =>
+        jsonResponse(
+          {
+            error: "Imbue Studio's permission service isn't running, so this couldn't be saved.",
+            detail: "Timed out after 30.0s waiting for a live forward",
+            remedy: "RESTART_APP",
+          },
+          502,
+        ),
+    });
+    await model.select("evt-a");
+
+    await model.approve();
+
+    expect(model.approvalError?.message).toBe(
+      "Imbue Studio's permission service isn't running, so this couldn't be saved.",
+    );
+    expect(model.approvalError?.details).toBe("HTTP 502\nTimed out after 30.0s waiting for a live forward");
+    expect(model.approvalRemedy).toBe("RESTART_APP");
+  });
+
+  it("keeps a FAILED approval's technical account out of the sentence", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PREDEFINED_DETAIL }),
+      "POST /requests/evt-a/grant": () =>
+        jsonResponse({ outcome: "FAILED", message: "Signing in to Slack didn't finish.", detail: "Error: closed" }),
+    });
+    await model.select("evt-a");
+
+    await model.approve();
+
+    expect(model.approvalError).toEqual({ message: "Signing in to Slack didn't finish.", details: "Error: closed" });
+  });
+
+  it("says Imbue Studio did not respond when the Approve never got an answer", async () => {
+    const model = new InboxModel({
+      fetcher: (url, init) => {
+        if ((init?.method ?? "GET") === "POST") return Promise.reject(new TypeError("Failed to fetch"));
+        return Promise.resolve(jsonResponse({ detail: PREDEFINED_DETAIL }));
+      },
+    });
+    await model.select("evt-a");
+
+    await model.approve();
+
+    expect(model.approvalError?.message).toBe("Imbue Studio didn't respond just now. Approve again in a moment.");
+    expect(model.approvalError?.details).toBe("No response.");
+  });
+
+  it("stays open on a failed approval whose request has left the pending set, with nothing left to press", async () => {
+    // An approval the gateway took but the workspace would not ends the
+    // request; the reason it gives is what the reader still has to read.
+    let closed = false;
+    const gone: string[] = [];
+    const model = makeModel(
+      {
+        "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PREDEFINED_DETAIL }),
+        "POST /requests/evt-a/grant": () =>
+          jsonResponse({ error: "Imbue Studio couldn't apply this permission to the workspace." }, 502),
+      },
+      () => {
+        closed = true;
+      },
+      undefined,
+      { onGone: (requestId) => gone.push(requestId) },
+    );
+    model.cards = [CARD_A];
+    model.isListLoaded = true;
+    await model.select("evt-a");
+    await model.approve();
+
+    await model.refreshIfPendingChanged([]);
+
+    expect(closed).toBe(false);
+    expect(gone).toEqual(["evt-a"]);
+    expect(model.isRequestGone).toBe(true);
+    expect(model.isApproveAllowed()).toBe(false);
+    expect(model.approvalError?.message).toBe("Imbue Studio couldn't apply this permission to the workspace.");
   });
 
   it("tells the list a request is gone before handing the reader back to it", async () => {
@@ -1300,7 +1533,7 @@ describe("InboxModel custom-service requests", () => {
 
     // Still pending, now asking: not an error, and not a denial.
     expect(model.manualCredentialsPrompt()).toEqual(prompt);
-    expect(model.errorMessage).toBeNull();
+    expect(model.approvalError).toBeNull();
     expect(model.isManualCredentialsFailureShown()).toBe(false);
     expect(model.isApproveAllowed()).toBe(false);
 
@@ -1567,8 +1800,7 @@ describe("the Chrome sign-in import offer", () => {
       ...OFFER_DUE,
       ...MARKED,
       ...GRANTED,
-      "POST /ui/api/settings/browser-import": () =>
-        jsonResponse({ is_success: false, detail: "Google Chrome is not installed." }),
+      "POST /ui/api/settings/browser-import": () => jsonResponse(chromeMissingOutcome()),
     });
     await model.approve();
     await settle();
@@ -1576,7 +1808,9 @@ describe("the Chrome sign-in import offer", () => {
     await model.acceptBrowserImport();
 
     expect(model.isBrowserImportOfferOpen).toBe(true);
-    expect(model.browserImport.outcome?.detail).toBe("Google Chrome is not installed.");
+    expect(model.browserImport.error?.message).toBe(
+      "Imbue Studio couldn't find Google Chrome's cookies on this computer.",
+    );
     expect(calls).not.toContain("POST /requests/evt-a/grant");
   });
 

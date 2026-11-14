@@ -382,12 +382,16 @@ class NotificationOutcome(LowerCaseStrEnum):
 
     CLOSED is the feed's own outcome for a request that vanished without a
     recorded response (e.g. its workspace was destroyed); grant/deny
-    responses only ever record APPROVED or DENIED.
+    responses only ever record APPROVED or DENIED. UNLISTED is the feed's own
+    state for a request that is still pending but whose workspace is not in
+    the current list, so it cannot be opened from here: the agent is still
+    waiting on it.
     """
 
     APPROVED = auto()
     DENIED = auto()
     CLOSED = auto()
+    UNLISTED = auto()
 
 
 class NotificationKind(LowerCaseStrEnum):
@@ -422,7 +426,8 @@ class UiNotificationEntry(FrozenModel):
     )
     outcome: NotificationOutcome | None = Field(
         description="How a permission request resolved; None while unresolved and for every other kind, "
-        "closed when it was auto-resolved because the request vanished (e.g. workspace destroyed)"
+        "closed when it was auto-resolved because the request vanished (e.g. workspace destroyed), "
+        "unlisted while the request is still pending but its workspace is not in the current list"
     )
     title: str = Field(description="Headline snapshotted at creation (request title, chat name, or event name)")
     body: str = Field(description="Detail line snapshotted at creation; may be empty")
@@ -1260,6 +1265,14 @@ class ErrorRemedy(UpperCaseStrEnum):
     ASK_AGENT = auto()
 
 
+class UiFailureNotice(FrozenModel):
+    """A failure as the SPA shows it: our sentence, the technical text behind See details, and any remedy."""
+
+    message: str = Field(description="The sentence on the visible line")
+    detail: str = Field(description="The technical text behind See details; may be empty")
+    remedy: ErrorRemedy | None = Field(description="The button that fixes it, when the app can run the fix")
+
+
 class UiWorkspacePermissions(FrozenModel):
     """Everything the workspace Permissions pane renders, in one response.
 
@@ -1299,6 +1312,12 @@ class UiWorkspacePermissions(FrozenModel):
         description="Pending permission requests from this workspace, oldest first"
     )
     permissions_unavailable: bool = Field(description="True when the permissions could not be loaded at all")
+    unavailable_notice: UiFailureNotice | None = Field(
+        default=None, description="Why the permissions could not be loaded; set exactly when they could not"
+    )
+    can_share_files: bool = Field(
+        default=True, description="False on a desktop with no device id, which cannot share its files at all"
+    )
     is_sync_supported: bool = Field(
         default=False, description="False when this build cannot keep a shared path in sync at all"
     )

@@ -219,7 +219,12 @@ login pages of the services latchkey knows, into the encrypted browser state
 desktop's, so one import serves every machine's sign-ins. Chrome itself is
 not changed. The run takes tens of seconds (the profile is copied and read
 back through a headless Chrome) and needs Chrome installed with a default
-profile; otherwise it fails with latchkey's reason.
+profile. Without one, latchkey gives no code, so the desktop client
+recognizes its wording and answers `is_chrome_missing` on the result: the
+user is told "Imbue Studio couldn't find Google Chrome's cookies on this
+computer.", with latchkey's reason behind See details and no Report a bug,
+and the dialog leaves out "Try again", which cannot help until Chrome is set
+up.
 
 Imbue Studio offers it **once**, at the moment it is worth the most: the
 first Approve that is about to open latchkey's browser for a sign-in (nothing
@@ -256,8 +261,9 @@ Mac: open System Settings > Privacy & Security > Full Disk Access (an "Open
 System Settings" button opens that list directly in the desktop app), turn
 on Imbue Studio, then quit and reopen the app and run the import again from
 Settings. Elsewhere: make Chrome's profile folder readable by the account
-running the app (latchkey's sentence, which names the folder, is shown
-underneath), then run the import again from Settings. The dialog leaves out
+running the app, then run the import again from Settings. Latchkey's
+sentence, which names the folder, is behind See details in both cases; there
+is no Report a bug, since the steps are the fix. The dialog leaves out
 "Try again" in both cases, since nothing changes until the permission has
 been granted.
 
@@ -567,12 +573,14 @@ Details worth knowing:
 
   * The value is **malformed** -- the service's own shape check rejects it
     (`latchkey auth set-nocurl` exits non-zero, e.g. "doesn't look like an
-    AWS access key ID"). Its explanation is surfaced verbatim, minus the
-    usage lines latchkey appends: those either restate a terminal command
-    Imbue Studio never shows or, for AWS, print the bare `<access-key-id>`
-    placeholder as the "example", which is worse than nothing next to an
-    input already labelled that way. `describe_credential_command_failure`
-    does that trimming (and caps a crash dump).
+    AWS access key ID"). The form says Imbue Studio couldn't store those
+    credentials and to check them and approve again, and the explanation
+    sits behind See details, minus the usage lines latchkey appends: those
+    either restate a terminal command Imbue Studio never shows or, for AWS,
+    print the bare `<access-key-id>` placeholder as the "example", which is
+    worse than nothing next to an input already labelled that way.
+    `describe_credential_command_failure` does that trimming (and caps a
+    crash dump).
 
   * The value is **well-formed but wrong** -- mistyped within the accepted
     shape, or revoked, rotated or expired. `auth set` only validates the
@@ -581,12 +589,13 @@ Details worth knowing:
     after storing and refuses to grant unless the account's credentials
     come back usable. Note that a service Imbue Studio cannot reach reads the same
     way (latchkey reports any failed check as `invalid`), so the message
-    names that possibility too. The credentials stay stored either way, so
-    a later Approve re-checks them.
+    names that possibility too, and says to correct them if needed and
+    approve again. The credentials stay stored either way, so a later
+    Approve re-checks them.
 
   In both cases the form comes back with the typed values intact and the
-  reason in place of its instruction -- as the design system's `error`
-  `Notice` (red, `role="alert"`), and scrolled into view with the smallest
+  reason in place of its instruction -- as an error notice with no Report
+  a bug (fixing the values is the remedy), and scrolled into view with the smallest
   movement that shows it, since the form sits above a permission list that
   can leave it off-screen from where the Approve button is. The scroll is
   handed out once per failed approval, so later redraws never fight the
@@ -596,6 +605,15 @@ Details worth knowing:
 * If the example has no `<placeholder>` at all (or is not a latchkey
   invocation), there is nothing to ask for: the dialog shows that as an
   error and offers **no Approve button**, leaving Deny as the only action.
+  When no stored account on the asking machine is usable either, the user is
+  never asked: as the request arrives, the desktop client denies it and tells
+  the agent why, so the agent can tell the user. The accounts that count are
+  the asking machine's, so this is judged only when this computer holds them:
+  for a remote machine with a store of its own here, or for a workspace on a
+  provider that runs on this computer (docker, lima). Otherwise -- the machine
+  not placed by discovery yet, or a remote machine this computer has not
+  provisioned, whose requests would be read against this computer's own
+  accounts -- the dialog above is what the user gets.
 
 ## Desktops
 
@@ -1190,11 +1208,16 @@ the approval also [puts this computer on the service's
 route](#an-agent-asking-for-a-proxy), the desktop egress rules travel in that
 same change; a toggle, a
 revoke, a sign-out cleanup, and the grants that go through the gateway's own
-approve endpoint (cross-workspace access, file sharing, accounts) each push a
-plain snapshot. A machine that will not take one fails the action that asked
-for it: the toggle stays where it was with the reason beside it, and the
-dialog's Approve reports FAILED and leaves its request pending for a retry --
-because it is not a grant until the gateway the agent talks to can act on it.
+approve endpoint (cross-workspace access, file sharing, accounts, remote
+execution) each push a plain snapshot. A machine that will not take one fails
+the action that asked for it -- because it is not a grant until the gateway the
+agent talks to can act on it: the toggle stays where it was with the reason
+beside it, and the dialog's Approve of a service permission reports FAILED and
+leaves its request pending for a retry. A grant through the gateway's approve
+endpoint cannot be retried, since the gateway consumed the pending record when
+it approved, so the request is ended instead: the agent gets a denial saying
+the approval did not reach its workspace and to ask again, and the dialog says
+so and offers Close.
 
 **Reading is symmetrical.** Opening (or refreshing) a remote workspace's
 Permissions tab reads that machine first -- its credential store, re-encrypted

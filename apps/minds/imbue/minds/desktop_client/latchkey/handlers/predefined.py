@@ -77,6 +77,10 @@ from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import resolve_workspace_display_name
+from imbue.minds.desktop_client.latchkey.failure_copy import HOST_NOT_RESOLVED_FOR_APPROVAL_SENTENCE
+from imbue.minds.desktop_client.latchkey.failure_copy import PERMISSION_SERVICE_NOT_RUNNING_FOR_CHANGE
+from imbue.minds.desktop_client.latchkey.failure_copy import describe_gateway_failure
+from imbue.minds.desktop_client.latchkey.failure_copy import make_failure_response
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
@@ -90,6 +94,8 @@ from imbue.minds.desktop_client.latchkey.handlers.recovery import maybe_recover_
 from imbue.minds.desktop_client.latchkey.handlers.resolution import resolve_request
 from imbue.minds.desktop_client.latchkey.machine_latchkey import machine_latchkey_for_host
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
+from imbue.minds.desktop_client.latchkey.machine_operations import describe_machine_failure
+from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
 from imbue.minds.desktop_client.latchkey.permission_toggles import DesktopEgressRouteThroughThisComputer
 from imbue.minds.desktop_client.latchkey.permission_toggles import PermissionToggleError
 from imbue.minds.desktop_client.latchkey.permission_toggles import describe_implicit_permissions
@@ -110,9 +116,11 @@ from imbue.minds.desktop_client.request_handler import UiUnsupportedDetail
 from imbue.minds.desktop_client.responses import make_json_error_response
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.ui_models import ErrorRemedy
 from imbue.minds.desktop_client.ui_models import UiPermissionGrantGroup
 from imbue.minds.desktop_client.ui_models import UiPermissionGrantRow
 from imbue.minds.desktop_client.ui_models import UiWorkspaceDesktop
+from imbue.minds.desktop_client.user_facing_failure import UserFacingFailure
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.account_scopes import build_account_grant
@@ -120,8 +128,10 @@ from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import DEFAULT_ACCOUNT
 from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_SET
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyServiceInfo
 from imbue.mngr_latchkey.core import ServiceAccountCredential
+from imbue.mngr_latchkey.core import is_scopes_not_granted_failure
 from imbue.mngr_latchkey.core import read_registered_services
 from imbue.mngr_latchkey.credential_commands import CredentialCommandError
 from imbue.mngr_latchkey.credential_commands import CredentialCommandParameter
@@ -220,6 +230,14 @@ def _format_proxy_not_set_up_note(reason: str) -> str:
     return f" The proxy you asked for was not set up: {reason}"
 
 
+class LatchkeyPermissionFlowError(Exception):
+    """Raised for caller-facing programming errors (empty grants, unknown permissions)."""
+
+
+class ProxyNoLongerSupportedError(LatchkeyPermissionFlowError):
+    """Raised when the dialog's proxy switch was left on for a workspace that can no longer have a proxy."""
+
+
 def _parse_proxy_form(raw_proxy: str) -> bool:
     """Parse the dialog's proxy field. Raises :class:`LatchkeyPermissionFlowError` for anything but its two values."""
     if raw_proxy == _PROXY_FIELD_ON:
@@ -274,6 +292,15 @@ class GrantResult(FrozenModel):
             "(the request stays pending, so the agent is not notified)."
         ),
     )
+    detail: str = Field(
+        description=(
+            "The technical account of a ``FAILED`` approval or of rejected typed credentials, shown behind See "
+            "details; empty otherwise."
+        ),
+    )
+    remedy: ErrorRemedy | None = Field(
+        description="The button the dialog offers beside a ``FAILED`` approval's message; None for none.",
+    )
     manual_credentials: UiManualCredentialsPrompt | None = Field(
         description=(
             "The credential form the dialog must render (with its message) before the next Approve "
@@ -282,8 +309,15 @@ class GrantResult(FrozenModel):
     )
 
 
-class LatchkeyPermissionFlowError(Exception):
-    """Raised for caller-facing programming errors (empty grants, unknown permissions)."""
+def _failed_grant(failure: UserFacingFailure, detail: str) -> GrantResult:
+    """A ``FAILED`` approval: the request stays pending and the dialog shows ``failure``."""
+    return GrantResult(
+        outcome=GrantOutcome.FAILED,
+        message=failure.message,
+        detail=detail,
+        remedy=failure.remedy,
+        manual_credentials=None,
+    )
 
 
 def _format_granted_message(service_display_name: str, granted: Sequence[str], account: str) -> str:
@@ -300,11 +334,51 @@ def _format_denied_message(service_display_name: str) -> str:
 
 
 def _format_auth_failed_message(service_display_name: str, detail: str) -> str:
-    suffix = f" Reason: {detail}" if detail else ""
+    if is_scopes_not_granted_failure(detail):
+        return (
+            f"{service_display_name} wasn't given all the access this needs. Approve again and allow everything "
+            f"on {service_display_name}'s sign-in page."
+        )
     return (
-        f"Sign-in to {service_display_name} did not complete, so the permission could not be "
-        f"granted at the moment.{suffix}"
+        f"Signing in to {service_display_name} didn't finish, so nothing was granted. *Try approving again* -- a "
+        "sign-in window will open."
     )
+
+
+def _format_machine_grant_failed_message(service_display_name: str) -> str:
+    return (
+        f"Imbue Studio couldn't apply this permission to the workspace, so the agent can't use "
+        f"{service_display_name} yet. The request is still waiting -- try approving again."
+    )
+
+
+def _format_proxy_failed_message(service_display_name: str) -> str:
+    return (
+        f"Imbue Studio couldn't send {service_display_name}'s requests through this computer, so nothing was "
+        'approved yet. Try again, or turn off "Proxy through my desktop" and approve without it.'
+    )
+
+
+def _format_denied_cannot_set_up_message(service_display_name: str) -> str:
+    return (
+        f"Your permission request for {service_display_name} was denied: {service_display_name} has no browser "
+        "sign-in, and Imbue Studio can't tell which credentials it needs, so the user cannot set it up from the "
+        "permission dialog."
+    )
+
+
+# The route-level guards an Approve can stop at before any grant work: nothing on
+# screen could have caused them, so the dialog says only that it failed.
+_APPROVAL_FAILED_SENTENCE: Final[str] = (
+    "Something went wrong approving this request. Try again. If this persists, report a bug."
+)
+_PROXY_NO_LONGER_SUPPORTED_SENTENCE: Final[str] = (
+    'This workspace can\'t send its requests through this computer any more. Turn off "Proxy through my desktop" '
+    "and approve again."
+)
+_GRANT_NOT_SAVED_SENTENCE: Final[str] = (
+    "Imbue Studio couldn't save this permission just now. *Try approving again in a moment.*"
+)
 
 
 class ManualCredentialsForm(FrozenModel):
@@ -354,10 +428,7 @@ def _format_unusable_credential_form_message(service_display_name: str, is_brows
             f"Imbue Studio cannot work out what {service_display_name} would need typed in, so sign in through "
             "the browser instead."
         )
-    return (
-        f"{service_display_name} does not support browser sign-in, and Imbue Studio cannot work out what it "
-        "would need typed in. It has to be connected some other way."
-    )
+    return f"Imbue Studio can't set up {service_display_name} from here yet. You can deny this request -- the agent is told."
 
 
 @pure
@@ -428,15 +499,18 @@ def _build_manual_credentials_form(
     )
 
 
-def _manual_credentials_result(message: str, prompt: UiManualCredentialsPrompt) -> GrantResult:
+def _manual_credentials_result(message: str, prompt: UiManualCredentialsPrompt, detail: str = "") -> GrantResult:
     """Build the result that leaves the request pending and re-shows the credential form.
 
     ``message`` replaces the prompt's own instruction, so the dialog explains
-    what went wrong with the attempt instead of repeating the instruction.
+    what went wrong with the attempt instead of repeating the instruction;
+    ``detail`` is latchkey's account of a rejection, behind See details.
     """
     return GrantResult(
         outcome=GrantOutcome.NEEDS_MANUAL_CREDENTIALS,
         message=message,
+        detail=detail,
+        remedy=None,
         manual_credentials=prompt.model_copy_update(to_update(prompt.field_ref().message, message)),
     )
 
@@ -833,7 +907,9 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             try:
                 self.refresh_machine_copies(str(agent_id))
             except MachineOperationError as e:
-                return GrantResult(outcome=GrantOutcome.FAILED, message=str(e), manual_credentials=None)
+                return _failed_grant(
+                    describe_machine_failure(e, _format_proxy_failed_message(service_info.display_name)), str(e)
+                )
 
         # Credentials belong to the machine the agent runs on, so the sign-in
         # (and everything it reads back) happens against that machine's own
@@ -866,21 +942,29 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         # grant once the machine has taken it, so a machine that will not fails
         # the approval outright and leaves the request pending for a retry.
         proxied: DesktopEgressRouteThroughThisComputer | None = None
-        try:
-            if desktop_egress.is_this_computer_put_first:
+        if desktop_egress.is_this_computer_put_first:
+            proxy_failed_message = _format_proxy_failed_message(service_info.display_name)
+            try:
                 proxied = self._put_this_computer_first_on_route(agent_id, service_info, resolved)
-            # A route that was changed took the grant to the machine with it.
-            if proxied is None or not proxied.is_this_computer_added:
+            except PermissionToggleError as e:
+                return _failed_grant(UserFacingFailure(message=proxy_failed_message, remedy=None), str(e))
+            except MachineOperationError as e:
+                return _failed_grant(describe_machine_failure(e, proxy_failed_message), str(e))
+            except LatchkeyGatewayClientError as e:
+                logger.warning("Could not set the route of {} via the gateway: {}", service_info.name, e)
+                return _failed_grant(
+                    describe_gateway_failure(e, proxy_failed_message, PERMISSION_SERVICE_NOT_RUNNING_FOR_CHANGE),
+                    str(e),
+                )
+        # A route that was changed took the grant to the machine with it.
+        if proxied is None or not proxied.is_this_computer_added:
+            try:
                 self.carry_grant_to_machine(str(agent_id), service_info.name, resolved)
-        except (PermissionToggleError, MachineOperationError) as e:
-            return GrantResult(outcome=GrantOutcome.FAILED, message=str(e), manual_credentials=None)
-        except LatchkeyGatewayClientError as e:
-            logger.warning("Could not set the route of {} via the gateway: {}", service_info.name, e)
-            return GrantResult(
-                outcome=GrantOutcome.FAILED,
-                message=f"Could not set the route through the latchkey gateway: {e}",
-                manual_credentials=None,
-            )
+            except MachineOperationError as e:
+                return _failed_grant(
+                    describe_machine_failure(e, _format_machine_grant_failed_message(service_info.display_name)),
+                    str(e),
+                )
         desktop_egress_note = (
             desktop_egress.note if proxied is None else _format_route_note(service_info.service_display_name, proxied)
         )
@@ -897,6 +981,8 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         return GrantResult(
             outcome=GrantOutcome.GRANTED,
             message=granted_message,
+            detail="",
+            remedy=None,
             manual_credentials=None,
         )
 
@@ -995,10 +1081,9 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             # denial: leave the request pending (no response event, gateway
             # record untouched, agent not notified) so a fresh Approve click
             # can retry, and surface the reason to the user in the dialog.
-            return GrantResult(
-                outcome=GrantOutcome.FAILED,
-                message=_format_auth_failed_message(service_info.display_name, detail),
-                manual_credentials=None,
+            return _failed_grant(
+                UserFacingFailure(message=_format_auth_failed_message(service_info.display_name, detail), remedy=None),
+                detail,
             )
         return self._account_after_sign_in(machine_latchkey, service_info, accounts_before, chosen)
 
@@ -1059,22 +1144,22 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             )
         except CredentialCommandError as e:
             return _manual_credentials_result(
-                message=f"The {service_info.display_name} credentials are incomplete: {e}.",
+                message=(
+                    f"The {service_info.display_name} credentials are incomplete: {e}. Fill them in and approve again."
+                ),
                 prompt=prompt,
             )
 
         is_success, detail = machine_latchkey.auth_set_credentials(service_info.name, argv)
         if not is_success:
-            # The service itself usually says which value it did not like; its
-            # usage lines (and any crash noise) are not worth showing.
-            described_failure = describe_credential_command_failure(detail)
             return _manual_credentials_result(
                 message=(
-                    f"{service_info.display_name} rejected those credentials: {described_failure}"
-                    if described_failure
-                    else f"Storing the {service_info.display_name} credentials failed."
+                    f"Imbue Studio couldn't store those {service_info.display_name} credentials. *Check them "
+                    "and approve again.*"
                 ),
                 prompt=prompt,
+                # Which value the service did not like, without latchkey's usage lines.
+                detail=describe_credential_command_failure(detail),
             )
         return self._account_after_manual_credentials(
             machine_latchkey=machine_latchkey,
@@ -1118,7 +1203,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 message=(
                     f"{service_info.display_name} did not accept those credentials. They may be mistyped or "
                     f"no longer valid (revoked, rotated or expired), or Imbue Studio could not reach "
-                    f"{service_info.display_name} to check them."
+                    f"{service_info.display_name} to check them. Correct them if needed and approve again."
                 ),
                 prompt=prompt,
             )
@@ -1198,13 +1283,15 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             sorted(accounts_before),
             sorted(accounts_after),
         )
-        return GrantResult(
-            outcome=GrantOutcome.FAILED,
-            message=(
-                f"Could not tell which {service_info.display_name} account was signed in, so the "
-                "permission was not granted. Try approving again and picking the account explicitly."
+        return _failed_grant(
+            UserFacingFailure(
+                message=(
+                    f"Could not tell which {service_info.display_name} account was signed in, so the "
+                    "permission was not granted. *Try approving again and picking the account explicitly.*"
+                ),
+                remedy=None,
             ),
-            manual_credentials=None,
+            "",
         )
 
     def deny(
@@ -1322,8 +1409,9 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         service_info = self.services_catalog.get_by_scope(payload.scope)
         if service_info is None:
             return make_json_error_response(
-                f"Scope '{payload.scope}' is not in the gateway catalog",
+                _APPROVAL_FAILED_SENTENCE,
                 status_code=400,
+                detail=f"Scope '{payload.scope}' is not in the gateway catalog",
             )
 
         form = request.form
@@ -1347,7 +1435,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 account_name=str(form.get("account_name", "")),
             )
         except LatchkeyPermissionFlowError as e:
-            return make_json_error_response(str(e), status_code=400)
+            return make_json_error_response(_APPROVAL_FAILED_SENTENCE, status_code=400, detail=str(e))
 
         request_event_id = permission_request.request_id
         parsed_agent_id = AgentId(permission_request.agent_id)
@@ -1355,13 +1443,16 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         host_id = _resolve_host_id(backend_resolver, parsed_agent_id)
         if host_id is None:
             return make_json_error_response(
-                f"Could not resolve host for agent {parsed_agent_id}; cannot apply grant.",
+                HOST_NOT_RESOLVED_FOR_APPROVAL_SENTENCE,
                 status_code=503,
+                detail=f"Could not resolve host for agent {parsed_agent_id}; cannot apply grant.",
             )
         try:
             desktop_egress = self._decide_desktop_egress(payload, host_id, service_info, form.get(_PROXY_FIELD))
+        except ProxyNoLongerSupportedError as e:
+            return make_json_error_response(_PROXY_NO_LONGER_SUPPORTED_SENTENCE, status_code=400, detail=str(e))
         except LatchkeyPermissionFlowError as e:
-            return make_json_error_response(str(e), status_code=400)
+            return make_json_error_response(_APPROVAL_FAILED_SENTENCE, status_code=400, detail=str(e))
         try:
             grant_result = self.grant(
                 request_event_id=request_event_id,
@@ -1374,21 +1465,23 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 desktop_egress=desktop_egress,
             )
         except LatchkeyPermissionFlowError as e:
-            return make_json_error_response(str(e), status_code=400)
+            return make_json_error_response(_APPROVAL_FAILED_SENTENCE, status_code=400, detail=str(e))
         except LatchkeyGatewayClientError as e:
-            # The grant flow could not reach the gateway's permissions
-            # extension; surface that as a 502 so the dialog can show a
-            # meaningful error instead of a generic 500.
             logger.warning("Could not apply latchkey permission grant via gateway: {}", e)
-            return make_json_error_response(
-                f"Could not apply grant through the latchkey gateway: {e}",
+            return make_failure_response(
+                describe_gateway_failure(e, _GRANT_NOT_SAVED_SENTENCE, PERMISSION_SERVICE_NOT_RUNNING_FOR_CHANGE),
                 status_code=502,
+                detail=str(e),
             )
 
         response_payload: dict[str, JsonValue] = {
             "outcome": str(grant_result.outcome),
             "message": grant_result.message,
         }
+        if grant_result.detail:
+            response_payload["detail"] = grant_result.detail
+        if grant_result.remedy is not None:
+            response_payload["remedy"] = str(grant_result.remedy)
         if grant_result.manual_credentials is not None:
             response_payload["manual_credentials"] = grant_result.manual_credentials.model_dump(mode="json")
         return make_response(
@@ -1414,15 +1507,76 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
 
         request_event_id = permission_request.request_id
         parsed_agent_id = AgentId(permission_request.agent_id)
-        self.deny(
-            request_event_id=request_event_id,
-            agent_id=parsed_agent_id,
-            display_name=display_name,
-        )
+        if service_info is not None and self._is_unconnectable_from_dialog(parsed_agent_id, service_info):
+            # The dialog offered nothing but Deny, so the agent is told why rather than
+            # being left to ask again for something no one here can set up.
+            self._write_response_and_notify(
+                request_event_id=request_event_id,
+                agent_id=parsed_agent_id,
+                status=RequestStatus.DENIED,
+                message=_format_denied_cannot_set_up_message(display_name),
+            )
+        else:
+            self.deny(
+                request_event_id=request_event_id,
+                agent_id=parsed_agent_id,
+                display_name=display_name,
+            )
         return make_response(
             content=json.dumps({"outcome": "DENIED"}),
             media_type="application/json",
         )
+
+    def _is_unconnectable_from_dialog(self, agent_id: AgentId, service_info: ServicePermissionInfo) -> bool:
+        """Whether the dialog for this service offered nothing but Deny, read from the store it was built from."""
+        host_id = _resolve_host_id(get_state().backend_resolver, agent_id)
+        machine_latchkey = self._open_machine_latchkey(agent_id, host_id)
+        if machine_latchkey is None:
+            return False
+        try:
+            return self._is_unanswerable_on(machine_latchkey, service_info)
+        except LatchkeyError as e:
+            # Only the agent's message depends on this; the Deny still goes through.
+            logger.warning("Could not check whether {} could be set up for {}: {}", service_info.name, agent_id, e)
+            return False
+
+    def _is_unanswerable_on(self, machine_latchkey: Latchkey, service_info: ServicePermissionInfo) -> bool:
+        """Whether no browser sign-in, credential form or usable stored account could connect the service.
+
+        The ways in are static, so the offline probe settles the common case (a
+        service with one) without waiting on latchkey to validate accounts
+        online. A probe latchkey does not answer counts as answerable: an
+        assumed shape's empty account list would read as "nothing stored".
+        """
+        stored_service_info = machine_latchkey.services_info(service_info.name, is_offline=True)
+        if stored_service_info is None or not self._has_no_way_to_connect(
+            machine_latchkey, service_info, stored_service_info
+        ):
+            return False
+        latchkey_service_info = machine_latchkey.services_info(service_info.name)
+        return latchkey_service_info is not None and all(
+            _needs_account_credential_setup(entry.credential_status) for entry in latchkey_service_info.accounts
+        )
+
+    def _open_machine_latchkey(self, agent_id: AgentId, host_id: HostId | None) -> Latchkey | None:
+        """The asking machine's store, or ``None`` when it cannot be opened."""
+        try:
+            return self.latchkey if host_id is None else machine_latchkey_for_host(self.latchkey, host_id)
+        except PermissionOverviewError as e:
+            logger.warning("Could not open the credentials of {}: {}", agent_id, e)
+            return None
+
+    def _has_no_way_to_connect(
+        self,
+        machine_latchkey: Latchkey,
+        service_info: ServicePermissionInfo,
+        latchkey_service_info: LatchkeyServiceInfo,
+    ) -> bool:
+        """Whether neither a browser sign-in nor a credential form can connect the service."""
+        if latchkey_service_info.is_browser_auth_supported:
+            return False
+        form = self._manual_credentials_form_for(machine_latchkey, service_info, latchkey_service_info)
+        return form.parsed_command is None
 
     def _desktop_egress_unsupported_reason(self, host_id: HostId) -> str | None:
         """Why no route but the machine itself can be set for this host's services, or ``None`` when one can."""
@@ -1522,7 +1676,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 note=_format_proxy_not_set_up_note("the user turned it off."),
             )
         if unsupported_reason is not None:
-            raise LatchkeyPermissionFlowError(unsupported_reason)
+            raise ProxyNoLongerSupportedError(unsupported_reason)
         return DesktopEgressDecision(is_this_computer_put_first=True, note="")
 
     def _put_this_computer_first_on_route(

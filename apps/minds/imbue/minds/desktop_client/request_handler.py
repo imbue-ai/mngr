@@ -185,6 +185,9 @@ class UiFileSharingPermissionDetail(FrozenModel):
         default=FolderSyncConflict.NEWER,
         description="The clash rule the agent asked for (or the default), which the dialog's dropdown starts on",
     )
+    is_edited_path_shareable: bool = Field(
+        description="False on a desktop with no device id, which can share only the path the agent asked for"
+    )
     sync_unavailable_reason: str = Field(
         default="",
         description="Why the requested path cannot be synced; empty when it can. Greys the option out",

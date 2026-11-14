@@ -644,8 +644,12 @@ describe("ShellState review deep link", () => {
     expect(routeSet.mock.calls.some(([path]) => path === "/inbox")).toBe(false);
   });
 
-  it("strips a resolved or unknown review id without opening the popup", async () => {
+  it("strips a resolved or unknown review id without opening the popup, and says it is gone", async () => {
     const shell = makeShell();
+    const toasts: string[] = [];
+    shell.notificationsUi = {
+      showTransientToast: (title: string) => toasts.push(title),
+    } as unknown as NonNullable<ShellState["notificationsUi"]>;
     const routeSet = vi
       .spyOn(m.route, "set")
       .mockImplementation(() => undefined);
@@ -659,6 +663,7 @@ describe("ShellState review deep link", () => {
       undefined,
       { replace: true },
     );
+    expect(toasts).toEqual(["That request is no longer waiting for you."]);
   });
 
   it("consumes a later deep link afresh once the stripped route has landed", async () => {

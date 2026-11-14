@@ -5,6 +5,7 @@ submits grants/denies to the ``/requests/<id>/grant|deny`` routes in
 ``app.py``.
 """
 
+from collections.abc import Iterable
 from enum import auto
 from typing import Final
 from typing import Literal
@@ -123,7 +124,14 @@ def displayable_pending_requests(
     Requests from since-vanished workspaces would render as meaningless hex
     ids, so they are hidden until their host reappears.
     """
-    pending = list(pending_requests.list_pending()) if pending_requests else []
+    return displayable_among(pending_requests.list_pending() if pending_requests else (), backend_resolver)
+
+
+def displayable_among(
+    pending: Iterable[StreamedPermissionRequest],
+    backend_resolver: BackendResolverInterface,
+) -> list[StreamedPermissionRequest]:
+    """The requests in ``pending`` whose originating agent's host is currently resolvable."""
     displayable: list[StreamedPermissionRequest] = []
     for req in pending:
         try:

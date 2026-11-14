@@ -15,12 +15,21 @@
 // answer a question nobody had asked yet. The list they picked from is where
 // closing takes them (see returnToPanelAfterRequest).
 
-import type { FolderSyncConflict, UiPermissionGrantGroup, UiWorkspaceDesktop } from "../generated/ui";
+import type { ErrorRemedy, FolderSyncConflict, UiPermissionGrantGroup, UiWorkspaceDesktop } from "../generated/ui";
 import {
   BrowserImportModel,
   isBrowserImportOfferDue,
   markBrowserImportOffered,
 } from "./browserImport";
+import type { UserFacingError } from "./errors";
+import {
+  errorFromResponse,
+  errorFromSentenceResponse,
+  fallbackErrorSentence,
+  isRequestResolvedFromBody,
+  readResponseBody,
+  remedyFromBody,
+} from "./errors";
 import { forgetWarmedRequestDetails, readWarmedRequestDetail, requestDetailUrl } from "./requestDetailPrefetch";
 
 export interface InboxCard {
@@ -138,6 +147,9 @@ export interface FileSharingPermissionDetail {
   sync_conflict: FolderSyncConflict;
   /** Why the requested path cannot be synced; empty when it can. */
   sync_unavailable_reason: string;
+  /** False on a desktop with no device id, which can share only the path
+   * the agent asked for: Approve waits while the path is edited. */
+  is_edited_path_shareable: boolean;
 }
 
 export interface WorkspacePermissionDetail {
@@ -241,8 +253,22 @@ export interface GrantResponse {
   outcome:
     "GRANTED" | "DENIED" | "NEEDS_MANUAL_CREDENTIALS" | "FAILED" | string;
   message?: string;
+  /** A FAILED approval's technical account, or why typed credentials were
+   * rejected, behind See details. */
+  detail?: string;
+  /** The button a FAILED approval's message asks for. */
+  remedy?: ErrorRemedy;
   manual_credentials?: ManualCredentialsPrompt;
 }
+
+/** What failed, for the fallback sentence of an Approve refused with no
+ * sentence of its own. */
+const APPROVE_WHAT_FAILED = "Imbue Studio couldn't answer this request";
+
+/** An Approve that never reached Imbue Studio on this computer: the app's own
+ * local server did not answer, so no internet claim. */
+const APPROVE_NO_RESPONSE_SENTENCE =
+  "Imbue Studio didn't respond just now. Approve again in a moment.";
 
 /** Expand a leading `~` / `~/` to the home dir (port of the legacy dialog JS;
  * `~user` stays unchanged so the roots check rejects it, matching the server). */
@@ -329,8 +355,9 @@ export interface InboxModelOptions {
    * it without waiting for its own read. No verdict: this page did not give
    * one, and nothing downstream should be told there was one. */
   onGone?: (requestId: string) => void;
-  /** Called when the request under review has a verdict (or is gone), so the
-   * page should dismiss. Fires at most once. */
+  /** Called when the request under review has a verdict (or is gone), or the
+   * user closes a request the page can't show, so the page should dismiss.
+   * Fires at most once. */
   onClose?: () => void;
   /** Called the moment a request gets a verdict, before the page closes. */
   onResolved?: (resolved: ResolvedRequest) => void;
@@ -358,13 +385,24 @@ export class InboxModel {
   isDetailLoading = false;
   isApproveBusy = false;
   isProgressShown = false;
-  errorMessage: string | null = null;
+  /** Why the last Approve did not go through; null while none failed. */
+  approvalError: UserFacingError | null = null;
+  /** The button that error asks for, when the app can run its fix. */
+  approvalRemedy: ErrorRemedy | null = null;
+  /** Whether that error offers a bug report: not for a request someone else
+   * already answered, which is no failure. */
+  isApprovalErrorReportable = true;
+  /** Set when the request on screen has a verdict while its failed approval is
+   * still being read: the reason stays up with a Close, and the answer buttons
+   * go, since nothing can answer it any more. */
+  isRequestGone = false;
   /** Prompt returned by the last Approve; it replaces the detail's own copy so
    * the form explains what went wrong with the attempt. ``isRejection`` says
    * whether that attempt carried credentials: a custom service's form first
    * arrives the same way, in answer to an Approve that had nothing to send,
    * and that is no failure. */
-  manualCredentialsFeedback: { prompt: ManualCredentialsPrompt; isRejection: boolean } | null = null;
+  manualCredentialsFeedback: { prompt: ManualCredentialsPrompt; isRejection: boolean; details: string } | null =
+    null;
   /** Set when an approval comes back unresolved, so the view scrolls the notice
    * the user has to read into view -- it can be a scroll away from the buttons
    * they just clicked. Consumed once, by whichever notice rendered. */
@@ -411,9 +449,9 @@ export class InboxModel {
   private isListLoading = false;
   /** Earliest the list may be asked for again after a failure. */
   private nextListRetryAtMs = 0;
-  /** The paced retry after a failure, so the promise the error notice makes
-   * ("they will be retried automatically") is kept without a redraw to drive
-   * it -- and cancelled with the page, so a closed one stops asking. */
+  /** The paced retry after a failure, so the spinner beside the error notice
+   * is honest without a redraw to drive it -- and cancelled with the page, so a
+   * closed one stops asking. */
   private listRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
   private readonly options: InboxModelOptions;
@@ -456,7 +494,9 @@ export class InboxModel {
    * one would navigate a page that is already on its way out. */
   private isClosed = false;
 
-  private close(): void {
+  /** Dismiss the page: after a verdict, or from the Close a failure that ended
+   * the request, or a request the page can't show, offers. */
+  close(): void {
     if (this.isClosed) return;
     this.isClosed = true;
     this.dispose();
@@ -514,8 +554,7 @@ export class InboxModel {
   }
 
   private markListLoadFailed(): void {
-    this.listErrorMessage =
-      "Could not load requests. They will be retried automatically.";
+    this.listErrorMessage = "Imbue Studio couldn't load your requests.";
     // The attempt completed: the popup's live-refresh gate (isListLoaded)
     // must open so the store-driven reconciliation keeps running...
     this.isListLoaded = true;
@@ -540,7 +579,10 @@ export class InboxModel {
     if (this.denyingIds.has(id)) return;
     this.selectedId = id;
     this.isDetailLoading = true;
-    this.errorMessage = null;
+    this.approvalError = null;
+    this.approvalRemedy = null;
+    this.isApprovalErrorReportable = true;
+    this.isRequestGone = false;
     this.manualCredentialsFeedback = null;
     this.isFailureScrollPending = false;
     this.manualCredentialValues = {};
@@ -657,7 +699,8 @@ export class InboxModel {
    * that failed is an attempt now abandoned, so its notice goes. */
   chooseManualCredentialEntry(): void {
     this.isManualCredentialEntryChosen = true;
-    this.errorMessage = null;
+    this.approvalError = null;
+    this.approvalRemedy = null;
     this.redraw();
   }
 
@@ -668,7 +711,8 @@ export class InboxModel {
   chooseBrowserSignIn(): void {
     this.isManualCredentialEntryChosen = false;
     this.manualCredentialsFeedback = null;
-    this.errorMessage = null;
+    this.approvalError = null;
+    this.approvalRemedy = null;
     this.redraw();
   }
 
@@ -726,7 +770,7 @@ export class InboxModel {
   /** Whether the Approve button is enabled for the current detail + edits. */
   isApproveAllowed(): boolean {
     const detail = this.detail;
-    if (detail === null || this.isApproveBusy) return false;
+    if (detail === null || this.isApproveBusy || this.isRequestGone) return false;
     if (this.isManualCredentialFormIncomplete()) return false;
     if (detail.kind === "predefined" || detail.kind === "workspace") {
       return this.checkedPermissions.size > 0;
@@ -738,7 +782,8 @@ export class InboxModel {
       );
       return (
         expanded.length > 0 &&
-        isSharePathWithinRoots(expanded, detail.allowed_roots)
+        isSharePathWithinRoots(expanded, detail.allowed_roots) &&
+        !this.isEditedPathUnshareable()
       );
     }
     if (detail.kind === "accounts") return true;
@@ -770,6 +815,14 @@ export class InboxModel {
     }
     this.isPermissionEditorShown = false;
     this.redraw();
+  }
+
+  /** Whether the path was edited on a desktop that can share only the path
+   * the agent asked for (one with no device id to name the file's desktop). */
+  isEditedPathUnshareable(): boolean {
+    const detail = this.detail;
+    if (detail === null || detail.kind !== "file_sharing" || detail.is_edited_path_shareable) return false;
+    return expandSharePathHome(this.filePathValue.trim(), detail.home_dir) !== detail.file_path;
   }
 
   /** Non-empty but out-of-roots file path: show the instant hint (legacy parity). */
@@ -951,6 +1004,10 @@ export class InboxModel {
     this.redraw();
   }
 
+  /** An approval that did not resolve its request reports on screen only while
+   * that request is still the one shown: the popup can have been re-pointed
+   * meanwhile (a browser sign-in takes a while), and the failure is not about
+   * the request it shows now. */
   private async submitApproval(): Promise<void> {
     const resolvedId = this.selectedId;
     if (resolvedId === null || !this.isApproveAllowed()) return;
@@ -958,7 +1015,8 @@ export class InboxModel {
     const isSendingCredentials = body.has("manual_credentials");
     this.isApproveBusy = true;
     this.isProgressShown = true;
-    this.errorMessage = null;
+    this.approvalError = null;
+    this.approvalRemedy = null;
     // Drop the previous attempt's feedback; the form itself stays visible
     // (it belongs to the detail) with everything the user typed.
     this.manualCredentialsFeedback = null;
@@ -969,8 +1027,21 @@ export class InboxModel {
         body,
       });
       if (!response.ok) {
-        const text = await response.text();
-        throw new Error(text || `HTTP ${response.status}`);
+        const body = await readResponseBody(response);
+        const isResolved = isRequestResolvedFromBody(body);
+        if (isResolved) this.markRequestGone(resolvedId);
+        if (this.selectedId !== resolvedId) return;
+        this.showApprovalFailure(
+          errorFromSentenceResponse(
+            APPROVE_WHAT_FAILED,
+            { status: response.status, body },
+            { isRetryable: !isResolved },
+          ),
+          remedyFromBody(body),
+          // 409: someone else answered it first.
+          response.status !== 409,
+        );
+        return;
       }
       const data = (await response.json()) as GrantResponse;
       if (data.outcome === "GRANTED" || data.outcome === "DENIED") {
@@ -981,6 +1052,7 @@ export class InboxModel {
         this.close();
         return;
       }
+      if (this.selectedId !== resolvedId) return;
       this.isProgressShown = false;
       if (data.outcome === "NEEDS_MANUAL_CREDENTIALS") {
         // Keep whatever the user already typed: a rejected credential is
@@ -988,23 +1060,51 @@ export class InboxModel {
         this.manualCredentialsFeedback = {
           prompt: data.manual_credentials ?? { parameters: [], message: data.message ?? "" },
           isRejection: isSendingCredentials,
+          details: data.detail ?? "",
         };
         this.isFailureScrollPending = this.isManualCredentialsFailureShown();
       } else {
         // FAILED (and anything unrecognized): request stays pending; show
         // the reason, scrolled into view, and let the user retry.
-        this.isFailureScrollPending = true;
-        this.errorMessage =
-          data.message ?? "Approval failed; please try again.";
+        this.showApprovalFailure(
+          {
+            message: data.message || fallbackErrorSentence(APPROVE_WHAT_FAILED),
+            details: data.detail ?? "",
+          },
+          data.remedy ?? null,
+        );
       }
-    } catch (error) {
-      this.isProgressShown = false;
-      this.isFailureScrollPending = true;
-      this.errorMessage = error instanceof Error ? error.message : String(error);
+    } catch {
+      if (this.selectedId !== resolvedId) return;
+      this.showApprovalFailure(
+        errorFromResponse(
+          APPROVE_WHAT_FAILED,
+          { status: 0, body: null },
+          { plainReason: APPROVE_NO_RESPONSE_SENTENCE },
+        ),
+        null,
+      );
     } finally {
       this.isApproveBusy = false;
       this.redraw();
     }
+  }
+
+  private showApprovalFailure(error: UserFacingError, remedy: ErrorRemedy | null, isReportable = true): void {
+    this.isProgressShown = false;
+    this.isFailureScrollPending = true;
+    this.approvalError = error;
+    this.approvalRemedy = remedy;
+    this.isApprovalErrorReportable = isReportable;
+  }
+
+  /** `requestId` has a verdict while its failure is still being read: the list
+   * drops it now, and if it is still the one on screen the dialog keeps the
+   * reason up with only Close to press. The popup can have been re-pointed
+   * while the approval ran, and the request it shows then can still be answered. */
+  private markRequestGone(requestId: string): void {
+    this.options.onGone?.(requestId);
+    if (this.selectedId === requestId) this.isRequestGone = true;
   }
 
   deny(): void {
@@ -1055,6 +1155,13 @@ export class InboxModel {
       // The list it came from is told first -- it is what the closing page
       // hands the reader back to, and a row for a request that is already gone
       // is exactly what it must not hand them back to.
+      if (this.approvalError !== null) {
+        // The failure that ended it (an approval the workspace would not
+        // take) is still being read; it goes when the reader closes it.
+        this.markRequestGone(selected);
+        this.redraw();
+        return;
+      }
       this.options.onGone?.(selected);
       this.close();
       return;

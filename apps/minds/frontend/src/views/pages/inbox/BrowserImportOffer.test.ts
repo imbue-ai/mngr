@@ -4,13 +4,17 @@ import {
   allText,
   attrsOf,
   byId,
+  chromeMissingOutcome,
   collectVnodes,
+  failedImportOutcome,
   renderDeep,
   renderRoot,
+  setFailedImport,
   unreadableChromeProfileOutcome,
   withMindsNative,
 } from "../../../testing";
 import type { AnyVnode } from "../../../testing";
+import { ErrorNotice } from "../../components/ErrorDisplay";
 import { BrowserImportOffer } from "./BrowserImportOffer";
 
 function render(model: InboxModel): AnyVnode[] {
@@ -65,19 +69,15 @@ describe("BrowserImportOffer", () => {
     expect(ids(nodes)).not.toContain("browser-import-accept");
   });
 
-  it("after a failed import, shows the reason and offers to go on to the sign-in", () => {
+  it("after a failed import, shows the reason and offers to try again or go on to the sign-in", () => {
     const model = new InboxModel();
     model.isBrowserImportOfferOpen = true;
-    model.browserImport.outcome = {
-      is_success: false,
-      detail: "Google Chrome is not installed.",
-      error_code: null,
-      is_full_disk_access_needed: false,
-    };
+    const error = setFailedImport(model.browserImport, failedImportOutcome());
 
     const nodes = render(model);
 
-    expect(allText(nodes)).toContain("Google Chrome is not installed.");
+    const notice = collectVnodes(nodes).find((vnode) => vnode.tag === ErrorNotice);
+    expect(notice === undefined ? null : attrsOf(notice).error).toEqual(error);
     // The question is answered: the outcome replaces the offer's pitch.
     expect(allText(nodes)).toContain("Couldn't import your Chrome cookies");
     expect(allText(nodes)).not.toContain("about to open a browser window");
@@ -89,6 +89,22 @@ describe("BrowserImportOffer", () => {
       ]),
     );
     expect(ids(nodes)).not.toContain("browser-import-accept");
+  });
+
+  it("leaves Try again and Report a bug out when this computer has no Chrome to import from", () => {
+    const model = new InboxModel();
+    model.isBrowserImportOfferOpen = true;
+    setFailedImport(model.browserImport, chromeMissingOutcome());
+
+    const nodes = renderThrough(model);
+
+    expect(allText(nodes)).toContain(
+      "Imbue Studio couldn't find Google Chrome's cookies on this computer.",
+    );
+    expect(allText(nodes)).toContain("See details");
+    expect(allText(nodes)).not.toContain("Report a bug");
+    expect(ids(nodes)).not.toContain("browser-import-retry");
+    expect(ids(nodes)).toContain("browser-import-continue");
   });
 
   it("after an import macOS refused, explains Full Disk Access instead of quoting the error, with no retry", async () => {
@@ -111,6 +127,30 @@ describe("BrowserImportOffer", () => {
         const openButton = byId(nodes, "browser-import-open-full-disk-access");
         (attrsOf(openButton!).onclick as () => void)();
         expect(openFullDiskAccessSettings).toHaveBeenCalledTimes(1);
+      },
+    );
+  });
+
+  it("draws Continue to sign in secondary while the Full Disk Access notice leads with its own button, and primary when it has none", async () => {
+    const continueVariant = (model: InboxModel): unknown =>
+      attrsOf(byId(render(model), "browser-import-continue")!).variant;
+    const model = new InboxModel();
+    model.isBrowserImportOfferOpen = true;
+    model.browserImport.outcome = unreadableChromeProfileOutcome();
+
+    // The browser build: the notice has no button, so going on is the one.
+    expect(continueVariant(model)).toBe("primary");
+
+    await withMindsNative(
+      {
+        platform: "darwin",
+        openFullDiskAccessSettings: async () => true,
+        relaunchApp: () => undefined,
+      },
+      async () => {
+        expect(continueVariant(model)).toBe("secondary");
+        await model.browserImport.openFullDiskAccessSettings();
+        expect(continueVariant(model)).toBe("secondary");
       },
     );
   });
@@ -150,10 +190,10 @@ describe("BrowserImportOffer", () => {
     expect(ids(nodes)).toContain("browser-import-unreadable-profile");
     expect(allText(nodes)).toContain("readable by the account running");
     expect(allText(nodes)).not.toContain("Full Disk Access");
-    // Latchkey's sentence names the path, so it stays.
-    expect(allText(nodes)).toContain(
-      "The Google Chrome profile could not be read: EPERM.",
-    );
+    // Latchkey's reason is behind See details, and the steps are the fix.
+    expect(allText(nodes)).not.toContain("EPERM");
+    expect(allText(nodes)).toContain("See details");
+    expect(allText(nodes)).not.toContain("Report a bug");
     expect(ids(nodes)).not.toContain("browser-import-open-full-disk-access");
     expect(ids(nodes)).not.toContain("browser-import-retry");
     expect(ids(nodes)).toContain("browser-import-continue");

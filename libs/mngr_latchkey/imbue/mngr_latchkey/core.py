@@ -1134,6 +1134,32 @@ def summarize_latchkey_failure(raw_output: str, fallback: str) -> str:
     return summary
 
 
+# How a strict sign-in (``latchkey auth browser --strict``) words a consent
+# screen left with some of the asked-for access unticked: latchkey's
+# ``ScopesNotGrantedError``, "<service> login did not grant all the permissions
+# it asked for. Not granted: ...".
+_SCOPES_NOT_GRANTED_MARKER: Final[str] = "did not grant all the permissions it asked for"
+
+
+def is_scopes_not_granted_failure(detail: str) -> bool:
+    """Whether a failed sign-in's detail says the user granted less access than the service asked for."""
+    return _SCOPES_NOT_GRANTED_MARKER in detail
+
+
+# How ``latchkey auth import-chrome`` words the two failures that mean there is
+# nothing on this computer to import: its ``ChromeNotFoundError`` and
+# ``ChromeProfileNotFoundError``.
+_CHROME_PROFILE_MISSING_MARKERS: Final[tuple[str, ...]] = (
+    "Google Chrome is not installed",
+    "No default Google Chrome profile found",
+)
+
+
+def is_chrome_profile_missing_failure(detail: str) -> bool:
+    """Whether a failed Chrome import's detail says this computer has no Chrome profile to import from."""
+    return any(marker in detail for marker in _CHROME_PROFILE_MISSING_MARKERS)
+
+
 class LatchkeyErrorCode(UpperCaseStrEnum):
     """The machine-readable failure codes latchkey (>= 3.19) prints for the failures a surface can act on.
 

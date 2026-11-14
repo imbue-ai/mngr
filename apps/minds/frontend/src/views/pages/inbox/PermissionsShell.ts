@@ -6,8 +6,10 @@
 
 import m from "mithril";
 import type { InboxModel } from "../../../models/inbox";
+import type { ErrorAction } from "../../../models/errors";
+import { remedyActions } from "../../components/errorRemedies";
 import { Button } from "../../components/Button";
-import { Notice } from "../../components/Notice";
+import { ErrorNotice } from "../../components/ErrorDisplay";
 import { Spinner } from "../../components/Spinner";
 
 const TEXT_INPUT_CLASS =
@@ -27,14 +29,16 @@ function scrollFailureIntoView(model: InboxModel, vnode: m.VnodeDOM): void {
 }
 
 /** The credential form's heading: the opening instruction, or -- once an
- * attempt has failed -- that attempt's reason, as an error notice.
+ * attempt has failed -- that attempt's reason, as an error notice with what
+ * latchkey said about it behind See details. No Report a bug: fixing the
+ * values is the remedy.
  *
  * A failure also carries the scroll-into-view hooks, on a plain wrapper because
  * that is what mithril's typings accept lifecycle hooks on. */
 function manualCredentialsMessage(model: InboxModel, message: string): m.Children {
-  const attrs = { id: "permissions-manual-credentials-message", role: "alert" };
+  const id = "permissions-manual-credentials-message";
   if (!model.isManualCredentialsFailureShown()) {
-    return m("p", { ...attrs, class: "type-body text-secondary" }, message);
+    return m("p", { id, role: "alert", class: "type-body text-secondary" }, message);
   }
   return m(
     "div",
@@ -42,8 +46,20 @@ function manualCredentialsMessage(model: InboxModel, message: string): m.Childre
       oncreate: (vnode: m.VnodeDOM) => scrollFailureIntoView(model, vnode),
       onupdate: (vnode: m.VnodeDOM) => scrollFailureIntoView(model, vnode),
     },
-    m(Notice, { variant: "error", ...attrs }, message),
+    m(ErrorNotice, {
+      id,
+      error: { message, details: model.manualCredentialsFeedback?.details ?? "" },
+      isBugReportOffered: false,
+    }),
   );
+}
+
+/** The buttons under a failed approval: Close first once the request has a
+ * verdict (nothing can answer it any more), then the remedy its refusal names. */
+function approvalErrorActions(model: InboxModel): ErrorAction[] {
+  const remedies = remedyActions(model.approvalRemedy);
+  if (!model.isRequestGone) return remedies;
+  return [{ label: "Close", onclick: () => model.close() }, ...remedies];
 }
 
 /** One labeled input per value the service's credential command needs, plus the
@@ -188,8 +204,9 @@ export function PermissionsShell(): m.Component<PermissionsShellAttrs> {
         manualCredentialsForm(model),
         credentialEntrySwitch ?? null,
         body,
-        // Right-aligned, Deny then Approve, each in its answer's color.
-        m("div", { class: "flex items-center justify-end gap-2" }, [
+        // Right-aligned, Deny then Approve, each in its answer's color. Gone
+        // with the request: once it has left the pending set nothing answers it.
+        model.isRequestGone ? null : m("div", { class: "flex items-center justify-end gap-2" }, [
           m(
             Button,
             {
@@ -222,7 +239,7 @@ export function PermissionsShell(): m.Component<PermissionsShellAttrs> {
               progressLabel,
             )
           : null,
-        model.errorMessage !== null
+        model.approvalError !== null
           ? m(
               "div",
               {
@@ -230,11 +247,12 @@ export function PermissionsShell(): m.Component<PermissionsShellAttrs> {
                 oncreate: (errorVnode: m.VnodeDOM) => scrollFailureIntoView(model, errorVnode),
                 onupdate: (errorVnode: m.VnodeDOM) => scrollFailureIntoView(model, errorVnode),
               },
-              m(
-                Notice,
-                { variant: "error", role: "alert" },
-                m("span", { id: "permissions-error-message" }, model.errorMessage),
-              ),
+              m(ErrorNotice, {
+                id: "permissions-error-notice",
+                error: model.approvalError,
+                actions: approvalErrorActions(model),
+                isBugReportOffered: model.isApprovalErrorReportable,
+              }),
             )
           : null,
         footer === null || footer === undefined

@@ -2,7 +2,8 @@ import m from "mithril";
 import { describe, expect, it } from "vitest";
 import { InboxModel } from "../../../models/inbox";
 import type { ManualCredentialsPrompt, PredefinedPermissionDetail } from "../../../models/inbox";
-import { Notice } from "../../components/Notice";
+import type { ErrorAction, UserFacingError } from "../../../models/errors";
+import { ErrorNotice } from "../../components/ErrorDisplay";
 import { PermissionsShell } from "./PermissionsShell";
 
 const AWS_PROMPT: ManualCredentialsPrompt = {
@@ -126,9 +127,8 @@ function classesOf(node: ElementVnode | undefined): string {
   return String(attrs.className ?? attrs.class ?? "");
 }
 
-/** Whether a node is the error-variant Notice (the design system's red box). */
 function isErrorNotice(node: ElementVnode | undefined): boolean {
-  return node?.tag === Notice && node?.attrs?.variant === "error";
+  return node?.tag === ErrorNotice;
 }
 
 /** Whether anything in the credential form asks to be scrolled into view. */
@@ -275,6 +275,7 @@ describe("PermissionsShell manual credentials", () => {
     model.manualCredentialsFeedback = {
       prompt: { ...AWS_PROMPT, message: "AWS did not accept those credentials." },
       isRejection: true,
+      details: "",
     };
 
     const nodes = renderShell(model);
@@ -307,6 +308,7 @@ describe("PermissionsShell manual credentials", () => {
     model.manualCredentialsFeedback = {
       prompt: { ...AWS_PROMPT, message: "AWS did not accept those credentials.", instructions: "IAM -> Users" },
       isRejection: true,
+      details: "",
     };
 
     expect(JSON.stringify(findById(renderShell(model), "permissions-manual-credentials-instructions"))).toContain(
@@ -320,6 +322,41 @@ describe("PermissionsShell manual credentials", () => {
     );
   });
 
+  it("offers Close instead of Deny and Approve once a failed approval's request has a verdict", () => {
+    let closed = false;
+    const model = new InboxModel({ onClose: () => (closed = true) });
+    model.detail = MANUAL_DETAIL;
+    model.approvalError = { message: "This request was already answered.", details: "HTTP 409" };
+    model.isApprovalErrorReportable = false;
+    model.isRequestGone = true;
+
+    const nodes = renderShell(model);
+
+    expect(findById(nodes, "permissions-deny-btn")).toBeUndefined();
+    expect(hasApproveButton(nodes)).toBe(false);
+    const notice = nodes.find((node) => node.tag === ErrorNotice);
+    const actions = (notice?.attrs?.actions ?? []) as ErrorAction[];
+    expect(actions.map((action) => action.label)).toEqual(["Close"]);
+    expect(notice?.attrs?.isBugReportOffered).toBe(false);
+
+    actions[0]?.onclick();
+    expect(closed).toBe(true);
+  });
+
+  it("puts what latchkey said about refused credentials behind See details", () => {
+    const model = modelWithDetail(MANUAL_DETAIL);
+    model.manualCredentialsFeedback = {
+      prompt: { ...AWS_PROMPT, message: "Imbue Studio couldn't store those AWS credentials. Check them and approve again." },
+      isRejection: true,
+      details: "doesn't look like an AWS access key ID",
+    };
+
+    const nodes = renderShell(model);
+
+    const notice = findById(nodes, "permissions-manual-credentials-message");
+    expect((notice?.attrs?.error as UserFacingError).details).toBe("doesn't look like an AWS access key ID");
+  });
+
   it("scrolls a failure into view, and only a failure", () => {
     // The opening instruction is where the user already is: nothing to scroll.
     expect(hasScrollHooks(renderShell(modelWithDetail(MANUAL_DETAIL)))).toBe(false);
@@ -328,15 +365,16 @@ describe("PermissionsShell manual credentials", () => {
     rejectedModel.manualCredentialsFeedback = {
       prompt: { ...AWS_PROMPT, message: "AWS did not accept those credentials." },
       isRejection: true,
+      details: "",
     };
     expect(hasScrollHooks(renderShell(rejectedModel))).toBe(true);
 
     // An outright failure has its own notice, below the buttons.
     const failedModel = modelWithDetail({ ...MANUAL_DETAIL, manual_credentials: null });
-    failedModel.errorMessage = "Sign-in did not complete";
+    failedModel.approvalError = { message: "Sign-in did not complete", details: "" };
     const nodes = renderShell(failedModel);
     const errorBox = findById(nodes, "permissions-error");
     expect(typeof errorBox?.attrs?.oncreate).toBe("function");
-    expect(isErrorNotice(flatten(errorBox?.children)[0])).toBe(true);
+    expect(flatten(errorBox?.children)[0]?.tag).toBe(ErrorNotice);
   });
 });

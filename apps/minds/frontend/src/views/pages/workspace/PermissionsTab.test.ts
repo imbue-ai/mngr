@@ -1,5 +1,5 @@
 import m from "mithril";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { settle } from "../../../testing";
 import {
   BROWSER_SIGN_IN,
@@ -14,8 +14,9 @@ import {
 } from "../../../models/workspacePermissions.testing";
 import type { UiWorkspacePermissions } from "../../../generated/ui";
 import type { RequestResult } from "../../../models/errors";
-import { OPTIONS_TABS, WorkspaceOptionsModel, toOptionsTab } from "../../../models/workspaceOptions";
+import { OPTIONS_TABS, WorkspaceOptionsModel, defaultFetchJson, toOptionsTab } from "../../../models/workspaceOptions";
 import { ADD_SHARED_PATH_ROW_KEY, PermissionsModel, isPathSyncOn } from "../../../models/workspacePermissions";
+import type { ErrorDialogRequest } from "../../../models/errorDialog";
 import { classifyRoute } from "../../shell/classify";
 import { PermissionsTab } from "./PermissionsTab";
 import { OptionsPanel } from "./OptionsPanel";
@@ -23,6 +24,8 @@ import { TITLEBAR_POPUP_ICONS } from "../../shell/RaisedTitlebarIcons";
 import { forgetFailedServiceMarks } from "../../components/ServiceMark";
 import { IMPLICIT_PERMISSIONS_HINT_ATTR } from "../../components/ImplicitPermissionsHint";
 import { Spinner } from "../../components/Spinner";
+import { ErrorNotice } from "../../components/ErrorDisplay";
+import type { ErrorAction, UserFacingError } from "../../../models/errors";
 import type { AnyVnode } from "../../../testing";
 import { allText, attrsOf, classesOf, collectText, collectVnodes, errorMarks, renderDeep, withAttr } from "../../../testing";
 
@@ -32,6 +35,9 @@ const AGENT_ID = "agent-" + "c".repeat(8);
 // test that exercises a missing mark would retire that service for every
 // test after it in this file, making the suite order-dependent.
 beforeEach(forgetFailedServiceMarks);
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 /** Copy carried by the disconnect confirm alone -- the panel's own Disconnect
  * block says something similar, so the dialog has to be read on its own. Empty
@@ -40,6 +46,21 @@ beforeEach(forgetFailedServiceMarks);
 function disconnectDialogText(node: unknown): string {
   const dialog = collectVnodes(node).find((vnode) => attrsOf(vnode).id === "ws-perm-disconnect");
   return dialog === undefined ? "" : allText(dialog.children);
+}
+
+/** The error displays in the tree, keyed by id: each carries our sentence and
+ * the details behind its See details. */
+function errorNotices(node: unknown): Map<string, { error: UserFacingError; actions: ErrorAction[] }> {
+  const notices = new Map<string, { error: UserFacingError; actions: ErrorAction[] }>();
+  for (const vnode of collectVnodes(node)) {
+    if (vnode.tag !== ErrorNotice) continue;
+    const attrs = attrsOf(vnode);
+    notices.set(String(attrs.id), {
+      error: attrs.error as UserFacingError,
+      actions: (attrs.actions as ErrorAction[] | undefined) ?? [],
+    });
+  }
+  return notices;
 }
 
 function switches(node: unknown): AnyVnode[] {
@@ -112,6 +133,8 @@ async function render(
      * a write is in flight or after one is refused. Return null to fall
      * through to the ordinary answers below. */
     respond?: (url: string) => Promise<RequestResult> | null;
+    /** Collects the error dialogs the pane raises. */
+    shownDialogs?: ErrorDialogRequest[];
   } = {},
 ): Promise<RenderResult> {
   const requests: { url: string; body: unknown }[] = [];
@@ -148,6 +171,7 @@ async function render(
       return Promise.resolve({ ok: true, status: 200, body: loaded ?? permissionsView() });
     },
     redraw: () => undefined,
+    errorDialogs: { show: (request) => void options.shownDialogs?.push(request) },
   });
   const selectedSections: string[] = [];
   const reviewedRequests: string[] = [];
@@ -185,11 +209,14 @@ describe("PermissionsTab loading", () => {
   });
 
   it("offers a retry instead of an empty tree when the read fails", async () => {
-    const { root } = await render(null, { isReadRefused: true });
-    expect(allText(root)).toContain("Permissions can't be loaded right now");
-    expect(allText(root)).toContain("gateway is down");
-    expect(allText(root)).toContain("Try again");
+    const { root, requests } = await render(null, { isReadRefused: true });
+    const notice = errorNotices(root).get("ws-perm-load-error");
+    expect(notice?.error).toEqual({ message: "gateway is down", details: "HTTP 503" });
     expect(switches(root)).toHaveLength(0);
+
+    notice?.actions.find((action) => action.label === "Try again")?.onclick();
+    await settle();
+    expect(requests).toHaveLength(2);
   });
 
   it("renders the unavailable notice, never a 'nothing granted' screen", async () => {
@@ -197,9 +224,63 @@ describe("PermissionsTab loading", () => {
       permissionsView({ connections: [], available_connections: [], permissions_unavailable: true }),
     );
     const text = allText(root);
-    expect(text).toContain("Permissions can't be loaded right now. Try again in a moment.");
+    expect(errorNotices(root).get("ws-perm-unavailable")?.error.message).toBe(
+      "Permissions can't be loaded right now. Try again in a moment.",
+    );
     expect(text).not.toContain("Add connection");
     expect(text).not.toContain("Every available service already has an account connected.");
+  });
+
+  const NEWER_FORMAT_VIEW: UiWorkspacePermissions = permissionsView({
+    connections: [],
+    available_connections: [],
+    permissions_unavailable: true,
+    unavailable_notice: {
+      message: "This workspace's permissions were changed by a newer Imbue Studio. Update Imbue Studio to see and change them here.",
+      detail: "permissions format 4 is newer than this build reads",
+      remedy: "UPDATE_APP",
+    },
+  });
+
+  it("offers only Update when a newer Imbue Studio wrote the permissions, since a re-read cannot help", async () => {
+    vi.stubGlobal("window", { mindsNative: {} });
+    const { root, requests } = await render(NEWER_FORMAT_VIEW);
+    const notice = errorNotices(root).get("ws-perm-unavailable");
+    expect(notice?.error).toEqual({
+      message: "This workspace's permissions were changed by a newer Imbue Studio. Update Imbue Studio to see and change them here.",
+      details: "permissions format 4 is newer than this build reads",
+    });
+    expect(notice?.actions.map((action) => action.label)).toEqual(["Update Imbue Studio"]);
+    expect(requests).toHaveLength(1);
+  });
+
+  it("offers no Try again for permissions a newer Imbue Studio wrote even where it cannot update", async () => {
+    // Outside the desktop app there is no updater, so there is no Update either.
+    const { root } = await render(NEWER_FORMAT_VIEW);
+    expect(errorNotices(root).get("ws-perm-unavailable")?.actions).toEqual([]);
+  });
+
+  it("leads with Restart when the permission service is down, keeping Try again as the lesser choice", async () => {
+    // The service can come back by itself, so Try again stays; the restart is the sure fix.
+    vi.stubGlobal("window", { mindsNative: { restartApp: () => {} } });
+    const { root, requests } = await render(
+      permissionsView({
+        connections: [],
+        available_connections: [],
+        permissions_unavailable: true,
+        unavailable_notice: {
+          message: "Imbue Studio's permission service isn't running, so this workspace's permissions can't be shown.",
+          detail: "Timed out waiting for the gateway port",
+          remedy: "RESTART_APP",
+        },
+      }),
+    );
+    const actions = errorNotices(root).get("ws-perm-unavailable")?.actions ?? [];
+    expect(actions.map((action) => action.label)).toEqual(["Restart Imbue Studio", "Try again"]);
+
+    actions.find((action) => action.label === "Try again")?.onclick();
+    await settle();
+    expect(requests).toHaveLength(2);
   });
 
   it("names the workspace in the heading and the intro", async () => {
@@ -504,7 +585,6 @@ describe("PermissionsTab connection panel", () => {
     const control = attrsOf(switches(egressRow(root))[0]);
     expect(control["aria-checked"]).toBe("false");
     expect(control.disabled).toBe(true);
-    expect(control.title).toBe("This computer's id is not known, so requests cannot be sent through it.");
     (control.onclick as () => void)();
     await settle();
     expect(requests).toHaveLength(1);
@@ -673,7 +753,7 @@ describe("PermissionsTab connection panel", () => {
 
     const after = rerender();
     expect(editorHops(after)).toEqual(["1. This computer"]);
-    expect(allText(after)).toContain("Could not save the change: the machine did not take it");
+    expect(errorNotices(after).get("ws-perm-error")?.error.message).toBe("the machine did not take it");
   });
 
   it.each([
@@ -886,6 +966,35 @@ describe("PermissionsTab connection panel", () => {
     });
   });
 
+  it("offers the fix a refused disconnect names inside the dialog that holds its reason", async () => {
+    vi.stubGlobal("window", { mindsNative: { restartApp: () => {} } });
+    const { root, rerender } = await render(
+      permissionsView({ connections: [slackConnection({ account: "work@example.com" })] }),
+      {
+        requestedSection: "conn:slack:work@example.com",
+        respond: (url) =>
+          url.endsWith("/connector-disconnect")
+            ? Promise.resolve({
+                ok: false,
+                status: 502,
+                body: {
+                  error: "Imbue Studio's permission service isn't running, so this couldn't be saved.",
+                  detail: "Timed out waiting for the gateway port",
+                  remedy: "RESTART_APP",
+                },
+              })
+            : null,
+      },
+    );
+
+    (attrsOf(withAttr(root, "data-perm-disconnect")[0]).onclick as () => void)();
+    (attrsOf(withAttr(rerender(), "data-perm-disconnect-confirm")[0]).onclick as () => void)();
+    await settleConnect();
+
+    const notice = errorNotices(rerender()).get("ws-perm-disconnect-error");
+    expect(notice?.actions.map((action) => action.label)).toEqual(["Restart Imbue Studio"]);
+  });
+
   it("leaves no dead connection selected once the disconnect lands", async () => {
     const gone = await render(permissionsView());
     (attrsOf(withAttr(gone.root, "data-perm-disconnect")[0]).onclick as () => void)();
@@ -922,6 +1031,62 @@ describe("PermissionsTab connection panel", () => {
     expect(withAttr(root, "data-perm-disconnect")).toHaveLength(0);
   });
 
+  it("offers to ask the agent to request a permission whose definition is gone", async () => {
+    const { root, rerender } = await render(permissionsView(), {
+      respond: (url) =>
+        url.endsWith("/connector-toggle")
+          ? Promise.resolve({
+              ok: false,
+              status: 409,
+              body: {
+                error: "Imbue Studio no longer knows what this permission covers.",
+                detail: "Permission 'slack-chat-read' cannot be re-enabled because its definition is gone.",
+                remedy: "ASK_AGENT",
+              },
+            })
+          : null,
+    });
+
+    (attrsOf(switches(root)[0]).onclick as () => void)();
+    await settle();
+
+    const notice = errorNotices(rerender()).get("ws-perm-error");
+    expect(notice?.error.message).toBe("Imbue Studio no longer knows what this permission covers.");
+    expect(notice?.actions.map((action) => action.label)).toEqual(["Ask the agent to request it again"]);
+  });
+
+  it("shows the fallback sentence, with the text behind See details, when the read fails with a plain-text 500", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("Internal Server Error: KeyError('host_id')", { status: 500 })),
+    );
+    const { root } = await render(permissionsView(), {
+      respond: (url) => (url === `/ui/api/workspaces/${AGENT_ID}/permissions` ? defaultFetchJson(url) : null),
+    });
+
+    const notice = errorNotices(root).get("ws-perm-load-error");
+    expect(notice?.error.message).toBe(
+      "Permissions can't be loaded right now. Try again. If this persists, report a bug.",
+    );
+    expect(notice?.error.details).toContain("Internal Server Error: KeyError('host_id')");
+  });
+
+  it("shows the fallback sentence, not the text, when a change is refused with a plain-text 500", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("Internal Server Error: KeyError('scope')", { status: 500 })));
+    const { root, rerender } = await render(permissionsView(), {
+      respond: (url) => (url.endsWith("/connector-toggle") ? defaultFetchJson(url, { method: "POST" }) : null),
+    });
+
+    (attrsOf(switches(root)[0]).onclick as () => void)();
+    await settle();
+
+    const notice = errorNotices(rerender()).get("ws-perm-error");
+    expect(notice?.error.message).not.toContain("KeyError");
+    expect(notice?.error.message).toMatch(/Try again\. If this persists, report a bug\.$/);
+    expect(notice?.error.details).toContain("Internal Server Error: KeyError('scope')");
+    expect(notice?.actions).toEqual([]);
+  });
+
   it("shows a failed write's message without dropping the rendered tree", async () => {
     const { root, rerender } = await render(permissionsView(), {
       respond: (url) =>
@@ -934,7 +1099,7 @@ describe("PermissionsTab connection panel", () => {
     await settle();
     const after = rerender();
 
-    expect(allText(after)).toContain("Could not save the change: gateway refused");
+    expect(errorNotices(after).get("ws-perm-error")?.error.message).toBe("gateway refused");
     expect(switches(after)).toHaveLength(2);
     expect(attrsOf(switches(after)[0])["aria-checked"]).toBe("false");
   });
@@ -983,6 +1148,33 @@ describe("PermissionsTab add connection and self panels", () => {
     );
 
     (attrsOf(withAttr(root, "data-perm-connect")[0]).onclick as () => void)();
+    await settleConnect();
+
+    expect(selectedSections).toEqual(["conn:slack:personal@example.com"]);
+  });
+
+  it("moves to the connection a sign-in retried from its error dialog added", async () => {
+    const existing = slackConnection({ account: "work@example.com" });
+    const added = slackConnection({ account: "personal@example.com" });
+    const shownDialogs: ErrorDialogRequest[] = [];
+    let isRefused = true;
+    const { root, selectedSections } = await render(
+      permissionsView({ connections: [existing], available_connections: [] }),
+      {
+        requestedSection: "add-connection",
+        viewAfterConnect: permissionsView({ connections: [existing, added], available_connections: [] }),
+        shownDialogs,
+        respond: (url) => {
+          if (!url.endsWith("/connect-browser") || !isRefused) return null;
+          isRefused = false;
+          return Promise.resolve({ ok: false, status: 502, body: { error: "The sign-in window was closed." } });
+        },
+      },
+    );
+
+    (attrsOf(withAttr(root, "data-perm-connect")[0]).onclick as () => void)();
+    await settleConnect();
+    shownDialogs[0]?.actions?.find((action) => action.label === "Try again")?.onclick();
     await settleConnect();
 
     expect(selectedSections).toEqual(["conn:slack:personal@example.com"]);
@@ -1096,12 +1288,49 @@ describe("PermissionsTab add connection and self panels", () => {
     const refused = rerender();
 
     const form = withAttr(refused, "data-perm-credential-form")[0];
-    expect(allText(form)).toContain("that is not an access key id");
+    expect(errorNotices(form).get("ws-perm-credential-error")?.error.message).toContain(
+      "that is not an access key id",
+    );
     const keptValues = withAttr(form, "name")
       .filter((node) => String(attrsOf(node).name).startsWith("credential-"))
       .map((node) => attrsOf(node).value);
     expect(keptValues).toEqual(["nonsense", "s3cret"]);
-    expect(model.errorMessage).toBe("");
+    expect(model.writeError).toBeNull();
+  });
+
+  it("offers the fix a refused credential write names beside the form", async () => {
+    vi.stubGlobal("window", { mindsNative: { restartApp: () => {} } });
+    const { root, rerender } = await render(
+      permissionsView({ connections: [], available_connections: [awsAvailable()] }),
+      {
+        requestedSection: "add-connection",
+        respond: (url) =>
+          url.endsWith("/connect-credentials")
+            ? Promise.resolve({
+                ok: false,
+                status: 502,
+                body: {
+                  error: "Imbue Studio couldn't read its settings for where your workspaces run.",
+                  detail: "config.toml: invalid TOML",
+                  remedy: "RESTART_APP",
+                },
+              })
+            : null,
+      },
+    );
+    (attrsOf(withAttr(root, "data-perm-connect")[0]).onclick as () => void)();
+    await settle();
+    const inputs = withAttr(rerender(), "name").filter((node) =>
+      String(attrsOf(node).name).startsWith("credential-"),
+    );
+    (attrsOf(inputs[0]).oninput as (event: unknown) => void)({ target: { value: "AKIA" } });
+    (attrsOf(inputs[1]).oninput as (event: unknown) => void)({ target: { value: "s3cret" } });
+    (attrsOf(withAttr(rerender(), "data-perm-credential-submit")[0]).onclick as () => void)();
+    await settleConnect();
+
+    const form = withAttr(rerender(), "data-perm-credential-form")[0];
+    const notice = errorNotices(form).get("ws-perm-credential-error");
+    expect(notice?.actions.map((action) => action.label)).toEqual(["Restart Imbue Studio"]);
   });
 
   it("offers no action for a service it cannot work out the credentials for", async () => {
@@ -1111,7 +1340,7 @@ describe("PermissionsTab add connection and self panels", () => {
     );
     const connect = withAttr(root, "data-perm-connect")[0];
     expect(attrsOf(connect).disabled).toBe(true);
-    expect(String(attrsOf(connect).title)).toContain("Imbue Studio can't work out which credentials AWS needs");
+    expect(String(attrsOf(connect).title)).toBe("Imbue Studio can't set up AWS from here yet.");
   });
 
   it("says so when every service already has an account", async () => {
@@ -1150,38 +1379,41 @@ describe("PermissionsTab add connection and self panels", () => {
     expect(allText(localFiles.root)).toContain("No files are being shared with agents in this workspace yet.");
     expect(allText(otherMachines.root)).toContain("Agents in this workspace can't manage your other workspaces yet.");
   });
-  it("raises a refused connection over the pane, and only the user closes it", async () => {
+  it("raises a refused connection as an error dialog over the pane, with a Try again that repeats the sign-in", async () => {
     // A service that turns the sign-in away usually says something the user has
     // to act on somewhere else entirely, at several lines' length. That is why
-    // it gets a popup while a refused toggle stays inline beside its row -- if
+    // it gets a dialog while a refused toggle stays inline beside its row -- if
     // this ever went back to the thin banner it would be missed on a pane the
     // user has scrolled down.
     const refusal =
       "your Zoom user is not allowed to create apps in the Zoom App Marketplace; ask an administrator";
-    const { root, rerender, model } = await render(permissionsView(), {
+    const shownDialogs: ErrorDialogRequest[] = [];
+    const { root, rerender, requests } = await render(permissionsView(), {
       requestedSection: "add-connection",
       signInRefusal: refusal,
+      shownDialogs,
     });
     const connect = withAttr(root, "data-perm-connect")[0];
 
     (attrsOf(connect).onclick as () => void)();
     await settleConnect();
-    const afterFailure = rerender();
 
-    const popup = collectVnodes(afterFailure).find((vnode) => attrsOf(vnode).id === "ws-perm-alert");
-    expect(popup).toBeDefined();
-    expect(attrsOf(popup as AnyVnode).isOpen).toBe(true);
-    expect(allText(popup)).toContain("Couldn't connect");
-    expect(allText(popup)).toContain(refusal);
+    expect(shownDialogs).toHaveLength(1);
+    const dialog = shownDialogs[0];
+    expect(dialog?.title).toBe("Couldn't connect");
+    expect(dialog?.error.message).toContain(refusal);
+    expect(dialog?.workspaceAgentId).toBe(AGENT_ID);
     // ...and NOT as the inline notice, which belongs to loads and toggles.
-    expect(collectVnodes(afterFailure).some((vnode) => attrsOf(vnode).id === "ws-perm-error")).toBe(false);
+    expect(collectVnodes(rerender()).some((vnode) => attrsOf(vnode).id === "ws-perm-error")).toBe(false);
 
-    model.dismissAlert();
-
-    const dismissed = collectVnodes(rerender()).find((vnode) => attrsOf(vnode).id === "ws-perm-alert");
-    expect(attrsOf(dismissed as AnyVnode).isOpen).toBe(false);
+    const actions = dialog?.actions ?? [];
+    expect(actions.map((action) => action.label)).toEqual(["Try again"]);
+    const signIns = (): number => requests.filter((request) => request.url.endsWith("/connect-browser")).length;
+    const signInsBefore = signIns();
+    actions[0]?.onclick();
+    await settleConnect();
+    expect(signIns()).toBe(signInsBefore + 1);
   });
-
 });
 
 describe("PermissionsTab service marks", () => {
@@ -1508,13 +1740,12 @@ describe("PermissionsTab shared paths", () => {
 
     const after = failed.rerender();
     expect(withAttr(after, "data-sync-retry-path")).toHaveLength(0);
-    expect(allText(after)).toContain("This folder isn't set up to sync any more. Turn syncing on for it again.");
-    expect(allText(after)).not.toContain("Could not start syncing again");
+    expect(allText(renderDeep(after))).toContain("This folder isn't set up to sync any more. Turn syncing on for it again.");
     expect(isPathSyncOn((failed.model.data?.shared_paths ?? [])[0])).toBe(false);
     failed.remove();
   });
 
-  it("marks the pane's error line, so its refusal reads as a failure rather than red prose", async () => {
+  it("marks a refused sync retry's notice, so it reads as a failure rather than red prose", async () => {
     const failed = await renderLocalFiles(
       permissionsView({
         shared_paths: [
@@ -1531,9 +1762,9 @@ describe("PermissionsTab shared paths", () => {
     (attrsOf(withAttr(failed.root, "data-sync-retry-path")[0]).onclick as () => void)();
     await settle();
 
-    const line = collectVnodes(failed.rerender()).find((vnode) => attrsOf(vnode).id === "ws-perm-error");
-    expect(allText(line)).toContain("Could not start syncing again: the workspace is asleep");
-    expect(errorMarks(renderDeep(line))).toHaveLength(1);
+    const notice = renderDeep(collectVnodes(failed.rerender()).find((vnode) => attrsOf(vnode).id === "ws-perm-error"));
+    expect(allText(notice)).toContain("the workspace is asleep");
+    expect(errorMarks(notice)).toHaveLength(1);
     failed.remove();
   });
 
@@ -1545,7 +1776,7 @@ describe("PermissionsTab shared paths", () => {
         ],
       }),
     );
-    const text = allText(failed.root);
+    const text = allText(renderDeep(failed.root));
     expect(text).toContain("machine is asleep");
     expect(text).toContain("Try again");
     expect(withAttr(failed.root, "data-sync-retry-path")).toHaveLength(1);
@@ -1793,7 +2024,7 @@ describe("PermissionsTab shared paths", () => {
         ],
       }),
     );
-    const text = allText(pathRows(root)[0]);
+    const text = allText(renderDeep(pathRows(root)[0]));
     expect(text).toContain("Failed");
     expect(text).toContain("Agent directory does not exist");
     // The user still wants this folder synced; the failure is news about it,

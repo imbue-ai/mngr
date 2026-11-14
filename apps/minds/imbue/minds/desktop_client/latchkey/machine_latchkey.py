@@ -30,6 +30,7 @@ from loguru import logger
 from imbue.imbue_common.model_update import to_update
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
+from imbue.minds.desktop_client.latchkey.permission_overview import WorkspaceHostUnresolvedError
 from imbue.minds.desktop_client.latchkey.permission_overview import resolve_workspace_host_id
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import Latchkey
@@ -83,7 +84,7 @@ def machine_latchkey_for_workspace(
     """
     host_id = resolve_workspace_host_id(backend_resolver, workspace_agent_id)
     if host_id is None:
-        raise PermissionOverviewError(
+        raise WorkspaceHostUnresolvedError(
             f"Could not resolve host for workspace '{workspace_agent_id}'; cannot reach its credentials."
         )
     logger.trace("Resolving credentials for workspace {} against host {}", workspace_agent_id, host_id)

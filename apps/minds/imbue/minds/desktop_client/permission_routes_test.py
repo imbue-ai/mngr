@@ -123,6 +123,8 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
             return GrantResult(
                 outcome=self.grant_outcome,
                 message=self.grant_message,
+                detail="",
+                remedy=None,
                 manual_credentials=self.grant_manual_credentials,
             )
         status = RequestStatus.GRANTED if self.grant_outcome == GrantOutcome.GRANTED else RequestStatus.DENIED
@@ -140,6 +142,8 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
         return GrantResult(
             outcome=self.grant_outcome,
             message=self.grant_message,
+            detail="",
+            remedy=None,
             manual_credentials=None,
         )
 
@@ -597,7 +601,8 @@ def test_post_permission_grant_rejects_a_malformed_credential_form(tmp_path: Pat
     )
 
     assert response.status_code == 400
-    assert "JSON object of strings" in response.get_json()["error"]
+    assert response.get_json()["error"].startswith("Something went wrong approving this request.")
+    assert "JSON object of strings" in response.get_json()["detail"]
     assert handler.grant_calls == []
 
 
@@ -675,6 +680,8 @@ def test_post_permission_grant_after_resolution_returns_409(tmp_path: Path) -> N
         data={"permissions": ["slack-read-all"], "account": _TEST_ACCOUNT},
     )
     assert second.status_code == 409
+    # The dialog is told nothing can answer the request any more.
+    assert second.get_json()["is_request_resolved"] is True
     # The handler must not have been invoked a second time.
     assert len(handler.grant_calls) == 1
 

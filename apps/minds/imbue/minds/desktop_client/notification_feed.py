@@ -7,19 +7,22 @@ entries of three kinds, each with its own lifecycle:
 - Permission requests are a *derived* reconciliation over the request inbox,
   not an event log: on every publish tick (and on every WS-connect snapshot
   build) the notifications derive hands ``reconcile`` the currently-displayable
-  pending requests (with their display fields already resolved) plus the
-  recorded grant/deny responses, and the feed diffs that view against its
+  pending requests (with their display fields already resolved), the recorded
+  grant/deny responses, and the ids of requests still pending whose workspace
+  is not in the current list, and the feed diffs that view against its
   entries. A displayable pending request it has never seen becomes a new
   unresolved entry (display fields snapshotted so the row still renders after
   the source request is gone); an entry whose request has a response resolves
-  as approved/denied; an unresolved entry whose request vanished without a
-  response resolves as "closed"; a "closed" entry whose request reappears
-  (still without a response) reopens. Displayability flaps when a workspace
-  transiently fails display resolution, and shortly after startup the gateway
-  follow stream re-delivers request events, so "vanished" must never be a
-  terminal state on its own. Clearing a request entry hides it for good, across
-  restarts when the feed is given a file to remember cleared ids in (the
-  request itself stays pending in the inbox).
+  as approved/denied; an unresolved entry whose request is still pending but
+  unlisted reads as "unlisted" (the agent is still waiting); one whose request
+  vanished without a response resolves as "closed"; a "closed" or "unlisted"
+  entry whose request is displayable again (still without a response)
+  reopens. Displayability flaps when a workspace transiently fails display
+  resolution, and shortly after startup the gateway follow stream re-delivers
+  request events, so "vanished" must never be a terminal state on its own.
+  Clearing a request entry hides it for good, across restarts when the feed
+  is given a file to remember cleared ids in (the request itself stays
+  pending in the inbox).
 - Agent messages are appended by the agent notifications route. They resolve
   into receipts when they are read: watched on arrival (the workspace says a
   page is showing the chat to a focused reader), or read later (the workspace
@@ -262,6 +265,7 @@ class NotificationFeed(MutableModel):
         pending_cards: tuple[PendingNotificationCard, ...],
         responses_by_request_id: Mapping[str, NotificationOutcome],
         known_workspace_agent_ids: AbstractSet[str] | None = None,
+        unlisted_request_ids: AbstractSet[str] = frozenset(),
     ) -> UiNotificationsMessage:
         """Reconcile the feed against the current pending view and return the full frame.
 
@@ -273,10 +277,13 @@ class NotificationFeed(MutableModel):
         click to land), so the caller passes a set whose absences are evidence,
         not a bare live listing. One whose workspace never resolved (``""``) had
         none to leave and stays until cleared. None skips that check.
+        ``unlisted_request_ids`` are requests still pending whose workspace is
+        not in the current list: their entries read as still waiting rather
+        than closed.
         """
         with self._lock:
             newly_filed = self._create_missing_request_entries_locked(pending_cards)
-            self._apply_request_resolutions_locked(pending_cards, responses_by_request_id)
+            self._apply_request_resolutions_locked(pending_cards, responses_by_request_id, unlisted_request_ids)
             if known_workspace_agent_ids is not None:
                 self._drop_orphaned_agent_messages_locked(known_workspace_agent_ids)
             self._evict_beyond_cap_locked()
@@ -494,6 +501,7 @@ class NotificationFeed(MutableModel):
         self,
         pending_cards: tuple[PendingNotificationCard, ...],
         responses_by_request_id: Mapping[str, NotificationOutcome],
+        unlisted_request_ids: AbstractSet[str],
     ) -> None:
         """Move every request entry to its target resolution state for the current view.
 
@@ -510,14 +518,18 @@ class NotificationFeed(MutableModel):
                 # A recorded response is authoritative, forever.
                 target_outcome: NotificationOutcome | None = response_outcome
             elif entry.request_id in pending_request_ids:
-                # Self-healing: a "closed" entry whose request reappeared
-                # reopens; approved/denied entries stay receipts even if
-                # their id flaps back into the displayable set.
-                target_outcome = None if entry.outcome == NotificationOutcome.CLOSED else entry.outcome
+                # Self-healing: a "closed" or unlisted entry whose request
+                # reappeared reopens; approved/denied entries stay receipts
+                # even if their id flaps back into the displayable set.
+                target_outcome = None if entry.outcome in _REOPENABLE_OUTCOMES else entry.outcome
+            elif entry.request_id in unlisted_request_ids:
+                # Still pending, but its workspace is not in the current list,
+                # so nothing here can open it: the agent is still waiting.
+                target_outcome = entry.outcome if entry.outcome in _ANSWERED_OUTCOMES else NotificationOutcome.UNLISTED
             else:
                 # Vanished without a response (workspace destroyed/stopped):
-                # close, keeping any outcome already recorded.
-                target_outcome = entry.outcome if entry.is_resolved else NotificationOutcome.CLOSED
+                # close, keeping any answer already recorded.
+                target_outcome = entry.outcome if entry.outcome in _ANSWERED_OUTCOMES else NotificationOutcome.CLOSED
             target_is_resolved = target_outcome is not None
             if (entry.is_resolved, entry.outcome) != (target_is_resolved, target_outcome):
                 self._entry_by_id[entry_id] = entry.model_copy_update(
@@ -659,6 +671,14 @@ def build_dispatch_request(entry: UiNotificationEntry) -> NotificationRequest:
         case _ as unreachable:
             assert_never(unreachable)
     return NotificationRequest(title=entry.workspace_name, subtitle=entry.title, body=body, url=url, entry=entry)
+
+
+_ANSWERED_OUTCOMES: Final[frozenset[NotificationOutcome]] = frozenset(
+    {NotificationOutcome.APPROVED, NotificationOutcome.DENIED}
+)
+_REOPENABLE_OUTCOMES: Final[frozenset[NotificationOutcome]] = frozenset(
+    {NotificationOutcome.CLOSED, NotificationOutcome.UNLISTED}
+)
 
 
 def account_level_entry_route(account_id: str) -> str:

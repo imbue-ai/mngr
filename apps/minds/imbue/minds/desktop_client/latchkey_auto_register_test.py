@@ -171,7 +171,7 @@ class _FakeMachine(MutableModel):
         with self._lock:
             self.refreshed_workspace_agent_ids.append(workspace_agent_id)
             if workspace_agent_id in self.unreadable_workspace_agent_ids:
-                raise MachineOperationError(f"machine of {workspace_agent_id} could not be read")
+                raise MachineOperationError(f"machine of {workspace_agent_id} could not be read", None)
             if self.during_read is not None:
                 self.during_read()
             if self.policy_json is None:
@@ -184,7 +184,7 @@ class _FakeMachine(MutableModel):
             self.pushed_workspace_agent_ids.append(workspace_agent_id)
             self.read_counts_at_push.append(len(self.refreshed_workspace_agent_ids))
             if workspace_agent_id in self.failing_workspace_agent_ids:
-                raise MachineOperationError(f"machine of {workspace_agent_id} refused the snapshot")
+                raise MachineOperationError(f"machine of {workspace_agent_id} refused the snapshot", None)
             self.policy_json = read_host_permissions(self.latchkey.plugin_data_dir, self.host_id)
 
     def pushed_count(self) -> int:

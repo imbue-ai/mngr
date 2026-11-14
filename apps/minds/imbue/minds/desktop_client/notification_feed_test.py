@@ -144,6 +144,42 @@ def test_vanished_request_without_a_response_closes_the_entry() -> None:
     assert entry.workspace_name == "alpha"
 
 
+def test_request_whose_workspace_is_unlisted_reads_as_still_waiting_not_closed() -> None:
+    feed = _make_feed()
+    feed.reconcile((_card("evt-1"),), {})
+
+    message = feed.reconcile((), {}, unlisted_request_ids=frozenset({"evt-1"}))
+
+    (entry,) = message.entries
+    assert entry.outcome == "unlisted"
+    assert message.unresolved_count == 0
+
+
+def test_unlisted_entry_reopens_when_its_workspace_is_listed_again_and_closes_once_gone() -> None:
+    feed = _make_feed()
+    feed.reconcile((_card("evt-1"),), {})
+    feed.reconcile((), {}, unlisted_request_ids=frozenset({"evt-1"}))
+
+    (reopened,) = feed.reconcile((_card("evt-1"),), {}).entries
+    assert reopened.is_resolved is False
+    assert reopened.outcome is None
+
+    feed.reconcile((), {}, unlisted_request_ids=frozenset({"evt-1"}))
+    (closed,) = feed.reconcile((), {}).entries
+    assert closed.outcome == "closed"
+
+
+def test_answered_entry_stays_answered_when_its_request_is_unlisted() -> None:
+    feed = _make_feed()
+    feed.reconcile((_card("evt-1"),), {})
+    feed.reconcile((), {"evt-1": NotificationOutcome.DENIED})
+
+    message = feed.reconcile((), {}, unlisted_request_ids=frozenset({"evt-1"}))
+
+    (entry,) = message.entries
+    assert entry.outcome == "denied"
+
+
 def test_closed_entry_reopens_when_its_request_reappears_without_a_response() -> None:
     dispatcher = _make_recording_dispatcher()
     feed = _make_feed(dispatcher=dispatcher)

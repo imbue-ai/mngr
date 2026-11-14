@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { UiFolderSyncToggleRequest } from "../generated/ui";
 import { settle } from "../testing";
+import type { ErrorDialogRequest } from "./errorDialog";
 import type { RequestResult } from "./errors";
+import { bodyFromText } from "./errors";
 import {
   forgetWarmedPermissionsOverview,
   readWarmedPermissionsOverview,
@@ -60,8 +62,10 @@ function makeModel(responder: (url: string, init?: RequestInit) => StubResponse 
   model: PermissionsModel;
   requests: RecordedRequest[];
   redrawCount: () => number;
+  shownDialogs: ErrorDialogRequest[];
 } {
   const requests: RecordedRequest[] = [];
+  const shownDialogs: ErrorDialogRequest[] = [];
   let redraws = 0;
   const model = new PermissionsModel(AGENT_ID, {
     fetchJson: (url: string, init?: RequestInit) => {
@@ -75,8 +79,9 @@ function makeModel(responder: (url: string, init?: RequestInit) => StubResponse 
     redraw: () => {
       redraws += 1;
     },
+    errorDialogs: { show: (request) => void shownDialogs.push(request) },
   });
-  return { model, requests, redrawCount: () => redraws };
+  return { model, requests, redrawCount: () => redraws, shownDialogs };
 }
 
 function okWith(body: unknown): StubResponse {
@@ -126,7 +131,7 @@ describe("PermissionsModel loading", () => {
     expect(requests).toEqual([{ url: PERMISSIONS_URL, method: "GET", body: null }]);
     expect(model.status).toBe("ready");
     expect(model.data).toEqual(view);
-    expect(model.errorMessage).toBe("");
+    expect(model.loadError).toBeNull();
     expect(redrawCount()).toBeGreaterThan(0);
   });
 
@@ -157,14 +162,32 @@ describe("PermissionsModel loading", () => {
     expect(requests).toEqual([{ url: PERMISSIONS_URL, method: "GET", body: null }]);
   });
 
-  it("surfaces the server's message and keeps no data when the read fails", async () => {
-    const { model } = makeModel(() => ({ ok: false, status: 503, body: { error: "gateway is down" } }));
+  it("surfaces the server's sentence with its detail behind See details when the read fails", async () => {
+    const { model } = makeModel(() => ({
+      ok: false,
+      status: 404,
+      body: {
+        error: "Permissions can't be loaded right now. Try again. If this persists, report a bug.",
+        detail: "Unknown workspace",
+      },
+    }));
 
     await model.load();
 
     expect(model.status).toBe("load_failed");
     expect(model.data).toBeNull();
-    expect(model.errorMessage).toBe("gateway is down");
+    expect(model.loadError).toEqual({
+      message: "Permissions can't be loaded right now. Try again. If this persists, report a bug.",
+      details: "HTTP 404\nUnknown workspace",
+    });
+  });
+
+  it("says Imbue Studio did not respond, not why the server refused, when the read got no answer", async () => {
+    const { model } = makeModel(() => ({ ok: false, status: 0, body: null }));
+
+    await model.load();
+
+    expect(model.loadError?.message).toBe("Imbue Studio didn't respond. Try again in a moment.");
   });
 
   it("reads once however often the tab is reopened", async () => {
@@ -207,7 +230,7 @@ describe("PermissionsModel writes", () => {
       body: { scope: "slack-api", account: "", permission: "slack-chat-read", enabled: true },
     });
     expect(model.data).toEqual(refreshed);
-    expect(model.errorMessage).toBe("");
+    expect(model.writeError).toBeNull();
   });
 
   it("drops a warm the flip has just invalidated, so the next open reads for itself", async () => {
@@ -290,14 +313,21 @@ describe("PermissionsModel writes", () => {
       body: { service_name: "slack", route: ["host-here", "self"] },
     });
     expect(model.data).toEqual(refreshed);
-    expect(model.errorMessage).toBe("");
+    expect(model.writeError).toBeNull();
   });
 
   it("keeps the last view and says why when the machine refuses a desktop egress route", async () => {
     const before = permissionsView({ connections: [slackConnection({ desktop_egress: desktopEgress() })] });
     const { model } = makeModel((url) =>
       url.endsWith("/desktop-egress-route")
-        ? Promise.resolve({ ok: false, status: 502, body: { error: "the machine did not take it" } })
+        ? Promise.resolve({
+            ok: false,
+            status: 502,
+            body: {
+              error: "Imbue Studio couldn't apply that change to the workspace. Try again.",
+              detail: "Could not reach that workspace: it is asleep",
+            },
+          })
         : okWith(before),
     );
     await model.load();
@@ -306,7 +336,35 @@ describe("PermissionsModel writes", () => {
 
     expect(isSaved).toBe(false);
     expect(model.data).toEqual(before);
-    expect(model.errorMessage).toBe("Could not save the change: the machine did not take it");
+    expect(model.writeError).toEqual({
+      message: "Imbue Studio couldn't apply that change to the workspace. Try again.",
+      details: "HTTP 502\nCould not reach that workspace: it is asleep",
+    });
+  });
+
+  it("re-reads the pane when the workspace can no longer route through this computer", async () => {
+    const before = permissionsView({ connections: [slackConnection({ desktop_egress: desktopEgress() })] });
+    const after = permissionsView({ host_id: "re-read" });
+    let reads = 0;
+    const { model } = makeModel((url) => {
+      if (url.endsWith("/desktop-egress-route")) {
+        return Promise.resolve({
+          ok: false,
+          status: 409,
+          body: { error: "This workspace can't send its requests through this computer any more." },
+        });
+      }
+      reads += 1;
+      return okWith(reads === 1 ? before : after);
+    });
+    await model.load();
+
+    await model.setDesktopEgressRoute("slack", ["host-here"]);
+    await settle();
+
+    // The refusal stays up, and the pane is the re-read one, without the switch it was about.
+    expect(model.writeError?.message).toBe("This workspace can't send its requests through this computer any more.");
+    expect(model.data).toEqual(after);
   });
 
   it("marks the desktop egress row busy while its write is in flight", async () => {
@@ -380,7 +438,7 @@ describe("PermissionsModel writes", () => {
     const loaded = permissionsView();
     const { model } = makeModel((url) =>
       url.endsWith("/connector-disconnect")
-        ? { ok: false, status: 502, body: { error: "keychain is locked" } }
+        ? { ok: false, status: 502, body: bodyFromText("keychain is locked") }
         : okWith(loaded),
     );
     await model.load();
@@ -388,7 +446,10 @@ describe("PermissionsModel writes", () => {
     const section = await model.disconnect(slackConnection({ account_label: "work@example.com" }));
 
     expect(section).toBeNull();
-    expect(model.errorMessage).toBe("Could not disconnect work@example.com from Slack: keychain is locked");
+    expect(model.writeError).toEqual({
+      message: "Imbue Studio couldn't disconnect work@example.com from Slack. Try again. If this persists, report a bug.",
+      details: "HTTP 502\nkeychain is locked",
+    });
     expect(model.data).toEqual(loaded);
   });
 
@@ -403,7 +464,27 @@ describe("PermissionsModel writes", () => {
 
     expect(model.data).toEqual(loaded);
     expect(model.status).toBe("ready");
-    expect(model.errorMessage).toBe("Could not save the change: gateway refused");
+    expect(model.writeError?.message).toBe("gateway refused");
+  });
+
+  it("carries the remedy a refusal names, for the button that fixes it", async () => {
+    const { model } = makeModel((url) =>
+      url.endsWith("/self-toggle")
+        ? {
+            ok: false,
+            status: 409,
+            body: {
+              error: "Imbue Studio no longer knows what this permission covers.",
+              remedy: "ASK_AGENT",
+            },
+          }
+        : okWith(permissionsView()),
+    );
+    await model.load();
+
+    await model.toggleSelf("shared-path-1", true);
+
+    expect(model.writeErrorRemedy).toBe("ASK_AGENT");
   });
 
   it("clears a stale error on request", async () => {
@@ -412,11 +493,11 @@ describe("PermissionsModel writes", () => {
     );
     await model.load();
     await model.toggleSelf("shared-path-1", true);
-    expect(model.errorMessage).not.toBe("");
+    expect(model.writeError).not.toBeNull();
 
-    model.clearErrorMessage();
+    model.clearWriteError();
 
-    expect(model.errorMessage).toBe("");
+    expect(model.writeError).toBeNull();
   });
 });
 
@@ -642,7 +723,34 @@ describe("PermissionsModel pending-request reconciliation", () => {
 
     expect(model.status).toBe("ready");
     expect(model.data?.host_id).toBe("good");
-    expect(model.errorMessage).toBe("Could not refresh permissions: gateway is down");
+    expect(model.refreshError).toEqual({
+      message: "These permissions may be out of date -- Imbue Studio couldn't refresh them.",
+      details: "HTTP 502\ngateway is down",
+    });
+
+    isFailing = false;
+    await model.retryRefresh();
+
+    expect(model.refreshError).toBeNull();
+  });
+
+  it("drops the out-of-date notice once a write answers with a fresh view", async () => {
+    let isReadFailing = false;
+    const { model } = makeModel((_url, init) =>
+      isReadFailing && (init?.method ?? "GET") === "GET"
+        ? { ok: false, status: 502, body: { error: "gateway is down" } }
+        : okWith(permissionsView({ host_id: init?.method === "POST" ? "written" : "good" })),
+    );
+    await model.load();
+    await model.refreshIfPendingChanged(["req-1"]);
+    isReadFailing = true;
+    await model.refreshIfPendingChanged([]);
+    expect(model.refreshError).not.toBeNull();
+
+    await model.toggleSelf("shared-path-1", true);
+
+    expect(model.data?.host_id).toBe("written");
+    expect(model.refreshError).toBeNull();
   });
 });
 
@@ -727,9 +835,13 @@ describe("PermissionsModel connect", () => {
 
   it("reports a refused sign-in without re-reading", async () => {
     const loaded = permissionsView();
-    const { model, requests } = makeModel((url) =>
+    const { model, requests, shownDialogs } = makeModel((url) =>
       url === `${PERMISSIONS_URL}/connect-browser`
-        ? { ok: false, status: 400, body: { error: "sign-in was cancelled" } }
+        ? {
+            ok: false,
+            status: 502,
+            body: { error: "Imbue Studio couldn't finish signing in to Notion.", detail: "sign-in was cancelled" },
+          }
         : okWith(loaded),
     );
     await model.load();
@@ -739,24 +851,13 @@ describe("PermissionsModel connect", () => {
     expect(section).toBeNull();
     expect(requests).toHaveLength(2);
     expect(model.data).toEqual(loaded);
-    // A refused sign-in is raised as a popup, not as the inline banner the
+    // A refused sign-in is raised as a dialog, not as the inline banner the
     // load and toggle failures use: what the service says is an errand the
     // user has to run somewhere else, so it has to be read.
-    expect(model.alertMessage).toBe("Could not connect: sign-in was cancelled");
-    expect(model.errorMessage, "the inline banner is left for the other failures").toBe("");
-  });
-
-  it("keeps the connection failure up until the user dismisses it", () => {
-    const { model } = makeModel(() => okWith(permissionsView()));
-    model.alertMessage = "Could not connect: ask an administrator";
-
-    // Switching section clears the inline error as noise; the popup is not
-    // noise, so the same call must leave it standing.
-    model.clearErrorMessage();
-    expect(model.alertMessage).toBe("Could not connect: ask an administrator");
-
-    model.dismissAlert();
-    expect(model.alertMessage).toBe("");
+    expect(shownDialogs.map((dialog) => dialog.error)).toEqual([
+      { message: "Imbue Studio couldn't finish signing in to Notion.", details: "HTTP 502\nsign-in was cancelled" },
+    ]);
+    expect(model.writeError, "the inline banner is left for the other failures").toBeNull();
   });
 });
 
@@ -820,11 +921,18 @@ describe("PermissionsModel connect with credentials", () => {
     expect(model.isRowBusy(connectServiceRowKey("aws"))).toBe(false);
   });
 
-  it("keeps the form and everything typed when a credential is refused", async () => {
+  it("keeps the form and everything typed when a credential is refused, with no bug report to file", async () => {
     const loaded = permissionsView({ available_connections: [awsAvailable()] });
     const { model } = makeModel((url) =>
       url.endsWith("/connect-credentials")
-        ? { ok: false, status: 400, body: { error: "AWS rejected those credentials: bad key id" } }
+        ? {
+            ok: false,
+            status: 422,
+            body: {
+              error: "Imbue Studio couldn't store those AWS credentials. Check them and try again.",
+              detail: "bad key id",
+            },
+          }
         : okWith(loaded),
     );
     await model.load();
@@ -834,11 +942,15 @@ describe("PermissionsModel connect with credentials", () => {
     const section = await model.connectWithCredentials("aws");
 
     expect(section).toBeNull();
-    expect(model.credentialErrorMessage).toBe("AWS rejected those credentials: bad key id");
+    expect(model.credentialError).toEqual({
+      message: "Imbue Studio couldn't store those AWS credentials. Check them and try again.",
+      details: "HTTP 422\nbad key id",
+    });
+    expect(model.isCredentialErrorReportable).toBe(false);
     expect(model.credentialFormServiceName).toBe("aws");
     expect(model.credentialValues).toEqual({ "access-key-id": "AKIA", "secret-access-key": "wrong" });
     // The refusal belongs next to the fields, not to the pane at large.
-    expect(model.errorMessage).toBe("");
+    expect(model.writeError).toBeNull();
     expect(model.data).toEqual(loaded);
   });
 

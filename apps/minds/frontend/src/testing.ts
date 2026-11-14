@@ -12,12 +12,16 @@ import type {
 } from "./channel/messages";
 import { createEmptyStores } from "./models/boot";
 import type { RequestResult } from "./models/errors";
-import type { BrowserImportResult } from "./models/browserImport";
+import type {
+  BrowserImportModel,
+  BrowserImportResult,
+} from "./models/browserImport";
 import type {
   ConnectionBackendOption,
   CreateFormDefaults,
   CreateRetryPrefill,
 } from "./models/create";
+import type { UserFacingError } from "./models/errors";
 import { createAppQueryClient } from "./models/queryClient";
 import type { SettingsOverview } from "./models/settings";
 import type {
@@ -328,6 +332,34 @@ export function settingsOverview(
   };
 }
 
+/** A `POST /ui/api/settings/browser-import` outcome: a successful run unless
+ * `overrides` say otherwise. */
+export function browserImportOutcome(
+  overrides: Partial<BrowserImportResult> = {},
+): BrowserImportResult {
+  return {
+    is_success: true,
+    message: "",
+    detail: "",
+    error_code: null,
+    is_full_disk_access_needed: false,
+    is_chrome_missing: false,
+    ...overrides,
+  };
+}
+
+/** Leave `model` as a run that came back with the failed `outcome` does: the
+ * outcome, and the error shown for it, which is returned. */
+export function setFailedImport(
+  model: BrowserImportModel,
+  outcome: BrowserImportResult,
+): UserFacingError {
+  const error = { message: outcome.message, details: outcome.detail };
+  model.outcome = outcome;
+  model.error = error;
+  return error;
+}
+
 /** The `POST /ui/api/settings/browser-import` outcome of an import the OS
  * refused: the Chrome profile is there, but could not be read. On a Mac
  * (the default) the app lacks Full Disk Access; elsewhere it is a plain
@@ -335,12 +367,36 @@ export function settingsOverview(
 export function unreadableChromeProfileOutcome(
   isFullDiskAccessNeeded = true,
 ): BrowserImportResult {
-  return {
+  return browserImportOutcome({
     is_success: false,
+    message:
+      "Imbue Studio couldn't import your Chrome cookies. Try again. If this persists, report a bug.",
     detail: "The Google Chrome profile could not be read: EPERM.",
     error_code: "CHROME_PROFILE_NOT_READABLE",
     is_full_disk_access_needed: isFullDiskAccessNeeded,
-  };
+  });
+}
+
+/** The `POST /ui/api/settings/browser-import` outcome of an import that failed
+ * for a reason with no explanation of its own. */
+export function failedImportOutcome(): BrowserImportResult {
+  return browserImportOutcome({
+    is_success: false,
+    message:
+      "Imbue Studio couldn't import your Chrome cookies. Try again. If this persists, report a bug.",
+    detail: "Error: The stored browser state is not valid JSON.",
+  });
+}
+
+/** The `POST /ui/api/settings/browser-import` outcome on a computer with no
+ * Chrome to import from. */
+export function chromeMissingOutcome(): BrowserImportResult {
+  return browserImportOutcome({
+    is_success: false,
+    message: "Imbue Studio couldn't find Google Chrome's cookies on this computer.",
+    detail: "Google Chrome is not installed in any of the standard locations.",
+    is_chrome_missing: true,
+  });
 }
 
 /** SharePanelModel options for a workspace granted by owner@example.com, with

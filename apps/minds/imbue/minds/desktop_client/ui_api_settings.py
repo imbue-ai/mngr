@@ -31,6 +31,7 @@ import sys
 from enum import auto
 from typing import Any
 from typing import Callable
+from typing import Final
 from typing import TypeVar
 
 from flask import Blueprint
@@ -80,6 +81,7 @@ from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
 from imbue.mngr_latchkey.core import BROWSER_STATE_FILENAME
 from imbue.mngr_latchkey.core import LatchkeyErrorCode
+from imbue.mngr_latchkey.core import is_chrome_profile_missing_failure
 
 _WriteT = TypeVar("_WriteT", bound=FrozenModel)
 
@@ -169,7 +171,8 @@ class UiBrowserImportResult(FrozenModel):
     """Outcome of one ``latchkey auth import-chrome`` run."""
 
     is_success: bool = Field(description="Whether the import completed")
-    detail: str = Field(description="Why the import did not happen; empty on success")
+    message: str = Field(default="", description="What the user is told about a failed import; empty on success")
+    detail: str = Field(description="Why the import did not happen, in latchkey's words; empty on success")
     error_code: LatchkeyErrorCode | None = Field(
         default=None,
         description="Latchkey's code for the failure when it gave one this package knows; None otherwise",
@@ -179,6 +182,13 @@ class UiBrowserImportResult(FrozenModel):
         description=(
             "Whether the fix is granting the app Full Disk Access: the Chrome profile could not be read "
             "and this desktop is a Mac, where that is what denies every application a look at Chrome's data"
+        ),
+    )
+    is_chrome_missing: bool = Field(
+        default=False,
+        description=(
+            "Whether the import failed because this computer has no Chrome profile to import from "
+            "(Chrome is not installed, or has no default profile), so running it again cannot help"
         ),
     )
 
@@ -343,6 +353,12 @@ class UiAiKeysContext(FrozenModel):
 
 def _json_response(payload: FrozenModel, status_code: int = 200) -> Response:
     return Response(payload.model_dump_json(), status=status_code, mimetype="application/json")
+
+
+_CHROME_NOT_FOUND_SENTENCE: Final[str] = "Imbue Studio couldn't find Google Chrome's cookies on this computer."
+_CHROME_IMPORT_FAILED_SENTENCE: Final[str] = (
+    "Imbue Studio couldn't import your Chrome cookies. Try again. If this persists, report a bug."
+)
 
 
 def _error_response(message: str, status_code: int) -> Response:
@@ -676,13 +692,15 @@ def _handle_browser_import_run() -> Response:
 
     Blocks for the whole run (tens of seconds), like the browser sign-in an
     Approve runs: the caller shows a spinner and reads the outcome from the
-    body. A failed import answers 200 with ``is_success`` false and latchkey's
-    reason, so the dialog can show it and go on to the sign-in; when latchkey
-    coded the failure, ``error_code`` carries it, and
+    body. A failed import answers 200 with ``is_success`` false, the sentence
+    to show, and latchkey's reason, so the dialog can say why and go on to the
+    sign-in; when latchkey coded the failure, ``error_code`` carries it, and
     ``is_full_disk_access_needed`` says whether this desktop's platform makes
     the Full Disk Access list the fix, so the client can say what to do rather
-    than quote the reason. Also counts as the offer having been made, since
-    running it is one way of answering it.
+    than quote the reason. ``is_chrome_missing`` marks a computer with no Chrome
+    profile to import from, where running the import again cannot help, so the
+    client leaves out its retry and Report a bug. Also counts as the offer
+    having been made, since running it is one way of answering it.
     """
     if not is_ui_request_authenticated():
         return _unauthenticated_response()
@@ -693,12 +711,21 @@ def _handle_browser_import_run() -> Response:
     if minds_config is not None:
         minds_config.set_is_browser_import_offered(True)
     outcome = handler.latchkey.import_chrome_browser_state()
+    is_chrome_missing = not outcome.is_success and is_chrome_profile_missing_failure(outcome.detail)
+    if outcome.is_success:
+        message = ""
+    elif is_chrome_missing:
+        message = _CHROME_NOT_FOUND_SENTENCE
+    else:
+        message = _CHROME_IMPORT_FAILED_SENTENCE
     return _json_response(
         UiBrowserImportResult(
             is_success=outcome.is_success,
+            message=message,
             detail=outcome.detail,
             error_code=outcome.error_code,
             is_full_disk_access_needed=is_full_disk_access_needed(outcome.error_code, sys.platform),
+            is_chrome_missing=is_chrome_missing,
         )
     )
 

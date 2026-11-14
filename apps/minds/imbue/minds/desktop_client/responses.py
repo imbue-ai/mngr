@@ -42,21 +42,25 @@ def make_json_error_response(
     status_code: int,
     detail: str = "",
     remedy: ErrorRemedy | None = None,
+    is_request_resolved: bool = False,
     code: str | None = None,
 ) -> Response:
     """Build the ``{"error": ...}`` JSON body the API-style routes share.
 
     ``detail``, when given, rides along as a ``detail`` key: verbatim machine output (a
     workspace's own verdict, say) the SPA renders apart from the message. ``remedy``, when
-    given, names the button the SPA offers beside the message. ``code``, when given, rides
-    along as a ``code`` key: a stable name for the refusal that callers can branch on
-    without parsing the message.
+    given, names the button the SPA offers beside the message. ``is_request_resolved`` marks
+    a refused answer to a permission request that has a verdict all the same, so the dialog
+    stops offering Approve and Deny. ``code``, when given, rides along as a ``code`` key: a
+    stable name for the refusal that callers can branch on without parsing the message.
     """
-    body: dict[str, str] = {"error": message}
+    body: dict[str, str | bool] = {"error": message}
     if detail:
         body["detail"] = detail
     if remedy is not None:
         body["remedy"] = str(remedy)
+    if is_request_resolved:
+        body["is_request_resolved"] = True
     if code is not None:
         body["code"] = code
     return make_response(content=json.dumps(body), media_type="application/json", status_code=status_code)

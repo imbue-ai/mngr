@@ -9,6 +9,7 @@
 import m from "mithril";
 import { getAppContext } from "../../app-context";
 import type { UiNotificationEntry } from "../../channel/messages";
+import type { NotificationOutcome } from "../../generated/ui";
 import type { NotificationsUiController } from "../../models/notificationsUi";
 import { Icon16 } from "../components/Icon";
 import {
@@ -54,8 +55,20 @@ export function filterEntries(
 
 /** The resolved-outcome chip a row carries once it is no longer pending.
  * "Closed" is the neutral auto-resolution (the request vanished, e.g. its
- * workspace was destroyed). */
-function outcomeChip(outcome: "approved" | "denied" | "closed"): m.Children {
+ * workspace was destroyed). "Still waiting" is a request that is still
+ * pending but whose workspace is not in the list right now, so it cannot be
+ * opened from here. */
+function outcomeChip(outcome: NotificationOutcome): m.Children {
+  if (outcome === "unlisted") {
+    return m("span", { class: "mt-1 flex flex-col gap-0.5", "data-outcome": "unlisted" }, [
+      m("span", { class: "inline-flex items-center gap-1 type-badge text-secondary" }, "Still waiting"),
+      m(
+        "span",
+        { class: "type-helper text-tertiary" },
+        "Imbue Studio can't find the workspace that asked right now.",
+      ),
+    ]);
+  }
   if (outcome === "approved") {
     return m(
       "span",
