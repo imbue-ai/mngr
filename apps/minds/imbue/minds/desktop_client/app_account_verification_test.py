@@ -17,6 +17,7 @@ from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.conftest import record_web_login_flow_for_test
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudPlanRefusedCliError
 
 
 def _make_client_with_account(tmp_path: Path, cli):
@@ -61,16 +62,59 @@ def test_set_plan_reports_sent_false_when_the_send_is_suppressed(tmp_path: Path)
     assert json.loads(response.data)["sent"] is False
 
 
-def test_set_plan_keeps_other_refusals_as_plain_text_errors(tmp_path: Path) -> None:
+def test_set_plan_answers_other_failures_with_the_command_text_as_detail_only(tmp_path: Path) -> None:
     cli = make_fake_imbue_cloud_cli()
-    cli.set_plan_error_to_raise = ImbueCloudCliError("The 'ally' plan requires partner access")
+    cli.set_plan_error_to_raise = ImbueCloudCliError("account set-plan failed (exit 1); see the desktop client logs")
     client = _make_client_with_account(tmp_path, cli)
 
     response = client.post("/accounts/user-1/plan", data={"plan": "ally"})
 
     assert response.status_code == 502
-    assert b"requires partner access" in response.data
+    assert json.loads(response.data) == {"detail": "account set-plan failed (exit 1); see the desktop client logs"}
     assert cli.resent_verification_emails == []
+
+
+def test_set_plan_answers_a_refusal_imbue_cloud_stated_with_its_reason_and_code(tmp_path: Path) -> None:
+    """The page words a stated refusal itself, so it needs the reason, not a status to retry on."""
+    cli = make_fake_imbue_cloud_cli()
+    refusal = ImbueCloudPlanRefusedCliError("account set-plan: The 'ally' plan requires partner access")
+    refusal.reason = "The 'ally' plan requires partner access"
+    cli.set_plan_error_to_raise = refusal
+    client = _make_client_with_account(tmp_path, cli)
+
+    response = client.post("/accounts/user-1/plan", data={"plan": "ally"})
+
+    assert response.status_code == 403
+    assert json.loads(response.data) == {"code": "plan_refused", "reason": "The 'ally' plan requires partner access"}
+
+
+def test_set_plan_refuses_a_switch_with_no_plan_in_a_sentence_the_page_shows(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    client = _make_client_with_account(tmp_path, cli)
+
+    response = client.post("/accounts/user-1/plan", data={"plan": " "})
+
+    assert response.status_code == 422
+    assert json.loads(response.data) == {"error": "Pick a plan to switch to, then select Switch plan."}
+    assert cli.set_plan_calls == []
+
+
+def test_set_plan_tells_a_missing_account_from_a_missing_imbue_cloud(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    client = _make_client_with_account(tmp_path, cli)
+    unconfigured_client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path / "unconfigured", is_authenticated=True
+    )
+
+    missing_account = client.post("/accounts/nobody/plan", data={"plan": "free"})
+    no_imbue_cloud = unconfigured_client.post("/accounts/user-1/plan", data={"plan": "free"})
+
+    assert missing_account.status_code == 409
+    assert "error" not in json.loads(missing_account.data)
+    assert "account list" in json.loads(missing_account.data)["detail"]
+    assert no_imbue_cloud.status_code == 503
+    assert json.loads(no_imbue_cloud.data)["error"] == "Imbue Studio can't do that on this computer."
+    assert cli.set_plan_calls == []
 
 
 def test_resend_verification_route_sends_for_the_named_account(tmp_path: Path) -> None:

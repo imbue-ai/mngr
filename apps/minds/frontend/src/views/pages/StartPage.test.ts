@@ -12,7 +12,7 @@ import {
   undoAnswer,
 } from "../../models/startFlow";
 import { allText, attrsOf, collectVnodes, createFormDefaults, withAttr } from "../../testing";
-import { areDefaultsStale, cloudCreateBody, transcriptTurns } from "./StartPage";
+import { areDefaultsStale, cloudCreateBody, cloudCreateRefusal, transcriptTurns } from "./StartPage";
 
 const SIGNED_OUT = { signedInAccount: null, knownAccountIds: [] };
 const SIGNED_IN = { signedInAccount: { userId: "user-1", email: "a@b.com" }, knownAccountIds: ["user-1"] };
@@ -46,6 +46,28 @@ describe("cloudCreateBody", () => {
     expect(cloudCreateBody(withBob, "user-2")).toMatchObject({
       account_id: "user-2",
     });
+  });
+});
+
+describe("cloudCreateRefusal", () => {
+  it("passes the create form's own sentence through, and words a refusal with none itself", () => {
+    const refused = { status: 400, data: { error: "Sharing needs a signed-in account, so turn it off to create this workspace.", field: "enable_web_access" } };
+    expect(cloudCreateRefusal(refused)).toBe("I couldn't set that up: Sharing needs a signed-in account, so turn it off to create this workspace.");
+    // A 422 lists fields in a shape that carries no sentence of its own.
+    const structural = { status: 422, data: { errors: [{ field: "git_url", message: "field required" }] } };
+    expect(cloudCreateRefusal(structural)).toBe(
+      "I couldn't set that up. Try again. If this persists, report a bug.",
+    );
+  });
+
+  it("asks for a restart, not the auth layer's words, when the create is refused for this window's lapsed login", () => {
+    expect(cloudCreateRefusal({ status: 401, data: { error: "Not authenticated" } })).toBe(
+      "I couldn't set that up: Imbue Studio needs to restart to reconnect this window.",
+    );
+  });
+
+  it("claims nothing about what was created when Imbue Studio did not answer", () => {
+    expect(cloudCreateRefusal({ status: 0, data: {} })).toBe("Imbue Studio didn't respond. Pick again.");
   });
 });
 

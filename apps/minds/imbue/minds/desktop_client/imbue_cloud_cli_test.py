@@ -12,6 +12,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudLeaseActiveCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudPlanRefusedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudShareRefusedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudSyncConflictCliError
@@ -71,6 +72,19 @@ def test_expect_success_raises_typed_quota_error_with_server_message() -> None:
         cli._expect_success(result, "bucket create")
     assert "allows 5 buckets" in str(exc_info.value)
     assert "bucket create" in str(exc_info.value)
+
+
+def test_expect_success_raises_the_typed_plan_refusal_carrying_the_connectors_reason() -> None:
+    cli = make_fake_imbue_cloud_cli()
+    reason = "The 'ally' plan requires partner access (a paid-listed email)"
+    body = json.dumps(
+        {"error": reason, "error_class": "ImbueCloudPlanRefusedError", "code": "plan_refused"},
+        indent=2,
+    )
+    result = MngrCallResult(returncode=1, stdout="", stderr="some log line\n" + body + "\n")
+    with pytest.raises(ImbueCloudPlanRefusedCliError) as exc_info:
+        cli._expect_success(result, "account set-plan")
+    assert exc_info.value.reason == reason
 
 
 def test_expect_success_raises_typed_auth_error_carrying_the_connector_status() -> None:

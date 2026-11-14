@@ -17,6 +17,18 @@
 
 import m from "mithril";
 import type { UiAccountEntry } from "../channel/messages";
+import type { ResponseBody, UserFacingError } from "./errors";
+import {
+  TextResponseBody,
+  WINDOW_LOGIN_LAPSED_SENTENCE,
+  errorCodeFromBody,
+  errorFromSentenceResponse,
+  fallbackErrorSentence,
+  readResponseBody,
+  reasonFromBody,
+  responseDetails,
+} from "./errors";
+import { isReconnectNeeded } from "./reconnect";
 
 export interface PlanUsageRow {
   label: string;
@@ -42,6 +54,32 @@ export interface TrimStatus {
   detail: string;
 }
 
+/** Why an account's plan or notification settings could not be read. All
+ * but WINDOW_LOGIN_LAPSED come from the route; that one is the route refusing
+ * this window because its own login on this computer has lapsed. */
+export type AccountReadFailureKind = RouteFailureKind | "WINDOW_LOGIN_LAPSED";
+
+const ROUTE_FAILURE_KINDS = [
+  "NOT_SIGNED_IN",
+  "NOT_CONFIGURED",
+  "SESSION_REJECTED",
+  "EMAIL_NOT_VERIFIED",
+  "CLIENT_TOO_OLD",
+  "FAILED",
+] as const;
+
+type RouteFailureKind = (typeof ROUTE_FAILURE_KINDS)[number];
+
+function isRouteFailureKind(kind: unknown): kind is RouteFailureKind {
+  return (ROUTE_FAILURE_KINDS as readonly unknown[]).includes(kind);
+}
+
+export interface AccountReadFailure {
+  kind: AccountReadFailureKind;
+  /** The underlying error, for See details. */
+  details: string;
+}
+
 export interface AccountPlanState {
   isLoaded: boolean;
   isUnavailable: boolean;
@@ -49,6 +87,8 @@ export interface AccountPlanState {
   isRefreshing: boolean;
   /** The last read failed, so the plan shown is an older one. */
   isRefreshFailed: boolean;
+  /** Why the last read failed; null after a successful one. */
+  readFailure: AccountReadFailure | null;
   planView: AccountPlanView | null;
   trimStatus: TrimStatus | null;
   privacyPolicyUrl: string;
@@ -80,8 +120,9 @@ export interface NotificationChannels {
 
 export interface NotificationPreferencesState {
   isLoaded: boolean;
-  /** null once loaded means Imbue Cloud could not be reached. */
+  /** null once loaded means they could not be read; readFailure says why. */
   channels: NotificationChannels | null;
+  readFailure: AccountReadFailure | null;
   isWriting: boolean;
 }
 
@@ -99,7 +140,9 @@ type FetchLike = typeof fetch;
 type ScheduleLike = (callback: () => void, delayMs: number) => void;
 
 export class AccountsDetailModel {
-  actionError = "";
+  actionError: UserFacingError | null = null;
+  /** Repeats the action behind `actionError`, for a failure that trying again can fix. */
+  actionErrorRetry: (() => void) | null = null;
   planByUserId = new Map<string, AccountPlanState>();
   notificationPreferencesByUserId = new Map<
     string,
@@ -168,6 +211,7 @@ export class AccountsDetailModel {
     const fresh: NotificationPreferencesState = {
       isLoaded: false,
       channels: null,
+      readFailure: null,
       isWriting: false,
     };
     this.notificationPreferencesByUserId.set(userId, fresh);
@@ -177,21 +221,13 @@ export class AccountsDetailModel {
   async loadNotificationPreferences(userId: string): Promise<void> {
     if (this.isDisposed) return;
     const state = this.notificationPreferencesFor(userId);
-    try {
-      const response = await this.fetchImpl(
-        notificationPreferencesUrl(userId),
-        {
-          credentials: "same-origin",
-        },
-      );
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const payload = (await response.json()) as {
-        preferences?: NotificationChannels | null;
-      };
-      state.channels = payload.preferences ?? null;
-    } catch {
-      state.channels = null;
-    }
+    const read = await readAccountSection<{
+      preferences?: NotificationChannels | null;
+    }>(this.fetchImpl, notificationPreferencesUrl(userId));
+    const channels = read.body?.preferences ?? null;
+    state.channels = channels;
+    state.readFailure =
+      channels === null ? (read.failure ?? failureInBody(read.body)) : null;
     state.isLoaded = true;
     this.redraw();
   }
@@ -205,35 +241,36 @@ export class AccountsDetailModel {
     const state = this.notificationPreferencesFor(userId);
     if (state.isWriting || state.channels === null) return;
     state.isWriting = true;
-    this.actionError = "";
+    this.actionError = null;
+    this.actionErrorRetry = null;
     this.redraw();
-    try {
-      const response = await this.fetchImpl(
-        notificationPreferencesUrl(userId),
-        {
-          method: "POST",
-          credentials: "same-origin",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email_enabled: isEnabled }),
-        },
-      );
-      const payload = response.ok
-        ? ((await response.json()) as {
-            preferences: NotificationChannels | null;
-          })
-        : null;
-      if (payload === null || payload.preferences === null) {
-        this.actionError = "The notification preference could not be saved.";
-      } else {
-        state.channels = payload.preferences;
-      }
-    } catch {
-      this.actionError =
-        "The notification preference could not be saved (network error).";
-    } finally {
-      state.isWriting = false;
-      this.redraw();
+    const read = await readAccountSection<{
+      preferences?: NotificationChannels | null;
+    }>(this.fetchImpl, notificationPreferencesUrl(userId), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email_enabled: isEnabled }),
+    });
+    const channels = read.body?.preferences ?? null;
+    const failure =
+      channels === null ? (read.failure ?? failureInBody(read.body)) : null;
+    if (failure === null) {
+      state.channels = channels;
+    } else if (failure.kind === "FAILED") {
+      this.actionError = {
+        message: fallbackErrorSentence("Couldn't save your notification setting"),
+        details: failure.details,
+      };
+      this.actionErrorRetry = () => void this.setEmailNotifications(userId, isEnabled);
+    } else {
+      // The write passes the same sign-in checks as the read, so any other
+      // cause leaves the section unreadable too, and the card's read notice
+      // offers its remedy (Sign in, Restart Imbue Studio).
+      state.channels = null;
+      state.readFailure = failure;
     }
+    state.isWriting = false;
+    this.redraw();
   }
 
   planStateFor(userId: string): AccountPlanState {
@@ -244,6 +281,7 @@ export class AccountsDetailModel {
       isUnavailable: false,
       isRefreshing: false,
       isRefreshFailed: false,
+      readFailure: null,
       planView: null,
       trimStatus: null,
       privacyPolicyUrl: "",
@@ -255,77 +293,80 @@ export class AccountsDetailModel {
   async loadPlan(userId: string): Promise<void> {
     if (this.isDisposed) return;
     const state = this.planStateFor(userId);
-    try {
-      const response = await this.fetchImpl(
-        `/ui/api/accounts/${encodeURIComponent(userId)}/plan`,
-        {
-          credentials: "same-origin",
-        },
-      );
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const payload = (await response.json()) as {
-        plan_view: AccountPlanView | null;
-        trim_status: TrimStatus | null;
-        privacy_policy_url?: string;
-      };
-      state.trimStatus = payload.trim_status;
-      state.privacyPolicyUrl = payload.privacy_policy_url ?? "";
-      if (payload.plan_view === null) {
-        markReadFailed(state);
-      } else {
-        state.isLoaded = true;
-        state.isUnavailable = false;
-        state.isRefreshing = false;
-        state.isRefreshFailed = false;
-        state.planView = payload.plan_view;
-        cachedPlanByUserId.set(userId, {
-          planView: payload.plan_view,
-          privacyPolicyUrl: state.privacyPolicyUrl,
-        });
-      }
-      if (payload.trim_status?.is_running && !this.isDisposed) {
-        this.schedule(() => void this.loadPlan(userId), TRIM_POLL_MS);
-      }
-    } catch {
-      markReadFailed(state);
+    const read = await readAccountSection<{
+      plan_view: AccountPlanView | null;
+      trim_status: TrimStatus | null;
+      privacy_policy_url?: string;
+    }>(this.fetchImpl, `/ui/api/accounts/${encodeURIComponent(userId)}/plan`);
+    const payload = read.body;
+    if (payload === null) {
+      markReadFailed(state, read.failure ?? failureInBody(null));
+      this.redraw();
+      return;
+    }
+    state.trimStatus = payload.trim_status;
+    state.privacyPolicyUrl = payload.privacy_policy_url ?? "";
+    if (payload.plan_view === null) {
+      markReadFailed(state, failureInBody(payload));
+    } else {
+      state.isLoaded = true;
+      state.isUnavailable = false;
+      state.isRefreshing = false;
+      state.isRefreshFailed = false;
+      state.readFailure = null;
+      state.planView = payload.plan_view;
+      cachedPlanByUserId.set(userId, {
+        planView: payload.plan_view,
+        privacyPolicyUrl: state.privacyPolicyUrl,
+      });
+    }
+    if (payload.trim_status?.is_running && !this.isDisposed) {
+      this.schedule(() => void this.loadPlan(userId), TRIM_POLL_MS);
     }
     this.redraw();
   }
 
   /** POST one of the legacy form routes, reporting whether it succeeded.
-   * `onFailure` may consume a non-OK response (returning true suppresses the
-   * generic actionError). */
+   * `whatFailed` names the action for the page error ("Couldn't log out
+   * <email>"); a refusal the route words itself replaces it. `onFailure` may
+   * consume a non-OK response (returning true suppresses the page error). */
   async submitAccountForm(
     url: string,
     fields: Record<string, string>,
-    onFailure?: (status: number, bodyText: string) => boolean,
+    whatFailed: string,
+    onFailure?: (status: number, body: ResponseBody) => boolean,
   ): Promise<boolean> {
-    this.actionError = "";
+    this.actionError = null;
+    this.actionErrorRetry = null;
+    let response: Response;
     try {
-      const response = await this.fetchImpl(url, {
+      response = await this.fetchImpl(url, {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams(fields).toString(),
       });
-      if (!response.ok) {
-        const text = await response.text();
-        if (onFailure === undefined || !onFailure(response.status, text)) {
-          this.actionError =
-            text || `The action failed (HTTP ${response.status}).`;
-        }
-        this.redraw();
-        return false;
-      }
-      return true;
-    } catch {
-      this.actionError = "The action failed (network error).";
+    } catch (thrown) {
+      this.actionError = {
+        message: fallbackErrorSentence(whatFailed),
+        details: `No response. ${thrown instanceof Error ? thrown.message : String(thrown)}`,
+      };
       this.redraw();
       return false;
     }
+    if (response.ok) return true;
+    const body = await readResponseBody(response);
+    if (onFailure === undefined || !onFailure(response.status, body)) {
+      this.actionError = errorFromSentenceResponse(whatFailed, {
+        status: response.status,
+        body,
+      });
+    }
+    this.redraw();
+    return false;
   }
 
-  async logOut(userId: string): Promise<void> {
+  async logOut(userId: string, email: string): Promise<void> {
     // Logging out runs a subprocess server-side (several seconds); the card's
     // button reads this set to show a busy state and swallow double-clicks.
     if (this.loggingOutUserIds.has(userId)) return;
@@ -335,6 +376,7 @@ export class AccountsDetailModel {
       await this.submitAccountForm(
         `/accounts/${encodeURIComponent(userId)}/logout`,
         {},
+        `Couldn't log out ${email}`,
       );
     } finally {
       this.loggingOutUserIds.delete(userId);
@@ -350,7 +392,13 @@ export class AccountsDetailModel {
     return this.verifyEmailPromptByUserId.get(userId) ?? null;
   }
 
-  async switchPlan(userId: string, plan: string): Promise<void> {
+  /** `planLabel` is the plan as the page names it ("Limited" for free). */
+  async switchPlan(
+    userId: string,
+    email: string,
+    plan: string,
+    planLabel: string,
+  ): Promise<void> {
     // Switching runs a connector round trip plus a plan reload (several
     // seconds); the card's button reads this set to show a busy state and
     // swallow double-clicks, like the log-out button.
@@ -362,8 +410,18 @@ export class AccountsDetailModel {
       const isSwitched = await this.submitAccountForm(
         `/accounts/${encodeURIComponent(userId)}/plan`,
         { plan },
-        (status, bodyText) => {
-          const refusal = parseEmailNotVerified(status, bodyText);
+        `Couldn't switch ${email} to the ${planLabel} plan`,
+        (status, body) => {
+          const planRefusal = parsePlanRefused(status, body);
+          if (planRefusal !== null) {
+            // Imbue Cloud's stated reason, which no retry changes.
+            this.actionError = {
+              message: `Imbue Cloud won't switch ${email} to the ${planLabel} plan. It said: "${planRefusal}"`,
+              details: `HTTP ${status}`,
+            };
+            return true;
+          }
+          const refusal = parseEmailNotVerified(status, body);
           if (refusal === null) return false;
           this.verifyEmailPromptByUserId.set(userId, {
             email: refusal.email,
@@ -432,6 +490,7 @@ export class AccountsDetailModel {
     await this.submitAccountForm(
       `/accounts/${encodeURIComponent(userId)}/trim-backups`,
       {},
+      "Couldn't start freeing up backup space",
     );
     await this.loadPlan(userId);
   }
@@ -439,9 +498,13 @@ export class AccountsDetailModel {
 
 /** A plan already on screen stays there, marked as not current; with none
  * the section reads as unavailable. */
-function markReadFailed(state: AccountPlanState): void {
+function markReadFailed(
+  state: AccountPlanState,
+  failure: AccountReadFailure,
+): void {
   state.isLoaded = true;
   state.isRefreshing = false;
+  state.readFailure = failure;
   if (state.planView === null) {
     state.isUnavailable = true;
   } else {
@@ -449,8 +512,141 @@ function markReadFailed(state: AccountPlanState): void {
   }
 }
 
+interface AccountSectionRead<T> {
+  /** The route's answer, or null when there was no usable one. */
+  body: T | null;
+  /** Why there was no usable answer; null when there was. */
+  failure: AccountReadFailure | null;
+}
+
+/** Read (or, with `init`, write) one of an account card's sections. A
+ * refusal of the window's own login is told apart, since only a restart
+ * fixes it. */
+async function readAccountSection<T>(
+  fetchImpl: FetchLike,
+  url: string,
+  init: RequestInit = {},
+): Promise<AccountSectionRead<T>> {
+  let response: Response;
+  try {
+    response = await fetchImpl(url, { ...init, credentials: "same-origin" });
+  } catch (thrown) {
+    return {
+      body: null,
+      failure: {
+        kind: "FAILED",
+        details: `No response. ${thrown instanceof Error ? thrown.message : String(thrown)}`,
+      },
+    };
+  }
+  const body = await readResponseBody(response);
+  if (!response.ok) {
+    return {
+      body: null,
+      failure: {
+        kind: isReconnectNeeded({ status: response.status, body }) ? "WINDOW_LOGIN_LAPSED" : "FAILED",
+        details: responseDetails({ status: response.status, body }),
+      },
+    };
+  }
+  if (
+    body === null ||
+    typeof body !== "object" ||
+    body instanceof TextResponseBody
+  ) {
+    return {
+      body: null,
+      failure: {
+        kind: "FAILED",
+        details: responseDetails({ status: response.status, body }),
+      },
+    };
+  }
+  return { body: body as T, failure: null };
+}
+
+/** The failure a section's answer carries alongside its empty value. */
+function failureInBody(body: unknown): AccountReadFailure {
+  const failure =
+    body !== null && typeof body === "object"
+      ? (body as { failure?: unknown }).failure
+      : undefined;
+  if (failure === null || typeof failure !== "object") {
+    return { kind: "FAILED", details: "" };
+  }
+  const { kind, detail } = failure as { kind?: unknown; detail?: unknown };
+  return {
+    kind: isRouteFailureKind(kind) ? kind : "FAILED",
+    details: typeof detail === "string" ? detail : "",
+  };
+}
+
+/** What failed, for the sentences below: the plan area, the notification row,
+ * or both when they failed for the same reason and share one notice. */
+export type AccountSection = "plan" | "notifications" | "plan-and-notifications";
+
+const SECTION_NOUN: Record<AccountSection, string> = {
+  plan: "your plan and usage",
+  notifications: "your notification settings",
+  "plan-and-notifications": "your plan, usage and notification settings",
+};
+
+const SECTION_SHORT_NOUN: Record<AccountSection, string> = {
+  plan: "your plan",
+  notifications: "your notification settings",
+  "plan-and-notifications": "your plan and notification settings",
+};
+
+/** The card's sentence for a section that could not be read. */
+export function accountReadError(
+  section: AccountSection,
+  failure: AccountReadFailure,
+): UserFacingError {
+  const noun = SECTION_SHORT_NOUN[section];
+  const details = failure.details;
+  switch (failure.kind) {
+    case "SESSION_REJECTED":
+      return {
+        message: `Your Imbue Cloud sign-in has expired. *Sign in again* to see ${noun}.`,
+        details,
+      };
+    case "EMAIL_NOT_VERIFIED":
+      return {
+        message:
+          `Imbue Cloud needs your email address verified before it shows ${noun}. ` +
+          "*Click the link in the verification email, then try again.*",
+        details,
+      };
+    case "CLIENT_TOO_OLD":
+      return {
+        message: `This version of Imbue Studio is too old to show ${noun}. *Update Imbue Studio.*`,
+        details,
+      };
+    case "NOT_CONFIGURED":
+      return {
+        message: `This copy of Imbue Studio isn't set up for Imbue Cloud, so it can't show ${noun}.`,
+        details,
+      };
+    case "WINDOW_LOGIN_LAPSED":
+      return { message: WINDOW_LOGIN_LAPSED_SENTENCE, details };
+    case "NOT_SIGNED_IN":
+    case "FAILED":
+      return {
+        message: fallbackErrorSentence(`Couldn't load ${SECTION_NOUN[section]}`),
+        details,
+      };
+  }
+}
+
 function notificationPreferencesUrl(userId: string): string {
   return `/ui/api/accounts/${encodeURIComponent(userId)}/notification-preferences`;
+}
+
+/** Imbue Cloud's reason from a structured plan_refused 403, or null when the
+ * response is not that refusal. */
+function parsePlanRefused(status: number, body: ResponseBody): string | null {
+  if (status !== 403 || errorCodeFromBody(body) !== "plan_refused") return null;
+  return reasonFromBody(body);
 }
 
 /** The email and auto-send outcome from a structured email_not_verified 403
@@ -459,25 +655,10 @@ function notificationPreferencesUrl(userId: string): string {
  * confirm. */
 function parseEmailNotVerified(
   status: number,
-  bodyText: string,
+  body: ResponseBody,
 ): { email: string; wasAutoSent: boolean } | null {
-  if (status !== 403) return null;
-  let body: unknown;
-  try {
-    body = JSON.parse(bodyText);
-  } catch {
-    return null;
-  }
-  if (
-    typeof body === "object" &&
-    body !== null &&
-    (body as { code?: unknown }).code === "email_not_verified" &&
-    typeof (body as { email?: unknown }).email === "string"
-  ) {
-    return {
-      email: (body as { email: string }).email,
-      wasAutoSent: (body as { sent?: unknown }).sent === true,
-    };
-  }
-  return null;
+  if (status !== 403 || errorCodeFromBody(body) !== "email_not_verified") return null;
+  if (body === null || body instanceof TextResponseBody) return null;
+  const email = body["email"];
+  return typeof email === "string" ? { email, wasAutoSent: body["sent"] === true } : null;
 }

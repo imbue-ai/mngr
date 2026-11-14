@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   accountEntry,
   jsonResponse,
@@ -138,21 +138,68 @@ describe("AccountsDetailModel", () => {
     expect(model.planStateFor("user-1").privacyPolicyUrl).toBe("");
   });
 
-  it("surfaces a failed form action's body as the page error", async () => {
+  it("names the failed action as the page error, with the route's answer behind See details", async () => {
     const model = new AccountsDetailModel(
       async (input) => {
         const url = String(input);
         if (url === "/accounts/user-1/plan")
-          return new Response("No plan selected.", { status: 422 });
+          return jsonResponse(
+            { detail: "account set-plan failed (exit 1); see the desktop client logs" },
+            502,
+          );
+        if (url === "/accounts/user-1/logout")
+          return new Response("Not authenticated", { status: 403 });
         return jsonResponse({ plan_view: null, trim_status: null });
       },
       () => {},
       (callback) => callback(),
     );
 
-    await model.switchPlan("user-1", "");
+    await model.switchPlan("user-1", "person@example.com", "free", "Limited");
+    const planError = model.actionError;
+    await model.logOut("user-1", "person@example.com");
 
-    expect(model.actionError).toBe("No plan selected.");
+    expect(planError).toEqual({
+      message:
+        "Couldn't switch person@example.com to the Limited plan. Try again. If this persists, report a bug.",
+      details:
+        "HTTP 502\naccount set-plan failed (exit 1); see the desktop client logs",
+    });
+    expect(model.actionError).toEqual({
+      message:
+        "Couldn't log out person@example.com. Try again. If this persists, report a bug.",
+      details: "HTTP 403\nNot authenticated",
+    });
+  });
+
+  it("shows the route's own sentence for a refusal it words, and names the action when nothing answers", async () => {
+    const model = new AccountsDetailModel(
+      async (input) => {
+        if (String(input) === "/accounts/user-1/trim-backups")
+          return jsonResponse(
+            { error: "Imbue Studio can't do that on this computer." },
+            503,
+          );
+        throw new TypeError("Failed to fetch");
+      },
+      () => {},
+      (callback) => callback(),
+    );
+
+    await model.submitAccountForm(
+      "/accounts/user-1/trim-backups",
+      {},
+      "Couldn't start freeing up backup space",
+    );
+    const refusal = model.actionError;
+    await model.logOut("user-1", "person@example.com");
+
+    expect(refusal?.message).toBe("Imbue Studio can't do that on this computer.");
+    expect(refusal?.details).toBe("HTTP 503");
+    expect(model.actionError?.message).toBe(
+      "Couldn't log out person@example.com. Try again. If this persists, report a bug.",
+    );
+    expect(model.actionError?.details).toContain("Failed to fetch");
   });
 
   it("reloads the account's plan section after a successful switch", async () => {
@@ -169,7 +216,7 @@ describe("AccountsDetailModel", () => {
       (callback) => callback(),
     );
 
-    await model.switchPlan("user-1", "explorer");
+    await model.switchPlan("user-1", "person@example.com", "explorer", "Explorer");
 
     expect(urls).toEqual([
       "/accounts/user-1/plan",
@@ -196,7 +243,7 @@ describe("AccountsDetailModel", () => {
       (callback) => callback(),
     );
 
-    await model.logOut("user-1");
+    await model.logOut("user-1", "person@example.com");
 
     expect(observedBody).toBe("");
     expect(observedContentType).toBe("application/x-www-form-urlencoded");
@@ -327,9 +374,9 @@ describe("verify-email prompt", () => {
         ),
     );
 
-    await model.switchPlan("user-1", "ally");
+    await model.switchPlan("user-1", "alice@example.com", "ally", "Ally");
 
-    expect(model.actionError).toBe("");
+    expect(model.actionError).toBeNull();
     expect(model.verifyEmailPromptFor("user-1")).toEqual({
       email: "alice@example.com",
       wasAutoSent: true,
@@ -351,7 +398,7 @@ describe("verify-email prompt", () => {
         ),
     );
 
-    await model.switchPlan("user-1", "ally");
+    await model.switchPlan("user-1", "alice@example.com", "ally", "Ally");
 
     expect(model.verifyEmailPromptFor("user-1")).toEqual({
       email: "alice@example.com",
@@ -361,7 +408,23 @@ describe("verify-email prompt", () => {
     });
   });
 
-  it("keeps a plain 403 as the page error (no prompt)", async () => {
+  it("says Imbue Cloud's stated reason for a refused switch, without asking for another try", async () => {
+    const model = makeModelWithPlanResponse(() =>
+      jsonResponse({ code: "plan_refused", reason: "The 'ally' plan requires partner access" }, 403),
+    );
+
+    await model.switchPlan("user-1", "alice@example.com", "ally", "Ally");
+
+    expect(model.verifyEmailPromptFor("user-1")).toBeNull();
+    expect(model.actionError).toEqual({
+      message:
+        "Imbue Cloud won't switch alice@example.com to the Ally plan. It said: \"The 'ally' plan requires partner access\"",
+      details: "HTTP 403",
+    });
+    expect(model.actionErrorRetry).toBeNull();
+  });
+
+  it("keeps any other 403 as the page error (no prompt), its text behind See details", async () => {
     const model = makeModelWithPlanResponse(
       () =>
         new Response("The 'ally' plan requires partner access", {
@@ -369,10 +432,15 @@ describe("verify-email prompt", () => {
         }),
     );
 
-    await model.switchPlan("user-1", "ally");
+    await model.switchPlan("user-1", "alice@example.com", "ally", "Ally");
 
     expect(model.verifyEmailPromptFor("user-1")).toBeNull();
-    expect(model.actionError).toBe("The 'ally' plan requires partner access");
+    expect(model.actionError?.message).toBe(
+      "Couldn't switch alice@example.com to the Ally plan. Try again. If this persists, report a bug.",
+    );
+    expect(model.actionError?.details).toBe(
+      "HTTP 403\nThe 'ally' plan requires partner access",
+    );
   });
 
   it("does not claim a resend the server suppressed (200 with sent: false)", async () => {
@@ -388,7 +456,7 @@ describe("verify-email prompt", () => {
         ),
       () => jsonResponse({ sent: false, email: "alice@example.com" }),
     );
-    await model.switchPlan("user-1", "ally");
+    await model.switchPlan("user-1", "alice@example.com", "ally", "Ally");
 
     await model.resendVerification("user-1");
 
@@ -412,12 +480,12 @@ describe("verify-email prompt", () => {
       },
       () => jsonResponse({ sent: true, email: "alice@example.com" }),
     );
-    await model.switchPlan("user-1", "ally");
+    await model.switchPlan("user-1", "alice@example.com", "ally", "Ally");
 
     await model.resendVerification("user-1");
     expect(model.verifyEmailPromptFor("user-1")?.wasResent).toBe(true);
 
-    await model.switchPlan("user-1", "ally");
+    await model.switchPlan("user-1", "alice@example.com", "ally", "Ally");
     expect(planCalls).toBe(2);
     expect(model.verifyEmailPromptFor("user-1")?.wasResent).toBe(false);
   });
@@ -439,10 +507,10 @@ describe("log-out busy state", () => {
       (callback) => callback(),
     );
 
-    const logoutDone = model.logOut("user-1");
+    const logoutDone = model.logOut("user-1", "alice@example.com");
     expect(model.isLoggingOut("user-1")).toBe(true);
     // A second click while busy is swallowed (no state churn, no extra POST).
-    await model.logOut("user-1");
+    await model.logOut("user-1", "alice@example.com");
     expect(model.isLoggingOut("user-1")).toBe(true);
 
     releaseLogout(new Response("", { status: 200 }));
@@ -470,10 +538,10 @@ describe("plan-switch busy state", () => {
       (callback) => callback(),
     );
 
-    const switchDone = model.switchPlan("user-1", "explorer");
+    const switchDone = model.switchPlan("user-1", "alice@example.com", "explorer", "Explorer");
     expect(model.isSwitchingPlan("user-1")).toBe(true);
     // A second click while busy is swallowed (no extra POST).
-    await model.switchPlan("user-1", "explorer");
+    await model.switchPlan("user-1", "alice@example.com", "explorer", "Explorer");
     expect(switchPostCount).toBe(1);
 
     releaseSwitch(new Response("", { status: 200 }));
@@ -514,6 +582,7 @@ describe("AccountsDetailModel notification preferences", () => {
     expect(model.notificationPreferencesFor(ACCOUNT.user_id)).toEqual({
       isLoaded: true,
       channels: { email_enabled: true, in_app_enabled: true },
+      readFailure: null,
       isWriting: false,
     });
 
@@ -526,15 +595,21 @@ describe("AccountsDetailModel notification preferences", () => {
       email_enabled: false,
       in_app_enabled: true,
     });
-    expect(model.actionError).toBe("");
+    expect(model.actionError).toBeNull();
   });
 
-  it("reads the channels as unavailable when Imbue Cloud cannot be reached, and writes nothing then", async () => {
+  it("keeps why the channels could not be read, and writes nothing then", async () => {
     const methods: string[] = [];
     const model = new AccountsDetailModel(
       async (_input, init) => {
         methods.push(init?.method ?? "GET");
-        return jsonResponse({ preferences: null });
+        return jsonResponse({
+          preferences: null,
+          failure: {
+            kind: "SESSION_REJECTED",
+            detail: "Refresh rejected by connector",
+          },
+        });
       },
       () => {},
       (callback) => callback(),
@@ -546,32 +621,184 @@ describe("AccountsDetailModel notification preferences", () => {
     expect(model.notificationPreferencesFor(ACCOUNT.user_id)).toEqual({
       isLoaded: true,
       channels: null,
+      readFailure: {
+        kind: "SESSION_REJECTED",
+        details: "Refresh rejected by connector",
+      },
       isWriting: false,
     });
     expect(methods).toEqual(["GET"]);
   });
 
-  it("leaves the switch where it was and says so when the write fails", async () => {
+  it("reads a section answered with text instead of JSON as failed, the text behind See details", async () => {
     const model = new AccountsDetailModel(
-      async (_input, init) =>
-        init?.method === "POST"
-          ? jsonResponse({ error: "Not authenticated" }, 502)
-          : jsonResponse({
-              preferences: { email_enabled: true, in_app_enabled: true },
-            }),
+      async () => new Response("<html>Bad gateway</html>", { status: 200 }),
+      () => {},
+      (callback) => callback(),
+    );
+
+    await model.loadPlan(ACCOUNT.user_id);
+
+    expect(model.planStateFor(ACCOUNT.user_id).isUnavailable).toBe(true);
+    expect(model.planStateFor(ACCOUNT.user_id).readFailure).toEqual({
+      kind: "FAILED",
+      details: "HTTP 200\n<html>Bad gateway</html>",
+    });
+  });
+
+  it("tells a refusal of this window's own login apart from a failed read", async () => {
+    const model = new AccountsDetailModel(
+      async (input) =>
+        String(input).endsWith("/plan")
+          ? jsonResponse({ error: "Not authenticated" }, 401)
+          : jsonResponse({ error: "boom" }, 500),
+      () => {},
+      (callback) => callback(),
+    );
+
+    await model.loadPlan(ACCOUNT.user_id);
+    await model.loadNotificationPreferences(ACCOUNT.user_id);
+
+    expect(model.planStateFor(ACCOUNT.user_id).isUnavailable).toBe(true);
+    expect(model.planStateFor(ACCOUNT.user_id).readFailure).toEqual({
+      kind: "WINDOW_LOGIN_LAPSED",
+      details: "HTTP 401\nNot authenticated",
+    });
+    expect(
+      model.notificationPreferencesFor(ACCOUNT.user_id).readFailure,
+    ).toEqual({ kind: "FAILED", details: "HTTP 500\nboom" });
+  });
+
+  it.each([
+    {
+      name: "a refused write",
+      answer: () => jsonResponse({ error: "boom" }, 502),
+      details: "HTTP 502\nboom",
+    },
+    {
+      name: "a write Imbue Cloud did not take",
+      answer: () =>
+        jsonResponse({
+          preferences: null,
+          failure: { kind: "FAILED", detail: "connector unreachable" },
+        }),
+      details: "connector unreachable",
+    },
+    {
+      name: "a write that got no answer",
+      answer: () => Promise.reject(new TypeError("Failed to fetch")),
+      details: "No response. Failed to fetch",
+    },
+  ])(
+    "leaves the switch where it was and names the failed save for $name, with why behind See details",
+    async ({ answer, details }) => {
+      const model = new AccountsDetailModel(
+        async (_input, init) =>
+          init?.method === "POST"
+            ? answer()
+            : jsonResponse({
+                preferences: { email_enabled: true, in_app_enabled: true },
+              }),
+        () => {},
+        (callback) => callback(),
+      );
+      await model.loadNotificationPreferences(ACCOUNT.user_id);
+
+      await model.setEmailNotifications(ACCOUNT.user_id, false);
+
+      expect(
+        model.notificationPreferencesFor(ACCOUNT.user_id).channels
+          ?.email_enabled,
+      ).toBe(true);
+      expect(model.notificationPreferencesFor(ACCOUNT.user_id).isWriting).toBe(
+        false,
+      );
+      expect(model.actionError).toEqual({
+        message:
+          "Couldn't save your notification setting. Try again. If this persists, report a bug.",
+        details,
+      });
+    },
+  );
+
+  it("sends the same setting again from the failed save's Try again", async () => {
+    const posted: unknown[] = [];
+    let isPostFailing = true;
+    const model = new AccountsDetailModel(
+      async (_input, init) => {
+        if (init?.method !== "POST") {
+          return jsonResponse({ preferences: { email_enabled: true, in_app_enabled: true } });
+        }
+        posted.push(JSON.parse(String(init.body)));
+        return isPostFailing
+          ? jsonResponse({ error: "boom" }, 502)
+          : jsonResponse({ preferences: { email_enabled: false, in_app_enabled: true } });
+      },
       () => {},
       (callback) => callback(),
     );
     await model.loadNotificationPreferences(ACCOUNT.user_id);
-
     await model.setEmailNotifications(ACCOUNT.user_id, false);
+    isPostFailing = false;
 
-    expect(
-      model.notificationPreferencesFor(ACCOUNT.user_id).channels?.email_enabled,
-    ).toBe(true);
-    expect(model.notificationPreferencesFor(ACCOUNT.user_id).isWriting).toBe(
-      false,
+    model.actionErrorRetry?.();
+    await vi.waitFor(() =>
+      expect(model.notificationPreferencesFor(ACCOUNT.user_id).channels?.email_enabled).toBe(false),
     );
-    expect(model.actionError).toContain("could not be saved");
+
+    expect(posted).toEqual([{ email_enabled: false }, { email_enabled: false }]);
+    expect(model.actionError).toBeNull();
+    expect(model.actionErrorRetry).toBeNull();
   });
+
+  it.each([
+    {
+      name: "an expired Imbue Cloud sign-in",
+      answer: () =>
+        jsonResponse({
+          preferences: null,
+          failure: {
+            kind: "SESSION_REJECTED",
+            detail: "Refresh rejected by connector",
+          },
+        }),
+      readFailure: {
+        kind: "SESSION_REJECTED",
+        details: "Refresh rejected by connector",
+      },
+    },
+    {
+      name: "this window's lapsed login",
+      answer: () => jsonResponse({ error: "Not authenticated" }, 401),
+      readFailure: {
+        kind: "WINDOW_LOGIN_LAPSED",
+        details: "HTTP 401\nNot authenticated",
+      },
+    },
+  ])(
+    "shows the section's read notice, not a failed save, for a write refused for $name",
+    async ({ answer, readFailure }) => {
+      const model = new AccountsDetailModel(
+        async (_input, init) =>
+          init?.method === "POST"
+            ? answer()
+            : jsonResponse({
+                preferences: { email_enabled: true, in_app_enabled: true },
+              }),
+        () => {},
+        (callback) => callback(),
+      );
+      await model.loadNotificationPreferences(ACCOUNT.user_id);
+
+      await model.setEmailNotifications(ACCOUNT.user_id, false);
+
+      expect(model.notificationPreferencesFor(ACCOUNT.user_id)).toEqual({
+        isLoaded: true,
+        channels: null,
+        readFailure,
+        isWriting: false,
+      });
+      expect(model.actionError).toBeNull();
+    },
+  );
 });

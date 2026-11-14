@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { launchModeLabel } from "../../../models/create";
 import type { CreateFormDefaults } from "../../../models/create";
-import { CONNECTION_BACKEND_OPTIONS } from "../../../testing";
+import { CONNECTION_BACKEND_OPTIONS, retryPrefill } from "../../../testing";
 import {
   CONNECTION_LAUNCH_PREFIX,
   CreateFormModel,
@@ -713,24 +713,7 @@ describe("CreateFormModel", () => {
 
   it("keeps a retry prefill's saved restic env instead of the seeded default", () => {
     const model = new CreateFormModel();
-    const prefill = {
-      git_url: "https://example.com/repo.git",
-      branch: "",
-      host_name: "",
-      launch_mode: "LIMA",
-      docker_runtime: "RUNSC",
-      backup_provider: "API_KEY",
-      backup_api_key_env: "RESTIC_REPOSITORY=s3:saved",
-      region: "",
-      cloud_account: "",
-      instance_type: "",
-      cpu_count: null,
-      memory_gb: null,
-      disk_gb: null,
-      color: "#123456",
-      is_onboarding_driven_by_agent: false,
-      unavailable_reason: "",
-    };
+    const prefill = retryPrefill({ backup_provider: "API_KEY", backup_api_key_env: "RESTIC_REPOSITORY=s3:saved" });
     model.applyDefaults(buildDefaults({ prefill }));
     expect(model.backupApiKeyEnv).toBe("RESTIC_REPOSITORY=s3:saved");
   });
@@ -739,24 +722,12 @@ describe("CreateFormModel", () => {
     const model = new CreateFormModel();
     model.applyDefaults(
       buildDefaults({
-        prefill: {
-          git_url: "https://example.com/repo.git",
-          branch: "main",
-          host_name: "old-name",
+        prefill: retryPrefill({
           launch_mode: "AWS",
-          docker_runtime: "RUNC",
-          backup_provider: "API_KEY",
-          backup_api_key_env: "RESTIC_REPOSITORY=s3:...",
           region: "us-east-1",
           cloud_account: "aws_acct",
           instance_type: "t3.xlarge",
-          cpu_count: null,
-          memory_gb: null,
-          disk_gb: null,
-          color: "#123456",
-          is_onboarding_driven_by_agent: false,
-          unavailable_reason: "",
-        },
+        }),
       }),
     );
     expect(model.launchValue).toBe(`${CONNECTION_LAUNCH_PREFIX}aws_acct`);
@@ -833,7 +804,7 @@ describe("CreateFormModel", () => {
 
   it("applies none of a retry prefill whose connection is gone, and exposes the reason instead", () => {
     const model = new CreateFormModel();
-    const reason = "The connection this attempt used was removed, so it cannot be retried.";
+    const reason = "The connection this attempt used was removed, so it can't be retried.";
     model.applyDefaults(
       buildDefaults({
         prefill: {
@@ -1005,24 +976,7 @@ describe("CreateFormModel machine size", () => {
     const model = new CreateFormModel();
     model.applyDefaults(
       buildDefaults({
-        prefill: {
-          git_url: "https://example.com/repo.git",
-          branch: "",
-          host_name: "",
-          launch_mode: "LIMA",
-          docker_runtime: "RUNC",
-          backup_provider: "CONFIGURE_LATER",
-          backup_api_key_env: "",
-          region: "",
-          cloud_account: "",
-          instance_type: "",
-          cpu_count: 6,
-          memory_gb: 12,
-          disk_gb: 250,
-          color: "#123456",
-          is_onboarding_driven_by_agent: false,
-          unavailable_reason: "",
-        },
+        prefill: retryPrefill({ launch_mode: "LIMA", cpu_count: 6, memory_gb: 12, disk_gb: 250 }),
       }),
     );
     expect(model.launchValue).toBe("LIMA");

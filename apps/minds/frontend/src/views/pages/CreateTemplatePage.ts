@@ -24,14 +24,17 @@ import {
   submitCreateRequest,
 } from "../../models/create";
 import type { LocalBackendPrerequisite } from "../../models/create";
+import type { ErrorAction } from "../../models/errors";
 import { LOCAL_PROFILE_USER_ID } from "../../models/providers";
 import type { UiWorkspaceEntry } from "../../channel/messages";
 import { Button, ButtonSubmit } from "../components/Button";
 import { Card } from "../components/Card";
+import { ErrorNotice, restartAppActions } from "../components/ErrorDisplay";
 import { FormLabel, Select } from "../components/FormControls";
 import { PageNarrowContainer } from "../components/Layout";
 import { Icon16 } from "../components/Icon";
 import { StatusBadge } from "../components/StatusBadge";
+import { variantBesideErrors } from "../components/variantBesideErrors";
 import { keyStateChipFor, livenessBadgeFor, rowClickActionFor } from "./landing-controls";
 import { slowStartNotice } from "./create/ComputeNotices";
 import { PRESET_TITLES, PresetCards } from "./create/PresetCards";
@@ -39,8 +42,12 @@ import { PrerequisiteNotice } from "./create/PrerequisiteNotice";
 import type { PresetName } from "./create/form-model";
 import { ImbueCloudSignInGate } from "./create/sign-in-gate";
 import {
+  CREATE_NO_RESPONSE,
+  isSubmitErrorClearedByRestart,
+  isSubmitErrorClearedBySignIn,
   CreateFormModel,
-  normalizeCreateApiError,
+  SIGNED_IN_ACCOUNT_NOT_READY,
+  createSubmitRefusal,
   presetOpensAdvanced,
   regionChoiceLabel,
 } from "./create/form-model";
@@ -135,6 +142,7 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
     create: postCreate,
     setSubmitError: (message) => {
       submitError = message;
+      model.submitErrorField = "";
     },
   });
   const copyTimers: ReturnType<typeof setTimeout>[] = [];
@@ -299,6 +307,7 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
   function postCreate(): void {
     model.isSubmitting = true;
     submitError = "";
+    model.submitErrorField = "";
     void submitCreateRequest({ ...model.submitBody() }).then((result) => {
       if (
         result.status === 202 &&
@@ -308,10 +317,14 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
         return;
       }
       model.isSubmitting = false;
-      submitError =
-        result.status === 0
-          ? "Could not reach the server. Please try again."
-          : normalizeCreateApiError(result.data).message;
+      if (result.status === 0) {
+        submitError = CREATE_NO_RESPONSE;
+      } else {
+        const error = createSubmitRefusal(result);
+        // The no-account backstop: this page reached the create believing an account was signed in.
+        submitError = error.redirectUrl ? SIGNED_IN_ACCOUNT_NOT_READY : error.message;
+        model.submitErrorField = error.field;
+      }
       m.redraw();
     });
   }
@@ -494,11 +507,29 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
     ]);
   }
 
+  function submitErrorActions(): ErrorAction[] {
+    if (!submitError) return [];
+    if (isSubmitErrorClearedBySignIn(model.submitErrorField)) {
+      return [{ label: "Sign in", onclick: () => signInGate.start() }];
+    }
+    return isSubmitErrorClearedByRestart(submitError) ? restartAppActions() : [];
+  }
+
   function createConfirmBody(): m.Children {
     const defaults = model.defaults;
     if (defaults === null) return m("p", { class: "type-helper text-tertiary" }, "Loading…");
     return m("form", { onsubmit: submitCreate }, [
-      submitError ? m("p", { role: "alert", class: "mb-4 type-helper text-important" }, submitError) : null,
+      submitError
+        ? m(
+            "div",
+            { class: "mb-4" },
+            m(ErrorNotice, {
+              id: "create-template-submit-error",
+              error: { message: submitError, details: "" },
+              actions: submitErrorActions(),
+            }),
+          )
+        : null,
       m("div", { class: "mb-4" }, [
         m("p", { class: "type-label" }, "Creating from"),
         m("p", { class: "type-body text-primary font-mono mt-1 break-all" }, gitUrl),
@@ -609,7 +640,10 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
         m(
           ButtonSubmit,
           {
-            variant: "primary",
+            variant: variantBesideErrors(
+              "primary",
+              submitError ? [{ message: submitError, actions: submitErrorActions() }] : [],
+            ),
             block: true,
             disabled: !isTrusted || model.isSubmitting || model.unmetPrerequisiteForSubmit() !== null,
           },

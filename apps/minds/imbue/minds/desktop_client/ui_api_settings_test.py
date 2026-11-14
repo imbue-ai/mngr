@@ -26,6 +26,7 @@ from imbue.minds.desktop_client.ui_api_settings import compute_error_reporting_v
 from imbue.minds.desktop_client.ui_api_settings import compute_notification_style_version
 from imbue.minds.desktop_client.ui_api_settings import compute_remote_execution_version
 from imbue.minds.desktop_client.ui_api_settings import is_full_disk_access_needed
+from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.mngr_latchkey.core import BROWSER_STATE_FILENAME
 from imbue.mngr_latchkey.core import ChromeImportOutcome
@@ -592,9 +593,43 @@ def test_account_plan_degrades_to_null_plan_view_without_a_connector(tmp_path: P
     assert response.status_code == 200
     payload = json.loads(response.data)
     assert payload["plan_view"] is None
+    assert payload["failure"]["kind"] == "NOT_CONFIGURED"
     assert payload["trim_status"] is None
     # No client env config means no known origin for the privacy policy.
     assert payload["privacy_policy_url"] == ""
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected_kind"),
+    [
+        pytest.param(
+            '{"error": "Refresh rejected by connector: Session missing in db or has expired", '
+            '"error_class": "ImbueCloudAuthError"}',
+            "SESSION_REJECTED",
+            id="session-rejected",
+        ),
+        pytest.param(
+            '{"error": "This version is no longer supported", "error_class": "ImbueCloudClientTooOldError"}',
+            "CLIENT_TOO_OLD",
+            id="client-too-old",
+        ),
+        pytest.param(
+            '{"error": "connector returned 500", "error_class": "ImbueCloudAccountError"}', "FAILED", id="other"
+        ),
+    ],
+)
+def test_account_plan_names_why_the_plan_could_not_be_read(tmp_path: Path, stderr: str, expected_kind: str) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.account_show_failure = MngrCallResult(returncode=1, stderr=stderr)
+    client = _preferences_client(tmp_path, cli)
+
+    payload = json.loads(client.get("/ui/api/accounts/user-123/plan").data)
+    unknown_account = json.loads(client.get("/ui/api/accounts/user-999/plan").data)
+
+    assert payload["plan_view"] is None
+    assert payload["failure"]["kind"] == expected_kind
+    assert json.loads(stderr)["error"] in payload["failure"]["detail"]
+    assert unknown_account["failure"]["kind"] == "NOT_SIGNED_IN"
 
 
 def test_account_plan_resolves_the_privacy_policy_url_from_the_client_env_config(tmp_path: Path) -> None:
@@ -830,7 +865,12 @@ def test_account_notification_preferences_degrade_to_null_without_the_connector(
     unknown_account = client.get("/ui/api/accounts/user-999/notification-preferences")
 
     assert response.status_code == 200 and json.loads(response.data)["preferences"] is None
+    assert json.loads(response.data)["failure"] == {
+        "kind": "FAILED",
+        "detail": "fake notification preferences failure",
+    }
     assert unknown_account.status_code == 200 and json.loads(unknown_account.data)["preferences"] is None
+    assert json.loads(unknown_account.data)["failure"]["kind"] == "NOT_SIGNED_IN"
 
 
 def test_account_notification_preferences_require_authentication(tmp_path: Path) -> None:

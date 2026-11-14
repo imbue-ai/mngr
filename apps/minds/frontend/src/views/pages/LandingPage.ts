@@ -39,7 +39,7 @@ import type {
 } from "../../models/providers";
 import {
   accountSectionTitleFor,
-  connectionRemovalErrorFor,
+  connectionRemovalDialog,
   connectionRowProblemFor,
   connectionStatusChipFor,
   editControlFor,
@@ -312,7 +312,7 @@ export const LandingPage: m.ClosureComponent = () => {
               "Imbue Studio couldn't find a cloud provider to add one for",
               { isRetryable: false },
             ),
-            details: "",
+            details: "The create form's defaults list no connection backends.",
           },
         });
         return;
@@ -338,12 +338,12 @@ export const LandingPage: m.ClosureComponent = () => {
       );
       if (backend === null) {
         showErrorDialog({
-          title: `Couldn't edit "${entry.alias}"`,
+          title: `Couldn't edit ${entry.alias}`,
           error: {
             message:
-              "This connection's provider isn't supported by this version of Imbue Studio. " +
-              "*Update Imbue Studio to edit it.*",
-            details: "",
+              `This version of Imbue Studio can't edit ${entry.backend_label} connections. ` +
+              "*Update Imbue Studio, then try again.*",
+            details: `Unknown connection backend: ${entry.backend}`,
           },
           actions: updateAppActions(),
           isBugReportOffered: false,
@@ -424,17 +424,16 @@ export const LandingPage: m.ClosureComponent = () => {
   function recheckConnection(entry: UiConnectionEntry): void {
     if (state.recheckingConnectionInstances.has(entry.instance)) return;
     state.recheckingConnectionInstances.add(entry.instance);
-    void defaultFetchJson(
-      `/api/v1/desktop/cloud-accounts/${encodeURIComponent(entry.instance)}/recheck`,
-      { method: "POST" },
-    ).then((outcome) => {
+    void defaultFetchJson(`/api/v1/desktop/cloud-accounts/${encodeURIComponent(entry.instance)}/recheck`, {
+      method: "POST",
+    }).then((outcome) => {
       state.recheckingConnectionInstances.delete(entry.instance);
       if (!outcome.ok) {
         console.error("Failed to re-check connection", entry.instance, outcome.status, outcome.body);
         showErrorDialog(
           titledError(
-            "Couldn't check this connection again",
-            errorFromResponse("Couldn't check this connection again", outcome),
+            `Couldn't check ${entry.alias} again`,
+            errorFromResponse(`Couldn't check ${entry.alias} again`, outcome),
           ),
         );
       }
@@ -458,19 +457,13 @@ export const LandingPage: m.ClosureComponent = () => {
     if (!isConfirmed || state.removingConnectionInstances.has(entry.instance))
       return;
     state.removingConnectionInstances.add(entry.instance);
-    void defaultFetchJson(
-      `/api/v1/desktop/cloud-accounts/${encodeURIComponent(entry.instance)}`,
-      { method: "DELETE" },
-    ).then((outcome) => {
+    void defaultFetchJson(`/api/v1/desktop/cloud-accounts/${encodeURIComponent(entry.instance)}`, {
+      method: "DELETE",
+    }).then((outcome) => {
       if (!outcome.ok) {
         state.removingConnectionInstances.delete(entry.instance);
         console.error("Failed to remove connection", entry.instance, outcome.status, outcome.body);
-        showErrorDialog(
-          titledError(
-            `Couldn't remove "${entry.alias}"`,
-            connectionRemovalErrorFor(outcome),
-          ),
-        );
+        showErrorDialog(connectionRemovalDialog(entry.alias, outcome, updateAppActions()));
       }
       m.redraw();
     });

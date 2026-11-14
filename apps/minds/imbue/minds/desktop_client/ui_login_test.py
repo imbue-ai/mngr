@@ -17,13 +17,22 @@ def _login_test_client(tmp_path: Path, is_authenticated: bool = False) -> FlaskC
     return client
 
 
-def test_login_without_one_time_code_explains_the_terminal_login_url(tmp_path: Path) -> None:
+def test_login_without_one_time_code_offers_a_restart_in_the_app_window_and_the_terminal_link_elsewhere(
+    tmp_path: Path,
+) -> None:
     client = _login_test_client(tmp_path)
     response = client.get("/login")
     assert response.status_code == 200
     body = response.get_data(as_text=True)
+    # Shown by default, for an Imbue Studio started from a terminal.
+    assert '<div id="login-terminal">' in body
     assert "one-time login link" in body
-    assert "<script>" not in body
+    # Swapped in only where the desktop app's preload offers the restart.
+    assert '<div id="login-restart" hidden>' in body
+    assert "Imbue Studio needs to restart to reconnect this window." in body
+    assert "native.retry()" in body
+    # Nothing on the page spends a login code.
+    assert "/authenticate" not in body
 
 
 def test_login_with_code_js_redirects_to_authenticate(tmp_path: Path) -> None:

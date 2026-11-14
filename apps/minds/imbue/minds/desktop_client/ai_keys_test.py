@@ -156,9 +156,7 @@ def test_mint_wraps_cli_failures_in_aikeyminterror(tmp_path: Path) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
 # Route tests: GET /settings/ai-keys and POST /settings/ai-keys/mint
-# ---------------------------------------------------------------------------
 
 
 class _FailingMintImbueCloudCli(FakeImbueCloudCli):
@@ -273,10 +271,13 @@ def test_mint_returns_credential_blob_for_associated_workspace(tmp_path: Path) -
     assert cli.create_calls[0]["alias"] == "workspace-agent-1"
 
 
-def test_mint_maps_cli_failure_to_502(tmp_path: Path) -> None:
+def test_mint_answers_a_cli_failure_with_our_sentence_and_the_commands_text_as_detail(tmp_path: Path) -> None:
     client = _build_associated_workspace_client(tmp_path, _FailingMintImbueCloudCli(connector_url=FAKE_CONNECTOR_URL))
 
     response = client.post("/settings/ai-keys/mint", json={"workspace": "host-abc"})
 
     assert response.status_code == 502
-    assert "Failed to create the key" in response.get_json()["error"]
+    assert response.get_json()["error"] == (
+        "Couldn't create a key for this workspace. Try again. If this persists, report a bug."
+    )
+    assert "Failed to create the key" in response.get_json()["detail"]

@@ -256,15 +256,21 @@ describe("which account answers a sign-in", () => {
     expect(asBob.verificationEmail).toBe(BOB.email);
   });
 
-  it("continuing as an account signed out since it was offered asks again about the account signed in now", () => {
+  it("continuing as an account signed out since it was offered says so and asks about the account signed in now", () => {
     const offered = answerStep(started(), 1, "cloud", SIGNED_IN);
     const bobOnly = { signedInAccount: BOB, knownAccountIds: [BOB.userId] };
     const reasked = answerStep(offered, 2, "continue", bobOnly);
-    expect(reasked.entries[2]).toMatchObject({ id: "account", answer: null, ack: "Imbue Cloud it is. You're signed in as bob@example.com." });
+    expect(reasked.entries[2]).toMatchObject({
+      id: "account",
+      answer: null,
+      ack: "alice@example.com is no longer signed in. Imbue Cloud it is. You're signed in as bob@example.com.",
+    });
     expect(reasked.isCloudCreatePending).toBe(false);
     expect(answerStep(reasked, 2, "continue", bobOnly).account).toEqual(BOB);
-    // With nobody signed in any more, it asks for an account instead.
-    expect(answerStep(offered, 2, "continue", SIGNED_OUT).entries[2]).toMatchObject({ id: "auth", answer: null });
+    // With nobody signed in any more, it asks for an account instead, still saying why.
+    const signIn = answerStep(offered, 2, "continue", SIGNED_OUT).entries[2];
+    expect(signIn).toMatchObject({ id: "auth", answer: null });
+    expect(signIn.kind === "step" ? signIn.ack : "").toMatch(/^alice@example\.com is no longer signed in\. /);
   });
 
   it("continuing after a sign-in was started and closed replaces that sign-in", () => {
@@ -316,7 +322,7 @@ describe("the cloud create", () => {
     expect(refused.isCloudCreatePending).toBe(false);
     expect(refused.entries.at(-1)).toMatchObject({
       id: "again",
-      ack: "That did not work: alice@example.com is no longer signed in.",
+      ack: "I couldn't set that up: alice@example.com is no longer signed in.",
       answer: null,
     });
     // Asked again, the cloud answer offers the account signed in now.

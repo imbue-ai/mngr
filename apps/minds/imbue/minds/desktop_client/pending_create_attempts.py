@@ -36,6 +36,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.desktop_client.data_types import CreateAttemptQuotaRefusal
 from imbue.minds.errors import PendingCreateAttemptStoreError
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import DockerRuntime
@@ -122,6 +123,13 @@ class PendingCreateAttemptRecord(FrozenModel):
     )
     log_tail: tuple[str, ...] = Field(
         default=(), description="Last lines of the create attempt log, snapshotted when the create attempt failed"
+    )
+    quota_refusal: CreateAttemptQuotaRefusal | None = Field(
+        default=None, description="The Imbue Cloud plan limit that refused the create, when that is why it failed"
+    )
+    provider_remediation: str | None = Field(
+        default=None,
+        description="The next step the provider named when it could not be reached, when that is why it failed",
     )
 
 
@@ -240,7 +248,13 @@ class PendingCreateAttemptStore(MutableModel):
         return True
 
     def mark_failed(
-        self, create_attempt_id: str, error: str, error_kind: str | None, log_tail: tuple[str, ...]
+        self,
+        create_attempt_id: str,
+        error: str,
+        error_kind: str | None,
+        log_tail: tuple[str, ...],
+        quota_refusal: CreateAttemptQuotaRefusal | None = None,
+        provider_remediation: str | None = None,
     ) -> None:
         """Flip a record to FAILED, snapshotting the error and the create-attempt-log tail."""
         record = self.read_record(create_attempt_id)
@@ -251,6 +265,8 @@ class PendingCreateAttemptStore(MutableModel):
             to_update(record.field_ref().state, PendingCreateAttemptState.FAILED),
             to_update(record.field_ref().error, error),
             to_update(record.field_ref().error_kind, error_kind),
+            to_update(record.field_ref().quota_refusal, quota_refusal),
+            to_update(record.field_ref().provider_remediation, provider_remediation),
             to_update(record.field_ref().log_tail, log_tail[-FAILED_CREATE_ATTEMPT_LOG_TAIL_MAX_LINES:]),
             to_update(record.field_ref().updated_at, datetime.now(timezone.utc)),
         )

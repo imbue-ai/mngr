@@ -343,6 +343,8 @@ def test_discard_status_reports_failed_without_finalizing_when_the_wrapper_died(
     payload = status_response.get_json()
     assert payload["status"] == str(CreateAttemptDiscardStatus.FAILED)
     assert payload["is_done"] is False
+    # The page shows a failed discard's output behind See details, so the status carries it.
+    assert payload["log"] == "partial output\n"
     assert store.read_record(create_attempt_id) is not None
 
 

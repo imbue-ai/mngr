@@ -13,6 +13,7 @@ import {
   attrsOf,
   collectVnodes,
   jsonResponse,
+  renderDeep,
   secondAccountEntry,
   settle,
 } from "../../testing";
@@ -93,5 +94,55 @@ describe("AccountsPage", () => {
     (attrsOf(addButton as AnyVnode).onclick as () => void)();
 
     expect(start).toHaveBeenCalledWith("", { isClosedOnSignIn: true });
+  });
+
+  /** The page's action error once Alice's Log out is pressed and `logout` answers it. */
+  async function pressLogOut(logout: () => Response): Promise<string> {
+    vi.spyOn(m, "redraw").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", (input: RequestInfo | URL) =>
+      Promise.resolve(
+        String(input).endsWith("/logout")
+          ? logout()
+          : jsonResponse({ plan_view: null, trim_status: null }),
+      ),
+    );
+    const stores = createEmptyStores();
+    stores.accounts.applyAccountsMessage(accountsMessage([ALICE]));
+    registerAppContext({ stores, shell: new ShellState(stores) });
+    const component = AccountsPage();
+    const vnode = m(component as m.ComponentTypes) as m.Vnode;
+    component.oninit?.call(component, vnode);
+    await settle();
+    const logOut = collectVnodes(renderDeep(renderPage(component, vnode))).find(
+      (node) => node.tag === "button" && allText(node) === "Log out",
+    );
+    (attrsOf(logOut as AnyVnode).onclick as () => void)();
+    await settle();
+    const notice = collectVnodes(renderDeep(renderPage(component, vnode))).find(
+      (node) => attrsOf(node).id === "accounts-action-error",
+    );
+    return allText(notice);
+  }
+
+  it("shows the route's reason for a refused log out", async () => {
+    const inFlight =
+      "A workspace is still being created on this account's providers; wait for it to finish, then sign out.";
+
+    const text = await pressLogOut(() => jsonResponse({ error: inFlight }, 409));
+
+    expect(text).toContain(inFlight);
+    expect(text).not.toContain("Couldn't log out");
+    expect(text).toContain("Report a bug");
+  });
+
+  it("names the log out that failed and asks for a bug report when the route gives no reason", async () => {
+    const text = await pressLogOut(() =>
+      jsonResponse({ detail: "The account isn't in this computer's account list." }, 409),
+    );
+
+    expect(text).toContain(
+      `Couldn't log out ${ALICE.email}. Try again. If this persists, report a bug.`,
+    );
+    expect(text).toContain("Report a bug");
   });
 });

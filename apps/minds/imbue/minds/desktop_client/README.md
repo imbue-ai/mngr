@@ -152,7 +152,8 @@ user id or `local` for the device. Every window is for one account, and sees tha
     the caller retries, and 503 when the connection stores or the app's concurrency group are not wired.
     Error bodies of the add, update and delete routes (and the failure a status read reports) carry a
     ``code`` naming the failure where the status alone is ambiguous: ``master_password_required`` (409),
-    ``connection_in_use`` (409), ``connection_removed_elsewhere`` (409, PUT), ``credentials_rejected``
+    ``connection_in_use`` (409), ``connection_removed_elsewhere`` (409, PUT), ``connection_too_new`` (409: a
+    newer app wrote the connection, so this one cannot change or remove it), ``credentials_rejected``
     (502), ``sync_failed`` (502), ``account_listing_failed`` (503).
 
     Instead of pasted keys, a connection may name a login installed on each device that uses it

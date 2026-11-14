@@ -64,6 +64,7 @@ from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER
 from imbue.minds.desktop_client.connections.primitives import is_local_profile_supported_for_backend
 from imbue.minds.desktop_client.connections.primitives import is_region_pinned_for_backend
 from imbue.minds.desktop_client.connections.primitives import mngr_backend_name
+from imbue.minds.desktop_client.data_types import CreateAttemptQuotaRefusal
 from imbue.minds.desktop_client.data_types import MachineSizeSelection
 from imbue.minds.desktop_client.destroying import DestroyingRecord
 from imbue.minds.desktop_client.destroying import DestroyingStatus
@@ -124,7 +125,7 @@ from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import default_docker_runtime
 from imbue.mngr.primitives import AgentId
 
-RETRY_CONNECTION_REMOVED_REASON: Final[str] = "The connection this attempt used was removed, so it cannot be retried."
+RETRY_CONNECTION_REMOVED_REASON: Final[str] = "The connection this attempt used was removed, so it can't be retried."
 
 
 class CreateAccountOption(FrozenModel):
@@ -306,6 +307,13 @@ class RecordCreateAttemptDetail(FrozenModel):
     workspace_name: str = Field(description="Display name for the header")
     error: str | None = Field(default=None, description="Persisted error message for failed records")
     error_kind: str | None = Field(default=None, description="Machine-readable failure classification")
+    quota_refusal: CreateAttemptQuotaRefusal | None = Field(
+        default=None, description="The Imbue Cloud plan limit that refused the create, when that is why it failed"
+    )
+    provider_remediation: str | None = Field(
+        default=None,
+        description="The next step the provider named when it could not be reached, when that is why it failed",
+    )
     log_tail: tuple[str, ...] = Field(default=(), description="Persisted tail of the create log")
     provider_label: str = Field(default="", description="Friendly compute-provider label")
     request: CreateAttemptRequestSummary = Field(description="The settings the attempt was submitted with")
@@ -719,6 +727,8 @@ def _handle_create_attempt_detail(create_attempt_id: str) -> Response:
         workspace_name=record.request.display_name or record.request.host_name,
         error=record.error,
         error_kind=record.error_kind,
+        quota_refusal=record.quota_refusal,
+        provider_remediation=record.provider_remediation,
         log_tail=record.log_tail,
         provider_label=friendly_provider_label(record.provider_instance_name or None),
         request=_request_summary(record.request),

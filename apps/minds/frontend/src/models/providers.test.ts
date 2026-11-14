@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { UiAccountProvidersEntry, UiConnectionEntry } from "../generated/ui";
 import { TextResponseBody } from "./errors";
+import type { RequestOutcome } from "./errors";
 import {
   ProvidersStore,
   accountSectionTitleFor,
   connectionLaunchLabel,
-  connectionRemovalErrorFor,
+  connectionRemovalDialog,
   connectionRowProblemFor,
   connectionStatusChipFor,
   editControlFor,
@@ -188,32 +189,31 @@ describe("row decisions", () => {
     expect(providersSummaryFor(5, 2)).toBe("5 providers, 2 need attention");
   });
 
-  it("keeps a removal's refusal visible, since the user can act on it, and hides anything else behind details", () => {
-    const inUse = connectionRemovalErrorFor({
+  it("keeps a removal's in-use refusal visible, since the user can act on it, and hides anything else behind details", () => {
+    const removalError = (outcome: RequestOutcome) => connectionRemovalDialog("team modal", outcome, []).error;
+    const inUse = removalError({
       status: 409,
-      body: { error: "This connection still has 2 active workspaces. Remove them first, then remove the connection." },
+      body: { error: "A workspace is still on this connection. Remove it first, then try again.", code: "connection_in_use" },
     });
-    expect(inUse.message).toBe(
-      "This connection still has 2 active workspaces. Remove them first, then remove the connection.",
-    );
+    expect(inUse.message).toBe("A workspace is still on this connection. Remove it first, then try again.");
     expect(inUse.details).toContain("HTTP 409");
 
-    const unknown = connectionRemovalErrorFor({ status: 404, body: { error: "Unknown cloud account 'modal_abc'." } });
-    expect(unknown.message).toBe("Couldn't remove this connection. Try again. If this persists, report a bug.");
+    const unknown = removalError({ status: 404, body: { error: "Unknown cloud account 'modal_abc'." } });
+    expect(unknown.message).toBe("Try again. If this persists, report a bug.");
     expect(unknown.details).toBe("HTTP 404\nUnknown cloud account 'modal_abc'.");
 
-    const unanswered = connectionRemovalErrorFor({ status: 0, body: null });
-    expect(unanswered.message).not.toContain("internet");
-    expect(connectionRemovalErrorFor({ status: 409, body: null }).message).toContain("Couldn't remove this connection");
+    expect(removalError({ status: 0, body: null }).message).not.toContain("internet");
+    expect(connectionRemovalDialog("team modal", { status: 404, body: null }, []).title).toBe("Couldn't remove team modal");
   });
 
-  it("keeps a 409 that carries no sentence of the route's off the visible line", () => {
-    const proxyText = connectionRemovalErrorFor({ status: 409, body: new TextResponseBody("upstream conflict") });
-    expect(proxyText.message).toBe("Couldn't remove this connection. Try again. If this persists, report a bug.");
+  it("keeps a 409 that carries no code of the route's off the visible line", () => {
+    const removalError = (outcome: RequestOutcome) => connectionRemovalDialog("team modal", outcome, []).error;
+    const proxyText = removalError({ status: 409, body: new TextResponseBody("upstream conflict") });
+    expect(proxyText.message).toBe("Try again. If this persists, report a bug.");
     expect(proxyText.details).toBe("HTTP 409\nupstream conflict");
 
-    const detailOnly = connectionRemovalErrorFor({ status: 409, body: { detail: "lease held by host-abc" } });
-    expect(detailOnly.message).toBe("Couldn't remove this connection. Try again. If this persists, report a bug.");
+    const detailOnly = removalError({ status: 409, body: { detail: "lease held by host-abc" } });
+    expect(detailOnly.message).toBe("Try again. If this persists, report a bug.");
     expect(detailOnly.details).toContain("lease held by host-abc");
   });
 

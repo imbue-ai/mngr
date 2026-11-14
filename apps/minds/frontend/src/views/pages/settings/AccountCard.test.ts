@@ -10,8 +10,10 @@ import {
   registerAppContext,
 } from "../../../app-context";
 import type { UiAccountEntry } from "../../../channel/messages";
+import type { AccountReadFailure } from "../../../models/accountsDetail";
 import { AccountsDetailModel } from "../../../models/accountsDetail";
 import { createEmptyStores } from "../../../models/boot";
+import { webLogin } from "../../../models/webLogin";
 import { ShellState } from "../../shell/shell-state";
 import type { AnyVnode } from "../../../testing";
 import {
@@ -19,6 +21,8 @@ import {
   attrsOf,
   collectText,
   collectVnodes,
+  renderDeep,
+  withMindsNative,
 } from "../../../testing";
 import { Spinner } from "../../components/Spinner";
 import { AccountCard } from "./AccountCard";
@@ -188,14 +192,160 @@ describe("a cached plan being refreshed", () => {
     expect(refreshIndicator(render())).toBeUndefined();
   });
 
-  it("says the figures are earlier ones when the refresh failed", () => {
+  it("says the figures may be out of date when the refresh failed, with a Try again that re-reads", () => {
     const model = modelOnPlan("free");
     model.planStateFor(ACCOUNT.user_id).isRefreshFailed = true;
+    const reads: string[] = [];
+    vi.spyOn(model, "loadPlan").mockImplementation(async (userId) => {
+      reads.push(userId);
+    });
 
-    const text = collectText(mountCard(model)()).join(" ");
+    const root = mountCard(model)();
+    const text = collectText(root).join(" ");
+    vnodeButtonLabelled(root, "Try again").click();
 
-    expect(text).toContain("Could not refresh -- showing earlier figures");
+    expect(text).toContain("Couldn't refresh -- these figures may be out of date.");
     expect(text).toContain("Limited");
+    expect(reads).toEqual([ACCOUNT.user_id]);
+  });
+});
+
+/** The button in a rendered vnode tree whose text is exactly `label`. */
+function vnodeButtonLabelled(root: m.Vnode, label: string): { click: () => void } {
+  const button = collectVnodes(root).find(
+    (node) =>
+      (node.tag === "button" || attrsOf(node).onclick !== undefined) &&
+      collectText(node).join("").trim() === label,
+  );
+  expect(button).toBeDefined();
+  return { click: () => (attrsOf(button as AnyVnode).onclick as () => void)() };
+}
+
+describe("a plan that could not be read", () => {
+  function modelWithPlanFailure(
+    failure: AccountReadFailure,
+  ): AccountsDetailModel {
+    const model = new AccountsDetailModel(undefined, () => {});
+    const state = model.planStateFor(ACCOUNT.user_id);
+    state.isLoaded = true;
+    state.isUnavailable = true;
+    state.readFailure = failure;
+    return model;
+  }
+
+  it("says so with a Try again that re-runs the read, and keeps the reason behind See details", () => {
+    const model = modelWithPlanFailure({
+      kind: "FAILED",
+      details: "account show failed (exit 1)",
+    });
+    const reads: string[] = [];
+    vi.spyOn(model, "loadPlan").mockImplementation(async (userId) => {
+      reads.push(userId);
+    });
+
+    const root = renderDeep(mountCard(model)()) as m.Vnode;
+    const text = collectText(root).join(" ");
+    vnodeButtonLabelled(root, "Try again").click();
+
+    expect(text).toContain(
+      "Couldn't load your plan and usage. Try again. If this persists, report a bug.",
+    );
+    expect(text).not.toContain("could not reach Imbue Cloud");
+    expect(text).toContain("Report a bug");
+    expect(reads).toEqual([ACCOUNT.user_id]);
+  });
+
+  it("asks for a fresh sign-in when Imbue Cloud no longer accepts the account's", () => {
+    const start = vi
+      .spyOn(webLogin, "start")
+      .mockImplementation(() => Promise.resolve());
+    const root = renderDeep(
+      mountCard(
+        modelWithPlanFailure({ kind: "SESSION_REJECTED", details: "" }),
+      )(),
+    ) as m.Vnode;
+
+    vnodeButtonLabelled(root, "Sign in").click();
+
+    expect(collectText(root).join(" ")).toContain(
+      "Your Imbue Cloud sign-in has expired.  Sign in again  to see your plan.",
+    );
+    expect(start).toHaveBeenCalledWith("", { isClosedOnSignIn: true });
+  });
+});
+
+describe("plan and notification reads that failed", () => {
+  function modelWithFailures(
+    planFailure: AccountReadFailure,
+    notificationFailure: AccountReadFailure,
+  ): AccountsDetailModel {
+    const model = new AccountsDetailModel(undefined, () => {});
+    const plan = model.planStateFor(ACCOUNT.user_id);
+    plan.isLoaded = true;
+    plan.isUnavailable = true;
+    plan.readFailure = planFailure;
+    const preferences = model.notificationPreferencesFor(ACCOUNT.user_id);
+    preferences.isLoaded = true;
+    preferences.readFailure = notificationFailure;
+    return model;
+  }
+
+  it("says a reason both share once, and Try again re-reads both", () => {
+    const model = modelWithFailures(
+      { kind: "FAILED", details: "account show failed (exit 1)" },
+      { kind: "FAILED", details: "notification read failed (exit 1)" },
+    );
+    const reads: string[] = [];
+    vi.spyOn(model, "loadPlan").mockImplementation(async () => {
+      reads.push("plan");
+    });
+    vi.spyOn(model, "loadNotificationPreferences").mockImplementation(async () => {
+      reads.push("notifications");
+    });
+
+    const root = renderDeep(mountCard(model)()) as m.Vnode;
+    const text = collectText(root).join(" ");
+    vnodeButtonLabelled(root, "Try again").click();
+
+    const sentence =
+      "Couldn't load your plan, usage and notification settings. Try again. If this persists, report a bug.";
+    expect(text.split(sentence)).toHaveLength(2);
+    expect(text).not.toContain("Couldn't load your plan and usage.");
+    expect(text).not.toContain("Couldn't load your notification settings.");
+    expect(reads).toEqual(["plan", "notifications"]);
+  });
+
+  it("keeps two notices when the reads failed for different reasons", () => {
+    const text = collectText(
+      renderDeep(
+        mountCard(
+          modelWithFailures({ kind: "SESSION_REJECTED", details: "" }, { kind: "FAILED", details: "" }),
+        )(),
+      ),
+    ).join(" ");
+
+    expect(text).toContain("Your Imbue Cloud sign-in has expired.  Sign in again  to see your plan.");
+    expect(text).toContain("Couldn't load your notification settings.");
+  });
+
+  it("offers Update Imbue Studio in the desktop app when this version is too old for both", async () => {
+    const shell = new ShellState(createEmptyStores());
+    shell.accountId = "user-cd34";
+    registerAppContext({ stores: shell.stores, shell });
+    const routed = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    await withMindsNative({}, async () => {
+      const root = renderDeep(
+        mountCard(
+          modelWithFailures({ kind: "CLIENT_TOO_OLD", details: "" }, { kind: "CLIENT_TOO_OLD", details: "" }),
+        )(),
+      ) as m.Vnode;
+
+      expect(collectText(root).join(" ")).toContain(
+        "This version of Imbue Studio is too old to show your plan and notification settings.  Update Imbue Studio. ",
+      );
+      vnodeButtonLabelled(root, "Update Imbue Studio").click();
+    });
+    expect(routed).toHaveBeenCalledWith("/settings", { section: "updates", account: "user-cd34" });
   });
 });
 
@@ -304,13 +454,23 @@ describe("the email notifications switch", () => {
     ).toHaveLength(spinnersBefore);
   });
 
-  it("says the settings are unavailable rather than drawing a switch", () => {
-    const root = mountCard(modelWithChannels(null))();
+  it("says the settings could not be loaded rather than drawing a switch, and re-reads on Try again", () => {
+    const model = modelWithChannels(null);
+    const reads: string[] = [];
+    vi.spyOn(model, "loadNotificationPreferences").mockImplementation(
+      async (userId) => {
+        reads.push(userId);
+      },
+    );
+    const root = renderDeep(mountCard(model)()) as m.Vnode;
+
+    vnodeButtonLabelled(root, "Try again").click();
 
     expect(emailSwitch(root)).toBeUndefined();
     expect(collectText(root).join(" ")).toContain(
-      "Notification settings are unavailable",
+      "Couldn't load your notification settings. Try again. If this persists, report a bug.",
     );
+    expect(reads).toEqual([ACCOUNT.user_id]);
   });
 
   it("waits in words before the channels are known", () => {

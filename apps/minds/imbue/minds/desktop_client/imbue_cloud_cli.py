@@ -91,6 +91,9 @@ _CLIENT_TOO_OLD_ERROR_CLASS_SIGNAL = "ImbueCloudClientTooOldError"
 # like the quota signal: the code rides inside the relayed connector body.
 _LEASE_ACTIVE_CODE_SIGNAL = "lease_active"
 
+# The plugin's code for a plan switch the connector refused with a stated reason.
+_PLAN_REFUSED_CODE: Final[str] = "plan_refused"
+
 # The structured code `mngr imbue_cloud users resolve|show` and `contacts add`
 # answer with when no account matches; a miss is an expected answer (the
 # address may simply have no account yet), never a failure.
@@ -155,6 +158,12 @@ class ImbueCloudEmailNotVerifiedCliError(ImbueCloudCliError):
     """
 
     email: str | None = None
+
+
+class ImbueCloudPlanRefusedCliError(ImbueCloudCliError):
+    """The connector refused a plan switch with a stated reason; ``reason`` is the connector's own words."""
+
+    reason: str = ""
 
 
 class ImbueCloudClientTooOldCliError(ImbueCloudCliError):
@@ -671,6 +680,14 @@ class ImbueCloudCli(MutableModel):
             verification_exc.stdout = result.stdout
             verification_exc.stderr = result.stderr
             raise verification_exc
+        error_body = _parse_stderr_error_body(result.stderr)
+        if error_body is not None and error_body.get("code") == _PLAN_REFUSED_CODE:
+            plan_refused_exc = ImbueCloudPlanRefusedCliError(f"{command_repr}: {error_body['error']}")
+            plan_refused_exc.reason = str(error_body["error"])
+            plan_refused_exc.exit_code = exit_code
+            plan_refused_exc.stdout = result.stdout
+            plan_refused_exc.stderr = result.stderr
+            raise plan_refused_exc
         auth_failure_body = _parse_auth_failure_body(result.stderr)
         if auth_failure_body is not None:
             auth_message = str(auth_failure_body["error"])
@@ -1642,6 +1659,12 @@ def classify_incomplete_web_login(result: MngrCallResult) -> WebLoginIncompleteR
     error_body = _parse_stderr_error_body(result.stderr) if result.returncode != 0 else None
     error_class = None if error_body is None else error_body.get("error_class")
     return _WEB_LOGIN_INCOMPLETE_REASON_BY_ERROR_CLASS.get(error_class) if isinstance(error_class, str) else None
+
+
+def is_session_rejected_cli_error(exc: ImbueCloudCliError) -> bool:
+    """Whether the call failed because the account's Imbue Cloud sign-in is no longer accepted."""
+    body = _parse_stderr_error_body(exc.stderr)
+    return body is not None and body.get("error_class") == IMBUE_CLOUD_AUTH_ERROR_CLASS
 
 
 def _parse_auth_failure_body(stderr: str) -> dict[str, Any] | None:

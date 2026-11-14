@@ -8,12 +8,14 @@ registry, the subprocess wrapper's state transitions, and the small JSON
 surface the Mithril UI polls.
 """
 
+import json
 import time
 import tomllib
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
+import tomlkit
 from flask.testing import FlaskClient
 from loguru import logger as loguru_logger
 from pydantic import AnyUrl
@@ -37,6 +39,7 @@ from imbue.minds.desktop_client.connections.account_lifecycle import CREATE_IN_F
 from imbue.minds.desktop_client.connections.data_types import ProviderMaterializationOutcome
 from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthAccount
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthFailedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthSession
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudWebLoginIncompleteCliError
@@ -205,7 +208,7 @@ def test_logout_waits_for_a_workspace_still_being_created_on_the_accounts_provid
 
     if is_create_on_the_accounts_provider or is_create_associated_with_the_account:
         assert response.status_code == 409
-        assert response.get_data(as_text=True) == CREATE_IN_FLIGHT_ON_ACCOUNT_MESSAGE
+        assert json.loads(response.data) == {"error": CREATE_IN_FLIGHT_ON_ACCOUNT_MESSAGE}
         assert cli.signed_out_accounts == []
     else:
         assert response.status_code == 303
@@ -302,8 +305,85 @@ def test_run_web_login_subprocess_records_error_status_when_mirroring_crashes(tm
     status = _read_web_login_status(flow_id)
     assert status is not None
     assert status.state == "error"
-    assert status.error is not None
-    assert "Signed in as" in status.error
+    assert status.error == (
+        "Imbue signed you in, but Imbue Studio couldn't save the sign-in on this computer. "
+        "Report a bug so we can look into it."
+    )
+    assert status.error_details is not None and "Signed in as" in status.error_details
+    assert not status.is_retry_offered
+
+
+def test_run_web_login_subprocess_keeps_why_the_account_could_not_be_recorded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A sign-in that went through but could not be written into mngr's settings says why, behind See details."""
+    root_name = "minds-dev-tname"
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, root_name)
+    unreadable_settings = "[providers\n"
+    settings_path.write_text(unreadable_settings)
+    email = f"user-{uuid4().hex}@example.com"
+    cli = make_fake_imbue_cloud_cli()
+    cli.login_session_to_return = ImbueCloudAuthSession(user_id=f"user-{uuid4().hex}", email=email, display_name=None)
+    connection_store = make_connection_store_for_test(tmp_path / f".{root_name}")
+    session_store = make_session_store_for_test(tmp_path / "minds", cli, connection_store=connection_store)
+    flow_id = f"flow-{uuid4().hex}"
+    _record_web_login_status(flow_id, _WebLoginFlowStatus(state="running", deadline=time.monotonic() + 60))
+
+    _run_web_login_subprocess(
+        flow_id=flow_id,
+        url_file=tmp_path / "login-url.txt",
+        imbue_cloud_cli=cli,
+        session_store=session_store,
+        sync_scheduler=None,
+        output_format=OutputFormat.JSON,
+        notify_accounts_changed=_do_nothing,
+        provider_materializer=make_provider_materializer_for_test(
+            root_name, connection_store, session_store_account_source(session_store)
+        ),
+    )
+
+    status = _read_web_login_status(flow_id)
+    assert status is not None
+    assert status.state == "error"
+    assert status.error == (
+        "Imbue signed you in, but Imbue Studio couldn't save the sign-in on this computer. "
+        "Report a bug so we can look into it."
+    )
+    assert status.error_details is not None
+    assert f"Signed in as {email}" in status.error_details
+    with pytest.raises(ValueError) as parse_failure:
+        tomlkit.loads(unreadable_settings)
+    assert str(parse_failure.value) in status.error_details
+    assert not status.is_retry_offered
+
+
+def test_run_web_login_subprocess_words_an_imbue_rejection_itself_and_keeps_the_connectors_text(
+    tmp_path: Path,
+) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    rejection = ImbueCloudAuthFailedCliError("auth login: Auth response missing required fields")
+    rejection.auth_status = "ERROR"
+    rejection.auth_message = "Auth response missing required fields"
+    cli.login_error_to_raise = rejection
+    flow_id = f"flow-{uuid4().hex}"
+    _record_web_login_status(flow_id, _WebLoginFlowStatus(state="running", deadline=time.monotonic() + 60))
+
+    _run_web_login_subprocess(
+        flow_id=flow_id,
+        url_file=tmp_path / "login-url.txt",
+        imbue_cloud_cli=cli,
+        session_store=make_session_store_for_test(tmp_path, cli),
+        sync_scheduler=None,
+        output_format=OutputFormat.JSON,
+        notify_accounts_changed=_do_nothing,
+        provider_materializer=None,
+    )
+
+    status = _read_web_login_status(flow_id)
+    assert status is not None
+    assert status.error == "Imbue couldn't finish signing you in. Try again. If this persists, report a bug."
+    assert status.error_details == "ERROR: Auth response missing required fields"
+    assert status.is_retry_offered
 
 
 def test_run_web_login_subprocess_marks_finishing_before_mirroring(tmp_path: Path) -> None:
@@ -445,6 +525,7 @@ def test_run_web_login_subprocess_records_error_when_the_plugin_fails(tmp_path: 
     # The raw CLI failure string is unusable UI copy; the generic actionable
     # message is what the modal shows.
     assert "sign-in service" in status.error
+    assert status.is_retry_offered
 
 
 @pytest.mark.parametrize(
@@ -499,6 +580,8 @@ def test_run_web_login_subprocess_names_why_an_incomplete_sign_in_failed(
     assert expected_copy in status.error
     assert "Try again" in status.error
     assert "sign-in service" not in status.error
+    # Each sentence names its cause and asks for Try again.
+    assert status.is_retry_offered
 
 
 def test_run_web_login_subprocess_fails_the_flow_when_the_login_crashes(

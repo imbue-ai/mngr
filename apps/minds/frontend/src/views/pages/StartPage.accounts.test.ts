@@ -261,7 +261,7 @@ describe("the account step on the live page", () => {
     await vi.waitFor(() =>
       expect(startFlow.state.entries.at(-1)).toMatchObject({
         id: "again",
-        ack: "That did not work: could not send the create request.",
+        ack: "I couldn't set that up. Try again. If this persists, report a bug.",
       }),
     );
     expect(createCalls()).toHaveLength(0);

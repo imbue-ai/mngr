@@ -7,6 +7,7 @@
 import m from "mithril";
 import { webLogin } from "../../models/webLogin";
 import { Button, ButtonLink } from "./Button";
+import { ErrorNotice } from "./ErrorDisplay";
 import { Icon16 } from "./Icon";
 import { Modal } from "./Modal";
 import { Spinner } from "./Spinner";
@@ -96,11 +97,14 @@ function waitingBody(local: WebLoginModalLocalState): m.Children {
 }
 
 function errorBody(): m.Children {
-  return m(
-    "div",
-    { class: "rounded-md border border-important/40 bg-important/10 text-important type-body px-3 py-2 mb-4" },
-    webLogin.error,
-  );
+  const error = webLogin.error ?? { message: "Sign-in failed. Please try again.", details: "" };
+  return m(ErrorNotice, {
+    id: "web-login-error",
+    error,
+    // The report form opens behind this modal, so the modal closes first.
+    beforeAction: () => webLogin.dismiss(),
+    extra: "mb-4",
+  });
 }
 
 export function WebLoginModal(): m.Component {
@@ -137,7 +141,7 @@ export function WebLoginModal(): m.Component {
                 { variant: "secondary", id: "web-login-cancel-btn", onclick: () => webLogin.dismiss() },
                 webLogin.state === "error" ? "Close" : "Cancel",
               ),
-          webLogin.state === "error"
+          webLogin.state === "error" && webLogin.isRetryOffered
             ? m(
                 Button,
                 { variant: "primary", id: "web-login-retry-btn", onclick: () => void webLogin.retry() },

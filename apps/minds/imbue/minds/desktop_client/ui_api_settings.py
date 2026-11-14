@@ -28,6 +28,7 @@ last write to a field is simply the newest choice.
 import hashlib
 import json
 import sys
+from enum import auto
 from typing import Any
 from typing import Callable
 from typing import TypeVar
@@ -40,6 +41,7 @@ from loguru import logger
 from pydantic import Field
 from pydantic import ValidationError
 
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.account_plan_view import build_account_plan_view
 from imbue.minds.desktop_client.account_plan_view import with_backup_storage_usage
@@ -49,6 +51,9 @@ from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER
 from imbue.minds.desktop_client.dek_store import is_master_password_set_for_account
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudClientTooOldCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import is_session_rejected_cli_error
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.minds_config import AutoUpdatePromptDecision
 from imbue.minds.desktop_client.minds_config import MindsConfig
@@ -247,11 +252,33 @@ class UiNotificationChannels(FrozenModel):
     in_app_enabled: bool = Field(description="Whether in-app notifications may be delivered")
 
 
+class AccountReadFailureKind(UpperCaseStrEnum):
+    """Why an account's plan or notification settings could not be read from Imbue Cloud."""
+
+    # The account is not in this computer's account list, or the list could not be read.
+    NOT_SIGNED_IN = auto()
+    # This copy of Imbue Studio has no Imbue Cloud set up.
+    NOT_CONFIGURED = auto()
+    # Imbue Cloud no longer accepts the account's sign-in.
+    SESSION_REJECTED = auto()
+    EMAIL_NOT_VERIFIED = auto()
+    CLIENT_TOO_OLD = auto()
+    FAILED = auto()
+
+
+class UiAccountReadFailure(FrozenModel):
+    """Why an account read came back empty, for the card to word and to keep behind See details."""
+
+    kind: AccountReadFailureKind = Field(description="The kind of failure")
+    detail: str = Field(description="The underlying error text; '' when there is none")
+
+
 class UiAccountNotificationPreferencesResponse(FrozenModel):
     """Answer to the account notification-preferences read or write."""
 
-    preferences: UiNotificationChannels | None = Field(
-        description="The preferences; None when Imbue Cloud could not be reached"
+    preferences: UiNotificationChannels | None = Field(description="The preferences; None when they could not be read")
+    failure: UiAccountReadFailure | None = Field(
+        default=None, description="Why the preferences could not be read or written; None on success"
     )
 
 
@@ -292,9 +319,12 @@ class UiTrimStatus(FrozenModel):
 
 
 class UiAccountPlanResponse(FrozenModel):
-    """Plan section payload; plan_view is None when the connector is unreachable."""
+    """Plan section payload; plan_view is None when the plan could not be read, and failure says why."""
 
     plan_view: UiAccountPlanView | None = Field(description="Plan + usage, or None when unavailable")
+    failure: UiAccountReadFailure | None = Field(
+        default=None, description="Why the plan could not be read; None when plan_view is set"
+    )
     trim_status: UiTrimStatus | None = Field(description="Trim progress when a trim ran or is running")
     privacy_policy_url: str = Field(
         description="The tier's privacy-policy page (for the plan selector's Learn-more link); '' when unknown"
@@ -803,23 +833,21 @@ def _with_live_backup_usage(cli: ImbueCloudCli, account: AccountSession, info: d
 def _handle_account_plan(user_id: str) -> Response:
     """GET /ui/api/accounts/<user_id>/plan: one account's plan + usage (slow: connector round trip).
 
-    A connector failure degrades to ``plan_view: null`` rather than an error
-    status, so the card renders a plan-unavailable state instead of failing.
+    A failed read answers ``plan_view: null`` with the failure's kind rather
+    than an error status, so the card words the failure in place.
     """
     if not is_ui_request_authenticated():
         return _unauthenticated_response()
-    session_store = get_state().session_store
+    account = _signed_in_account_for(user_id)
     cli = get_state().imbue_cloud_cli
-    account = next(
-        (a for a in (session_store.list_accounts() if session_store else []) if str(a.user_id) == user_id),
-        None,
-    )
     plan_view: UiAccountPlanView | None = None
+    failure = _missing_account_or_cli_failure(account, cli)
     if account is not None and cli is not None:
         try:
             info = cli.get_account_info(str(account.email))
         except ImbueCloudCliError as exc:
             logger.debug("Could not fetch account info for {}: {}", account.email, exc)
+            failure = _account_read_failure_for(exc)
         else:
             plan_view = UiAccountPlanView.model_validate(
                 build_account_plan_view(_with_live_backup_usage(cli, account, info))
@@ -828,6 +856,7 @@ def _handle_account_plan(user_id: str) -> Response:
     return _json_response(
         UiAccountPlanResponse(
             plan_view=plan_view,
+            failure=failure,
             trim_status=_trim_status_payload(trim_status),
             privacy_policy_url=_privacy_policy_url(),
         )
@@ -840,20 +869,51 @@ def _signed_in_account_for(user_id: str) -> AccountSession | None:
     return next((account for account in accounts if str(account.user_id) == user_id), None)
 
 
+def _missing_account_or_cli_failure(
+    account: AccountSession | None, cli: ImbueCloudCli | None
+) -> UiAccountReadFailure | None:
+    """The failure for a read that cannot be made at all, or None when it can."""
+    if cli is None:
+        return UiAccountReadFailure(kind=AccountReadFailureKind.NOT_CONFIGURED, detail="No Imbue Cloud is configured.")
+    if account is None:
+        return UiAccountReadFailure(
+            kind=AccountReadFailureKind.NOT_SIGNED_IN,
+            detail="The account is not in this computer's account list, or the list could not be read.",
+        )
+    return None
+
+
+def _account_read_failure_for(exc: ImbueCloudCliError) -> UiAccountReadFailure:
+    """Classify a failed Imbue Cloud read by what the user can do about it."""
+    if isinstance(exc, ImbueCloudClientTooOldCliError):
+        kind = AccountReadFailureKind.CLIENT_TOO_OLD
+    elif isinstance(exc, ImbueCloudEmailNotVerifiedCliError):
+        kind = AccountReadFailureKind.EMAIL_NOT_VERIFIED
+    elif is_session_rejected_cli_error(exc):
+        kind = AccountReadFailureKind.SESSION_REJECTED
+    else:
+        kind = AccountReadFailureKind.FAILED
+    return UiAccountReadFailure(kind=kind, detail=str(exc))
+
+
 def _handle_account_notification_preferences(user_id: str) -> Response:
     """GET/POST /ui/api/accounts/<user_id>/notification-preferences: the account's channels on Imbue Cloud.
 
     Only the email switch is written: in-app stays as it is (the channel is
-    modelled but not delivered yet). A connector failure degrades to
-    ``preferences: null`` rather than an error status, so the card renders an
-    unavailable state instead of failing.
+    modelled but not delivered yet). A failed read or write answers
+    ``preferences: null`` with the failure's kind rather than an error status,
+    so the card words the failure in place.
     """
     if not is_ui_request_authenticated():
         return _unauthenticated_response()
     account = _signed_in_account_for(user_id)
     cli = get_state().imbue_cloud_cli
     if account is None or cli is None:
-        return _json_response(UiAccountNotificationPreferencesResponse(preferences=None))
+        return _json_response(
+            UiAccountNotificationPreferencesResponse(
+                preferences=None, failure=_missing_account_or_cli_failure(account, cli)
+            )
+        )
     try:
         if request.method == "POST":
             body = request.get_json(silent=True, force=True)
@@ -872,7 +932,9 @@ def _handle_account_notification_preferences(user_id: str) -> Response:
             info = cli.get_notification_preferences(account=str(account.email))
     except ImbueCloudCliError as exc:
         logger.debug("Could not reach the notification preferences for {}: {}", account.email, exc)
-        return _json_response(UiAccountNotificationPreferencesResponse(preferences=None))
+        return _json_response(
+            UiAccountNotificationPreferencesResponse(preferences=None, failure=_account_read_failure_for(exc))
+        )
     return _json_response(
         UiAccountNotificationPreferencesResponse(
             preferences=UiNotificationChannels(email_enabled=info.email_enabled, in_app_enabled=info.in_app_enabled)

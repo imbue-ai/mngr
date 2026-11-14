@@ -47,6 +47,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudDocumentNotFoundError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudEmailNotVerifiedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudKeyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudPlanRefusedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudQuotaExceededError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudRateLimitedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudRecordFormatTooNewError
@@ -743,15 +744,27 @@ def test_set_account_plan_posts_plan(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_set_account_plan_ineligible_403_surfaces_server_reason(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An eligibility refusal raises ImbueCloudAccountError with the server's reason, not an auth error."""
+    """An eligibility refusal raises the typed plan refusal with the server's reason, not an auth error."""
     reason = "The 'ally' plan requires partner access (a paid-listed email)"
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(403, json={"detail": reason})
 
     client = _install_mock_httpx(monkeypatch, handler)
-    with pytest.raises(ImbueCloudAccountError, match="partner access"):
+    with pytest.raises(ImbueCloudPlanRefusedError, match="partner access"):
         client.set_account_plan(SecretStr("tok"), "ally")
+
+
+def test_set_account_plan_waitlisted_403_surfaces_server_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A waitlisted guest's structured refusal is a plan refusal with the connector's message, not an auth error."""
+    message = "This account is on the waitlist, so it cannot use Imbue Cloud resources yet."
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(403, json={"detail": {"code": "waitlisted", "message": message}})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudPlanRefusedError, match="on the waitlist"):
+        client.set_account_plan(SecretStr("tok"), "free")
 
 
 def test_admin_account_endpoints_use_admin_paths(monkeypatch: pytest.MonkeyPatch) -> None:

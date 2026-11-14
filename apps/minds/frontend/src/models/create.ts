@@ -159,6 +159,23 @@ export interface LiveCreateAttemptDetail {
   request: CreateAttemptRequestSummary;
 }
 
+/** Which Imbue Cloud plan limit refused a create. */
+export interface CreateAttemptQuotaRefusal {
+  entitlement: string;
+  limit: number;
+}
+
+/** Why a create attempt failed: the raw error, and what the server recognised in it. */
+export interface CreateAttemptFailure {
+  /** The raw error text, for See details and a bug report; never the visible sentence. */
+  error: string;
+  /** The server's classification (a CreateAttemptErrorKind value), "" when unrecognised. */
+  errorKind: string;
+  quotaRefusal: CreateAttemptQuotaRefusal | null;
+  /** The next step the provider named when it could not be reached ("start Docker"), "" when it named none. */
+  providerRemediation: string;
+}
+
 export interface CreateAttemptDetail {
   kind: "live" | "record" | "gone";
   live: LiveCreateAttemptDetail | null;
@@ -167,6 +184,8 @@ export interface CreateAttemptDetail {
     workspace_name: string;
     error: string | null;
     error_kind: string | null;
+    quota_refusal?: CreateAttemptQuotaRefusal | null;
+    provider_remediation?: string | null;
     log_tail: string[];
     provider_label: string;
     request: CreateAttemptRequestSummary;
@@ -395,12 +414,14 @@ export interface CreateOperationStatus {
   redirect_url?: string;
   error?: string;
   error_kind?: string;
+  quota_refusal?: CreateAttemptQuotaRefusal | null;
+  provider_remediation?: string | null;
   progress?: OperationProgress | null;
 }
 
 export interface CreateAttemptWatcherHooks {
   onDone(redirectUrl: string): void;
-  onFailed(error: string, errorKind: string): void;
+  onFailed(failure: CreateAttemptFailure): void;
   onStageText(text: string): void;
   onLogLines(lines: string[]): void;
   /** The attempt's progress as the poll carried it, every poll that carries one. */
@@ -484,7 +505,12 @@ export class CreateAttemptWatcher {
     }
     if (data.status === "FAILED") {
       this.stopPolling();
-      this.hooks.onFailed(data.error ?? "unknown error", data.error_kind ?? "");
+      this.hooks.onFailed({
+        error: data.error ?? "",
+        errorKind: data.error_kind ?? "",
+        quotaRefusal: data.quota_refusal ?? null,
+        providerRemediation: data.provider_remediation ?? "",
+      });
       return;
     }
     if (data.status_text) this.hooks.onStageText(data.status_text);

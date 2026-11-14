@@ -1,6 +1,7 @@
 """Tests for CLI output helpers."""
 
 import json
+from collections.abc import Mapping
 
 import pytest
 
@@ -18,12 +19,12 @@ from imbue.mngr.cli.output_helpers import write_event_line
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.primitives import ProviderInstanceName
 
-# =============================================================================
 # Tests for AbortError
-# =============================================================================
 
 
 def test_abort_error_stores_message() -> None:
@@ -47,9 +48,7 @@ def test_abort_error_is_base_exception() -> None:
     assert not isinstance(error, Exception)
 
 
-# =============================================================================
 # Tests for emit_info
-# =============================================================================
 
 
 def test_emit_info_human_format(capsys: pytest.CaptureFixture[str]) -> None:
@@ -75,9 +74,7 @@ def test_emit_info_json_format(capsys: pytest.CaptureFixture[str]) -> None:
     assert captured.out == ""
 
 
-# =============================================================================
 # Tests for emit_event
-# =============================================================================
 
 
 def test_emit_event_human_format_with_message(capsys: pytest.CaptureFixture[str]) -> None:
@@ -109,9 +106,7 @@ def test_emit_event_json_format(capsys: pytest.CaptureFixture[str]) -> None:
     assert captured.out == ""
 
 
-# =============================================================================
 # Tests for write_event_line
-# =============================================================================
 
 
 def test_write_event_line_prepends_event_field(capsys: pytest.CaptureFixture[str]) -> None:
@@ -121,9 +116,7 @@ def test_write_event_line_prepends_event_field(capsys: pytest.CaptureFixture[str
     assert output == {"event": "destroyed", "agent_id": "agent-123"}
 
 
-# =============================================================================
 # Tests for emit_operator_result
-# =============================================================================
 
 
 def test_emit_operator_result_json_merges_part_data(capsys: pytest.CaptureFixture[str]) -> None:
@@ -170,9 +163,7 @@ def test_emit_operator_result_human_writes_lines_skipping_none(capsys: pytest.Ca
     assert capsys.readouterr().out == "line one\nline three\n"
 
 
-# =============================================================================
 # Tests for on_error
-# =============================================================================
 
 
 @pytest.mark.allow_warnings(match=r"^test error")
@@ -215,9 +206,7 @@ def test_on_error_stores_original_exception() -> None:
     assert exc_info.value.original_exception is original
 
 
-# =============================================================================
 # Tests for format_size
-# =============================================================================
 
 
 def test_format_size_bytes() -> None:
@@ -258,9 +247,7 @@ def test_format_size_terabytes() -> None:
     assert format_size(int(2.5 * 1024**4)) == "2.50 TB"
 
 
-# =============================================================================
 # Tests for MngrError.format_message
-# =============================================================================
 
 
 def test_mngr_error_format_message_without_help_text() -> None:
@@ -291,9 +278,7 @@ def test_mngr_error_format_message_with_multiline_help_text() -> None:
     assert "Line 1\nLine 2" in result
 
 
-# =============================================================================
 # Tests for render_format_template
-# =============================================================================
 
 
 def test_render_format_template_simple_field() -> None:
@@ -356,9 +341,7 @@ def test_render_format_template_format_spec_left_align() -> None:
     assert result == "test      "
 
 
-# =============================================================================
 # Tests for emit_format_template_lines
-# =============================================================================
 
 
 def test_emit_format_template_lines_outputs_one_line_per_item(capsys: pytest.CaptureFixture[str]) -> None:
@@ -382,9 +365,7 @@ def test_emit_format_template_lines_empty_list(capsys: pytest.CaptureFixture[str
     assert captured.out == ""
 
 
-# =============================================================================
 # Tests for write_human_line
-# =============================================================================
 
 
 def test_write_human_line_no_args(capsys: pytest.CaptureFixture[str]) -> None:
@@ -401,9 +382,7 @@ def test_write_human_line_with_args(capsys: pytest.CaptureFixture[str]) -> None:
     assert captured.out == "Created 3 agent(s) on modal\n"
 
 
-# =============================================================================
 # Tests for write_json_line
-# =============================================================================
 
 
 def test_write_json_line_outputs_json(capsys: pytest.CaptureFixture[str]) -> None:
@@ -422,9 +401,7 @@ def test_write_json_line_terminates_with_newline(capsys: pytest.CaptureFixture[s
     assert captured.out.endswith("\n")
 
 
-# =============================================================================
 # Tests for on_error (JSON ABORT)
-# =============================================================================
 
 
 def test_on_error_json_format_abort() -> None:
@@ -452,9 +429,7 @@ def test_on_error_jsonl_includes_error_class_when_exc_given(capsys: pytest.Captu
     assert output["error_class"] == "MngrError"
 
 
-# =============================================================================
 # Tests for emit_error_event
-# =============================================================================
 
 
 def test_emit_error_event_jsonl_emits_event_with_error_class(capsys: pytest.CaptureFixture[str]) -> None:
@@ -462,6 +437,39 @@ def test_emit_error_event_jsonl_emits_event_with_error_class(capsys: pytest.Capt
     emit_error_event(MngrError("no exact match"), OutputFormat.JSONL)
     output = json.loads(capsys.readouterr().out.strip())
     assert output == {"event": "error", "error_class": "MngrError", "message": "no exact match"}
+
+
+class _RefusalWithFactsError(MngrError):
+    def event_details(self) -> Mapping[str, str | float]:
+        return {"entitlement": "max_remote_workspaces", "limit": 2.0}
+
+
+def test_emit_error_event_carries_the_errors_structured_facts(capsys: pytest.CaptureFixture[str]) -> None:
+    """An error with facts of its own carries them under ``details``, so a caller need not parse the message."""
+    emit_error_event(_RefusalWithFactsError("limit reached"), OutputFormat.JSONL)
+    output = json.loads(capsys.readouterr().out.strip())
+    assert output == {
+        "event": "error",
+        "error_class": "_RefusalWithFactsError",
+        "message": "limit reached",
+        "details": {"entitlement": "max_remote_workspaces", "limit": 2.0},
+    }
+
+
+def test_emit_error_event_carries_an_unavailable_providers_reason_and_named_fix(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A caller can say what to do about an unreachable provider from the provider's own fields."""
+    error = ProviderUnavailableError(
+        ProviderInstanceName("docker"), "Cannot connect to Docker daemon", short_remediation="start Docker"
+    )
+    emit_error_event(error, OutputFormat.JSONL)
+    output = json.loads(capsys.readouterr().out.strip())
+    assert output["error_class"] == "ProviderUnavailableError"
+    assert output["details"] == {
+        "short_reason": "Cannot connect to Docker daemon",
+        "short_remediation": "start Docker",
+    }
 
 
 def test_emit_error_event_human_format_is_noop(capsys: pytest.CaptureFixture[str]) -> None:

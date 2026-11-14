@@ -469,7 +469,7 @@ export function answerStep(
   if (choiceId === "continue") {
     const offered = state.offeredAccount;
     if (offered === null || !context.knownAccountIds.includes(offered.userId)) {
-      return reofferAccountStep(state, at, context.signedInAccount);
+      return reofferAccountStep(state, at, context.signedInAccount, offered);
     }
     return {
       ...state,
@@ -495,10 +495,20 @@ export function answerStep(
 
 /**
  * The account offered at the account step is no longer signed in: the same
- * question is asked again in place, about whichever account is signed in now.
+ * question is asked again in place, about whichever account is signed in now,
+ * led by the reason the question changed.
  */
-function reofferAccountStep(state: StartFlowState, at: number, signedInAccount: FlowAccount | null): StartFlowState {
-  const reasked = accountStepEntry(signedInAccount);
+function reofferAccountStep(
+  state: StartFlowState,
+  at: number,
+  signedInAccount: FlowAccount | null,
+  goneAccount: FlowAccount | null,
+): StartFlowState {
+  const fresh = accountStepEntry(signedInAccount);
+  const reasked =
+    goneAccount !== null && fresh.kind === "step"
+      ? { ...fresh, ack: `${goneAccount.email} is no longer signed in. ${fresh.ack}` }
+      : fresh;
   return {
     ...state,
     entries: state.entries.map((entry, index) => (index === at ? reasked : entry)),
@@ -714,7 +724,7 @@ export function refuseCreateForSignedOutAccount(
 ): StartFlowState {
   const account = state.account;
   if (!state.isCloudCreatePending || account === null || knownAccountIds.includes(account.userId)) return state;
-  return settleCloudCreate(state, `That did not work: ${account.email} is no longer signed in.`);
+  return settleCloudCreate(state, `I couldn't set that up: ${account.email} is no longer signed in.`);
 }
 
 /**

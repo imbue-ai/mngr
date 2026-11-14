@@ -4,6 +4,8 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.minds.desktop_client.provider_relay import SignInCallbackForwarderInterface
+from imbue.minds.desktop_client.provider_relay import SignInCallbackNotTakenError
+from imbue.minds.desktop_client.provider_relay import SignInCallbackOwnerOnlyError
 from imbue.minds.desktop_client.provider_relay import SignInCallbackRefusedError
 from imbue.minds.desktop_client.provider_relay import SignInCallbackResult
 from imbue.minds.desktop_client.provider_relay import SignInForwardError
@@ -19,6 +21,8 @@ class RecordingSignInCallbackForwarder(SignInCallbackForwarderInterface):
     result: SignInCallbackResult = Field(description="What every forward answers")
     is_failing: bool = Field(default=False, description="Whether forwards raise SignInForwardError")
     is_refusing: bool = Field(default=False, description="Whether forwards raise SignInCallbackRefusedError")
+    is_not_taking: bool = Field(default=False, description="Whether forwards raise SignInCallbackNotTakenError")
+    is_owner_only: bool = Field(default=False, description="Whether forwards raise SignInCallbackOwnerOnlyError")
     is_holding: bool = Field(default=False, description="Whether forwards wait for release_held before answering")
 
     _forwarded: list[str] = PrivateAttr(default_factory=list)
@@ -34,6 +38,10 @@ class RecordingSignInCallbackForwarder(SignInCallbackForwarderInterface):
             raise SignInForwardError("the workspace did not answer")
         if self.is_refusing:
             raise SignInCallbackRefusedError("that sign-in is no longer active")
+        if self.is_owner_only:
+            raise SignInCallbackOwnerOnlyError("the workspace answered 403")
+        if self.is_not_taking:
+            raise SignInCallbackNotTakenError("the workspace answered 500")
         return self.result
 
     def forwarded(self) -> list[str]:

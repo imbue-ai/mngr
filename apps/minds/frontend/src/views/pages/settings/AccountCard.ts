@@ -7,8 +7,16 @@
 import m from "mithril";
 import { getAppContext } from "../../../app-context";
 import type { UiAccountEntry } from "../../../channel/messages";
-import type { AccountsDetailModel } from "../../../models/accountsDetail";
+import type {
+  AccountReadFailure,
+  AccountSection,
+  AccountsDetailModel,
+} from "../../../models/accountsDetail";
+import { accountReadError } from "../../../models/accountsDetail";
+import type { ErrorAction } from "../../../models/errors";
 import { Button } from "../../components/Button";
+import { ErrorNotice, restartAppActions, updateAppActions } from "../../components/ErrorDisplay";
+import { webLogin } from "../../../models/webLogin";
 import { Card } from "../../components/Card";
 import { Link } from "../../components/Link";
 import { Notice } from "../../components/Notice";
@@ -104,6 +112,64 @@ function pendingPlanDetails(
   ]);
 }
 
+/** A card section that could not be read: the sentence for why, and the
+ * button that fits it. */
+function readFailureNotice(
+  id: string,
+  section: AccountSection,
+  failure: AccountReadFailure,
+  retry: () => void,
+): m.Children {
+  const tryAgain: ErrorAction = { label: "Try again", onclick: retry };
+  let actions: ErrorAction[];
+  switch (failure.kind) {
+    case "SESSION_REJECTED":
+      actions = [
+        {
+          label: "Sign in",
+          onclick: () => void webLogin.start("", { isClosedOnSignIn: true }),
+        },
+        tryAgain,
+      ];
+      break;
+    case "WINDOW_LOGIN_LAPSED":
+      actions = restartAppActions();
+      break;
+    case "CLIENT_TOO_OLD":
+      actions = updateAppActions();
+      break;
+    case "NOT_CONFIGURED":
+      actions = [];
+      break;
+    case "EMAIL_NOT_VERIFIED":
+    case "NOT_SIGNED_IN":
+    case "FAILED":
+      actions = [tryAgain];
+      break;
+  }
+  return m(ErrorNotice, { id, error: accountReadError(section, failure), actions });
+}
+
+/** The plan and notification reads' failure, when both failed for the same
+ * reason: the card shows it once, over both sections. */
+function sharedReadFailure(
+  model: AccountsDetailModel,
+  userId: string,
+): AccountReadFailure | null {
+  const plan = model.planStateFor(userId);
+  const preferences = model.notificationPreferencesFor(userId);
+  if (!plan.isLoaded || !preferences.isLoaded) return null;
+  const planFailure = plan.isUnavailable || plan.planView === null ? (plan.readFailure ?? FAILED_UNKNOWN) : null;
+  const notificationFailure = preferences.channels === null ? (preferences.readFailure ?? FAILED_UNKNOWN) : null;
+  if (planFailure === null || notificationFailure === null || planFailure.kind !== notificationFailure.kind) {
+    return null;
+  }
+  const details = [...new Set([planFailure.details, notificationFailure.details])].filter((part) => part !== "");
+  return { kind: planFailure.kind, details: details.join("\n\n") };
+}
+
+const FAILED_UNKNOWN: AccountReadFailure = { kind: "FAILED", details: "" };
+
 function planSection(
   model: AccountsDetailModel,
   account: UiAccountEntry,
@@ -119,10 +185,11 @@ function planSection(
     );
   }
   if (plan.isUnavailable || plan.planView === null) {
-    return m(
-      "div",
-      { class: "type-helper text-tertiary" },
-      "Plan and usage are unavailable right now (could not reach Imbue Cloud).",
+    return readFailureNotice(
+      `account-plan-error-${account.user_id}`,
+      "plan",
+      plan.readFailure ?? FAILED_UNKNOWN,
+      () => void model.loadPlan(account.user_id),
     );
   }
   const view = plan.planView;
@@ -183,11 +250,19 @@ function planSection(
               title: "Refreshing plan and usage",
             })
           : plan.isRefreshFailed
-            ? m(
-                "span",
-                { class: "type-helper text-tertiary" },
-                "Could not refresh -- showing earlier figures",
-              )
+            ? m("span", { class: "type-helper text-tertiary" }, [
+                "Couldn't refresh -- these figures may be out of date. ",
+                m(
+                  "button",
+                  {
+                    type: "button",
+                    class:
+                      "bg-transparent border-0 p-0 type-helper text-accent hover:underline cursor-pointer",
+                    onclick: () => void model.loadPlan(account.user_id),
+                  },
+                  "Try again",
+                ),
+              ])
             : null,
       ]),
       view.available_plans.length > 1
@@ -226,7 +301,12 @@ function planSection(
                   (isAgreementNeeded && !isAgreementChecked) ||
                   isSwitchingPlan,
                 onclick: () =>
-                  void model.switchPlan(account.user_id, selectedPlan),
+                  void model.switchPlan(
+                    account.user_id,
+                    account.email,
+                    selectedPlan,
+                    planLabel(selectedPlan),
+                  ),
               },
               isSwitchingPlan
                 ? [m(Spinner, { size: "sm" }), "Switching…"]
@@ -338,10 +418,11 @@ function notificationSection(
       [m(Spinner, { size: "sm" }), "Loading notification settings…"],
     );
   if (preferences.channels === null)
-    return m(
-      "div",
-      { class: "type-helper text-tertiary" },
-      "Notification settings are unavailable right now (could not reach Imbue Cloud).",
+    return readFailureNotice(
+      `account-notifications-error-${account.user_id}`,
+      "notifications",
+      preferences.readFailure ?? FAILED_UNKNOWN,
+      () => void model.loadNotificationPreferences(account.user_id),
     );
   const isEnabled = preferences.channels.email_enabled;
   return m("div", { class: "flex items-center justify-between gap-4" }, [
@@ -379,6 +460,7 @@ export function AccountCard(): m.Component<AccountCardAttrs> {
     view(vnode) {
       const { model, account } = vnode.attrs;
       const workspaceNoun = "workspace(s)";
+      const sharedFailure = sharedReadFailure(model, account.user_id);
       return m(Card, [
         m("div", { class: "flex items-center justify-between" }, [
           m("div", [
@@ -395,7 +477,8 @@ export function AccountCard(): m.Component<AccountCardAttrs> {
               {
                 variant: "danger",
                 disabled: model.isLoggingOut(account.user_id),
-                onclick: () => void model.logOut(account.user_id),
+                onclick: () =>
+                  void model.logOut(account.user_id, account.email),
               },
               model.isLoggingOut(account.user_id)
                 ? [m(Spinner, { size: "sm" }), "Logging out…"]
@@ -403,21 +486,37 @@ export function AccountCard(): m.Component<AccountCardAttrs> {
             ),
           ]),
         ]),
-        m(
-          "div",
-          { class: "mt-3 pt-3 border-t border-default" },
-          planSection(
-            model,
-            account,
-            selectedPlanByUserId,
-            isExplorerAgreementCheckedByUserId,
-          ),
-        ),
-        m(
-          "div",
-          { class: "mt-3 pt-3 border-t border-default" },
-          notificationSection(model, account),
-        ),
+        sharedFailure !== null
+          ? m(
+              "div",
+              { class: "mt-3 pt-3 border-t border-default" },
+              readFailureNotice(
+                `account-read-error-${account.user_id}`,
+                "plan-and-notifications",
+                sharedFailure,
+                () => {
+                  void model.loadPlan(account.user_id);
+                  void model.loadNotificationPreferences(account.user_id);
+                },
+              ),
+            )
+          : [
+              m(
+                "div",
+                { class: "mt-3 pt-3 border-t border-default" },
+                planSection(
+                  model,
+                  account,
+                  selectedPlanByUserId,
+                  isExplorerAgreementCheckedByUserId,
+                ),
+              ),
+              m(
+                "div",
+                { class: "mt-3 pt-3 border-t border-default" },
+                notificationSection(model, account),
+              ),
+            ],
       ]);
     },
   };

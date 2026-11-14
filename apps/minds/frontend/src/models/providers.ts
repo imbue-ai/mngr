@@ -10,8 +10,10 @@ import type {
   UiConnectionEntry,
   UiProviderEntry,
 } from "../generated/ui";
-import type { RequestOutcome, UserFacingError } from "./errors";
-import { asSentence, errorFromResponse, errorFromSentenceResponse } from "./errors";
+import type { ErrorDialogRequest } from "./errorDialog";
+import { titledError } from "./errorDialog";
+import type { ErrorAction, RequestOutcome, UserFacingError } from "./errors";
+import { asSentence, errorCodeFromBody, errorFromResponse, errorFromSentenceResponse } from "./errors";
 
 /** The owner the local profile's section reports (never synced). */
 export const LOCAL_PROFILE_USER_ID = "local";
@@ -24,6 +26,54 @@ export interface ConnectionOwnerOption {
 export interface StatusChip {
   label: string;
   tone: "ok" | "warn" | "error" | "muted";
+}
+
+/** The removal route's code for a connection something still depends on; its sentence says what. */
+const CONNECTION_IN_USE_CODE = "connection_in_use";
+/** The removal route's code for a connection a newer version of the app wrote. */
+const CONNECTION_TOO_NEW_CODE = "connection_too_new";
+
+/**
+ * The dialog for a connection that could not be removed: the route's own
+ * sentence when the connection is still in use (workspaces on it, a create or
+ * credential change under way), ours with `updateActions` when a newer version
+ * of the app wrote it. Anything else gets the fallback naming the connection.
+ * The response is the details.
+ */
+export function connectionRemovalDialog(
+  alias: string,
+  outcome: RequestOutcome,
+  updateActions: readonly ErrorAction[],
+): ErrorDialogRequest {
+  const whatFailed = `Couldn't remove ${alias}`;
+  switch (errorCodeFromBody(outcome.body)) {
+    case CONNECTION_IN_USE_CODE:
+      return titledError(
+        whatFailed,
+        errorFromSentenceResponse(whatFailed, outcome),
+      );
+    case CONNECTION_TOO_NEW_CODE:
+      return {
+        ...titledError(
+          whatFailed,
+          errorFromResponse(
+            whatFailed,
+            outcome,
+            {
+              plainReason:
+                `A newer version of Imbue Studio added ${alias}, so this version can't remove it. ` +
+                "*Update Imbue Studio, then try again.*",
+            },
+          ),
+        ),
+        actions: updateActions,
+      };
+    default:
+      return titledError(
+        whatFailed,
+        errorFromResponse(whatFailed, outcome),
+      );
+  }
 }
 
 /** A connection as the compute select offers it, so the creation summary cannot name it differently. */
@@ -141,18 +191,6 @@ export function providersSummaryFor(rowCount: number, attentionCount: number): s
   const rows = `${rowCount} ${rowCount === 1 ? "provider" : "providers"}`;
   if (attentionCount === 0) return rows;
   return `${rows}, ${attentionCount} ${attentionCount === 1 ? "needs" : "need"} attention`;
-}
-
-/**
- * The error for a refused or failed connection removal. A refusal (409) says
- * what is in the way, which the user can act on, so its sentence stays
- * visible; anything else gets the fallback sentence.
- */
-export function connectionRemovalErrorFor(outcome: RequestOutcome): UserFacingError {
-  const whatFailed = "Couldn't remove this connection";
-  return outcome.status === 409
-    ? errorFromSentenceResponse(whatFailed, outcome)
-    : errorFromResponse(whatFailed, outcome);
 }
 
 interface RemoveControl {

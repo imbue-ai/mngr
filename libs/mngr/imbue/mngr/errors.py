@@ -1,5 +1,6 @@
 import re
 import sys
+from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -42,6 +43,10 @@ class MngrError(ClickException):
     """
 
     user_help_text: str | None = None
+
+    def event_details(self) -> Mapping[str, str | float]:
+        """Structured facts the JSONL ``error`` event carries beside the message, so a caller can word the failure itself."""
+        return {}
 
     def format_message(self) -> str:
         if self.user_help_text:
@@ -553,6 +558,12 @@ class ProviderUnavailableError(ProviderError):
             f"Ensure the provider backend is running (e.g. start its daemon), or disable the provider:\n"
             f"  mngr config set --scope user providers.{provider_name}.is_enabled false"
         )
+
+    def event_details(self) -> Mapping[str, str | float]:
+        details: dict[str, str | float] = {"short_reason": self.short_reason}
+        if self.short_remediation:
+            details["short_remediation"] = self.short_remediation
+        return details
 
 
 class ProviderEmptyError(ProviderError):

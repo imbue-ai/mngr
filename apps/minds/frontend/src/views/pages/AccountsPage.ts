@@ -10,11 +10,18 @@
 import m from "mithril";
 import { getAppContext } from "../../app-context";
 import { AccountsDetailModel } from "../../models/accountsDetail";
+import type { ErrorAction } from "../../models/errors";
 import { webLogin } from "../../models/webLogin";
 import { Button } from "../components/Button";
-import { Notice } from "../components/Notice";
+import { ErrorNotice } from "../components/ErrorDisplay";
 import { Spinner } from "../components/Spinner";
+import { variantBesideErrors } from "../components/variantBesideErrors";
 import { AccountCard } from "./settings/AccountCard";
+
+function actionErrorActions(model: AccountsDetailModel): ErrorAction[] {
+  const retry = model.actionErrorRetry;
+  return retry === null ? [] : [{ label: "Try again", onclick: retry }];
+}
 
 export function AccountsPage(): m.Component {
   const model = new AccountsDetailModel();
@@ -34,11 +41,15 @@ export function AccountsPage(): m.Component {
       // padding, scroll, and close X -- so no PageContainer wrapper.
       return [
         m("h1", { class: "type-heading text-primary mb-4" }, "Manage Accounts"),
-        model.actionError !== ""
+        model.actionError !== null
           ? m(
               "div",
               { class: "mb-4" },
-              m(Notice, { variant: "error" }, model.actionError),
+              m(ErrorNotice, {
+                id: "accounts-action-error",
+                error: model.actionError,
+                actions: actionErrorActions(model),
+              }),
             )
           : null,
         accounts.length > 0
@@ -56,7 +67,17 @@ export function AccountsPage(): m.Component {
           m(
             Button,
             {
-              variant: "primary",
+              variant: variantBesideErrors(
+                "primary",
+                model.actionError !== null
+                  ? [
+                      {
+                        message: model.actionError.message,
+                        actions: actionErrorActions(model),
+                      },
+                    ]
+                  : [],
+              ),
               disabled: webLogin.isOpen,
               onclick: () =>
                 void webLogin.start("", { isClosedOnSignIn: true }),

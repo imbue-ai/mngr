@@ -11,6 +11,7 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.progress import PROGRESS_EVENT_NAME
@@ -279,11 +280,17 @@ def emit_error_event(error: BaseException, output_format: OutputFormat | None) -
     exception handler so every command surfaces a structured
     ``{"event": "error", "error_class": ..., "message": ...}`` line in
     ``--format jsonl`` mode -- letting callers (e.g. minds) branch on the
-    exception *type* without parsing human-formatted error text.
+    exception *type* without parsing human-formatted error text. An error with
+    structured facts of its own (``MngrError.event_details``) carries them
+    under ``details``.
     """
     if output_format is not OutputFormat.JSONL:
         return
-    write_event_line("error", {"error_class": type(error).__name__, "message": str(error)})
+    event: dict[str, Any] = {"error_class": type(error).__name__, "message": str(error)}
+    details = error.event_details() if isinstance(error, MngrError) else {}
+    if details:
+        event["details"] = dict(details)
+    write_event_line("error", event)
 
 
 @pure

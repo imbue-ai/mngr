@@ -27,6 +27,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.connections.data_types import DEFAULT_CREDENTIAL_SOURCE_NAME
 from imbue.minds.desktop_client.connections.primitives import MODAL_SANDBOX_TIMEOUT_SECONDS_MAX
 from imbue.minds.desktop_client.create_progress import OperationProgressSnapshot
+from imbue.minds.desktop_client.data_types import CreateAttemptQuotaRefusal
 from imbue.minds.desktop_client.data_types import NotificationDestination
 from imbue.minds.desktop_client.data_types import ShareGatewayState
 from imbue.minds.desktop_client.data_types import ShareRemovalOutcome
@@ -109,8 +110,15 @@ class CreateOperationStatusResponse(FrozenModel):
         default=None,
         description=(
             "Machine-readable failure classification (e.g. GITHUB_AUTH_REQUIRED), set when the "
-            "failure is recognized; the creating page gates extra static guidance on it"
+            "failure is recognized; the creating page words the failure from it"
         ),
+    )
+    quota_refusal: CreateAttemptQuotaRefusal | None = Field(
+        default=None, description="The Imbue Cloud plan limit that refused the create, when that is why it failed"
+    )
+    provider_remediation: str | None = Field(
+        default=None,
+        description="The next step the provider named when it could not be reached, when that is why it failed",
     )
     progress: OperationProgressSnapshot | None = Field(
         default=None,
@@ -135,6 +143,7 @@ class CreateAttemptDiscardStatusResponse(FrozenModel):
     kind: str = Field(description="Always 'create_attempt_discard'")
     status: str = Field(description="Raw discard status: RUNNING / DONE / FAILED")
     is_done: bool = Field(description="Whether the discard finished and the pending record was removed")
+    log: str = Field(default="", description="The discard's output, carried once it has FAILED")
 
 
 class RestartOperationStatusResponse(FrozenModel):

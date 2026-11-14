@@ -6,6 +6,7 @@ import type {
   CloudAccountOption,
   CreateAccountOption,
   CreateFormDefaults,
+  CreateSubmitResult,
   LocalBackendPrerequisite,
 } from "../../../models/create";
 import {
@@ -13,6 +14,7 @@ import {
   hostNameFormatError,
   launchModeLabel,
 } from "../../../models/create";
+import { WINDOW_LOGIN_LAPSED_SENTENCE, fallbackErrorSentence } from "../../../models/errors";
 import type { MachineSizeDimension, MachineSizeDraft, MachineSizeNumbers } from "../../../models/machineSize";
 import {
   MACHINE_SIZE_DIMENSIONS,
@@ -23,6 +25,7 @@ import {
   LOCAL_PROFILE_USER_ID,
   connectionLaunchLabel,
 } from "../../../models/providers";
+import { isReconnectNeeded } from "../../../models/reconnect";
 
 /** The launch select value of a connection option: the prefix plus the connection instance name. */
 export const CONNECTION_LAUNCH_PREFIX = "CONNECTION:";
@@ -114,6 +117,29 @@ export interface NormalizedApiError {
   redirectUrl: string;
 }
 
+/** A sign-in landed but the server does not list its account yet: pressing Create again picks it up. */
+export const SIGNED_IN_ACCOUNT_NOT_READY =
+  "Signed in, but the account is not available yet. *Press Create to try again.*";
+
+/**
+ * The create request got no answer from Imbue Studio. It may still have been
+ * taken, so this sends the user to the list before a second create.
+ */
+export const CREATE_NO_RESPONSE =
+  "Imbue Studio didn't respond, so this workspace may or may not have started. " +
+  "*Check your workspaces list before trying again.* If this persists, restart Imbue Studio.";
+
+/** Whether a refused create's sentence is one a restart of Imbue Studio clears: no answer, or this window's lapsed login. */
+export function isSubmitErrorClearedByRestart(message: string): boolean {
+  return message === CREATE_NO_RESPONSE || message === WINDOW_LOGIN_LAPSED_SENTENCE;
+}
+
+/** Whether a refused create names the account field: there is no signed-in account to run it under, which a sign-in
+ * gives it. */
+export function isSubmitErrorClearedBySignIn(field: string): boolean {
+  return field === "account_id";
+}
+
 /** Normalize the create API's error shapes ({error, field}, spectree 422
  * bodies, and the no-account {error, redirect_url} backstop) into one form.
  * `fallbackMessage` names the operation when the body carries no message. */
@@ -133,6 +159,19 @@ export function normalizeCreateApiError(
     field: typeof body.field === "string" ? body.field : "",
     redirectUrl: typeof body.redirect_url === "string" ? body.redirect_url : "",
   };
+}
+
+/** The create front door's answer to a refused create, normalized. Its 401
+ * refuses this window's lapsed login, whose "Not authenticated" is not a
+ * sentence for the user. */
+export function createSubmitRefusal(
+  result: CreateSubmitResult,
+  fallbackMessage = fallbackErrorSentence("Couldn't create the workspace"),
+): NormalizedApiError {
+  if (isReconnectNeeded({ status: result.status, body: result.data })) {
+    return { message: WINDOW_LOGIN_LAPSED_SENTENCE, field: "", redirectUrl: "" };
+  }
+  return normalizeCreateApiError(result.data, fallbackMessage);
 }
 
 export class CreateFormModel {
@@ -247,6 +286,12 @@ export class CreateFormModel {
       this.backupApiKeyEnv = DEFAULT_RESTIC_ENV;
     }
     this.syncAccountDefaults();
+  }
+
+  /** Backups and sharing off Imbue Cloud, as if picked by hand, for an account that can't use it. */
+  turnOffImbueCloudServices(): void {
+    if (this.backupProvider === "IMBUE_CLOUD") this.setBackupProvider(BACKUP_PROVIDER_WITHOUT_ACCOUNT);
+    this.setWebAccess(false);
   }
 
   /** The user flipped the sharing switch. */

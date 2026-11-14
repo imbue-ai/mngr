@@ -69,6 +69,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudEmailNotVerifiedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudKeyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudPaidListError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudPlanRefusedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudQuotaExceededError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudRateLimitedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudRecordFormatTooNewError
@@ -1686,20 +1687,26 @@ class ImbueCloudConnectorClient(MutableModel):
             json={"plan": plan},
             timeout=self.timeout_seconds,
         )
-        # A 403 here is a refusal with a stated reason (e.g. the ally plan
-        # requires a paid-listed email), not an authentication failure, so
-        # surface the server's plain-string detail directly instead of letting
+        # A 403 here is a refusal with a stated reason (the ally plan requires
+        # a paid-listed email, as a plain-string detail; a waitlisted guest
+        # can't switch, as a structured ``waitlisted`` detail), not an
+        # authentication failure, so surface the reason instead of letting
         # ``_check`` wrap it as "Unauthenticated". Structured quota 403s still
         # get the typed quota error first.
         if response.status_code == 403:
             self._raise_if_quota_exceeded(response)
             self._raise_if_email_not_verified(response)
+            structured_detail = _detail_dict_from_response(response)
+            if structured_detail is not None and structured_detail.get("code") == "waitlisted":
+                raise ImbueCloudPlanRefusedError(
+                    str(structured_detail.get("message", "This account is on the waitlist."))
+                )
             try:
                 detail = response.json().get("detail")
             except ValueError:
                 detail = None
             if isinstance(detail, str) and detail:
-                raise ImbueCloudAccountError(detail)
+                raise ImbueCloudPlanRefusedError(detail)
         return self._check(response, ImbueCloudAccountError)
 
     def create_storage_cleanup_grant(self, access_token: SecretStr) -> StorageCleanupGrant:

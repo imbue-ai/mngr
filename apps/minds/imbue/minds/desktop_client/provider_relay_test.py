@@ -16,6 +16,8 @@ from imbue.minds.desktop_client.provider_relay import ProviderSignInRelay
 from imbue.minds.desktop_client.provider_relay import RelayArmResult
 from imbue.minds.desktop_client.provider_relay import RelayRequestVerdict
 from imbue.minds.desktop_client.provider_relay import SignInCallback
+from imbue.minds.desktop_client.provider_relay import SignInCallbackNotTakenError
+from imbue.minds.desktop_client.provider_relay import SignInCallbackOwnerOnlyError
 from imbue.minds.desktop_client.provider_relay import SignInCallbackRefusedError
 from imbue.minds.desktop_client.provider_relay import SignInCallbackResult
 from imbue.minds.desktop_client.provider_relay import SignInForwardError
@@ -335,10 +337,32 @@ def test_relay_keeps_waiting_when_the_callback_cannot_reach_the_workspace_and_a_
 
     assert unreachable.status_code == 502
     assert "Couldn&#x27;t reach your workspace" in unreachable.text
+    assert "machine" not in unreachable.text
     assert is_still_listening
     assert "You&#x27;re signed in to Anthropic" in retried.text
     assert len(forwarder.forwarded()) == 2
     assert handled.is_set()
+
+
+@pytest.mark.parametrize(
+    ("failure_flag", "expected_status", "expected_title"),
+    [
+        pytest.param("is_not_taking", 502, "Couldn&#x27;t finish this sign-in", id="error-answer"),
+        pytest.param("is_owner_only", 403, "Only the workspace&#x27;s owner can connect an account", id="owner-only"),
+    ],
+)
+def test_relay_does_not_blame_reachability_when_the_workspace_answered_with_a_refusal(
+    failure_flag: str, expected_status: int, expected_title: str
+) -> None:
+    forwarder = RecordingSignInCallbackForwarder(result=_SIGNED_IN, **{failure_flag: True})
+    handled = threading.Event()
+    with _armed_relay(forwarder, handled) as relay:
+        page = _get(relay, f"/callback?code=c-1&state={_STATE}")
+
+    assert page.status_code == expected_status
+    assert expected_title in page.text
+    assert "reach your workspace" not in page.text
+    assert not handled.is_set()
 
 
 def test_relay_tells_the_browser_when_the_workspace_no_longer_takes_the_callback() -> None:
@@ -519,19 +543,27 @@ def test_workspace_forwarder_posts_the_callback_to_the_chat_app_as_the_owner_and
 
 
 @pytest.mark.parametrize(
-    ("status", "body"),
+    ("status", "body", "expected_error"),
     [
-        pytest.param(403, b'{"error": "Only the owner"}', id="refused"),
-        pytest.param(200, b"not json", id="unreadable"),
-        pytest.param(200, b'{"state": "exploded", "provider_name": "Anthropic"}', id="unknown-state"),
+        pytest.param(403, b'{"error": "Only the owner"}', SignInCallbackOwnerOnlyError, id="not-the-owner"),
+        pytest.param(400, b'{"detail": "path_and_query must be a string"}', SignInCallbackNotTakenError, id="bad"),
+        pytest.param(200, b"not json", SignInCallbackNotTakenError, id="unreadable"),
+        pytest.param(
+            200,
+            b'{"state": "exploded", "provider_name": "Anthropic"}',
+            SignInCallbackNotTakenError,
+            id="unknown-state",
+        ),
+        pytest.param(502, b"Backend connection lost", SignInForwardError, id="forward-could-not-reach"),
+        pytest.param(503, b"Backend not yet available", SignInForwardError, id="forward-not-ready"),
     ],
 )
-def test_workspace_forwarder_raises_when_the_chat_app_does_not_answer_the_callback(
-    status: int, body: bytes, tmp_path: Path
+def test_workspace_forwarder_tells_an_unreachable_workspace_from_one_that_refused_the_callback(
+    status: int, body: bytes, expected_error: type[Exception], tmp_path: Path
 ) -> None:
     ca_cert_path = tmp_path / "forward-ca.pem"
     with scripted_chat_callback_server(status, body, ca_cert_path) as (port, _recorded):
-        with pytest.raises(SignInForwardError):
+        with pytest.raises(expected_error):
             _forwarder(port, ca_cert_path).forward("/callback")
 
 

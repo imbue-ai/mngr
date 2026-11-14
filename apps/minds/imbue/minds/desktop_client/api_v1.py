@@ -1561,7 +1561,9 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     if is_web_access_enabled and not account_id:
         # A share is registered under the owning account, so without one there
         # is nothing to publish.
-        return _json_field_error("Sharing requires a selected account.", "enable_web_access")
+        return _json_field_error(
+            "Sharing needs a signed-in account, so turn it off to create this workspace.", "enable_web_access"
+        )
     submitted_region = str(body.get("region", "")).strip()
     instance_type = str(body.get("instance_type", "")).strip()
     if instance_type:
@@ -1653,13 +1655,13 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         if not has_any_account:
             return _json_response(
                 {
-                    "error": "imbue_cloud requires an account. Sign in to continue.",
+                    "error": "Sign in to an Imbue account to run this workspace on Imbue Cloud.",
                     "redirect_url": REMOTE_SIGNIN_REDIRECT_URL,
                 },
                 status_code=400,
             )
         return _json_field_error(
-            "imbue_cloud requires an account. Select an account or pick a different compute provider.",
+            "Imbue Cloud needs a signed-in account. Sign in, or choose to run this workspace on this computer instead.",
             "account_id",
         )
 
@@ -1669,6 +1671,15 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     account_email = ""
     if account_id and session_store is not None:
         account_email = session_store.get_account_email(account_id) or ""
+    if (
+        account_id
+        and not account_email
+        and (is_imbue_cloud or submitted_backup_provider is BackupProvider.IMBUE_CLOUD)
+    ):
+        # The window's account was signed out since the form loaded, so nothing can run or back up under it.
+        return _json_field_error(
+            "This account isn't signed in any more. Sign in to it again, then try again.", "account_id"
+        )
 
     # Build the same restic setup request the create form builds, under the
     # form's default when the body names no provider. Fail fast on a bad
@@ -2324,9 +2335,11 @@ def _handle_create_operation_status(operation_id: str) -> CreateOperationStatusR
         redirect_url=info.redirect_url,
         error=info.error,
         # Machine-readable failure classification (e.g. GITHUB_AUTH_REQUIRED for a
-        # private/nonexistent GitHub repo); the creating page reveals static
-        # guidance for kinds it knows about.
+        # private/nonexistent GitHub repo); the creating page words the failure
+        # for kinds it knows about.
         error_kind=str(info.error_kind) if info.error_kind is not None else None,
+        quota_refusal=info.quota_refusal,
+        provider_remediation=info.provider_remediation,
         progress=info.progress,
     )
 
@@ -3658,11 +3671,20 @@ def _handle_create_attempt_discard_status(operation_id: str) -> CreateAttemptDis
         return _json_error(f"Unknown operation {operation_id}", 404)
     if record.status is create_attempt_discard.CreateAttemptDiscardStatus.DONE:
         _cleanup_discarded_create_attempt(operation_id, paths)
+    failure_log = ""
+    if record.status is create_attempt_discard.CreateAttemptDiscardStatus.FAILED:
+        try:
+            failure_log_bytes, _ = create_attempt_discard.read_discard_log_chunk(operation_id, paths, 0)
+        except FileNotFoundError:
+            logger.debug("Discard {} failed without writing any output", operation_id)
+            failure_log_bytes = b""
+        failure_log = failure_log_bytes.decode("utf-8", errors="replace")
     return CreateAttemptDiscardStatusResponse(
         operation_id=operation_id,
         kind="create_attempt_discard",
         status=str(record.status),
         is_done=record.status is create_attempt_discard.CreateAttemptDiscardStatus.DONE,
+        log=failure_log,
     )
 
 
@@ -4646,6 +4668,7 @@ def _updated_placement(existing_placement: Mapping[str, Any], parsed: _ParsedCon
 CONNECTION_ERROR_CODE_MASTER_PASSWORD_REQUIRED: Final[str] = "master_password_required"
 CONNECTION_ERROR_CODE_CONNECTION_IN_USE: Final[str] = "connection_in_use"
 CONNECTION_ERROR_CODE_REMOVED_ELSEWHERE: Final[str] = "connection_removed_elsewhere"
+CONNECTION_ERROR_CODE_CONNECTION_TOO_NEW: Final[str] = "connection_too_new"
 CONNECTION_ERROR_CODE_CREDENTIALS_REJECTED: Final[str] = "credentials_rejected"
 CONNECTION_ERROR_CODE_SYNC_FAILED: Final[str] = "sync_failed"
 CONNECTION_ERROR_CODE_ACCOUNT_LISTING_FAILED: Final[str] = "account_listing_failed"
@@ -4665,14 +4688,11 @@ _ACCOUNT_LISTING_FAILED_MESSAGE: Final[str] = (
 )
 
 
-def _connection_in_use_message(active_workspace_count: int) -> str:
-    """The 409 sentence for removing a connection that workspaces still run on, shown to the user as is."""
-    if active_workspace_count == 1:
-        return "This connection still has 1 active workspace. Remove it first, then remove the connection."
-    return (
-        f"This connection still has {active_workspace_count} active workspaces. "
-        "Remove them first, then remove the connection."
-    )
+def _connection_still_hosts_workspaces_message(workspace_count: int) -> str:
+    """The 409 message for a removal refused because workspaces still run on the connection."""
+    if workspace_count == 1:
+        return "A workspace is still on this connection. Remove it first, then try again."
+    return f"{workspace_count} workspaces are still on this connection. Remove them first, then try again."
 
 
 def _running_connection_operation_message(registry: ConnectionOperationRegistry, instance_name: str) -> str | None:
@@ -5261,7 +5281,7 @@ def _handle_update_cloud_account(account_name: str) -> tuple[OperationHandleResp
     except ConnectionUpdateInProgressError:
         return _json_error(UPDATE_IN_FLIGHT_ON_CONNECTION_MESSAGE, 409, CONNECTION_ERROR_CODE_CONNECTION_IN_USE)
     except ConnectionTooNewError as exc:
-        return _json_error(str(exc), 409)
+        return _json_error(str(exc), 409, CONNECTION_ERROR_CODE_CONNECTION_TOO_NEW)
     if _materialize_provider_settings() is ProviderMaterializationOutcome.SKIPPED:
         connection_store.restore_validation_rollback(owner_user_id, record.doc_id)
         return _json_error(_ACCOUNT_LISTING_FAILED_MESSAGE, 503, CONNECTION_ERROR_CODE_ACCOUNT_LISTING_FAILED)
@@ -5426,7 +5446,9 @@ def _handle_delete_cloud_account(account_name: str) -> OkResponse | Response:
         )
     if active_agent_ids:
         return _json_error(
-            _connection_in_use_message(len(active_agent_ids)), 409, CONNECTION_ERROR_CODE_CONNECTION_IN_USE
+            _connection_still_hosts_workspaces_message(len(active_agent_ids)),
+            409,
+            CONNECTION_ERROR_CODE_CONNECTION_IN_USE,
         )
     # A record is seeded only once `mngr create` returns, and a cloud create
     # runs for minutes, so the sources above cannot see a create in flight.
@@ -5448,7 +5470,7 @@ def _handle_delete_cloud_account(account_name: str) -> OkResponse | Response:
     except ConnectionUpdateInProgressError:
         return _json_error(UPDATE_IN_FLIGHT_ON_CONNECTION_MESSAGE, 409, CONNECTION_ERROR_CODE_CONNECTION_IN_USE)
     except ConnectionTooNewError as exc:
-        return _json_error(str(exc), 409)
+        return _json_error(str(exc), 409, CONNECTION_ERROR_CODE_CONNECTION_TOO_NEW)
     # The materializer restarts discovery when the block went away, so it stops
     # fanning out to the removed provider.
     _materialize_provider_settings()

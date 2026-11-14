@@ -10,8 +10,12 @@ The flow it preserves exactly:
   scripts, so a prefetch cannot consume the one-time code. ``/authenticate``
   (unchanged, in app.py) validates and consumes the code and sets the session
   cookie.
-- A missing code renders a static explanation pointing the user at the login
-  URL printed in the terminal.
+- A missing code renders a static explanation. In the desktop app's window
+  (where the Electron preload exposes ``window.mindsNative``) it is the
+  lapsed-login state, "Imbue Studio needs to restart to reconnect this
+  window.", whose button restarts the app (which signs the window in again);
+  anywhere else, Imbue Studio was started from a terminal, and the page points
+  at the login URL printed there.
 
 This is the *local session* with the desktop client itself; Imbue *account*
 sign-in happens on the connector's hosted accounts pages in the system browser
@@ -19,6 +23,7 @@ sign-in happens on the connector's hosted accounts pages in the system browser
 """
 
 import json
+from typing import Final
 
 from flask import Response
 from flask import request
@@ -31,12 +36,38 @@ def _render_login_document(body_html: str, head_extra: str = "") -> Response:
     return Response(build_static_page_html(body_html, head_extra=head_extra), mimetype="text/html")
 
 
+_RESTART_BUTTON_STYLE: Final[str] = (
+    "font:inherit;padding:.5rem 1rem;border-radius:6px;border:0;background:#1a1a1a;color:#fff;cursor:pointer"
+)
+
+# Swaps in the restart state inside the desktop app's window, whose preload
+# exposes the restart call; a plain browser keeps the terminal instructions.
+_SHOW_RESTART_IN_DESKTOP_WINDOW_SCRIPT: Final[str] = (
+    "<script>(function(){"
+    "var native=window.mindsNative;"
+    'if(!native||typeof native.retry!=="function")return;'
+    'document.getElementById("login-terminal").hidden=true;'
+    'document.getElementById("login-restart").hidden=false;'
+    'document.getElementById("login-restart-button").addEventListener("click",function(){'
+    "this.disabled=true;native.retry();});"
+    "})();</script>"
+)
+
+
 def render_missing_code_page() -> Response:
     return _render_login_document(
+        '<div id="login-terminal">'
         "<h1>Sign in to Imbue Studio</h1>"
         "<p>This page needs the one-time login link printed in your terminal.</p>"
         "<p>Find the line with the login URL where the Imbue Studio app is running and open "
         "that full link here.</p>"
+        "</div>"
+        '<div id="login-restart" hidden>'
+        "<h1>Reconnect this window</h1>"
+        "<p>Imbue Studio needs to restart to reconnect this window.</p>"
+        f'<p><button type="button" id="login-restart-button" style="{_RESTART_BUTTON_STYLE}">'
+        "Restart Imbue Studio</button></p>"
+        "</div>" + _SHOW_RESTART_IN_DESKTOP_WINDOW_SCRIPT
     )
 
 

@@ -200,7 +200,7 @@ describe("answerRow", () => {
           label: "Retry",
           isEmphasized: true,
           isDisabled: true,
-          title: "The connection this attempt used was removed, so it cannot be retried.",
+          title: "The connection this attempt used was removed, so it can't be retried.",
           onPress: () => undefined,
         },
       ],
@@ -208,7 +208,7 @@ describe("answerRow", () => {
 
     expect(attrsOf(buttonOf(row, "retry") as AnyVnode)).toMatchObject({
       disabled: true,
-      title: "The connection this attempt used was removed, so it cannot be retried.",
+      title: "The connection this attempt used was removed, so it can't be retried.",
     });
     expect(attrsOf(buttonOf(row, "discard") as AnyVnode)).toMatchObject({ disabled: false });
     expect(attrsOf(buttonOf(row, "discard") as AnyVnode).title).toBeUndefined();

@@ -645,11 +645,18 @@ def _ensure_field_value(page: Page, selector: str, expected_value: str) -> None:
     page.fill(selector, expected_value)
 
 
+# The failure view a failed create draws, and the ids named from it: its See
+# details toggle and the panel that toggle opens (CreatingPage.ts failureTurn,
+# which names them the way every error names its details).
+_FAILURE_VIEW_ID: Final[str] = "failure-view"
+_FAILURE_DETAILS_ID: Final[str] = f"{_FAILURE_VIEW_ID}-details"
+
+
 class WorkspaceCreateAttemptFailedError(RuntimeError):
     """Raised when the Electron create flow surfaces its failure view.
 
-    Carries the human-readable text Imbue Studio rendered into the loading
-    screen's ``#error-message`` element (whatever ``mngr create`` reported)
+    Carries the sentence Imbue Studio rendered into the loading screen's
+    ``#error-message`` element and the raw cause behind its See details
     so a create attempt failure fails the run *fast* with the real cause, instead
     of blocking until the full create-form navigation budget elapses. The
     silent-hang this prevents is what turned a one-line "unknown runtime
@@ -658,12 +665,28 @@ class WorkspaceCreateAttemptFailedError(RuntimeError):
 
 
 def _read_failure_message(page: Page) -> str:
-    """Return the text Imbue Studio rendered into the failure view's '#error-message' element."""
+    """Return the failure view's sentence ('#error-message') and the raw cause behind its See details.
+
+    The sentence is the creation page's own words; what ``mngr create`` actually
+    reported is kept behind the failure's collapsed See details, so it is opened
+    and read too.
+    """
     message_element = page.query_selector("#error-message")
     if message_element is None:
         return "unknown error: the '#error-message' element was not present"
-    message = message_element.inner_text().strip()
-    return message or "unknown error: the '#error-message' element was empty"
+    message = message_element.inner_text().strip() or "unknown error: the '#error-message' element was empty"
+    details_trigger = page.query_selector(f"#{_FAILURE_DETAILS_ID}")
+    if details_trigger is None:
+        return message
+    details_trigger.click()
+    # The panel is drawn only once the page redraws after the click, so wait for it.
+    try:
+        details_panel = page.wait_for_selector(f"#{_FAILURE_DETAILS_ID}-panel", state="attached", timeout=5_000)
+    except PlaywrightTimeoutError:
+        logger.warning("The create failure's See details panel did not open; reporting its sentence alone")
+        return message
+    details = details_panel.inner_text().strip() if details_panel is not None else ""
+    return f"{message}\n{details}" if details else message
 
 
 def wait_for_workspace_ready_or_failure(browser: Browser, creating_page: Page, timeout_seconds: int) -> Frame:
@@ -698,7 +721,7 @@ def wait_for_workspace_ready_or_failure(browser: Browser, creating_page: Page, t
                     if _AGENT_SUBDOMAIN_PATTERN.search(frame.url):
                         return frame
         try:
-            failure_is_visible = creating_page.is_visible("#failure-view")
+            failure_is_visible = creating_page.is_visible(f"#{_FAILURE_VIEW_ID}")
         except PlaywrightError:
             # The page routes onto /workspace/<id> the instant the shell
             # shows the workspace, which can destroy the execution context

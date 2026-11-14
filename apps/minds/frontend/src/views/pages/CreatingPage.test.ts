@@ -2,7 +2,9 @@ import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearAppContextForTests, registerAppContext } from "../../app-context";
 import type { AppContext } from "../../app-context";
+import { createEmptyStores } from "../../models/boot";
 import type { CreateAttemptDetail } from "../../models/create";
+import type { ErrorAction, UserFacingError } from "../../models/errors";
 import {
   READY_LINE,
   SETUP_LINE,
@@ -25,51 +27,119 @@ import { manifestoOpenerMarkdown } from "../../models/welcomeChat";
 import { WELCOME_CHAT_WAIT_BOUND_MS, welcomeChatArrival } from "../../models/welcomeChatArrival";
 import type { WelcomeChatBody } from "../../models/welcomeChat";
 import type { AnyVnode } from "../../testing";
-import { InertEventSource, allText, byId, classTokensOf, collectText, attrsOf, collectVnodes, jsonResponse, renderDeep } from "../../testing";
+import {
+  InertEventSource,
+  allText,
+  attrsOf,
+  byId,
+  classTokensOf,
+  classesOf,
+  collectText,
+  collectVnodes,
+  jsonResponse,
+  renderDeep,
+  withAttr,
+  withMindsNative,
+} from "../../testing";
 import { Button } from "../components/Button";
-import { CreatingPage, failureGuidance, failureTurn } from "./CreatingPage";
-
-describe("failureGuidance", () => {
-  it("explains the recognized clone failures and nothing else", () => {
-    expect(allText(failureGuidance("GITHUB_AUTH_REQUIRED"))).toContain(
-      "Install the GitHub app",
-    );
-    expect(allText(failureGuidance("GIT_AUTH_REQUIRED"))).toContain(
-      "rejected anonymous access",
-    );
-    expect(allText(failureGuidance("GIT_REF_NOT_FOUND"))).toContain(
-      "no branch or tag with that name",
-    );
-    expect(failureGuidance("")).toBeNull();
-    expect(failureGuidance("SOMETHING_ELSE")).toBeNull();
-  });
-});
+import { BTN_VARIANTS } from "../components/constants";
+import { ChatError } from "./start/ChatError";
+import type { ChatErrorAttrs } from "./start/ChatError";
+import { ShellState } from "../shell/shell-state";
+import { CreatingPage, failureTurn } from "./CreatingPage";
 
 describe("failureTurn", () => {
-  it("keeps the ids the e2e workspace runner polls, around the failure text", () => {
-    const turn = failureTurn("alpha", "clone blew up");
+  /** The turn as one live component, so its See details stays open across a
+   * redraw the way it does on the page the e2e runner drives. */
+  function drawFailureTurn(error: UserFacingError): () => unknown {
+    const turn = failureTurn(error) as m.Vnode<ChatErrorAttrs>;
+    const component = (turn.tag as () => m.Component<ChatErrorAttrs>)();
+    return () => renderDeep(component.view(turn));
+  }
+
+  /** The node carrying `id`; throws when the turn does not name one. */
+  function nodeById(tree: unknown, id: string): AnyVnode {
+    const node = collectVnodes(tree).find((candidate) => attrsOf(candidate).id === id);
+    if (node === undefined) throw new Error(`no #${id} in the failure turn`);
+    return node;
+  }
+
+  it("keeps the ids the e2e workspace runner polls, around our sentence, landed whole", () => {
+    const turn = renderDeep(
+      failureTurn({
+        message: "Couldn't create alpha. Try again. If this persists, report a bug.",
+        details: "",
+      }),
+    );
     const nodes = collectVnodes(turn);
-    const view = nodes.find((node) => attrsOf(node).id === "failure-view");
+    expect(nodes.find((node) => attrsOf(node).id === "failure-view")).toBeDefined();
     const message = nodes.find((node) => attrsOf(node).id === "error-message");
-    expect(view).toBeDefined();
-    expect(message).toBeDefined();
-    expect(allText(message)).toBe("Could not create alpha: clone blew up");
+    expect(allText(message)).toBe("Couldn't create alpha. Try again. If this persists, report a bug.");
+    // An error is read, not followed: streamed a character at a time it reads as the app hanging.
+    expect(nodes.filter((node) => String(attrsOf(node).class ?? "").includes("start-char"))).toHaveLength(0);
   });
 
-  it("lands the failure text whole rather than streamed", () => {
-    // An error can run to pages, and streamed a character at a time it reads
-    // as the app hanging while the cause is still spelling itself out.
-    const turn = failureTurn("alpha", "clone blew up");
-    const streamed = collectVnodes(turn).filter((node) =>
-      String(attrsOf(node).class ?? "").includes("start-char"),
+  it("names the See details toggle and the panel it opens from the failure view the runner polls", () => {
+    const draw = drawFailureTurn({
+      message: "Couldn't create alpha. Try again. If this persists, report a bug.",
+      details: "mngr create failed (exit code 1):\nunknown or invalid runtime name: runsc",
+    });
+    // The runner clicks `#failure-view-details` and reads the panel it
+    // opens; without that panel's id it has the sentence alone, which names
+    // no cause.
+    (attrsOf(nodeById(draw(), "failure-view-details")).onclick as () => void)();
+    expect(allText(nodeById(draw(), "failure-view-details-panel"))).toContain(
+      "unknown or invalid runtime name: runsc",
     );
-    expect(streamed).toHaveLength(0);
-    const message = collectVnodes(turn).find(
-      (node) => attrsOf(node).id === "error-message",
-    );
-    expect(allText(message)).toBe("Could not create alpha: clone blew up");
   });
 });
+
+/** What the page puts on screen, with its components rendered through. */
+function shownText(view: unknown): string {
+  return allText(renderDeep(view));
+}
+
+/** The element carrying `id` in what the page actually draws. */
+function shownById(view: unknown, id: string): unknown {
+  return collectVnodes(renderDeep(view)).find(
+    (node) => attrsOf(node).id === id,
+  );
+}
+
+/** The answer buttons a render offers, by their data-answer id. */
+function answers(view: unknown): Map<string, () => void> {
+  return new Map(
+    withAttr(renderDeep(view), "data-answer").map((node) => [
+      String(attrsOf(node)["data-answer"]),
+      attrsOf(node).onclick as () => void,
+    ]),
+  );
+}
+
+/** The chat error keyed `key`. */
+function failureNoticeIn(view: unknown, key: string): AnyVnode | undefined {
+  return collectVnodes(view).find(
+    (node) => node.tag === ChatError && attrsOf(node).key === key,
+  );
+}
+
+/** The ways forward the failure's chat error offers, by label, in order. */
+function failureActions(view: unknown): Map<string, ErrorAction> {
+  const actions = (attrsOf(failureNoticeIn(view, "creation-failure") ?? {}).actions ?? []) as ErrorAction[];
+  return new Map(actions.map((action) => [action.label, action]));
+}
+
+/** What the page keeps behind the See details of the chat error keyed `key`. */
+function failureDetailsIn(view: unknown, key: string): string {
+  const error = attrsOf(failureNoticeIn(view, key) ?? {}).error as UserFacingError | undefined;
+  return error?.details ?? "";
+}
+
+/** The attrs the retry form's embedded create form opens with, once the form is open. */
+function retryFormAttrs(view: unknown): Record<string, unknown> | undefined {
+  const form = collectVnodes(view).find((node) => attrsOf(node).mode === "embedded");
+  return form === undefined ? undefined : attrsOf(form);
+}
 
 describe("CreatingPage across a route change", () => {
   afterEach(() => {
@@ -619,5 +689,348 @@ describe("CreatingPage across a route change", () => {
       "/ui/api/create/attempts/create-attempt-a",
       "/ui/api/create/attempts/create-attempt-b",
     ]);
+  });
+  type AttemptRecord = NonNullable<CreateAttemptDetail["record"]>;
+
+  function recordWith(createAttemptId: string, record: Partial<AttemptRecord>): CreateAttemptDetail {
+    const failed = failedRecord(createAttemptId);
+    return { ...failed, record: { ...(failed.record as AttemptRecord), ...record } };
+  }
+
+  interface MountedPage {
+    page: m.Component;
+    render: () => m.Vnode;
+  }
+
+  /** Mount the page on `createAttemptId` against whatever `fetch` the test stubbed. */
+  function mountPage(createAttemptId: string): MountedPage {
+    vi.spyOn(m, "redraw").mockImplementation(() => undefined);
+    const page = CreatingPage(vnodeFor(createAttemptId));
+    const render = (): m.Vnode => (page.view as (v: m.Vnode) => m.Vnode).call(page, vnodeFor(createAttemptId));
+    (page.oninit as (v: m.VnodeDOM) => void).call(page, vnodeFor(createAttemptId));
+    return { page, render };
+  }
+
+  /** Register a real shell, whose hub route is where a finished discard leaves for. */
+  function registerShell(): ShellState {
+    const shell = new ShellState(createEmptyStores());
+    registerAppContext({ stores: shell.stores, shell });
+    return shell;
+  }
+
+  /** Mount the page on a record-backed attempt, with `fetch` answering every other URL through `route`. */
+  async function mountRecord(
+    createAttemptId: string,
+    detail: CreateAttemptDetail,
+    route: (url: string, init?: RequestInit) => Response | Promise<Response> = () => jsonResponse({}),
+  ): Promise<MountedPage> {
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) =>
+      Promise.resolve(url.startsWith("/ui/api/create/attempts/") ? jsonResponse(detail) : route(url, init)),
+    );
+    const mounted = mountPage(createAttemptId);
+    // The name is in the settings the user turn folds away, so this waits on
+    // the markup rather than on what a reader would see.
+    await vi.waitFor(() => expect(allText(mounted.render())).toContain(`workspace-${createAttemptId}`));
+    return mounted;
+  }
+
+  it("tells a failed create in our words and keeps the raw error and its log behind See details", async () => {
+    const { render } = await mountRecord(
+      "create-attempt-f",
+      recordWith("create-attempt-f", {
+        error: "mngr create failed (exit code 1):\nTraceback: boom",
+        log_tail: ["[Imbue Studio] Creating...", "Traceback: boom"],
+      }),
+    );
+    const view = render();
+    const message = shownById(view, "error-message");
+    expect(allText(message)).toBe(
+      "Couldn't create workspace-create-attempt-f. Try again. If this persists, report a bug.",
+    );
+    expect(shownText(view)).not.toContain("exit code");
+    const details = failureDetailsIn(view, "creation-failure");
+    expect(details).toContain("mngr create failed (exit code 1)");
+    expect(details).toContain("[Imbue Studio] Creating...");
+    // The ways forward are the user's answer row: the way out among its quiet
+    // links at the left, the fix as the answer at its right.
+    expect([...answers(view).keys()]).toEqual([
+      "failure-view-dismissal-0",
+      "failure-view-fix-0",
+    ]);
+    expect([...failureActions(view).keys()]).toEqual(["Retry", "Dismiss"]);
+    failureActions(view).get("Retry")?.onclick();
+    const retryForm = retryFormAttrs(render());
+    expect(retryForm?.retryId).toBe("create-attempt-f");
+    expect(retryForm?.initialPreset).toBeUndefined();
+    expect(retryForm?.isImbueCloudRefused).toBe(false);
+  });
+
+  it("tells a branch the repository lacks by name, with Retry and the clone's output behind See details", async () => {
+    const failed = failedRecord("create-attempt-r");
+    const record = failed.record as AttemptRecord;
+    const { render } = await mountRecord("create-attempt-r", {
+      ...failed,
+      record: {
+        ...record,
+        error: "git fetch failed:\nfatal: couldn't find remote ref v9",
+        error_kind: "GIT_REF_NOT_FOUND",
+        request: { ...(record.request as NonNullable<AttemptRecord["request"]>), branch: "v9" },
+      },
+    });
+    const view = render();
+    const message = shownById(view, "error-message");
+    expect(allText(message)).toContain("https://example.com/repo has no branch or tag called v9.");
+    expect(allText(renderDeep(failureNoticeIn(view, "creation-failure")))).toContain("Report a bug");
+    expect(failureDetailsIn(view, "creation-failure")).toContain("couldn't find remote ref v9");
+    expect([...failureActions(view).keys()]).toEqual(["Retry", "Dismiss"]);
+  });
+
+  it("offers a waitlisted account its own computer instead of a Retry that fails the same way", async () => {
+    const { render } = await mountRecord(
+      "create-attempt-w",
+      recordWith("create-attempt-w", { error: "This account is on the waitlist.", error_kind: "WAITLISTED" }),
+    );
+    const view = render();
+    expect(shownText(view)).toContain("still on the waitlist");
+    const offered = failureActions(view);
+    expect([...offered.keys()]).toEqual(["Run on this computer", "Dismiss"]);
+    offered.get("Run on this computer")?.onclick();
+    expect(retryFormAttrs(render())).toMatchObject({
+      retryId: "create-attempt-w",
+      initialPreset: "local",
+      isImbueCloudRefused: true,
+    });
+  });
+
+  it("leads a plan limit with a run on this computer that keeps Imbue Cloud backups and sharing, Retry behind it", async () => {
+    const { render } = await mountRecord(
+      "create-attempt-q",
+      recordWith("create-attempt-q", {
+        error: "Quota exceeded",
+        error_kind: "QUOTA_EXCEEDED",
+        quota_refusal: { entitlement: "max_remote_workspaces", limit: 3 },
+      }),
+    );
+    const offered = failureActions(render());
+    expect([...offered.keys()]).toEqual(["Run on this computer", "Retry", "Dismiss"]);
+    offered.get("Run on this computer")?.onclick();
+    expect(retryFormAttrs(render())).toMatchObject({ initialPreset: "local", isImbueCloudRefused: false });
+  });
+
+  it("offers a version too old for Imbue Cloud an update in the desktop app, and a run on this computer", async () => {
+    const shell = new ShellState(createEmptyStores());
+    shell.accountId = "user-cd34";
+    registerAppContext({ stores: shell.stores, shell });
+    const routed = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    await withMindsNative({}, async () => {
+      const { render } = await mountRecord(
+        "create-attempt-o",
+        recordWith("create-attempt-o", { error: "Client too old", error_kind: "CLIENT_TOO_OLD" }),
+      );
+      const offered = failureActions(render());
+      expect([...offered.keys()]).toEqual(["Update Imbue Studio", "Run on this computer", "Dismiss"]);
+      offered.get("Update Imbue Studio")?.onclick();
+    });
+    expect(routed).toHaveBeenCalledWith("/settings", { section: "updates", account: "user-cd34" });
+  });
+
+  it("holds Retry on a failed attempt that can't be retried, saying why instead of asking for a retry", async () => {
+    const reason = "The connection this attempt used was removed, so it can't be retried.";
+    const { render } = await mountRecord(
+      "create-attempt-h",
+      recordWith("create-attempt-h", { error_kind: "NAME_TAKEN", retry_unavailable_reason: reason }),
+    );
+    const message = shownById(render(), "error-message");
+    expect(allText(message)).toBe(`Couldn't create workspace-create-attempt-h. ${reason}`);
+    expect([...failureActions(render()).keys()]).toEqual(["Retry", "Dismiss"]);
+    const retry = failureActions(render()).get("Retry");
+    expect(retry).toMatchObject({ isDisabled: true, tooltip: reason });
+    retry?.onclick();
+    expect(retryFormAttrs(render())).toBeUndefined();
+    // A held Retry is never the emphasized answer: with nothing pressable in
+    // the row, nothing in it is filled.
+    expect(
+      withAttr(renderDeep(render()), "data-answer").map((node) => [
+        attrsOf(node)["data-answer"],
+        classesOf(node).includes(BTN_VARIANTS.success) ? "success" : "quiet",
+      ]),
+    ).toEqual([
+      ["failure-view-dismissal-0", "quiet"],
+      ["failure-view-fix-0", "quiet"],
+    ]);
+  });
+
+  it("words an unreachable provider from the fix the provider named", async () => {
+    const { render } = await mountRecord(
+      "create-attempt-d",
+      recordWith("create-attempt-d", {
+        error: "Provider 'docker' is not available: Cannot connect to Docker daemon",
+        error_kind: "PROVIDER_UNAVAILABLE",
+        provider_remediation: "start Docker",
+      }),
+    );
+    const message = shownById(render(), "error-message");
+    // The fix is set apart, so it reads as its own run of text.
+    expect(allText(message)).toBe(
+      "Couldn't create workspace-create-attempt-d. To fix it,  start Docker, then select Retry .",
+    );
+  });
+
+  it("stays on the page through a discard and leaves only once the discard has finished", async () => {
+    vi.useFakeTimers();
+    const statuses = [
+      { status: "RUNNING", is_done: false },
+      { status: "DONE", is_done: true },
+    ];
+    const requested: string[] = [];
+    const { render } = await mountRecord(
+      "create-attempt-i",
+      recordWith("create-attempt-i", { state: "interrupted" }),
+      (url, init) => {
+        requested.push(`${init?.method ?? "GET"} ${url}`);
+        if (url.endsWith("/discard")) return jsonResponse({ operation_id: "create-attempt-i" }, 202);
+        return jsonResponse(statuses.shift());
+      },
+    );
+    const shell = registerShell();
+    const routed = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    answers(render()).get("discard")?.();
+    expect(shownText(render())).toContain("Removing what was left of workspace-create-attempt-i…");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(routed).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(routed).toHaveBeenCalledWith(shell.hubRoute(), undefined, undefined);
+    expect(requested).toEqual([
+      "POST /api/v1/workspaces/create-attempts/create-attempt-i/discard",
+      "GET /api/v1/workspaces/operations/create-attempt-discard/create-attempt-i",
+      "GET /api/v1/workspaces/operations/create-attempt-discard/create-attempt-i",
+    ]);
+  });
+
+  it("stops following a discard once the page is gone, so it never routes away from where the user went", async () => {
+    vi.useFakeTimers();
+    let releaseStatus: (response: Response) => void = () => undefined;
+    const requested: string[] = [];
+    const { page, render } = await mountRecord(
+      "create-attempt-k",
+      recordWith("create-attempt-k", { state: "interrupted" }),
+      (url, init) => {
+        requested.push(`${init?.method ?? "GET"} ${url}`);
+        if (url.endsWith("/discard")) return jsonResponse({ operation_id: "create-attempt-k" }, 202);
+        return new Promise<Response>((resolve) => {
+          releaseStatus = resolve;
+        });
+      },
+    );
+    const routed = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    answers(render()).get("discard")?.();
+    await vi.advanceTimersByTimeAsync(0);
+    (page.onremove as () => void).call(page);
+    releaseStatus(jsonResponse({ status: "RUNNING", is_done: false }));
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(routed).not.toHaveBeenCalled();
+    expect(requested).toEqual([
+      "POST /api/v1/workspaces/create-attempts/create-attempt-k/discard",
+      "GET /api/v1/workspaces/operations/create-attempt-discard/create-attempt-k",
+    ]);
+  });
+
+  it("says a discard failed, with its output behind See details, instead of leaving as if it worked", async () => {
+    const { render } = await mountRecord(
+      "create-attempt-j",
+      recordWith("create-attempt-j", { state: "interrupted" }),
+      (url) =>
+        url.endsWith("/discard")
+          ? jsonResponse({ operation_id: "create-attempt-j" }, 202)
+          : jsonResponse({ status: "FAILED", is_done: false, log: "mngr destroy: host busy" }),
+    );
+    const routed = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    answers(render()).get("discard")?.();
+    await vi.waitFor(() =>
+      expect(shownText(render())).toContain(
+        "Imbue Studio couldn't remove what was left of workspace-create-attempt-j. " +
+          "Try again. If this persists, report a bug.",
+      ),
+    );
+    expect(failureDetailsIn(render(), "creation-discard-failure")).toBe("mngr destroy: host busy");
+    expect(routed).not.toHaveBeenCalled();
+    // Discard stays on offer as the way to try again.
+    expect([...answers(render()).keys()]).toEqual(["retry", "discard"]);
+  });
+
+  it("emphasizes Discard on an interrupted attempt that can't be retried, and says why instead of offering a retry", async () => {
+    const reason = "The connection this attempt used was removed, so it can't be retried.";
+    const { render } = await mountRecord(
+      "create-attempt-l",
+      recordWith("create-attempt-l", { state: "interrupted", retry_unavailable_reason: reason }),
+    );
+    const view = render();
+    expect(shownText(view)).toContain(`${reason} You can discard the partial workspace.`);
+    expect(shownText(view)).not.toContain("You can retry");
+    // Discard leads the row and carries the emphasis; the held Retry follows
+    // it, quieter and unpressable.
+    const drawn = withAttr(renderDeep(view), "data-answer").map((node) => [
+      attrsOf(node)["data-answer"],
+      classesOf(node).includes(BTN_VARIANTS.success) ? "success" : "secondary",
+    ]);
+    expect(drawn).toEqual([
+      ["discard", "success"],
+      ["retry", "secondary"],
+    ]);
+  });
+
+  it("leaves for the workspaces list when the attempt was already discarded elsewhere, rather than failing the discard", async () => {
+    const { render } = await mountRecord(
+      "create-attempt-g",
+      recordWith("create-attempt-g", { state: "interrupted" }),
+      () => jsonResponse({ error: "Unknown create attempt create-attempt-g" }, 404),
+    );
+    const shell = registerShell();
+    const routed = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    answers(render()).get("discard")?.();
+
+    await vi.waitFor(() => expect(routed).toHaveBeenCalledWith(shell.hubRoute(), undefined, undefined));
+    expect(shownText(render())).not.toContain("couldn't remove");
+  });
+
+  it("keeps the create log of a failure it watched live, behind See details with the raw error", async () => {
+    const sources: Array<{ onmessage: ((event: { data: string }) => void) | null }> = [];
+    vi.stubGlobal(
+      "EventSource",
+      class {
+        onmessage: ((event: { data: string }) => void) | null = null;
+        onerror: unknown = null;
+        constructor() {
+          sources.push(this);
+        }
+        close(): void {}
+      },
+    );
+    vi.stubGlobal("fetch", (url: string) =>
+      Promise.resolve(
+        url.startsWith("/ui/api/create/attempts/")
+          ? jsonResponse(liveDetail("create-attempt-l"))
+          : jsonResponse({
+              status: "FAILED",
+              error: "mngr create failed (exit code 1):\nError: Host name already exists: alpha",
+              error_kind: "NAME_TAKEN",
+            }),
+      ),
+    );
+    const { page, render } = mountPage("create-attempt-l");
+    await vi.waitFor(() => expect(sources).toHaveLength(1));
+    sources[0].onmessage?.({ data: JSON.stringify({ log: "[Imbue Studio] Creating workspace..." }) });
+
+    await vi.waitFor(() => expect(shownText(render())).toContain("There's already a workspace called"));
+    const details = failureDetailsIn(render(), "creation-failure");
+    expect(details).toContain("Host name already exists: alpha");
+    expect(details).toContain("[Imbue Studio] Creating workspace...");
+    (page.onremove as () => void).call(page);
   });
 });

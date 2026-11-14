@@ -62,6 +62,16 @@ _UNAVAILABLE_AUTH_SERVICE_MESSAGE: Final[str] = (
     "We could not reach the Imbue sign-in service. Check your internet connection and try again."
 )
 
+# Shown for every rejection Imbue gives the sign-in; the connector's own words go behind See details.
+_AUTH_REJECTED_MESSAGE: Final[str] = "Imbue couldn't finish signing you in. Try again. If this persists, report a bug."
+
+# Shown when the sign-in itself went through but recording the account on this computer failed: the
+# cause (a settings file it can't write, a full disk) is on this computer, so signing in again won't help.
+_SIGNIN_NOT_RECORDED_MESSAGE: Final[str] = (
+    "Imbue signed you in, but Imbue Studio couldn't save the sign-in on this computer. "
+    "Report a bug so we can look into it."
+)
+
 
 @pure
 def _web_login_incomplete_message(reason: WebLoginIncompleteReason) -> str:
@@ -86,11 +96,18 @@ def _web_login_incomplete_message(reason: WebLoginIncompleteReason) -> str:
 def _user_facing_auth_message(exc: ImbueCloudCliError) -> str:
     """Return copy safe to render in the UI for a failed plugin auth call."""
     if isinstance(exc, ImbueCloudAuthFailedCliError):
-        return exc.auth_message
+        return _AUTH_REJECTED_MESSAGE
     if isinstance(exc, ImbueCloudWebLoginIncompleteCliError):
         return _web_login_incomplete_message(exc.reason)
     logger.warning("Auth call failed without a structured connector verdict: {}", exc)
     return _UNAVAILABLE_AUTH_SERVICE_MESSAGE
+
+
+def _web_login_error_details(exc: ImbueCloudCliError) -> str:
+    """What the sign-in's failure said underneath our sentence, for See details."""
+    if isinstance(exc, ImbueCloudAuthFailedCliError):
+        return f"{exc.auth_status}: {exc.auth_message}"
+    return str(exc)
 
 
 def _log_web_login_failure(exc: ImbueCloudCliError) -> None:
@@ -234,6 +251,8 @@ class _WebLoginFlowStatus(FrozenModel):
     display_name: str | None = None
     is_email_verified: bool | None = None
     error: str | None = None
+    error_details: str | None = None
+    is_retry_offered: bool = True
     deadline: float | None = None
 
 
@@ -369,6 +388,7 @@ def _run_web_login_subprocess(
                 login_url=login_url,
                 # The frontend renders this verbatim in the modal's error box.
                 error=_user_facing_auth_message(exc),
+                error_details=_web_login_error_details(exc),
                 deadline=_flow_deadline(),
             ),
         )
@@ -380,18 +400,36 @@ def _run_web_login_subprocess(
 
     # Anything that goes wrong while mirroring the signin into the desktop
     # client must still resolve the flow status -- the frontend polls it, so an
-    # unresolved crash here would leave the user stuck. Nothing is caught: a
-    # mirroring crash propagates to the CG's ObservableThread (which logs it),
+    # unresolved crash here would leave the user stuck. An OSError or
+    # ValueError while recording the account (a settings file it can't write
+    # or parse) is recorded with its reason; any
+    # other crash propagates to the CG's ObservableThread (which logs it),
     # while the finally block flips a still-unresolved status to "error".
     try:
-        _mirror_signin_result(
-            result=result,
-            session_store=session_store,
-            sync_scheduler=sync_scheduler,
-            output_format=output_format,
-            notify_accounts_changed=notify_accounts_changed,
-            provider_materializer=provider_materializer,
-        )
+        try:
+            _mirror_signin_result(
+                result=result,
+                session_store=session_store,
+                sync_scheduler=sync_scheduler,
+                output_format=output_format,
+                notify_accounts_changed=notify_accounts_changed,
+                provider_materializer=provider_materializer,
+            )
+        except (OSError, ValueError) as e:
+            logger.error("Signed in as {}, but could not record the account on this computer: {}", result.email, e)
+            _record_web_login_status(
+                flow_id,
+                _WebLoginFlowStatus(
+                    state="error",
+                    login_url=login_url,
+                    error=_SIGNIN_NOT_RECORDED_MESSAGE,
+                    is_retry_offered=False,
+                    error_details=f"Signed in as {result.email}, but recording the account on this computer "
+                    f"failed: {type(e).__name__}: {e}",
+                    deadline=_flow_deadline(),
+                ),
+            )
+            return
         _record_web_login_status(
             flow_id,
             _WebLoginFlowStatus(
@@ -412,10 +450,10 @@ def _run_web_login_subprocess(
                 _WebLoginFlowStatus(
                     state="error",
                     login_url=login_url,
-                    error=(
-                        f"Signed in as {result.email}, but applying the signin locally failed; "
-                        "see the desktop client logs for details."
-                    ),
+                    error=_SIGNIN_NOT_RECORDED_MESSAGE,
+                    is_retry_offered=False,
+                    error_details=f"Signed in as {result.email}, but recording the account on this computer "
+                    "stopped unexpectedly.",
                     deadline=_flow_deadline(),
                 ),
             )
@@ -552,6 +590,8 @@ def _handle_web_login_status(flow_id: str) -> Response:
             "email": status.email,
             "display_name": status.display_name,
             "error": status.error,
+            "error_details": status.error_details,
+            "is_retry_offered": status.is_retry_offered,
         }
     )
 

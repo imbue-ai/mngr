@@ -31,6 +31,7 @@ from pydantic import PrivateAttr
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.config.data_types import MNGR_BINARY
+from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import CREATE_ATTEMPT_LOG_REPLAY_MAX_LINES
@@ -65,6 +66,7 @@ from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import network_restricted_label_args
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
 from imbue.minds.desktop_client.agent_creator import provider_instance_name_for_launch
+from imbue.minds.desktop_client.agent_creator import quota_refusal_of
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.agent_creator import run_mngr_aws_prepare
 from imbue.minds.desktop_client.agent_creator import run_mngr_create
@@ -75,6 +77,7 @@ from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import RecordingImbueCloudCli
 from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
 from imbue.minds.desktop_client.create_progress import OperationProgressTracker
+from imbue.minds.desktop_client.data_types import CreateAttemptQuotaRefusal
 from imbue.minds.desktop_client.data_types import MachineSizeSelection
 from imbue.minds.desktop_client.imbue_cloud_cli import EMAIL_NOT_VERIFIED_ERROR_CLASS
 from imbue.minds.desktop_client.imbue_cloud_cli import QUOTA_EXCEEDED_ERROR_CLASS
@@ -90,6 +93,7 @@ from imbue.minds.desktop_client.template_mngr_pin import INTERNAL_GIT_TOKEN_REMO
 from imbue.minds.desktop_client.template_mngr_pin import INTERNAL_GIT_TOKEN_VAULT_KEY
 from imbue.minds.desktop_client.template_mngr_pin import INTERNAL_MNGR_REPO_URL
 from imbue.minds.desktop_client.template_mngr_pin import PUBLIC_MNGR_REPO_URL
+from imbue.minds.desktop_client.template_mngr_pin import TemplateMngrPinError
 from imbue.minds.desktop_client.testing import capture_error_logs
 from imbue.minds.desktop_client.testing import install_stub_mngr_on_path
 from imbue.minds.desktop_client.testing import install_stub_on_path
@@ -103,9 +107,12 @@ from imbue.minds.desktop_client.workspace_defaults import DEFAULT_WORKSPACE_TEMP
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
 from imbue.minds.desktop_client.workspace_template_cache import WorkspaceTemplateCache
 from imbue.minds.desktop_client.workspace_template_cache import WorkspaceTemplateCacheStatus
+from imbue.minds.errors import CreateOutcomeUnknownError
+from imbue.minds.errors import CreateTargetUnresolvedError
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import GitRefNotFoundError
+from imbue.minds.errors import LocalRepoPathMissingError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import PendingCreateAttemptStoreError
 from imbue.minds.errors import WorkspaceNameInUseError
@@ -368,70 +375,164 @@ def test_is_github_https_url_matches_only_github_http_urls() -> None:
 
 
 def test_classify_create_attempt_error_flags_any_failed_github_clone() -> None:
-    """ANY failed clone of a github.com source classifies -- no matching of
-    git's error text (deliberately: substring matching is brittle, and a
-    failed github clone is overwhelmingly an access problem the guidance
-    covers, while the raw error stays visible alongside it)."""
+    """ANY failed clone or fetch of a github.com source classifies -- no matching
+    of git's error text (deliberately: substring matching is brittle, and the
+    page's sentence claims neither cause, while the raw error stays behind
+    See details)."""
     url = "https://github.com/acme/private-repo.git"
     failures = (
-        "git clone failed:\nfatal: could not read Username for 'https://github.com': terminal prompts disabled",
-        "git clone failed:\nfatal: Authentication failed for 'https://github.com/acme/private-repo.git/'",
-        "git fetch failed:\nremote: Repository not found.\n"
-        "fatal: repository 'https://github.com/acme/private-repo.git/' not found",
-        "git clone failed:\nfatal: unable to access 'https://github.com/acme/repo.git/': "
-        "Could not resolve host: github.com",
+        ("clone", "fatal: could not read Username for 'https://github.com': terminal prompts disabled"),
+        ("clone", "fatal: Authentication failed for 'https://github.com/acme/private-repo.git/'"),
+        (
+            "fetch",
+            "remote: Repository not found.\nfatal: repository 'https://github.com/acme/private-repo.git/' not found",
+        ),
+        ("clone", "fatal: unable to access 'https://github.com/acme/repo.git/': Could not resolve host: github.com"),
     )
-    for message in failures:
-        assert (
-            classify_create_attempt_error(url, GitCloneError(message)) is CreateAttemptErrorKind.GITHUB_AUTH_REQUIRED
-        ), message
+    for step, output in failures:
+        error = GitCloneError(f"git {step} failed:\n{output}", failed_step=step)
+        assert classify_create_attempt_error(url, error) is CreateAttemptErrorKind.GITHUB_AUTH_REQUIRED, output
 
 
 def test_classify_create_attempt_error_flags_a_missing_ref_on_any_remote() -> None:
     """A clone that reached the remote but found no such branch or tag is not an
     access problem, so it classifies as GIT_REF_NOT_FOUND ahead of the
     host-based auth kinds."""
-    error = GitRefNotFoundError("git fetch failed:\nfatal: couldn't find remote ref main")
+    error = GitRefNotFoundError("git fetch failed:\nfatal: couldn't find remote ref main", failed_step="fetch")
     for source in ("https://github.com/acme/repo", "https://gitlab.example.com/acme/repo.git"):
         assert classify_create_attempt_error(source, error) is CreateAttemptErrorKind.GIT_REF_NOT_FOUND, source
 
 
-def test_classify_create_attempt_error_flags_non_github_remotes_generically() -> None:
-    """A failed clone of a non-github REMOTE git source classifies as the
-    generic GIT_AUTH_REQUIRED (same access guidance, without the GitHub-CLI
-    advice) -- covering another host over https and scp-style ssh remotes."""
-    error = GitCloneError(
-        "git clone failed:\nfatal: Authentication failed for 'https://gitlab.example.com/acme/repo.git/'"
-    )
+def test_classify_create_attempt_error_tells_https_remotes_from_ssh_remotes() -> None:
+    """A failed clone of another https host is a sign-in question; an ssh remote is
+    a question about this computer's SSH key, so the page words it differently."""
+    error = GitCloneError("git clone failed:\nfatal: Authentication failed", failed_step="clone")
     assert (
         classify_create_attempt_error("https://gitlab.example.com/acme/repo.git", error)
         is CreateAttemptErrorKind.GIT_AUTH_REQUIRED
     )
     assert (
         classify_create_attempt_error("git@gitlab.example.com:acme/repo.git", error)
-        is CreateAttemptErrorKind.GIT_AUTH_REQUIRED
+        is CreateAttemptErrorKind.GIT_SSH_AUTH_REQUIRED
     )
     assert (
         classify_create_attempt_error("ssh://git@gitlab.example.com/acme/repo.git", error)
-        is CreateAttemptErrorKind.GIT_AUTH_REQUIRED
+        is CreateAttemptErrorKind.GIT_SSH_AUTH_REQUIRED
     )
+    assert (
+        classify_create_attempt_error("git@github.com:acme/repo.git", error)
+        is CreateAttemptErrorKind.GIT_SSH_AUTH_REQUIRED
+    )
+
+
+def test_classify_create_attempt_error_ignores_a_clone_that_failed_after_the_download() -> None:
+    """The fetched ref's local checkout failing says nothing about reaching the
+    repository, so it gets no access sentence."""
+    error = GitCloneError("git checkout failed:\nerror: pathspec", failed_step="checkout")
+    assert classify_create_attempt_error("https://github.com/acme/repo.git", error) is None
 
 
 def test_classify_create_attempt_error_ignores_local_paths_and_bare_input() -> None:
     """A clone failure on a local path is not an access problem, and a bare
     non-remote string is not a recognizable remote -- neither classifies."""
-    error = GitCloneError("git clone failed:\nfatal: repository not found")
+    error = GitCloneError("git clone failed:\nfatal: repository not found", failed_step="clone")
     assert classify_create_attempt_error("/local/path/to/repo", error) is None
     assert classify_create_attempt_error("./relative/repo", error) is None
     assert classify_create_attempt_error("~/repo", error) is None
     assert classify_create_attempt_error("just-a-name", error) is None
 
 
-def test_classify_create_attempt_error_ignores_non_clone_errors() -> None:
-    """Only clone failures classify; a downstream mngr failure that happens to
-    echo an auth-shaped string must not trigger the clone guidance."""
+def test_classify_create_attempt_error_ignores_auth_shaped_text_in_other_failures() -> None:
+    """A downstream mngr failure that happens to echo an auth-shaped string, with
+    no structured class, must not be read as a clone failure."""
     error = MngrCommandError("mngr create failed:\nfatal: could not read Username for 'https://github.com'")
     assert classify_create_attempt_error("https://github.com/acme/repo.git", error) is None
+
+
+def test_classify_create_attempt_error_reads_the_local_failures_by_type() -> None:
+    url = "https://github.com/acme/repo.git"
+    assert (
+        classify_create_attempt_error(url, GitOperationError("git checkout failed for ref 'nope' (exit code 1)"))
+        is CreateAttemptErrorKind.BRANCH_CHECKOUT_FAILED
+    )
+    assert (
+        classify_create_attempt_error("/no/such/dir", LocalRepoPathMissingError("Local path does not exist: /no"))
+        is CreateAttemptErrorKind.LOCAL_PATH_MISSING
+    )
+    assert (
+        classify_create_attempt_error(
+            url, CreateTargetUnresolvedError("IMBUE_CLOUD mode requires imbue_cloud_account")
+        )
+        is CreateAttemptErrorKind.TARGET_UNRESOLVED
+    )
+    assert (
+        classify_create_attempt_error(url, CreateOutcomeUnknownError("mngr create exited 0 but ..."))
+        is CreateAttemptErrorKind.OUTCOME_UNKNOWN
+    )
+    assert (
+        classify_create_attempt_error(url, TemplateMngrPinError("the template's pyproject.toml is not valid TOML"))
+        is CreateAttemptErrorKind.TEMPLATE_UNREADABLE
+    )
+
+
+def _failed_mngr_create(jsonl_error_event: str) -> MngrCommandError:
+    """The error a failed ``mngr create`` raises after printing ``jsonl_error_event``."""
+    capture = _CreateEventCapture()
+    capture(jsonl_error_event, is_stdout=True)
+    return _mngr_create_failure(1, "", "Error: refused", capture)
+
+
+def test_classify_create_attempt_error_names_each_provider_refusal_by_its_error_class() -> None:
+    url = "https://github.com/acme/repo.git"
+    for error_class, expected in (
+        ("ProviderUnavailableError", CreateAttemptErrorKind.PROVIDER_UNAVAILABLE),
+        ("HostNameConflictError", CreateAttemptErrorKind.NAME_TAKEN),
+        ("ImbueCloudEmailNotVerifiedError", CreateAttemptErrorKind.EMAIL_NOT_VERIFIED),
+        ("ImbueCloudAccountSuspendedError", CreateAttemptErrorKind.ACCOUNT_SUSPENDED),
+        ("ImbueCloudClientTooOldError", CreateAttemptErrorKind.CLIENT_TOO_OLD),
+        ("ImbueCloudLeaseUnavailableError", CreateAttemptErrorKind.NO_CLOUD_CAPACITY),
+    ):
+        error = _failed_mngr_create(json.dumps({"event": "error", "error_class": error_class, "message": "no"}))
+        assert classify_create_attempt_error(url, error) is expected, error_class
+    unknown = _failed_mngr_create('{"event": "error", "error_class": "ConfigParseError", "message": "merge"}')
+    assert classify_create_attempt_error(url, unknown) is None
+
+
+def test_a_quota_refusal_carries_its_limit_and_a_zero_limit_reads_as_the_waitlist() -> None:
+    """The limit rides mngr's JSONL error event as structured details; the guest
+    (waitlist) plan grants nothing, so its refusal is the one with a zero limit."""
+    url = "https://github.com/acme/repo.git"
+    over_limit = _failed_mngr_create(
+        json.dumps(
+            {
+                "event": "error",
+                "error_class": "ImbueCloudQuotaExceededError",
+                "message": "Quota exceeded: this account allows 2 remote workspaces and 2 are already in use.",
+                "details": {"entitlement": "max_remote_workspaces", "limit": 2.0, "current": 2.0},
+            }
+        )
+    )
+    assert classify_create_attempt_error(url, over_limit) is CreateAttemptErrorKind.QUOTA_EXCEEDED
+    assert quota_refusal_of(over_limit) == CreateAttemptQuotaRefusal(entitlement="max_remote_workspaces", limit=2.0)
+
+    waitlisted = _failed_mngr_create(
+        json.dumps(
+            {
+                "event": "error",
+                "error_class": "ImbueCloudQuotaExceededError",
+                "message": "This account is on the waitlist.",
+                "details": {"entitlement": "max_remote_workspaces", "limit": 0, "current": 0},
+            }
+        )
+    )
+    assert classify_create_attempt_error(url, waitlisted) is CreateAttemptErrorKind.WAITLISTED
+
+    # An older mngr that sends no details leaves the refusal unclassified rather than guessing.
+    without_details = _failed_mngr_create(
+        '{"event": "error", "error_class": "ImbueCloudQuotaExceededError", "message": "Quota exceeded"}'
+    )
+    assert classify_create_attempt_error(url, without_details) is None
+    assert quota_refusal_of(without_details) is None
 
 
 def test_redact_url_credentials_strips_userinfo_for_schemed_urls() -> None:
@@ -2332,6 +2433,76 @@ def test_a_private_pin_without_a_credential_fails_the_create_attempt_with_the_re
     record = store.read_record(str(create_attempt_id))
     assert record is not None
     assert record.state is PendingCreateAttemptState.FAILED
+
+
+def _fail_create_attempt_with_mngr_error_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_event: dict[str, object], host_name: str
+) -> tuple[AgentCreateAttemptInfo, PendingCreateAttemptRecord]:
+    """Run a create attempt whose ``mngr create`` prints ``error_event`` and exits 1; return its FAILED info and record."""
+    install_stub_mngr_on_path(tmp_path / "fake-bin", monkeypatch, f"echo '{json.dumps(error_event)}'\nexit 1")
+    template = tmp_path / f"template-{host_name}"
+    template.mkdir()
+    store = PendingCreateAttemptStore(records_dir=tmp_path / "pending")
+    creator = _make_test_creator(tmp_path, pending_create_attempt_store=store)
+
+    create_attempt_id = creator.start_create_attempt(str(template), host_name=host_name, launch_mode=LaunchMode.DOCKER)
+    _wait_until_finished(creator, create_attempt_id)
+    creator.wait_for_all()
+
+    info = creator.get_create_attempt_info(create_attempt_id)
+    assert info is not None and info.status is AgentCreateAttemptStatus.FAILED
+    record = store.read_record(str(create_attempt_id))
+    assert record is not None and record.state is PendingCreateAttemptState.FAILED
+    return info, record
+
+
+@pytest.mark.timeout(30)
+def test_a_quota_refusal_reaches_the_attempt_and_its_record_as_a_kind_and_a_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """mngr's structured refusal survives the worker: the live status and the
+    FAILED record both carry the kind and the limit, so the creation page can
+    name the limit after a restart as well as live."""
+    info, record = _fail_create_attempt_with_mngr_error_event(
+        tmp_path,
+        monkeypatch,
+        {
+            "event": "error",
+            "error_class": "ImbueCloudQuotaExceededError",
+            "message": "Quota exceeded: this account allows 3 total workspaces (running + stopped) and 3 are in use.",
+            "details": {"entitlement": "max_total_workspaces", "limit": 3.0, "current": 3.0},
+        },
+        host_name="over-limit-77120",
+    )
+
+    expected_refusal = CreateAttemptQuotaRefusal(entitlement="max_total_workspaces", limit=3.0)
+    assert info.error_kind is CreateAttemptErrorKind.QUOTA_EXCEEDED
+    assert info.quota_refusal == expected_refusal
+    assert record.error_kind == "QUOTA_EXCEEDED"
+    assert record.quota_refusal == expected_refusal
+
+
+@pytest.mark.timeout(30)
+def test_an_unreachable_providers_named_fix_reaches_the_attempt_and_its_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fix the provider named for being unreachable survives the worker, so the creation page can say it
+    live and after a restart."""
+    info, record = _fail_create_attempt_with_mngr_error_event(
+        tmp_path,
+        monkeypatch,
+        {
+            "event": "error",
+            "error_class": "ProviderUnavailableError",
+            "message": "Provider 'docker' is not available: Cannot connect to Docker daemon.",
+            "details": {"short_reason": "Cannot connect to Docker daemon", "short_remediation": "start Docker"},
+        },
+        host_name="docker-down-77121",
+    )
+
+    assert info.error_kind is CreateAttemptErrorKind.PROVIDER_UNAVAILABLE
+    assert info.provider_remediation == "start Docker"
+    assert record.provider_remediation == "start Docker"
 
 
 _FAKE_VAULT_TOKEN = "tok-from-vault-40217"

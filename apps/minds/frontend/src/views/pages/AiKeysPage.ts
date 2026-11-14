@@ -7,88 +7,15 @@
 // AppOverlay supplies the card chrome, padding, scroll, and close X.
 
 import m from "mithril";
+import { getAppContext } from "../../app-context";
+import type { AiKeysContext } from "../../models/aiKeys";
+import { AiKeysMintModel } from "../../models/aiKeys";
+import type { ErrorAction } from "../../models/errors";
 import { Button } from "../components/Button";
+import { ErrorNotice, restartAppActions } from "../components/ErrorDisplay";
 import { FormLabel, Textarea } from "../components/FormControls";
-import { Notice } from "../components/Notice";
 import { Spinner } from "../components/Spinner";
-
-interface AiKeysContext {
-  workspace_id: string;
-  workspace_display_name: string;
-  account_email: string;
-  error_message: string;
-}
-
-class AiKeysMintModel {
-  context: AiKeysContext | null = null;
-  isLoadFailed = false;
-  isMinting = false;
-  hasMintedOnce = false;
-  statusMessage = "";
-  isStatusError = false;
-  credentialBlob = "";
-
-  async load(): Promise<void> {
-    const workspace = m.route.param("workspace") ?? "";
-    try {
-      const response = await fetch(
-        `/ui/api/ai-keys?workspace=${encodeURIComponent(workspace)}`,
-        {
-          credentials: "same-origin",
-        },
-      );
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      this.context = (await response.json()) as AiKeysContext;
-    } catch {
-      this.isLoadFailed = true;
-    }
-    m.redraw();
-  }
-
-  async mint(): Promise<void> {
-    const context = this.context;
-    if (context === null || this.isMinting) return;
-    this.isMinting = true;
-    this.statusMessage = "Creating key...";
-    this.isStatusError = false;
-    m.redraw();
-    try {
-      const response = await fetch("/settings/ai-keys/mint", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workspace: context.workspace_id }),
-      });
-      const data = (await response.json().catch(() => ({}))) as {
-        credentials?: string;
-        error?: string;
-      };
-      if (response.status !== 200 || !data.credentials) {
-        this.statusMessage = data.error ?? "Could not create the key.";
-        this.isStatusError = true;
-      } else {
-        // Always reveal the blob so the user can copy manually if the
-        // clipboard write is rejected (insecure context, permissions).
-        this.credentialBlob = data.credentials;
-        this.hasMintedOnce = true;
-        try {
-          await navigator.clipboard.writeText(data.credentials);
-          this.statusMessage =
-            "Credentials copied to your clipboard. Paste them into the workspace sign-in dialog.";
-        } catch {
-          this.statusMessage =
-            "Key created. Copy the credentials below and paste them into the workspace sign-in dialog.";
-        }
-        this.isStatusError = false;
-      }
-    } catch {
-      this.statusMessage = "Could not reach the server. Please try again.";
-      this.isStatusError = true;
-    }
-    this.isMinting = false;
-    m.redraw();
-  }
-}
+import { variantBesideErrors } from "../components/variantBesideErrors";
 
 /** The minted-key form: the success body once the workspace's owning account
  * has resolved. Extracted so the view keeps the load / error / ready branches
@@ -125,7 +52,17 @@ function aiKeysBody(
       m(
         Button,
         {
-          variant: "primary",
+          variant: variantBesideErrors(
+            "primary",
+            model.mintError !== null
+              ? [
+                  {
+                    message: model.mintError.message,
+                    actions: mintErrorActions(model),
+                  },
+                ]
+              : [],
+          ),
           extra: "w-80",
           disabled: model.isMinting,
           onclick: () => void model.mint(),
@@ -140,11 +77,20 @@ function aiKeysBody(
           "p",
           {
             role: "status",
-            class:
-              "mt-4 type-helper text-center " +
-              (model.isStatusError ? "text-important" : "text-secondary"),
+            class: "mt-4 type-helper text-center text-secondary",
           },
           model.statusMessage,
+        )
+      : null,
+    model.mintError !== null
+      ? m(
+          "div",
+          { class: "mt-4" },
+          m(ErrorNotice, {
+            id: "ai-keys-mint-error",
+            error: model.mintError,
+            actions: mintErrorActions(model),
+          }),
         )
       : null,
     model.credentialBlob !== ""
@@ -170,11 +116,44 @@ function aiKeysBody(
   ];
 }
 
+function mintErrorActions(model: AiKeysMintModel): ErrorAction[] {
+  return model.isWindowLoginLapsed ? restartAppActions() : [];
+}
+
+function loadErrorActions(model: AiKeysMintModel): ErrorAction[] {
+  if (model.isWindowLoginLapsed) return restartAppActions();
+  return [
+    {
+      label: "Try again",
+      onclick: () => void model.load(m.route.param("workspace") ?? ""),
+    },
+  ];
+}
+
+/** The workspace's Settings -> Account, where the account the server found
+ * missing is linked; nothing when the page was opened without a workspace. */
+function unlinkedWorkspaceActions(context: AiKeysContext): ErrorAction[] {
+  if (context.workspace_id === "") return [];
+  return [
+    {
+      label: "Open workspace settings",
+      onclick: () => {
+        const { shell, stores } = getAppContext();
+        const agentId = stores.workspaces.toAgentScopedId(context.workspace_id);
+        shell.routeTo(`/workspace/${agentId}/options`, {
+          tab: "settings",
+          group: "account",
+        });
+      },
+    },
+  ];
+}
+
 export function AiKeysPage(): m.Component {
   const model = new AiKeysMintModel();
   return {
     oninit(): void {
-      void model.load();
+      void model.load(m.route.param("workspace") ?? "");
     },
     view(): m.Children {
       const context = model.context;
@@ -186,12 +165,12 @@ export function AiKeysPage(): m.Component {
           { class: "type-section text-primary mb-4" },
           "Sign in with Imbue",
         ),
-        model.isLoadFailed
-          ? m(
-              Notice,
-              { variant: "error" },
-              "This page could not be loaded. Refresh to try again.",
-            )
+        model.loadError !== null
+          ? m(ErrorNotice, {
+              id: "ai-keys-load-error",
+              error: model.loadError,
+              actions: loadErrorActions(model),
+            })
           : context === null
             ? m(
                 "div",
@@ -199,7 +178,12 @@ export function AiKeysPage(): m.Component {
                 [m(Spinner, { size: "sm" }), "Loading…"],
               )
             : context.error_message !== ""
-              ? m(Notice, { variant: "error" }, context.error_message)
+              ? m(ErrorNotice, {
+                  id: "ai-keys-context-error",
+                  error: { message: context.error_message, details: "" },
+                  actions: unlinkedWorkspaceActions(context),
+                  isBugReportOffered: false,
+                })
               : aiKeysBody(model, context),
       ];
     },

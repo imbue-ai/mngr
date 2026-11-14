@@ -21,21 +21,27 @@
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
-import type { CreateAttemptDetail, CreateAttemptRequestSummary } from "../../models/create";
+import type {
+  CreateAttemptDetail,
+  CreateAttemptFailure,
+  CreateAttemptRequestSummary,
+} from "../../models/create";
 import { CreateAttemptWatcher, fetchCreateAttemptDetail } from "../../models/create";
 import { ProgressDisplay } from "../../models/progress";
-import type { ShowcaseApp } from "../../models/creationTranscript";
+import type { FailureCopy, ShowcaseApp } from "../../models/creationTranscript";
 import {
   IMBUE_CLOUD_SUMMARY_LINE,
-  INTERRUPTED_LINE,
   READY_LINE,
   SETUP_LINE,
   SHOWCASE_APP,
   SHOWCASE_INTRO_LINE,
   SUMMARY_HEADING,
-  failureLine,
+  failureCopy,
+  interruptedLine,
   summarySettingLines,
 } from "../../models/creationTranscript";
+import type { ErrorAction, UserFacingError } from "../../models/errors";
+import { errorFromResponse, fallbackErrorSentence } from "../../models/errors";
 import {
   FLOW_OPTIONS_GAP_MS,
   FLOW_THINK_MS,
@@ -53,15 +59,24 @@ import {
 import { wash } from "../../models/wash";
 import { postWelcomeChat, postWelcomeChatLanding, welcomeChatBody } from "../../models/welcomeChat";
 import { welcomeChatArrival } from "../../models/welcomeChatArrival";
+import { defaultFetchJson } from "../../models/workspaceOptions";
 import { Button } from "../components/Button";
+import { updateAppActions } from "../components/ErrorDisplay";
+import type { ErrorTone } from "../components/errorDesign";
+import { ChatError } from "./start/ChatError";
 import { ImageLightbox } from "../components/ImageLightbox";
-import { Notice } from "../components/Notice";
 import { PageContainer } from "../components/Layout";
 import { Spinner } from "../components/Spinner";
 import { createFormModal } from "./CreatePage";
-import { TRANSCRIPT_COLUMN_CLASS, agentTurn, answerRow, disclosureList, scrollAnchor, userTurn } from "./start/transcript";
+import { TRANSCRIPT_COLUMN_CLASS, agentTurn, disclosureList, scrollAnchor, userTurn } from "./start/transcript";
 import { transcriptTurns } from "./StartPage";
 
+/** How often a running discard is checked on. */
+const DISCARD_POLL_MS = 1000;
+/** The most create-log lines a failure's details carry. */
+const FAILURE_LOG_MAX_LINES = 1000;
+/** The mithril key a failed create's turn is drawn under. */
+const FAILURE_EXTRAS_KEY = "creation-failure";
 /** The space over the ready heading: twice a turn's, so it reads as the conversation's close. */
 const READY_MARGIN_CLASS = "mt-20";
 /** The one bold line of the loading box, over its bar. */
@@ -78,8 +93,8 @@ interface CreatingState {
   isDone: boolean;
   isFailed: boolean;
   redirectUrl: string;
-  errorText: string;
-  errorKind: string;
+  /** Why a live attempt failed, once it has. */
+  failure: CreateAttemptFailure | null;
   stageText: string;
   /** The bar, fed by the status polls and extrapolated between them. */
   progress: ProgressDisplay;
@@ -100,6 +115,15 @@ interface CreatingState {
   isEntryStarted: boolean;
   isActionPending: boolean;
   isRetryFormOpen: boolean;
+  /** The retry form runs the attempt on this computer ("Run on this computer"). */
+  isRetryRunHere: boolean;
+  /** The run-here form also turns Imbue Cloud backups and sharing off: the account can't use Imbue Cloud at all. */
+  isRetryImbueCloudRefused: boolean;
+  /** A discard of what an interrupted attempt left: running, or why it failed. */
+  discard: { phase: "removing" } | { phase: "failed"; error: UserFacingError } | null;
+  discardTimer: ReturnType<typeof setTimeout> | null;
+  /** Set once the page is left or a later attempt takes it over, so a discard's pending answer is dropped. */
+  isStopped: boolean;
   /** Whether the showcase recording is open enlarged over the page. */
   isShowcaseLightboxOpen: boolean;
   progressTimer: ReturnType<typeof setInterval> | null;
@@ -130,43 +154,35 @@ function isReducedMotion(): boolean {
 }
 
 /**
- * The agent turn that reports a failed attempt. It keeps the ids the Electron
- * e2e workspace runner (desktop_client/e2e_workspace_runner.py) polls to fail
- * a create fast and to read the cause: `#failure-view` and `#error-message`.
+ * A failure in the creation chat: the sentence as an agent turn, its raw text
+ * behind See details, and the ways forward as the user's answer row.
+ *
+ * It carries the ids the Electron e2e workspace runner
+ * (desktop_client/e2e_workspace_runner.py) polls to fail a create fast:
+ * `#failure-view`, around its sentence `#error-message`, and -- named from
+ * `#failure-view` as every error's details are -- the `#failure-view-details`
+ * toggle and the `#failure-view-details-panel` holding the raw cause.
  */
-export function failureTurn(workspaceName: string, error: string): m.Children {
-  return agentTurn({
-    key: "creation-failed",
+export function failureTurn(
+  error: UserFacingError,
+  actions: ErrorAction[] = [],
+  options: { tone?: ErrorTone; isBugReportOffered?: boolean } = {},
+): m.Children {
+  return m(ChatError, {
+    key: FAILURE_EXTRAS_KEY,
     id: "failure-view",
     textId: "error-message",
-    text: failureLine(workspaceName, error),
-    startAtMs: FLOW_THINK_MS,
-    // An error is read, not followed, and can run to pages: streamed a
-    // character at a time it reads as the app hanging.
-    isInstant: true,
+    error,
+    actions,
+    tone: options.tone,
+    isBugReportOffered: options.isBugReportOffered,
   });
 }
 
-/** The recognized-error guidance under a failure, when the error kind has some. */
-export function failureGuidance(errorKind: string): m.Children {
-  if (errorKind === "GITHUB_AUTH_REQUIRED") {
-    return m(Notice, { key: "creation-guidance", id: "github-auth-help", extra: "max-w-[calc(100%-100px)]" }, [
-      "This repository looks private. Install the GitHub app or use a repository URL that includes ",
-      "credentials, then retry.",
-    ]);
-  }
-  if (errorKind === "GIT_AUTH_REQUIRED") {
-    return m(Notice, { key: "creation-guidance", id: "git-auth-help", extra: "max-w-[calc(100%-100px)]" }, [
-      "This git host rejected anonymous access. Use a repository URL that includes credentials, then retry.",
-    ]);
-  }
-  if (errorKind === "GIT_REF_NOT_FOUND") {
-    return m(Notice, { key: "creation-guidance", id: "git-ref-help", extra: "max-w-[calc(100%-100px)]" }, [
-      "This repository has no branch or tag with that name. Clear the Branch field to use the repository's ",
-      "default branch, or enter one that exists, then retry.",
-    ]);
-  }
-  return null;
+/** Everything under a failed create: the raw error, then the end of its create log. */
+function failureDetails(error: string, logLines: readonly string[]): string {
+  const log = logLines.slice(-FAILURE_LOG_MAX_LINES).join("\n");
+  return [error, log !== "" ? `Create log:\n${log}` : ""].filter((part) => part !== "").join("\n\n");
 }
 
 function freshState(createAttemptId: string): CreatingState {
@@ -177,8 +193,7 @@ function freshState(createAttemptId: string): CreatingState {
     isDone: false,
     isFailed: false,
     redirectUrl: "",
-    errorText: "",
-    errorKind: "",
+    failure: null,
     stageText: "",
     progress: new ProgressDisplay(),
     logLines: [],
@@ -192,6 +207,11 @@ function freshState(createAttemptId: string): CreatingState {
     isEntryStarted: false,
     isActionPending: false,
     isRetryFormOpen: false,
+    isRetryRunHere: false,
+    isRetryImbueCloudRefused: false,
+    discard: null,
+    discardTimer: null,
+    isStopped: false,
     isShowcaseLightboxOpen: false,
     progressTimer: null,
     washTimer: null,
@@ -321,10 +341,9 @@ export const CreatingPage: m.ClosureComponent = () => {
         state.coverUntil = awaitWelcomeChatOnScreen(redirectUrl);
         scheduleEntry(FLOW_THINK_MS);
       },
-      onFailed(error, errorKind) {
+      onFailed(failure) {
         state.isFailed = true;
-        state.errorText = error;
-        state.errorKind = errorKind;
+        state.failure = failure;
         state.stageText = "";
       },
       onStageText(text) {
@@ -358,20 +377,55 @@ export const CreatingPage: m.ClosureComponent = () => {
       });
   }
 
+  /**
+   * Discard what an interrupted attempt left, staying on the page until the
+   * discard finishes: its status read on DONE is what clears the record, and
+   * only then does the row leave the list.
+   */
   function discardAttempt(): void {
-    state.isActionPending = true;
-    fetch(
-      `/api/v1/workspaces/create-attempts/${encodeURIComponent(state.createAttemptId)}/discard`,
-      {
-        method: "POST",
-        credentials: "same-origin",
-      },
-    )
-      .then(() => getAppContext().shell.routeToHub())
-      .catch(() => {
-        state.isActionPending = false;
-        m.redraw();
+    const own = state;
+    const workspaceName = own.detail?.record?.workspace_name || "the workspace";
+    const whatFailed = `Imbue Studio couldn't remove what was left of ${workspaceName}`;
+    // Another attempt took the page over, or the page is gone.
+    const isAbandoned = (): boolean => state !== own || own.isStopped;
+    const fail = (error: UserFacingError): void => {
+      if (isAbandoned()) return;
+      own.discard = { phase: "failed", error };
+      own.isActionPending = false;
+      m.redraw();
+    };
+    own.isActionPending = true;
+    own.discard = { phase: "removing" };
+    const statusUrl = `/api/v1/workspaces/operations/create-attempt-discard/${encodeURIComponent(own.createAttemptId)}`;
+    const poll = (): void => {
+      own.discardTimer = null;
+      void defaultFetchJson(statusUrl).then((result) => {
+        if (isAbandoned()) return;
+        if (!result.ok) {
+          // A finalized discard answers 404: the record is already gone.
+          if (result.status === 404) getAppContext().shell.routeToHub();
+          else fail(errorFromResponse(whatFailed, result));
+          return;
+        }
+        const body = result.body as { is_done?: boolean; status?: string; log?: string } | null;
+        if (body?.is_done === true) {
+          getAppContext().shell.routeToHub();
+        } else if (body?.status === "FAILED") {
+          fail({ message: fallbackErrorSentence(whatFailed), details: body.log ?? "" });
+        } else {
+          own.discardTimer = setTimeout(poll, DISCARD_POLL_MS);
+        }
       });
+    };
+    void defaultFetchJson(`/api/v1/workspaces/create-attempts/${encodeURIComponent(own.createAttemptId)}/discard`, {
+      method: "POST",
+    }).then((result) => {
+      if (isAbandoned()) return;
+      // A 404 means the record is already gone (discarded from another window), as for the poll.
+      if (result.ok) poll();
+      else if (result.status === 404) getAppContext().shell.routeToHub();
+      else fail(errorFromResponse(whatFailed, result));
+    });
   }
 
   /**
@@ -502,6 +556,8 @@ export const CreatingPage: m.ClosureComponent = () => {
         state.isRetryFormOpen = false;
       },
       retryId: state.createAttemptId,
+      initialPreset: state.isRetryRunHere ? "local" : undefined,
+      isImbueCloudRefused: state.isRetryImbueCloudRefused,
       onSubmitted: (operationId: string) => {
         state.isRetryFormOpen = false;
         m.route.set(`/creating/${operationId}`);
@@ -509,64 +565,150 @@ export const CreatingPage: m.ClosureComponent = () => {
     });
   }
 
-  /**
-   * Retry / Dismiss (a failed attempt) or Retry / Discard (an interrupted one).
-   * A non-empty `retryUnavailableReason` holds Retry and says why; the other
-   * way out stays open.
-   */
-  function recoveryButtons(secondLabel: string, onSecond: () => void, retryUnavailableReason = ""): m.Children {
-    return answerRow({
-      key: "creation-recovery",
-      delayMs: FLOW_THINK_MS,
-      buttons: [
-        {
-          id: "recover-second",
-          label: secondLabel,
-          isEmphasized: false,
-          onPress: () => {
-            if (!state.isActionPending) onSecond();
-          },
-        },
-        {
-          id: "retry",
-          label: "Retry",
-          isEmphasized: true,
-          isDisabled: retryUnavailableReason !== "",
-          title: retryUnavailableReason === "" ? undefined : retryUnavailableReason,
-          onPress: () => {
-            if (retryUnavailableReason === "") state.isRetryFormOpen = true;
-          },
-        },
-      ],
-    });
+  function openRetryForm(isRunHere: boolean, isImbueCloudRefused = false): void {
+    state.isRetryRunHere = isRunHere;
+    state.isRetryImbueCloudRefused = isImbueCloudRefused;
+    state.isRetryFormOpen = true;
   }
 
-  /** The failure turn, followed by the recognized-error guidance when the error kind has some. */
-  function failureTurns(workspaceName: string, error: string, errorKind: string): m.Children[] {
-    const guidance = failureGuidance(errorKind);
-    return [failureTurn(workspaceName, error), ...(guidance !== null ? [guidance] : [])];
+  /**
+   * A failed attempt's ways forward, the sure fix first: Update Imbue Studio,
+   * Run on this computer, Retry (which works only once the cause is dealt
+   * with), then Dismiss. A non-empty `retryUnavailableReason` holds Retry,
+   * disabled with the reason on hover; nothing in the row is emphasized
+   * then, since a disabled answer never leads.
+   */
+  function failureActions(copy: FailureCopy, retryUnavailableReason: string): ErrorAction[] {
+    const isRetryHeld = retryUnavailableReason !== "";
+    const retry: ErrorAction[] = copy.isRetryOffered
+      ? [
+          {
+            label: "Retry",
+            isDisabled: isRetryHeld,
+            tooltip: isRetryHeld ? retryUnavailableReason : undefined,
+            onclick: () => {
+              if (!isRetryHeld) openRetryForm(false);
+            },
+          },
+        ]
+      : [];
+    return [
+      ...(copy.isUpdateOffered ? updateAppActions() : []),
+      ...(copy.isRunHereOffered
+        ? [{ label: "Run on this computer", onclick: () => openRetryForm(true, copy.isImbueCloudUnusable) }]
+        : []),
+      ...retry,
+      {
+        label: "Dismiss",
+        isDismissal: true,
+        onclick: () => {
+          if (!state.isActionPending) dismissAttempt();
+        },
+      },
+    ];
+  }
+
+  /** An interrupted attempt's question: Retry, or Discard. A non-empty
+   * `retryUnavailableReason` holds Retry, says why, and leaves Discard -- the
+   * answer that works -- leading the row. */
+  function interruptedActions(retryUnavailableReason: string): ErrorAction[] {
+    const isRetryHeld = retryUnavailableReason !== "";
+    const discard: ErrorAction = {
+      id: "discard",
+      label: "Discard",
+      onclick: () => {
+        if (!state.isActionPending) discardAttempt();
+      },
+    };
+    const retry: ErrorAction = {
+      id: "retry",
+      label: "Retry",
+      isDisabled: isRetryHeld,
+      tooltip: isRetryHeld ? retryUnavailableReason : undefined,
+      onclick: () => {
+        if (!isRetryHeld) openRetryForm(false);
+      },
+    };
+    return isRetryHeld ? [discard, retry] : [retry, discard];
+  }
+
+  /** A failed attempt: our sentence, its details and report button, and the ways forward it allows. */
+  function failureTurns(
+    workspaceName: string,
+    failure: CreateAttemptFailure,
+    request: CreateAttemptRequestSummary | null,
+    logLines: readonly string[],
+    retryUnavailableReason = "",
+  ): m.Children[] {
+    const copy = failureCopy(workspaceName, failure, request, retryUnavailableReason);
+    const error: UserFacingError = { message: copy.message, details: failureDetails(failure.error, logLines) };
+    return [failureTurn(error, failureActions(copy, retryUnavailableReason))];
+  }
+
+  /** An interrupted attempt: nothing failed outright, so it reads as a
+   * warning the user answers -- or the discard it asked for, under way or
+   * failed. */
+  function interruptedTurns(workspaceName: string, retryUnavailableReason: string): m.Children[] {
+    const discard = state.discard;
+    if (discard?.phase === "removing") {
+      return [
+        agentTurn({
+          key: "creation-interrupted",
+          text: interruptedLine(retryUnavailableReason),
+          startAtMs: FLOW_THINK_MS,
+          isInstant: true,
+        }),
+        agentTurn({
+          key: "creation-discarding",
+          id: "discarding",
+          text: `Removing what was left of ${workspaceName || "the workspace"}…`,
+          startAtMs: 0,
+          isInstant: true,
+        }),
+      ];
+    }
+    if (discard?.phase === "failed") {
+      // The attempt is still there to be dealt with, so the question it was
+      // answering stands beside the report.
+      return [
+        m(ChatError, {
+          key: "creation-discard-failure",
+          id: "discard-failed",
+          error: discard.error,
+          actions: interruptedActions(retryUnavailableReason),
+        }),
+      ];
+    }
+    return [
+      m(ChatError, {
+        key: "creation-interrupted",
+        id: "creation-interrupted",
+        tone: "warn",
+        isBugReportOffered: false,
+        error: { message: interruptedLine(retryUnavailableReason), details: "" },
+        actions: interruptedActions(retryUnavailableReason),
+      }),
+    ];
   }
 
   /** A record-backed attempt with no live thread: the failure with its log tail, or the interrupted notice. */
   function recordTurns(record: NonNullable<CreateAttemptDetail["record"]>): m.Children[] {
     if (record.state === "failed") {
-      const turns = failureTurns(record.workspace_name, record.error ?? "unknown error", record.error_kind ?? "");
-      if (record.log_tail.length > 0) {
-        turns.push(
-          m(
-            "pre",
-            { key: "creation-log-tail", class: "mt-3 type-helper font-mono bg-fill-subtle rounded-md p-3 max-h-64 overflow-y-auto max-w-[calc(100%-100px)]" },
-            record.log_tail.join("\n"),
-          ),
-        );
-      }
-      turns.push(recoveryButtons("Dismiss", dismissAttempt, record.retry_unavailable_reason));
-      return turns;
+      const failure: CreateAttemptFailure = {
+        error: record.error ?? "",
+        errorKind: record.error_kind ?? "",
+        quotaRefusal: record.quota_refusal ?? null,
+        providerRemediation: record.provider_remediation ?? "",
+      };
+      return failureTurns(
+        record.workspace_name,
+        failure,
+        record.request,
+        record.log_tail,
+        record.retry_unavailable_reason,
+      );
     }
-    return [
-      agentTurn({ key: "creation-interrupted", text: INTERRUPTED_LINE, startAtMs: FLOW_THINK_MS, isInstant: true }),
-      recoveryButtons("Discard", discardAttempt, record.retry_unavailable_reason),
-    ];
+    return interruptedTurns(record.workspace_name, record.retry_unavailable_reason);
   }
 
   /** The recording of an app built in Studio, drawn the width of an agent turn. It opens enlarged on a click:
@@ -613,14 +755,17 @@ export const CreatingPage: m.ClosureComponent = () => {
    * A live attempt: the setup line, then either the live failure, or the recording under its intro line (for
    * an onboarding attempt) and the loading box, with the ready line under them once the attempt is done.
    */
-  function liveTurns(workspaceName: string, isInstant: boolean): m.Children[] {
+  function liveTurns(
+    request: CreateAttemptRequestSummary | null,
+    workspaceName: string,
+    isInstant: boolean,
+  ): m.Children[] {
     const setupAt = isInstant ? 0 : FLOW_THINK_MS;
     const turns: m.Children[] = [
       agentTurn({ key: "creation-setup", text: SETUP_LINE, startAtMs: setupAt, isInstant }),
     ];
-    if (state.isFailed) {
-      turns.push(...failureTurns(workspaceName, state.errorText, state.errorKind));
-      turns.push(recoveryButtons("Dismiss", dismissAttempt));
+    if (state.isFailed && state.failure !== null) {
+      turns.push(...failureTurns(workspaceName, state.failure, request, state.logLines));
       return turns;
     }
     const afterSetupAt = isInstant ? 0 : setupAt + streamDurationMs(SETUP_LINE) + FLOW_OPTIONS_GAP_MS;
@@ -692,15 +837,17 @@ export const CreatingPage: m.ClosureComponent = () => {
     if (detail.kind === "record" && detail.record !== null) {
       return [...summary, ...recordTurns(detail.record)];
     }
-    return [...summary, ...liveTurns(workspaceName, isInstant)];
+    return [...summary, ...liveTurns(request ?? null, workspaceName, isInstant)];
   }
 
   /** Leave `state` behind: the page is being removed, or a later attempt is taking it over. */
   function stopWatching(): void {
+    state.isStopped = true;
     if (state.isDone && !state.isEntryStarted) welcomeChatArrival.cancel();
     state.watcher?.stop();
     if (state.progressTimer !== null) clearInterval(state.progressTimer);
     if (state.washTimer !== null) clearTimeout(state.washTimer);
+    if (state.discardTimer !== null) clearTimeout(state.discardTimer);
   }
 
   /** Show `createAttemptId`: fresh state, its detail, and (for a live attempt) the watcher. */

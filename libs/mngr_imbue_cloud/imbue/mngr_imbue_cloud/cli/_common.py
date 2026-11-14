@@ -28,6 +28,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountSuspendedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudClientTooOldError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudEmailNotVerifiedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudPlanRefusedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudQuotaExceededError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudRateLimitedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudShareRefusedError
@@ -205,6 +206,9 @@ def handle_imbue_cloud_errors(func):
             fail_with_json(str(exc), error_class=type(exc).__name__, code="user_not_found")
         except ImbueCloudRateLimitedError as exc:
             fail_with_json(str(exc), error_class=type(exc).__name__, code="rate_limited")
+        except ImbueCloudPlanRefusedError as exc:
+            # The message is the connector's own reason, which no retry changes.
+            fail_with_json(str(exc), error_class=type(exc).__name__, code="plan_refused")
         except ImbueCloudShareRefusedError as exc:
             # The desktop keys off the code: grants_out_of_date means push, then retry once.
             fail_with_json(str(exc), error_class=type(exc).__name__, code=exc.code)

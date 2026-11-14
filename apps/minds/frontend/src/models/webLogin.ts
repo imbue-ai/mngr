@@ -13,6 +13,8 @@
 
 import m from "mithril";
 import { electronBridge } from "../electron-bridge";
+import type { UserFacingError } from "./errors";
+import { TextResponseBody, bodyFromText, fallbackErrorSentence, responseDetails } from "./errors";
 
 export type WebLoginState = "idle" | "starting" | "waiting" | "finishing" | "done" | "error";
 
@@ -22,7 +24,14 @@ interface FlowStatusBody {
   user_id?: string | null;
   email?: string | null;
   error?: string | null;
+  error_details?: string | null;
+  is_retry_offered?: boolean;
 }
+
+/** The request that starts the sign-in reached no answer the page can use. */
+const SIGN_IN_NOT_STARTED = fallbackErrorSentence(
+  "Imbue Studio couldn't start the sign-in",
+);
 
 export const POLL_INTERVAL_MS = 1000;
 
@@ -45,7 +54,9 @@ export class WebLoginModel {
   // lists the account can arrive after the poll reads "done".
   userId = "";
   email = "";
-  error = "";
+  error: UserFacingError | null = null;
+  /** Signing in again can help; it can't when the sign-in went through but couldn't be saved here. */
+  isRetryOffered = true;
   private readonly fetchImpl: FetchLike;
   private readonly redraw: () => void;
   private readonly bringAppToFront: () => void;
@@ -90,44 +101,50 @@ export class WebLoginModel {
     this.state = "starting";
     this.isClosedOnSignIn = options.isClosedOnSignIn ?? false;
     this.loginUrl = "";
-    this.error = "";
+    this.error = null;
+    this.isRetryOffered = true;
     this.userId = "";
     this.email = "";
     this.hasRaisedApp = false;
     const generation = ++this.generation;
     this.redraw();
+    let status = 0;
+    let text: string;
     try {
       const response = await this.fetchImpl("/auth/api/web-login/start", { method: "POST", credentials: "same-origin" });
-      const body = (await response.json()) as {
-        flow_id?: string;
-        error?: string;
-        is_already_running?: boolean;
-        login_url?: string | null;
-      };
-      // The user may have dismissed (or restarted) the flow while the start
-      // request was in flight; a superseded continuation must not reopen the
-      // modal or clobber the newer flow's state.
-      if (generation !== this.generation) return;
-      if (!response.ok || !body.flow_id) {
-        this.state = "error";
-        this.error = body.error || "Could not start the sign-in flow.";
-        this.redraw();
-        return;
-      }
-      this.activeFlowId = body.flow_id;
-      this.state = "waiting";
-      // Joining a sign-in still waiting from earlier: its browser tab may be long
-      // gone, so open the page again rather than leave the user to find it.
-      if (body.is_already_running && body.login_url) {
-        this.loginUrl = body.login_url;
-        this.openInBrowser(body.login_url);
-      }
-      this.schedulePoll();
-    } catch {
-      if (generation !== this.generation) return;
-      this.state = "error";
-      this.error = "Could not reach the app backend. Please try again.";
+      status = response.status;
+      text = await response.text();
+    } catch (thrown) {
+      text = thrown instanceof Error ? thrown.message : String(thrown);
     }
+    // The user may have dismissed (or restarted) the flow while the start
+    // request was in flight; a superseded continuation must not reopen the
+    // modal or clobber the newer flow's state.
+    if (generation !== this.generation) return;
+    const read = bodyFromText(text);
+    const body =
+      read !== null && typeof read === "object" && !(read instanceof TextResponseBody) ? (read as StartBody) : null;
+    if (body === null || status < 200 || status >= 300 || !body.flow_id) {
+      // No answer, one that is not ours (a crash's plain-text 500), or the
+      // route's own refusal, whose text is for See details: none names a
+      // cause the user can act on.
+      this.state = "error";
+      this.error = {
+        message: SIGN_IN_NOT_STARTED,
+        details: status === 0 ? `No response. ${text}` : responseDetails({ status, body: read }),
+      };
+      this.redraw();
+      return;
+    }
+    this.activeFlowId = body.flow_id;
+    this.state = "waiting";
+    // Joining a sign-in still waiting from earlier: its browser tab may be long
+    // gone, so open the page again rather than leave the user to find it.
+    if (body.is_already_running && body.login_url) {
+      this.loginUrl = body.login_url;
+      this.openInBrowser(body.login_url);
+    }
+    this.schedulePoll();
     this.redraw();
   }
 
@@ -201,7 +218,7 @@ export class WebLoginModel {
       if (flowId !== this.activeFlowId) return;
       if (response.status === 404) {
         this.state = "error";
-        this.error = "The sign-in flow expired. Please try again.";
+        this.error = { message: "The sign-in flow expired. Please try again.", details: "" };
         this.redraw();
         return;
       }
@@ -225,7 +242,11 @@ export class WebLoginModel {
       this.state = "done";
     } else if (body.state === "error") {
       this.state = "error";
-      this.error = body.error || "Sign-in failed. Please try again.";
+      this.isRetryOffered = body.is_retry_offered !== false;
+      this.error = {
+        message: body.error || "Sign-in failed. Please try again.",
+        details: body.error_details ?? "",
+      };
     } else {
       this.state = body.state === "finishing" ? "finishing" : "waiting";
       if (this.state === "finishing") this.raiseApp();
@@ -233,6 +254,12 @@ export class WebLoginModel {
     }
     this.redraw();
   }
+}
+
+interface StartBody {
+  flow_id?: string;
+  is_already_running?: boolean;
+  login_url?: string | null;
 }
 
 // One shared flow for the whole window: every entry point (the start flow,

@@ -1,4 +1,7 @@
+from collections.abc import Mapping
+
 import click
+from pydantic import JsonValue
 
 from imbue.minds.mngr_settings.errors import MindsSettingsError
 
@@ -23,7 +26,11 @@ class SigningKeyError(MindError):
 class GitCloneError(MindError):
     """Raised when git clone fails."""
 
-    ...
+    def __init__(self, message: str, *, failed_step: str) -> None:
+        super().__init__(message)
+        # The git subcommand that failed (``clone``, ``fetch``, ``checkout``, ...): only
+        # the steps that reach the remote say anything about access to it.
+        self.failed_step = failed_step
 
 
 class GitRefNotFoundError(GitCloneError):
@@ -57,12 +64,22 @@ class WorkspaceTemplateCacheError(MindError):
 class MngrCommandError(MindError):
     """Raised when an mngr CLI command fails (timed out, exited nonzero, or could not be launched)."""
 
-    def __init__(self, message: str, *, error_class: str | None = None, output_tail: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_class: str | None = None,
+        error_details: Mapping[str, JsonValue] | None = None,
+        output_tail: str | None = None,
+    ) -> None:
         super().__init__(message)
         # mngr's exception class name, parsed from a structured JSONL ``error``
         # event when available (e.g. ``FastPathUnavailableError``). Lets callers
         # branch on the failure *type* without matching human-formatted text.
         self.error_class = error_class
+        # The same event's ``details``: the structured facts some errors carry
+        # (a quota refusal's entitlement and limit), empty when there are none.
+        self.error_details: Mapping[str, JsonValue] = error_details if error_details is not None else {}
         # Bounded tails of whatever the subprocess wrote to stdout/stderr, kept
         # off the message so user-facing surfaces stay short and the text-matching
         # consumers of ``str(exc)`` see only mngr's verdict. The message names the
@@ -83,6 +100,28 @@ class MngrCommandTimeoutError(MngrCommandError):
 
     A killed command has no verdict of its own, so ``output_tail`` is the only
     record of which step it died in.
+    """
+
+    ...
+
+
+class LocalRepoPathMissingError(MngrCommandError):
+    """Raised when a create names a local folder that does not exist."""
+
+    ...
+
+
+class CreateTargetUnresolvedError(MngrCommandError):
+    """Raised when a create cannot work out which provider or account to run the workspace on."""
+
+    ...
+
+
+class CreateOutcomeUnknownError(MngrCommandError):
+    """Raised when ``mngr create`` finished without a readable report of the workspace it made.
+
+    The workspace may exist all the same, so the caller must not read this as
+    "nothing was created".
     """
 
     ...

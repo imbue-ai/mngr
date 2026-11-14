@@ -100,6 +100,7 @@ from imbue.minds.desktop_client.identity_records import IdentityCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudPlanRefusedCliError
 from imbue.minds.desktop_client.kernel_fix import KernelFixRunner
 from imbue.minds.desktop_client.kernel_security import KernelMachineAccess
 from imbue.minds.desktop_client.kernel_security import KernelProbeTransport
@@ -1773,10 +1774,10 @@ def _handle_account_trim_backups(user_id: str) -> Response:
         (a for a in (session_store.list_accounts() if session_store else []) if str(a.user_id) == user_id),
         None,
     )
-    if account is None or cli is None or paths is None:
-        # The SPA reloads /accounts and reads errors from the response; the
-        # legacy re-render of the accounts page died with the JinjaX pages.
-        return make_response(status_code=409, content="Account not found or imbue_cloud CLI unavailable.")
+    if cli is None or paths is None:
+        return _account_action_unavailable_response()
+    if account is None:
+        return _account_action_account_missing_response()
     get_state().backup_trim_manager.start_trim(
         user_id=user_id,
         account_email=str(account.email),
@@ -1793,15 +1794,17 @@ def _handle_account_set_plan(user_id: str) -> Response:
         return make_response(status_code=403, content="Not authenticated")
     plan = str(request.form.get("plan", "")).strip()
     if not plan:
-        return make_response(status_code=422, content="No plan selected.")
+        return make_json_error_response("Pick a plan to switch to, then select Switch plan.", 422)
     session_store: MultiAccountSessionStore | None = get_state().session_store
     cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
     account = next(
         (a for a in (session_store.list_accounts() if session_store else []) if str(a.user_id) == user_id),
         None,
     )
-    if account is None or cli is None:
-        return make_response(status_code=409, content="Account not found or imbue_cloud CLI unavailable.")
+    if cli is None:
+        return _account_action_unavailable_response()
+    if account is None:
+        return _account_action_account_missing_response()
     try:
         cli.set_account_plan(str(account.email), plan)
     except ImbueCloudEmailNotVerifiedCliError as exc:
@@ -1816,11 +1819,37 @@ def _handle_account_set_plan(user_id: str) -> Response:
             content=json.dumps({"code": "email_not_verified", "email": email, "sent": is_sent}),
             media_type="application/json",
         )
+    except ImbueCloudPlanRefusedCliError as exc:
+        # The connector's stated reason, which no retry changes; the page words it.
+        return make_response(
+            status_code=403,
+            content=json.dumps({"code": "plan_refused", "reason": exc.reason}),
+            media_type="application/json",
+        )
     except ImbueCloudCliError as exc:
-        # The connector's reason (e.g. "requires partner access") is the
-        # user-facing explanation -- surface it plainly.
-        return make_response(status_code=502, content=f"Could not switch {account.email} to '{plan}': {exc}")
+        logger.warning("Could not switch {} to the {} plan: {}", account.email, plan, exc)
+        # No sentence of our own: the page names the switch that failed, with this text behind See details.
+        return make_response(status_code=502, content=json.dumps({"detail": str(exc)}), media_type="application/json")
     return make_response(status_code=303, headers={"Location": "/accounts"})
+
+
+def _account_action_account_missing_response() -> Response:
+    """The refusal of an account action for an account missing from the list, or a list that could not be read.
+
+    No sentence of our own: the page names the action that failed and asks for a bug report.
+    """
+    return make_response(
+        status_code=409,
+        content=json.dumps(
+            {"detail": "The account isn't in this computer's account list, or the list couldn't be read."}
+        ),
+        media_type="application/json",
+    )
+
+
+def _account_action_unavailable_response() -> Response:
+    """The refusal of an account action on a copy of Imbue Studio with no Imbue Cloud set up."""
+    return make_json_error_response("Imbue Studio can't do that on this computer.", 503)
 
 
 def _send_verification_email_best_effort(cli: ImbueCloudCli, email: str) -> bool:
@@ -1974,7 +2003,11 @@ def _handle_mint_ai_key() -> Response:
         )
     except AiKeyMintError as exc:
         logger.warning("LiteLLM key mint failed for workspace {}: {}", resolved.workspace_id, exc)
-        return make_response(status_code=502, content=json.dumps({"error": str(exc)}), media_type="application/json")
+        return make_json_error_response(
+            "Couldn't create a key for this workspace. Try again. If this persists, report a bug.",
+            502,
+            detail=str(exc),
+        )
     return make_response(
         status_code=200, content=json.dumps({"credentials": credential_blob}), media_type="application/json"
     )
@@ -1997,8 +2030,8 @@ def _handle_account_logout(
         return make_response(status_code=403, content="Not authenticated")
     state = get_state()
     # Signing out removes the account's provider blocks, which a create still
-    # running on one of them needs for its later ``mngr`` calls; the body is the
-    # text the accounts page shows for a refused action.
+    # running on one of them needs for its later ``mngr`` calls; the accounts
+    # page shows the refusal's ``error`` as its sentence.
     in_flight_provider_names = (
         state.agent_creator.live_in_flight_provider_instance_names() if state.agent_creator is not None else set()
     )
@@ -2006,7 +2039,7 @@ def _handle_account_logout(
         state.agent_creator.live_in_flight_account_ids() if state.agent_creator is not None else set()
     )
     if has_live_create_on_account(user_id, state.connection_store, in_flight_provider_names, in_flight_account_ids):
-        return make_response(status_code=409, content=CREATE_IN_FLIGHT_ON_ACCOUNT_MESSAGE)
+        return make_json_error_response(CREATE_IN_FLIGHT_ON_ACCOUNT_MESSAGE, 409)
     if state.session_store is not None:
         signout_user_via_plugin(user_id)
     return make_response(status_code=303, headers={"Location": "/accounts"})

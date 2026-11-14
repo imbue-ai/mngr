@@ -616,3 +616,137 @@ describe("the providers panel", () => {
     }
   });
 });
+
+describe("the providers panel's connection actions", () => {
+  const ALICE = accountEntry({ user_id: "user-alice", email: "alice@example.com" });
+  const CONNECTION: UiConnectionEntry = {
+    id: "conn-1",
+    instance: "modal_" + "0".repeat(32),
+    backend: "modal",
+    backend_label: "Modal",
+    alias: "team modal",
+    identifier: "ak…1234",
+    placement: {},
+    status: "PROFILE_MISSING",
+    workspace_count: 0,
+  };
+
+  afterEach(() => {
+    while (errorDialogs.current !== null) errorDialogs.dismiss();
+    errorDialogs.detachHost();
+  });
+
+  /** Alice's hub with her one connection listed and the providers panel open; `answer` serves the connection routes. */
+  function openPanel(answer: () => Response): () => m.Vnode {
+    errorDialogs.attachHost();
+    const shell = updatesShell({}, false);
+    shell.stores.accounts.applyAccountsMessage(accountsMessage([ALICE], ALICE.user_id));
+    shell.accountId = ALICE.user_id;
+    shell.stores.providers.applyProvidersMessage({
+      type: "providers",
+      accounts: [
+        {
+          user_id: ALICE.user_id,
+          email: ALICE.email,
+          state: "SIGNED_IN",
+          is_connection_owner_eligible: true,
+          imbue_cloud: null,
+          connections: [CONNECTION],
+        },
+      ],
+      device_providers: [],
+      last_event_at: null,
+      last_full_snapshot_at: null,
+    });
+    const { view } = initLandingPage(() => Promise.resolve(jsonResponse(settled)));
+    vi.stubGlobal("fetch", (url: string) =>
+      Promise.resolve(url.includes("/cloud-accounts/") ? answer() : jsonResponse(settled)),
+    );
+    const toggle = collectVnodes(byId(view(), "landing-providers")).find((node) => node.tag === "button");
+    (attrsOf(toggle!).onclick as () => void)();
+    return view;
+  }
+
+  /** Press the row's button labelled `label`; the row's notice draws its actions only once rendered. */
+  function press(view: () => m.Vnode, label: string): void {
+    const button = collectVnodes(renderDeep(view())).find(
+      (node) => node.tag === "button" && allText(node) === label && attrsOf(node).onclick,
+    );
+    (attrsOf(button!).onclick as () => void)();
+  }
+
+  it("tells a re-check the app refused in the styled dialog, with the answer behind See details", async () => {
+    const alert = vi.fn();
+    vi.stubGlobal("window", { alert });
+    const view = openPanel(() => jsonResponse({ error: `Unknown cloud account '${CONNECTION.instance}'.` }, 404));
+
+    press(view, "Check again");
+
+    await vi.waitFor(() => expect(errorDialogs.current).not.toBeNull());
+    expect(errorDialogs.current?.title).toBe("Couldn't check team modal again");
+    expect(errorDialogs.current?.error).toEqual({
+      message: "Try again. If this persists, report a bug.",
+      details: `HTTP 404\nUnknown cloud account '${CONNECTION.instance}'.`,
+    });
+    expect(alert).not.toHaveBeenCalled();
+  });
+
+  it("says why a connection still in use can't be removed, in the route's words", async () => {
+    vi.stubGlobal("window", { confirm: () => true });
+    const inUse = "A workspace is still on this connection. Remove it first, then try again.";
+    const view = openPanel(() => jsonResponse({ error: inUse, code: "connection_in_use" }, 409));
+
+    press(view, "Remove");
+
+    await vi.waitFor(() => expect(errorDialogs.current).not.toBeNull());
+    expect(errorDialogs.current?.error.message).toBe(inUse);
+    expect(errorDialogs.current?.error.details).toContain("HTTP 409");
+  });
+
+  it("says to update Imbue Studio when a newer version wrote the connection", async () => {
+    vi.stubGlobal("window", { confirm: () => true });
+    const tooNew = "This connection was added by a newer version of the app; update the app to manage it.";
+    const view = openPanel(() => jsonResponse({ error: tooNew, code: "connection_too_new" }, 409));
+
+    press(view, "Remove");
+
+    await vi.waitFor(() => expect(errorDialogs.current).not.toBeNull());
+    expect(errorDialogs.current?.title).toBe("Couldn't remove team modal");
+    expect(errorDialogs.current?.error.message).toBe(
+      "A newer version of Imbue Studio added team modal, so this version can't remove it. " +
+        "*Update Imbue Studio, then try again.*",
+    );
+    expect(errorDialogs.current?.error.details).toContain(tooNew);
+  });
+
+  it("names the connection for any other refused removal, keeping the server's text behind See details", async () => {
+    vi.stubGlobal("window", { confirm: () => true });
+    const view = openPanel(() => jsonResponse({ error: "Could not write the provider settings." }, 500));
+
+    press(view, "Remove");
+
+    await vi.waitFor(() => expect(errorDialogs.current).not.toBeNull());
+    expect(errorDialogs.current?.title).toBe("Couldn't remove team modal");
+    expect(errorDialogs.current?.error).toEqual({
+      message: "Try again. If this persists, report a bug.",
+      details: "HTTP 500\nCould not write the provider settings.",
+    });
+  });
+
+  it.each(["Check again", "Remove"])(
+    "keeps the app-wide 500's plain text behind See details when %s fails",
+    async (label) => {
+      vi.stubGlobal("window", { confirm: () => true });
+      const view = openPanel(() => new Response("Internal Server Error: OSError('disk full')", { status: 500 }));
+
+      press(view, label);
+
+      await vi.waitFor(() => expect(errorDialogs.current).not.toBeNull());
+      expect(errorDialogs.current?.title).toMatch(/^Couldn't (check|remove) team modal/);
+      expect(errorDialogs.current?.error.message).toBe(
+        "Try again. If this persists, report a bug.",
+      );
+      expect(errorDialogs.current?.error.details).toBe("HTTP 500\nInternal Server Error: OSError('disk full')");
+    },
+  );
+});

@@ -45,7 +45,7 @@ def test_api_key_env_rejects_a_user_supplied_restic_password() -> None:
         api_key_env="RESTIC_REPOSITORY=s3:x\nRESTIC_PASSWORD=nope\n",
     )
     assert request is None
-    assert error is not None and "RESTIC_PASSWORD" in error
+    assert error is not None and "password" in error
 
 
 def test_api_key_env_is_carried_verbatim() -> None:

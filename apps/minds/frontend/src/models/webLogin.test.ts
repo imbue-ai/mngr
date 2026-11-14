@@ -75,7 +75,43 @@ describe("WebLoginModel", () => {
     await startPromise;
 
     expect(model.state).toBe("idle");
-    expect(model.error).toBe("");
+    expect(model.error).toBeNull();
+  });
+
+  it("says it couldn't start the sign-in, without naming a cause, when the answer is unusable or missing", async () => {
+    const crashed = makeModelWithDeferredStart();
+    const crashedStart = crashed.model.start();
+    crashed.resolve(new Response("Internal Server Error", { status: 500 }));
+    await crashedStart;
+
+    const unanswered = makeModelWithDeferredStart();
+    const unansweredStart = unanswered.model.start();
+    unanswered.reject(new TypeError("Failed to fetch"));
+    await unansweredStart;
+
+    const sentence =
+      "Imbue Studio couldn't start the sign-in. Try again. If this persists, report a bug.";
+    expect(crashed.model.state).toBe("error");
+    expect(crashed.model.error).toEqual({
+      message: sentence,
+      details: "HTTP 500\nInternal Server Error",
+    });
+    expect(unanswered.model.error?.message).toBe(sentence);
+    expect(unanswered.model.error?.details).toContain("Failed to fetch");
+  });
+
+  it("keeps the start route's own refusal behind See details, under the same sentence", async () => {
+    const refused = makeModelWithDeferredStart();
+    const refusedStart = refused.model.start();
+    refused.resolve(jsonResponse({ status: "ERROR", error: "imbue_cloud_cli is not configured" }, 503));
+    await refusedStart;
+
+    expect(refused.model.state).toBe("error");
+    expect(refused.model.error?.message).toBe(
+      "Imbue Studio couldn't start the sign-in. Try again. If this persists, report a bug.",
+    );
+    expect(refused.model.error?.details).toContain("HTTP 503");
+    expect(refused.model.error?.details).toContain("imbue_cloud_cli is not configured");
   });
 
   it("moves to waiting when the start request succeeds without a dismiss", async () => {
@@ -250,6 +286,64 @@ describe("WebLoginModel", () => {
 
       expect(model.state).toBe("error");
       expect(raiseCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("WebLoginModel a failed sign-in", () => {
+  /** A model whose flow starts and then reports `failure` as its status. */
+  async function failedWith(failure: Record<string, unknown>): Promise<WebLoginModel> {
+    const model = new WebLoginModel(
+      (input) =>
+        Promise.resolve(
+          String(input).includes("/web-login/start")
+            ? jsonResponse({ flow_id: "flow-1" })
+            : jsonResponse({ state: "error", ...failure }),
+        ),
+      () => {},
+      () => {},
+    );
+    await model.start();
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+    return model;
+  }
+
+  it("shows the flow's sentence with what lay under it behind See details, with no Try again when signing in again can't help", async () => {
+    vi.useFakeTimers();
+    try {
+      const sentence =
+        "Imbue signed you in, but Imbue Studio couldn't save the sign-in on this computer. " +
+        "Report a bug so we can look into it.";
+      const model = await failedWith({
+        error: sentence,
+        error_details: "Signed in as a@example.com, but recording the account on this computer failed",
+        is_retry_offered: false,
+      });
+
+      expect(model.state).toBe("error");
+      expect(model.error).toEqual({
+        message: sentence,
+        details: "Signed in as a@example.com, but recording the account on this computer failed",
+      });
+      expect(model.isRetryOffered).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("offers Try again for a failure that signing in again can fix", async () => {
+    vi.useFakeTimers();
+    try {
+      const model = await failedWith({
+        error: "The sign-in timed out before your browser finished. Click Try again.",
+        error_details: "auth login: TIMED_OUT",
+        is_retry_offered: true,
+      });
+
+      expect(model.state).toBe("error");
+      expect(model.isRetryOffered).toBe(true);
     } finally {
       vi.useRealTimers();
     }

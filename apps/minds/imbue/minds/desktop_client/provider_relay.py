@@ -77,6 +77,9 @@ _WORKSPACE_FORWARD_TIMEOUT_SECONDS: Final[float] = 60.0
 # unknown label falls back to the name, which the forward plugin also routes on.
 CHAT_SERVICE_NAME: Final[str] = "chat"
 _MAX_DETAIL_CHARS: Final[int] = 300
+
+# What the local forward plugin answers in the workspace's place when it cannot reach it.
+_UNREACHABLE_WORKSPACE_STATUSES: Final[frozenset[int]] = frozenset({502, 503, 504})
 _PAGE_CONTENT_SECURITY_POLICY: Final[str] = "default-src 'none'; style-src 'unsafe-inline'"
 # A body the relay reads before answering, so its close is not a reset: a callback a provider sends as a form
 # POST is small; anything larger is left unread.
@@ -150,7 +153,19 @@ def parse_provider_sign_in_url(url: str) -> SignInCallback:
 
 
 class SignInForwardError(MindError, ConnectionError):
-    """Raised when the callback could not be handed to the workspace, or its answer could not be read."""
+    """Raised when the callback could not be handed to the workspace: it could not be reached."""
+
+    ...
+
+
+class SignInCallbackNotTakenError(MindError):
+    """Raised when the workspace answered the callback with an error, or with an answer that could not be read."""
+
+    ...
+
+
+class SignInCallbackOwnerOnlyError(SignInCallbackNotTakenError):
+    """Raised when the workspace refused the callback because it did not come from the workspace's owner."""
 
     ...
 
@@ -185,8 +200,9 @@ class SignInCallbackForwarderInterface(MutableModel, ABC):
     def forward(self, path_and_query: str) -> SignInCallbackResult:
         """Replay the callback against the flow's CLI.
 
-        Raises SignInForwardError when the workspace could not be asked, and SignInCallbackRefusedError
-        when its flow no longer takes the callback.
+        Raises SignInForwardError when the workspace could not be asked, SignInCallbackRefusedError
+        when its flow no longer takes the callback, and SignInCallbackNotTakenError (or its
+        SignInCallbackOwnerOnlyError) when it answered with any other refusal or an unreadable answer.
         """
 
 
@@ -257,7 +273,19 @@ def page_for_result(result: SignInCallbackResult) -> RelayPage:
 _UNREACHABLE_WORKSPACE_PAGE: Final[RelayPage] = RelayPage(
     status=502,
     title="Couldn't reach your workspace",
-    message="Imbue Studio couldn't pass this sign-in to your workspace. Make sure the workspace is running, then reload this page.",
+    message="Imbue Studio couldn't pass this sign-in to your workspace. Make sure the workspace is running in "
+    "Imbue Studio, then reload this page.",
+)
+_NOT_TAKEN_PAGE: Final[RelayPage] = RelayPage(
+    status=502,
+    title="Couldn't finish this sign-in",
+    message="Your workspace couldn't take this sign-in. Go back to Imbue Studio and start the sign-in again. "
+    "If this persists, report a bug.",
+)
+_OWNER_ONLY_PAGE: Final[RelayPage] = RelayPage(
+    status=403,
+    title="Only the workspace's owner can connect an account",
+    message="This workspace only takes sign-ins from its owner. Go back to Imbue Studio.",
 )
 _STALE_STATE_PAGE: Final[RelayPage] = RelayPage(
     status=400,
@@ -501,9 +529,16 @@ class ProviderSignInRelay(MutableModel):
         except SignInForwardError as e:
             logger.warning("Could not relay a sign-in callback into workspace {}: {}", self.workspace_id, e)
             # The CLI never saw the code, so a reload can still deliver it.
-            with self._condition:
-                self._is_callback_taken = False
+            self._let_a_reload_retry()
             return _UNREACHABLE_WORKSPACE_PAGE
+        except SignInCallbackOwnerOnlyError as e:
+            logger.warning("Workspace {} refused a sign-in callback as not its owner's: {}", self.workspace_id, e)
+            self._let_a_reload_retry()
+            return _OWNER_ONLY_PAGE
+        except SignInCallbackNotTakenError as e:
+            logger.warning("Workspace {} did not take a sign-in callback: {}", self.workspace_id, e)
+            self._let_a_reload_retry()
+            return _NOT_TAKEN_PAGE
         except SignInCallbackRefusedError as e:
             logger.info("Workspace {} no longer takes its sign-in callback: {}", self.workspace_id, e)
             self._keep_answering_reloads_briefly()
@@ -512,6 +547,10 @@ class ProviderSignInRelay(MutableModel):
         self._keep_answering_reloads_briefly()
         self.on_callback_handled()
         return page_for_result(result)
+
+    def _let_a_reload_retry(self) -> None:
+        with self._condition:
+            self._is_callback_taken = False
 
     def _keep_answering_reloads_briefly(self) -> None:
         with self._condition:
@@ -588,12 +627,20 @@ class WorkspaceChatSignInForwarder(SignInCallbackForwarderInterface):
                 raise SignInForwardError(f"the workspace could not be reached ({type(e).__name__})") from e
         if response.status_code == 409:
             raise SignInCallbackRefusedError(f"the workspace answered 409: {response.text[:_MAX_DETAIL_CHARS]}")
+        if response.status_code in _UNREACHABLE_WORKSPACE_STATUSES:
+            raise SignInForwardError(
+                f"the workspace could not be reached (the forward answered {response.status_code})"
+            )
+        if response.status_code == 403:
+            raise SignInCallbackOwnerOnlyError(f"the workspace answered 403: {response.text[:_MAX_DETAIL_CHARS]}")
         if response.status_code != 200:
-            raise SignInForwardError(f"the workspace answered {response.status_code}")
+            raise SignInCallbackNotTakenError(
+                f"the workspace answered {response.status_code}: {response.text[:_MAX_DETAIL_CHARS]}"
+            )
         try:
             answer = _WorkspaceCallbackAnswer.model_validate_json(response.content)
         except ValidationError as e:
-            raise SignInForwardError("the workspace's answer could not be read") from e
+            raise SignInCallbackNotTakenError("the workspace's answer could not be read") from e
         return SignInCallbackResult(
             outcome=_OUTCOME_BY_FLOW_STATE[answer.state], provider_name=answer.provider_name, detail=answer.detail
         )

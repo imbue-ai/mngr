@@ -1690,6 +1690,82 @@ def test_create_workspace_rejects_imbue_cloud_backup_without_account(
     assert "account" in json.loads(response.data)["error"].lower()
 
 
+def test_create_workspace_refuses_an_imbue_cloud_create_under_an_account_no_longer_signed_in(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    # The window's account was signed out after the form loaded: refused here, on
+    # the account field, rather than failing later in the background attempt.
+    cli = _fake_sharing_cli()
+    cli.add_account(user_id="11111111-1111-1111-1111-111111111111", email="owner@example.com")
+    store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, session_store=store)
+
+    response = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={
+            "git_url": "https://example/repo",
+            "launch_mode": "IMBUE_CLOUD",
+            "account_id": "22222222-2222-2222-2222-222222222222",
+        },
+    )
+
+    assert response.status_code == 400
+    body = json.loads(response.data)
+    assert body["field"] == "account_id"
+    assert "isn't signed in any more" in body["error"]
+
+
+def test_create_workspace_refuses_imbue_backups_under_an_account_no_longer_signed_in(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    cli = _fake_sharing_cli()
+    cli.add_account(user_id="11111111-1111-1111-1111-111111111111", email="owner@example.com")
+    store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, session_store=store)
+
+    response = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={
+            "git_url": "https://example/repo",
+            "launch_mode": "DOCKER",
+            "account_id": "22222222-2222-2222-2222-222222222222",
+            "backup_provider": "IMBUE_CLOUD",
+        },
+    )
+
+    assert response.status_code == 400
+    body = json.loads(response.data)
+    assert body["field"] == "account_id"
+    assert "isn't signed in any more" in body["error"]
+
+
+def test_create_workspace_on_this_computer_under_an_account_no_longer_signed_in_still_starts(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    # Nothing in this create runs or backs up under the account, so its sign-out refuses nothing.
+    cli = _fake_sharing_cli()
+    cli.add_account(user_id="11111111-1111-1111-1111-111111111111", email="owner@example.com")
+    store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, session_store=store)
+
+    response = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={
+            "git_url": "https://example/repo",
+            "launch_mode": "DOCKER",
+            "account_id": "22222222-2222-2222-2222-222222222222",
+        },
+    )
+
+    assert response.status_code == 202
+
+
 def test_destroy_unknown_workspace_returns_404(tmp_path: Path) -> None:
     client = _client_with_workspace(tmp_path, AgentId())
     other_id = AgentId()
@@ -5934,10 +6010,7 @@ def test_delete_connection_refuses_while_a_workspace_uses_it_then_removes_its_bl
     refused = busy_parts.client.delete(f"/api/v1/desktop/cloud-accounts/{instance_name}", headers=_auth_header())
     assert refused.status_code == 409
     assert json.loads(refused.data)["code"] == "connection_in_use"
-    # The app shows this sentence as is, so it names no internal instance.
-    refusal = json.loads(refused.data)["error"]
-    assert "1 active workspace." in refusal
-    assert instance_name not in refusal
+    assert json.loads(refused.data)["error"].startswith("A workspace is still on this connection.")
     assert instance_name in tomllib.loads(parts.settings_path.read_text())["providers"]
 
     removed = parts.client.delete(f"/api/v1/desktop/cloud-accounts/{instance_name}", headers=_auth_header())
@@ -5983,7 +6056,7 @@ def test_delete_connection_refuses_a_connection_a_newer_app_wrote(
     refused = parts.client.delete(f"/api/v1/desktop/cloud-accounts/{instance_name}", headers=_auth_header())
 
     assert refused.status_code == 409, refused.data
-    assert "newer" in json.loads(refused.data)["error"]
+    assert json.loads(refused.data)["code"] == "connection_too_new"
     (view,) = parts.connection_store.list_all_views()
     assert view.connection_id == str(connection_id)
 
@@ -6014,7 +6087,7 @@ def test_delete_local_connection_refuses_while_an_accounts_records_hold_a_worksp
     refused = parts.client.delete(f"/api/v1/desktop/cloud-accounts/{instance_name}", headers=_auth_header())
 
     assert refused.status_code == 409, refused.data
-    assert "1 active workspace" in json.loads(refused.data)["error"]
+    assert json.loads(refused.data)["error"].startswith("A workspace is still on this connection.")
     assert instance_name in tomllib.loads(parts.settings_path.read_text())["providers"]
 
 
@@ -6050,7 +6123,7 @@ def test_delete_connection_counts_a_workspace_in_both_discovery_and_the_owners_r
 
     assert refused.status_code == 409
     # The hosted-here workspace appears in both sources; the other only in the records.
-    assert "2 active workspace" in json.loads(refused.data)["error"]
+    assert json.loads(refused.data)["error"].startswith("2 workspaces are still on this connection.")
 
 
 def _rotated_modal_body() -> dict[str, str]:

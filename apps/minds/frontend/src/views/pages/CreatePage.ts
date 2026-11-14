@@ -21,6 +21,7 @@ import {
   fetchCreateFormDefaults,
   submitCreateRequest,
 } from "../../models/create";
+import type { ErrorAction } from "../../models/errors";
 import type { ConnectionOwnerOption } from "../../models/providers";
 import { LOCAL_PROFILE_USER_ID } from "../../models/providers";
 import { Button, ButtonSubmit } from "../components/Button";
@@ -29,15 +30,22 @@ import { Link } from "../components/Link";
 import { PageNarrowContainer } from "../components/Layout";
 import { MachineSizeInput } from "../components/MachineSizeInput";
 import { DialogCloseButton, Modal } from "../components/Modal";
+import { ErrorNotice, restartAppActions } from "../components/ErrorDisplay";
+import { InlineError } from "../components/errorDesign";
 import { Notice } from "../components/Notice";
+import { variantBesideErrors } from "../components/variantBesideErrors";
 import { CloudAccountsModal, CloudAccountsModalState } from "./create/CloudAccountsModal";
 import { slowStartNotice } from "./create/ComputeNotices";
 import { PresetCards } from "./create/PresetCards";
 import { PrerequisiteNotice } from "./create/PrerequisiteNotice";
 import type { CreateSubmitBody, PresetName } from "./create/form-model";
 import {
+  CREATE_NO_RESPONSE,
+  isSubmitErrorClearedByRestart,
+  isSubmitErrorClearedBySignIn,
   CreateFormModel,
-  normalizeCreateApiError,
+  SIGNED_IN_ACCOUNT_NOT_READY,
+  createSubmitRefusal,
   presetOpensAdvanced,
   regionChoiceLabel,
 } from "./create/form-model";
@@ -54,10 +62,12 @@ export const ONBOARDING_EXAMPLES_SENTENCE =
 export interface CreatePageAttrs {
   /** `page` (the default) is the routed /create page; `embedded` is the form inside a modal. */
   mode?: "page" | "embedded";
-  /** The preset to open on; the page defaults to remote. */
+  /** The preset to open on; the page defaults to remote. With `retryId`, applied over the attempt's settings. */
   initialPreset?: PresetName;
   /** Prefill from an interrupted / failed attempt's record (the page reads `?retry=` instead). */
   retryId?: string;
+  /** The window's account can't use Imbue Cloud (e.g. the waitlist, a suspended account): Imbue backups and sharing open off. */
+  isImbueCloudRefused?: boolean;
   /** Open with "Show onboarding examples?" on: the start flow's form answers, whose create is the first. */
   isOnboardingDrivenByAgent?: boolean;
   /** Embedded mode's outcome: called with the new attempt's operation id instead of routing. */
@@ -127,6 +137,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
     create: () => createNow(true),
     setSubmitError: (message) => {
       model.submitError = message;
+      model.submitErrorField = "";
     },
   });
   let hostNameDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -224,8 +235,8 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
     }
     if (model.imbueCloudNeedsAccount()) {
       if (isAfterSignIn) {
-        model.submitError =
-          "Signed in, but the account is not available yet. Press Create to try again.";
+        model.submitError = SIGNED_IN_ACCOUNT_NOT_READY;
+        model.submitErrorField = "";
       } else {
         signInGate.start();
       }
@@ -262,7 +273,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
     void submitCreateRequest({ ...body }).then((result) => {
       if (result.status === 0) {
         model.isSubmitting = false;
-        model.submitError = "Could not reach the server. Please try again.";
+        model.submitError = CREATE_NO_RESPONSE;
         m.redraw();
         return;
       }
@@ -274,7 +285,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
         }
         return;
       }
-      const error = normalizeCreateApiError(result.data);
+      const error = createSubmitRefusal(result);
       if (error.redirectUrl && !isAfterSignIn) {
         // The server's no-account backstop: sign in, as the form would have.
         model.isSubmitting = false;
@@ -283,7 +294,8 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
         return;
       }
       model.isSubmitting = false;
-      model.submitError = error.message;
+      // The no-account backstop answering the create a sign-in just enabled.
+      model.submitError = error.redirectUrl ? SIGNED_IN_ACCOUNT_NOT_READY : error.message;
       model.submitErrorField = error.field;
       if (error.field) model.isAdvancedOpen = true;
       m.redraw();
@@ -315,6 +327,40 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
 
   function fieldRing(fieldId: string): string {
     return model.submitErrorField === fieldId ? " !ring-1 ring-important" : "";
+  }
+
+  /** Whether the refusal names a field the form is drawing, so it goes under that field instead of at the top. */
+  function isSubmitErrorUnderField(): boolean {
+    switch (model.submitErrorField) {
+      case "git_url":
+        return true;
+      case "host_name":
+        // The name's own live check, when it has something to say, holds that spot.
+        return !model.hostNameError;
+      case "backup_api_key_env":
+        return model.backupProvider === "API_KEY";
+      default:
+        return false;
+    }
+  }
+
+  /** The buttons of the refusal drawn at the top; empty when none is drawn there. */
+  function topSubmitErrorActions(): ErrorAction[] {
+    if (!model.submitError || isSubmitErrorUnderField()) return [];
+    if (isSubmitErrorClearedBySignIn(model.submitErrorField)) {
+      return [{ label: "Sign in", onclick: () => signInGate.start() }];
+    }
+    return isSubmitErrorClearedByRestart(model.submitError) ? restartAppActions() : [];
+  }
+
+  /** The server's refusal under the field it names, when isSubmitErrorUnderField. */
+  function fieldError(fieldId: string): m.Children {
+    if (!model.submitError || model.submitErrorField !== fieldId || !isSubmitErrorUnderField()) return null;
+    return m(
+      "div",
+      { id: `${fieldId}-error`, role: "alert", class: "mt-1" },
+      m(InlineError, { message: model.submitError }),
+    );
   }
 
   /** The CPUs / memory / disk fields for a mode sized by numbers (DOCKER, LIMA, MODAL), the disk alone for a cloud
@@ -358,7 +404,13 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
         ]),
       ]),
       invalid.size > 0
-        ? m("p", { id: "machine-size-error", class: "mt-1 type-helper text-important", role: "alert" }, "Each size must be a whole number of at least 1.")
+        ? m(
+            "div",
+            { id: "machine-size-error", class: "mt-1", role: "alert" },
+            m(InlineError, {
+              message: "Each size must be a whole number of at least 1.",
+            }),
+          )
         : null,
     ]);
   }
@@ -397,14 +449,12 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
             }),
             model.hostNameError
               ? m(
-                  "p",
-                  {
-                    id: "host-name-error",
-                    class: "mt-1 type-helper text-important",
-                  },
-                  model.hostNameError,
+                  "div",
+                  { id: "host-name-error", class: "mt-1" },
+                  m(InlineError, { message: model.hostNameError }),
                 )
               : m("p", { id: "host-name-error", class: "hidden" }),
+            fieldError("host_name"),
           ]),
           m("div", [
             m("div", { class: "flex items-start justify-between gap-3" }, [
@@ -564,7 +614,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                     id: "backup-provider-account-error",
                     class: "mt-1 type-helper text-warning text-right",
                   },
-                  "Imbue backups need a signed-in account; Create will ask you to sign in.",
+                  "Backups to Imbue Cloud need a signed-in account; Create will ask you to sign in.",
                 )
               : null,
             model.backupProvider === "API_KEY"
@@ -592,7 +642,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                     id: "backup_api_key_env",
                     name: "backup_api_key_env",
                     rows: 6,
-                    extra: "font-mono",
+                    extra: "font-mono" + fieldRing("backup_api_key_env"),
                     value: model.backupApiKeyEnv,
                     oninput: (event: InputEvent) => {
                       model.backupApiKeyEnv = (
@@ -600,6 +650,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                       ).value;
                     },
                   }),
+                  fieldError("backup_api_key_env"),
                 ])
               : null,
           ]),
@@ -637,7 +688,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                     id: "web-access-account-error",
                     class: "mt-1 type-helper text-warning",
                   },
-                  "Sharing needs a signed-in account.",
+                  "Sharing needs a signed-in account, so turn it off to create this workspace.",
                 )
               : null,
           ]),
@@ -809,6 +860,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                 model.gitUrl = (event.target as HTMLInputElement).value;
               },
             }),
+            fieldError("git_url"),
           ]),
           m("div", [
             m(FormLabel, { target: "branch" }, "Branch"),
@@ -839,14 +891,10 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
         .then((defaults) => {
           model.applyDefaults(defaults);
           if (attrs.isOnboardingDrivenByAgent === true) model.isOnboardingDrivenByAgent = true;
-          // An embedded caller's opening preset, unless a retry prefill
-          // already decided it (a prefill that could not be applied decides nothing).
-          if (
-            (defaults.prefill === null || model.retryUnavailableReason !== "") &&
-            attrs.initialPreset !== undefined
-          ) {
-            selectPreset(attrs.initialPreset);
-          }
+          // An embedded caller's opening preset; over a retry's prefill it
+          // sets only where the workspace runs.
+          if (attrs.initialPreset !== undefined) selectPreset(attrs.initialPreset);
+          if (attrs.isImbueCloudRefused === true) model.turnOffImbueCloudServices();
           // The device's window offers no Imbue Cloud card, so the form
           // cannot open on the selection it does not show.
           if (isDeviceWindow() && model.selectedPreset === "remote") {
@@ -916,17 +964,22 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                       m("h1", { class: "type-heading-lg text-primary mt-1" }, "Where should it run?"),
                     ]),
                 model.retryUnavailableReason
-                  ? m(
-                      Notice,
-                      { variant: "error", id: "retry-unavailable", role: "alert", extra: "mb-6" },
-                      model.retryUnavailableReason,
-                    )
+                  ? m(ErrorNotice, {
+                      id: "retry-unavailable",
+                      error: { message: model.retryUnavailableReason, details: "" },
+                      isBugReportOffered: false,
+                      extra: "mb-6",
+                    })
                   : null,
-                model.submitError
+                model.submitError && !isSubmitErrorUnderField()
                   ? m(
-                      "p",
-                      { id: "create-error", role: "alert", class: "mb-6 type-helper text-important text-center" },
-                      model.submitError,
+                      "div",
+                      { id: "create-error", class: "mb-6" },
+                      m(ErrorNotice, {
+                        id: "create-submit-error",
+                        error: { message: model.submitError, details: "" },
+                        actions: topSubmitErrorActions(),
+                      }),
                     )
                   : m("p", { id: "create-error", class: "hidden" }),
                 m("div", { id: "simple-view", class: model.isAdvancedOpen ? "hidden" : "" }, [
@@ -1012,6 +1065,12 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                     ButtonSubmit,
                     {
                       id: "create-submit",
+                      variant: variantBesideErrors(
+                        "primary",
+                        model.submitError && !isSubmitErrorUnderField()
+                          ? [{ message: model.submitError, actions: topSubmitErrorActions() }]
+                          : [],
+                      ),
                       extra: "w-80",
                       disabled: model.isSubmitting || model.unmetPrerequisiteForSubmit() !== null,
                     },

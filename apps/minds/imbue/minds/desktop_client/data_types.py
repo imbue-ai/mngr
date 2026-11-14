@@ -159,6 +159,13 @@ class MachineSizeSelection(FrozenModel):
         return self.cpu_count is None and self.memory_gb is None and self.disk_gb is None
 
 
+class CreateAttemptQuotaRefusal(FrozenModel):
+    """Which Imbue Cloud plan limit refused a create, so the creation page can name it."""
+
+    entitlement: str = Field(description="The connector's entitlement name (e.g. max_remote_workspaces)")
+    limit: float = Field(description="The plan's limit for that entitlement")
+
+
 # The key a workspace message's type travels under, beside its other fields.
 WORKSPACE_MESSAGE_TYPE_KEY: Final[str] = "type"
 

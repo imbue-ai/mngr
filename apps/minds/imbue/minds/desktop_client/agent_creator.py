@@ -39,6 +39,7 @@ import httpx2
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import JsonValue
 from pydantic import PrivateAttr
 from pydantic import SkipValidation
 from tenacity import RetryCallState
@@ -75,6 +76,7 @@ from imbue.minds.desktop_client.create_progress import apply_bootstrap_event_lin
 from imbue.minds.desktop_client.create_progress_history import ProgressHistoryStore
 from imbue.minds.desktop_client.create_progress_history import create_scope
 from imbue.minds.desktop_client.create_progress_history import make_progress_history_store
+from imbue.minds.desktop_client.data_types import CreateAttemptQuotaRefusal
 from imbue.minds.desktop_client.data_types import MachineSizeSelection
 from imbue.minds.desktop_client.data_types import WorkspaceProbeOutcome
 from imbue.minds.desktop_client.imbue_cloud_cli import EMAIL_NOT_VERIFIED_ERROR_CLASS
@@ -109,9 +111,12 @@ from imbue.minds.desktop_client.workspace_defaults import default_workspace_git_
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
 from imbue.minds.desktop_client.workspace_defaults import is_local_workspace_defaults_opt_in
 from imbue.minds.errors import BackupProvisioningError
+from imbue.minds.errors import CreateOutcomeUnknownError
+from imbue.minds.errors import CreateTargetUnresolvedError
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import GitRefNotFoundError
+from imbue.minds.errors import LocalRepoPathMissingError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import PendingCreateAttemptStoreError
 from imbue.minds.errors import WorkspaceNameInUseError
@@ -125,6 +130,8 @@ from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.utils.secret_redaction import redact_secret_env_assignments
 from imbue.minds.utils.secret_redaction import redact_url_credentials_in_text
+from imbue.mngr.errors import HostNameConflictError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostId
@@ -136,6 +143,10 @@ from imbue.mngr.utils.progress import ProgressStep
 from imbue.mngr.utils.progress import parse_progress_event
 from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 from imbue.mngr_forward.primitives import MNGR_FORWARD_SESSION_COOKIE_NAME
+from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountSuspendedError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudClientTooOldError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudEmailNotVerifiedError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
 from imbue.mngr_latchkey.agent_setup import LatchkeyGatewayLocation
 from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
@@ -363,27 +374,66 @@ class AgentCreateAttemptStatus(UpperCaseStrEnum):
 class CreateAttemptErrorKind(UpperCaseStrEnum):
     """Machine-readable classification of a create attempt failure.
 
-    Carried alongside the human-readable ``error`` message so the creating
-    page can gate extra static guidance on the failure *type* instead of
-    substring-matching the message client-side. Only failure kinds that
-    change what the UI shows get a value here; unclassified failures carry
-    no kind and the UI shows just the error message.
+    Carried alongside the raw ``error`` text so the creation page can say what
+    went wrong in its own words (and offer the controls that fit) instead of
+    showing the text, or matching it client-side. Unclassified failures carry
+    no kind and the page falls back to its generic sentence.
     """
 
-    # The clone of a github.com workspace source failed. By far the most
-    # common cause: the repo is private (or does not exist -- GitHub
-    # deliberately answers both the same way, to avoid leaking which private
-    # repos exist) and none of this machine's git credentials can see it, so
-    # the creating page shows GitHub sign-in guidance alongside the raw error.
-    # The clone mechanism is git, but the problem we surface is GitHub access.
+    # A clone or fetch of a github.com https source failed: the repo may be
+    # private (GitHub answers a private and a missing repo the same way), a
+    # requested commit may not exist, or the network failed. A missing branch
+    # or tag on a remote that answers is GIT_REF_NOT_FOUND instead.
     GITHUB_AUTH_REQUIRED = auto()
 
-    # The clone of a NON-github remote git source (a URL on another host, or an
-    # ssh remote) failed -- same likely cause (private/nonexistent, no usable
-    # credentials on this machine) and same guidance, minus the GitHub-CLI
-    # advice, which only fits github.com. The creating page shows generic
-    # git-credentials guidance for this kind.
+    # The same for any other http(s) / git:// remote.
     GIT_AUTH_REQUIRED = auto()
+
+    # The same for an ssh remote (``ssh://`` or ``user@host:path``), where access
+    # is decided by this computer's SSH key rather than by a sign-in.
+    GIT_SSH_AUTH_REQUIRED = auto()
+
+    # The requested branch could not be checked out.
+    BRANCH_CHECKOUT_FAILED = auto()
+
+    # A local repository path does not name a folder on this computer.
+    LOCAL_PATH_MISSING = auto()
+
+    # The provider the create runs on is not reachable (e.g. Docker not running).
+    PROVIDER_UNAVAILABLE = auto()
+
+    # A workspace with this name already exists on the provider.
+    NAME_TAKEN = auto()
+
+    # Imbue Cloud refused the create until the account's email is verified.
+    EMAIL_NOT_VERIFIED = auto()
+
+    # Imbue Cloud refused the create because the account is suspended.
+    ACCOUNT_SUSPENDED = auto()
+
+    # Imbue Cloud refused this version of Imbue Studio as too old.
+    CLIENT_TOO_OLD = auto()
+
+    # Imbue Cloud had no free machine to lease.
+    NO_CLOUD_CAPACITY = auto()
+
+    # Imbue Cloud refused the create because the account is still on the
+    # waitlist (a quota refusal whose limit is zero: the guest plan grants nothing).
+    WAITLISTED = auto()
+
+    # Imbue Cloud refused the create because a plan limit is reached; the limit
+    # rides along as ``quota_refusal``.
+    QUOTA_EXCEEDED = auto()
+
+    # ``mngr create`` finished without a readable report of the workspace it
+    # made, so the workspace may or may not exist.
+    OUTCOME_UNKNOWN = auto()
+
+    # Imbue Studio could not work out which provider or account to run on.
+    TARGET_UNRESOLVED = auto()
+
+    # The template's settings file could not be read.
+    TEMPLATE_UNREADABLE = auto()
 
     # The clone reached the remote, but it has no branch or tag with the name
     # the create asked for (e.g. ``main`` on a repo whose default branch is
@@ -442,6 +492,13 @@ class AgentCreateAttemptInfo(FrozenModel):
             "Machine-readable classification of the failure, set alongside ``error`` when the "
             "failure is recognized (see ``classify_create_attempt_error``); ``None`` otherwise"
         ),
+    )
+    quota_refusal: CreateAttemptQuotaRefusal | None = Field(
+        default=None, description="The Imbue Cloud plan limit that refused the create, when that is why it failed"
+    )
+    provider_remediation: str | None = Field(
+        default=None,
+        description="The next step the provider named when it could not be reached, when that is why it failed",
     )
     progress: OperationProgressSnapshot | None = Field(
         default=None, description="The attempt's progress as of this snapshot, once the attempt is tracked"
@@ -557,37 +614,99 @@ def _is_remote_git_source(repo_source: str) -> bool:
     return bool(re.match(r"^[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+:", repo_source))
 
 
+# The git steps that talk to the remote: only their failure says anything
+# about reaching the repository (a failed local checkout of what was fetched
+# does not).
+_REMOTE_GIT_STEPS: Final[frozenset[str]] = frozenset({"clone", "fetch"})
+
+# ``mngr create``'s JSONL ``error_class`` for each provider-side refusal the
+# creation page words itself.
+_ERROR_KIND_BY_MNGR_ERROR_CLASS: Final[Mapping[str, CreateAttemptErrorKind]] = {
+    ProviderUnavailableError.__name__: CreateAttemptErrorKind.PROVIDER_UNAVAILABLE,
+    HostNameConflictError.__name__: CreateAttemptErrorKind.NAME_TAKEN,
+    ImbueCloudEmailNotVerifiedError.__name__: CreateAttemptErrorKind.EMAIL_NOT_VERIFIED,
+    ImbueCloudAccountSuspendedError.__name__: CreateAttemptErrorKind.ACCOUNT_SUSPENDED,
+    ImbueCloudClientTooOldError.__name__: CreateAttemptErrorKind.CLIENT_TOO_OLD,
+    ImbueCloudLeaseUnavailableError.__name__: CreateAttemptErrorKind.NO_CLOUD_CAPACITY,
+}
+
+
+def _is_ssh_git_source(repo_source: str) -> bool:
+    """Check if a repo source is an ssh remote: an ``ssh://`` URL or an scp-style ``user@host:path``."""
+    if "://" in repo_source:
+        return urlsplit(repo_source).scheme in ("ssh", "git+ssh", "ssh+git")
+    return _is_remote_git_source(repo_source)
+
+
 def classify_create_attempt_error(repo_source: str, error: Exception) -> CreateAttemptErrorKind | None:
     """Classify a create attempt failure into a ``CreateAttemptErrorKind``, when recognizable.
 
-    Recognizes cases for a failed clone (``GitCloneError``). Deliberately no
-    matching of git's error text (git has no structured error output, and
-    substring matching is brittle across git versions and locales). The one
-    case told apart is a missing ref, which :func:`clone_git_repo` establishes
-    from ``git ls-remote``'s exit code and raises as ``GitRefNotFoundError``,
-    whatever the source. Any other failed clone of a REMOTE source is
-    overwhelmingly an access problem (private/nonexistent, no usable
-    credentials on this machine), and the creating page's guidance covers it
-    while the raw git error stays visible right above for anything rarer.
+    Classification is by exception type and structured fields only, never by
+    matching git's or mngr's text (git has no structured error output, and
+    text matching is brittle across versions and locales):
 
-    - ``GitRefNotFoundError`` -> ``GIT_REF_NOT_FOUND`` (the remote answered
-      but has no such branch or tag; guidance points at the Branch field).
-    - ``https://github.com/...`` -> ``GITHUB_AUTH_REQUIRED`` (guidance names
-      the GitHub CLI, which only fits github.com https).
-    - any other remote git source (a URL on another host, or an ssh remote)
-      -> ``GIT_AUTH_REQUIRED`` (generic git-credentials guidance, no GitHub CLI).
-
-    A local path or unrecognized input returns ``None`` (just the raw error).
+    - a missing branch or tag -> ``GIT_REF_NOT_FOUND``: :func:`clone_git_repo`
+      establishes it from ``git ls-remote``'s exit code and raises
+      ``GitRefNotFoundError``, whatever the source.
+    - a clone or fetch of a REMOTE source -> GitHub https, any other https, or
+      ssh; a failure at a local step of the clone, or of a local source, is not
+      an access problem and stays unclassified.
+    - a failed branch checkout, a missing local folder, an unresolvable
+      provider, an unreadable template, and a create with no readable result
+      each have their own exception type.
+    - a failed ``mngr create`` by the ``error_class`` of its JSONL error event;
+      a quota refusal with a zero limit is the waitlist (the guest plan grants
+      nothing).
     """
-    if not isinstance(error, GitCloneError):
-        return None
     if isinstance(error, GitRefNotFoundError):
         return CreateAttemptErrorKind.GIT_REF_NOT_FOUND
-    if _is_github_https_url(repo_source):
-        return CreateAttemptErrorKind.GITHUB_AUTH_REQUIRED
-    if _is_remote_git_source(repo_source):
-        return CreateAttemptErrorKind.GIT_AUTH_REQUIRED
+    if isinstance(error, GitCloneError):
+        if error.failed_step not in _REMOTE_GIT_STEPS:
+            return None
+        if _is_github_https_url(repo_source):
+            return CreateAttemptErrorKind.GITHUB_AUTH_REQUIRED
+        if _is_ssh_git_source(repo_source):
+            return CreateAttemptErrorKind.GIT_SSH_AUTH_REQUIRED
+        if _is_remote_git_source(repo_source):
+            return CreateAttemptErrorKind.GIT_AUTH_REQUIRED
+        return None
+    if isinstance(error, GitOperationError):
+        return CreateAttemptErrorKind.BRANCH_CHECKOUT_FAILED
+    if isinstance(error, TemplateMngrPinError):
+        return CreateAttemptErrorKind.TEMPLATE_UNREADABLE
+    if isinstance(error, LocalRepoPathMissingError):
+        return CreateAttemptErrorKind.LOCAL_PATH_MISSING
+    if isinstance(error, CreateTargetUnresolvedError):
+        return CreateAttemptErrorKind.TARGET_UNRESOLVED
+    if isinstance(error, CreateOutcomeUnknownError):
+        return CreateAttemptErrorKind.OUTCOME_UNKNOWN
+    if isinstance(error, MngrCommandError) and error.error_class is not None:
+        if error.error_class == QUOTA_EXCEEDED_ERROR_CLASS:
+            refusal = quota_refusal_of(error)
+            if refusal is None:
+                return None
+            return CreateAttemptErrorKind.WAITLISTED if refusal.limit == 0 else CreateAttemptErrorKind.QUOTA_EXCEEDED
+        return _ERROR_KIND_BY_MNGR_ERROR_CLASS.get(error.error_class)
     return None
+
+
+def quota_refusal_of(error: Exception) -> CreateAttemptQuotaRefusal | None:
+    """The plan limit an Imbue Cloud quota refusal names, or None for any other failure."""
+    if not isinstance(error, MngrCommandError) or error.error_class != QUOTA_EXCEEDED_ERROR_CLASS:
+        return None
+    entitlement = error.error_details.get("entitlement")
+    limit = error.error_details.get("limit")
+    if not isinstance(entitlement, str) or isinstance(limit, bool) or not isinstance(limit, (int, float)):
+        return None
+    return CreateAttemptQuotaRefusal(entitlement=entitlement, limit=float(limit))
+
+
+def provider_remediation_of(error: Exception) -> str | None:
+    """The next step an unreachable provider named for its failure ("start Docker"), or None."""
+    if not isinstance(error, MngrCommandError) or error.error_class != ProviderUnavailableError.__name__:
+        return None
+    remediation = error.error_details.get("short_remediation")
+    return remediation if isinstance(remediation, str) and remediation else None
 
 
 def _redact_url_credentials(url: str) -> str:
@@ -770,8 +889,8 @@ def clone_git_repo(
             and not _FULL_SHA_RE.match(str(branch))
             and _is_ref_missing_on_remote(clone_dir, branch, git_env, config_args, timeout_seconds, parent_cg)
         ):
-            raise GitRefNotFoundError(message)
-        raise GitCloneError(message)
+            raise GitRefNotFoundError(message, failed_step=step_name)
+        raise GitCloneError(message, failed_step=step_name)
 
 
 def _is_ref_missing_on_remote(
@@ -1191,13 +1310,13 @@ def provider_instance_name_for_launch(
             return "vultr"
         case LaunchMode.IMBUE_CLOUD:
             if not imbue_cloud_user_id:
-                raise MngrCommandError("IMBUE_CLOUD mode requires imbue_cloud_user_id")
+                raise CreateTargetUnresolvedError("IMBUE_CLOUD mode requires imbue_cloud_user_id")
             return imbue_cloud_provider_name_for_user(imbue_cloud_user_id)
         case LaunchMode.AWS | LaunchMode.GCP | LaunchMode.AZURE | LaunchMode.MODAL:
             # The remote clouds have no ambient provider instances in minds --
             # they are reachable only through a connection instance, which the
             # ``cloud_account`` short-circuit above already returned.
-            raise MngrCommandError(f"{launch_mode.value} mode requires a cloud account")
+            raise CreateTargetUnresolvedError(f"{launch_mode.value} mode requires a cloud account")
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -1781,6 +1900,10 @@ class _CreateEventCapture(MutableModel):
             "of the failure. The two are always taken from one event, so they describe the same error."
         ),
     )
+    error_details: dict[str, JsonValue] = Field(
+        default_factory=dict,
+        description="The same event's structured ``details`` (e.g. a quota refusal's limit); empty when it has none",
+    )
     on_progress: Callable[[ProgressEvent], None] | None = Field(
         default=None,
         description="Receives each ``progress`` event mngr streams (its plan and step reports), parsed",
@@ -1807,6 +1930,8 @@ class _CreateEventCapture(MutableModel):
             self.error_message = (
                 error_message_raw.strip() if isinstance(error_message_raw, str) and error_message_raw.strip() else None
             )
+            error_details_raw = event.get("details")
+            self.error_details = error_details_raw if isinstance(error_details_raw, dict) else {}
             return
         if event_type != "created":
             return
@@ -1937,7 +2062,7 @@ def run_mngr_create(
         # Exit-zero without a created event almost certainly means the
         # JSONL output got mangled or some pre-emit error path took over.
         # Fail loudly rather than fall through with a sentinel id.
-        raise MngrCommandError(
+        raise CreateOutcomeUnknownError(
             "mngr create exited 0 but did not emit a JSONL 'created' event; stdout tail:\n{}".format(
                 result.stdout.strip()[-2000:]
             )
@@ -1946,7 +2071,9 @@ def run_mngr_create(
     try:
         canonical_host_id = HostId(capture.canonical_host_id)
     except ValueError as e:
-        raise MngrCommandError(f"mngr create emitted an invalid host_id {capture.canonical_host_id!r}: {e}") from e
+        raise CreateOutcomeUnknownError(
+            f"mngr create emitted an invalid host_id {capture.canonical_host_id!r}: {e}"
+        ) from e
 
     return capture.canonical_agent_id, canonical_host_id
 
@@ -1968,12 +2095,14 @@ def _mngr_create_failure(
         return MngrCommandError(
             error_message,
             error_class=capture.error_class,
+            error_details=capture.error_details,
             output_tail=format_output_tail(stdout, stderr),
         )
     transcript = stderr.strip() if stderr.strip() else stdout.strip()
     return MngrCommandError(
         f"mngr create failed (exit code {returncode}):\n{transcript}",
         error_class=capture.error_class,
+        error_details=capture.error_details,
     )
 
 
@@ -2007,7 +2136,7 @@ def run_mngr_aws_prepare(
     # ``_build_mngr_create_command`` raises so the empty-region case is rejected
     # consistently regardless of which step trips first.
     if not region:
-        raise MngrCommandError("AWS mode requires a region")
+        raise CreateTargetUnresolvedError("AWS mode requires a region")
     _run_mngr_prepare_command(
         [MNGR_BINARY, "aws", "prepare", "--provider", provider_name, "--region", region, "--format", "jsonl"],
         f"aws prepare for region {region}",
@@ -2408,6 +2537,8 @@ class AgentCreator(MutableModel):
     _redirect_urls: dict[str, str] = PrivateAttr(default_factory=dict)
     _errors: dict[str, str] = PrivateAttr(default_factory=dict)
     _error_kinds: dict[str, CreateAttemptErrorKind] = PrivateAttr(default_factory=dict)
+    _quota_refusals: dict[str, CreateAttemptQuotaRefusal] = PrivateAttr(default_factory=dict)
+    _provider_remediations: dict[str, str] = PrivateAttr(default_factory=dict)
     _launch_modes: dict[str, LaunchMode] = PrivateAttr(default_factory=dict)
     _host_names: dict[str, str] = PrivateAttr(default_factory=dict)
     # Provider instance each create attempt targets (the scope of host-name
@@ -2776,7 +2907,13 @@ class AgentCreator(MutableModel):
             )
 
     def _mark_pending_create_attempt_failed(
-        self, create_attempt_id_str: str, error: str, error_kind: str | None, log_tail: tuple[str, ...]
+        self,
+        create_attempt_id_str: str,
+        error: str,
+        error_kind: str | None,
+        log_tail: tuple[str, ...],
+        quota_refusal: CreateAttemptQuotaRefusal | None,
+        provider_remediation: str | None,
     ) -> None:
         """Flip the pending record to FAILED, downgrading store errors to warnings.
 
@@ -2788,7 +2925,12 @@ class AgentCreator(MutableModel):
             return
         try:
             self.pending_create_attempt_store.mark_failed(
-                create_attempt_id_str, error=error, error_kind=error_kind, log_tail=log_tail
+                create_attempt_id_str,
+                error=error,
+                error_kind=error_kind,
+                log_tail=log_tail,
+                quota_refusal=quota_refusal,
+                provider_remediation=provider_remediation,
             )
         except PendingCreateAttemptStoreError as e:
             logger.warning(
@@ -2822,6 +2964,8 @@ class AgentCreator(MutableModel):
             redirect_url=self._redirect_urls.get(cid_str),
             error=self._errors.get(cid_str),
             error_kind=self._error_kinds.get(cid_str),
+            quota_refusal=self._quota_refusals.get(cid_str),
+            provider_remediation=self._provider_remediations.get(cid_str),
             progress=tracker.snapshot() if (tracker := self._progress_trackers.get(cid_str)) is not None else None,
         )
 
@@ -2849,6 +2993,8 @@ class AgentCreator(MutableModel):
                 self._redirect_urls,
                 self._errors,
                 self._error_kinds,
+                self._quota_refusals,
+                self._provider_remediations,
                 self._launch_modes,
                 self._host_names,
                 self._provider_instance_names,
@@ -2962,7 +3108,7 @@ class AgentCreator(MutableModel):
                 if _is_local_path(repo_source):
                     resolved_path = Path(os.path.expanduser(repo_source)).resolve()
                     if not resolved_path.is_dir():
-                        raise MngrCommandError("Local path does not exist: {}".format(resolved_path))
+                        raise LocalRepoPathMissingError("Local path does not exist: {}".format(resolved_path))
 
                     if _is_git_worktree(resolved_path):
                         # Worktrees have a .git file pointing to the parent repo's
@@ -3376,6 +3522,8 @@ class AgentCreator(MutableModel):
             # The steps that did finish measured something real; only they are kept.
             self._record_progress_durations(launch_mode, tracker)
             error_kind = classify_create_attempt_error(repo_source, e)
+            quota_refusal = quota_refusal_of(e)
+            provider_remediation = provider_remediation_of(e)
             # Snapshot the failure (and the create attempt log's tail) into the
             # pending-create-attempt record BEFORE publishing the in-memory
             # FAILED status (mirroring the DONE path): anyone who observes
@@ -3385,12 +3533,18 @@ class AgentCreator(MutableModel):
                 error=str(e),
                 error_kind=error_kind.value if error_kind is not None else None,
                 log_tail=log_sink.tail_lines(FAILED_CREATE_ATTEMPT_LOG_TAIL_MAX_LINES),
+                quota_refusal=quota_refusal,
+                provider_remediation=provider_remediation,
             )
             with self._lock:
                 self._statuses[cid_str] = AgentCreateAttemptStatus.FAILED
                 self._errors[cid_str] = str(e)
                 if error_kind is not None:
                     self._error_kinds[cid_str] = error_kind
+                if quota_refusal is not None:
+                    self._quota_refusals[cid_str] = quota_refusal
+                if provider_remediation is not None:
+                    self._provider_remediations[cid_str] = provider_remediation
             self._notify_create_attempts_changed()
         finally:
             if scratch_clone_root is not None:

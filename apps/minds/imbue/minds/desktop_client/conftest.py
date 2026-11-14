@@ -636,7 +636,14 @@ class FakeImbueCloudCli(ImbueCloudCli):
         default_factory=dict, description="The raw `account show` document get_account_info answers per account email"
     )
 
+    account_show_failure: MngrCallResult | None = Field(
+        default=None,
+        description="When set, `account show` fails with this result, classified the way the real CLI classifies it",
+    )
+
     def get_account_info(self, account: str) -> dict[str, Any]:
+        if self.account_show_failure is not None:
+            return self._expect_success(self.account_show_failure, "account show")
         info = self.account_info_by_email.get(account)
         if info is None:
             raise ImbueCloudCliError(f"account show: connector unreachable for {account} (fake)")

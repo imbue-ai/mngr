@@ -205,6 +205,11 @@ export interface TurnMore {
  * paragraph and `textId` a span around the words, for turns something outside
  * the page reads.
  */
+/** The measure an agent turn is set in: 100px short of the column, so its
+ * right edge lands inside the user's bubbles rather than flush with them. */
+export const AGENT_TURN_CLASS =
+  "max-w-[calc(100%-100px)] leading-[1.5] whitespace-pre-wrap break-words";
+
 export function agentTurn(attrs: {
   key: string;
   text: string;
@@ -244,7 +249,7 @@ export function agentTurn(attrs: {
       key: attrs.key,
       id: attrs.id,
       class:
-        `${attrs.marginClass ?? "mt-10"} max-w-[calc(100%-100px)] leading-[1.5] whitespace-pre-wrap break-words first:mt-0` +
+        `${attrs.marginClass ?? "mt-10"} ${AGENT_TURN_CLASS} first:mt-0` +
         (attrs.class !== undefined ? ` ${attrs.class}` : ""),
       "data-agent-turn": "",
     },
@@ -452,7 +457,11 @@ export function answerRow(
   );
 }
 
-function linkButton(label: string, onPress: () => void, extraAttrs: m.Attributes): m.Children {
+export function linkButton(
+  label: string,
+  onPress: () => void,
+  extraAttrs: m.Attributes = {},
+): m.Children {
   return m(
     "button",
     {

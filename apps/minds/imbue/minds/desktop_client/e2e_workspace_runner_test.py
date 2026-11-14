@@ -1,5 +1,6 @@
 import io
 import re
+from collections.abc import Callable
 from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
@@ -34,11 +35,15 @@ _PENDING_URL = "http://localhost:8080/create"
 
 
 class _FakeElement:
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, on_click: Callable[[], None] = lambda: None) -> None:
         self._text = text
+        self._on_click = on_click
 
     def inner_text(self) -> str:
         return self._text
+
+    def click(self) -> None:
+        self._on_click()
 
 
 class _FakeFrame:
@@ -94,6 +99,11 @@ class _FakeCreatingPage:
     are consumed one entry per poll iteration; the final entry repeats. An
     ``is_visible_results`` entry that is an exception is raised, simulating an
     execution-context-destroyed error when the page routes onto ``/workspace/<id>``.
+
+    The selectors it answers are the ids ``failureTurn`` puts on screen
+    (``CreatingPage.ts``): ``#error-message`` around the sentence, the
+    ``#failure-view-details`` toggle and the ``#failure-view-details-panel`` it
+    opens. Anything else returns nothing, as it would on the real page.
     """
 
     def __init__(
@@ -103,10 +113,14 @@ class _FakeCreatingPage:
         is_visible_results: Sequence[bool | BaseException] = (),
         candidate_pages: Sequence[_FakeContentPage] = (),
         error_message: str | None = None,
+        error_details: str | None = None,
     ) -> None:
         self._urls = list(urls)
         self._is_visible_results = list(is_visible_results)
         self._error_message = error_message
+        self._error_details = error_details
+        self._is_details_open = False
+        self._is_details_redraw_pending = False
         self.wait_for_timeout_calls = 0
         pages: list[object] = [self, *candidate_pages]
         self._browser = _FakeBrowser([_FakeContext(pages)])
@@ -133,7 +147,23 @@ class _FakeCreatingPage:
     def query_selector(self, selector: str) -> _FakeElement | None:
         if selector == "#error-message" and self._error_message is not None:
             return _FakeElement(self._error_message)
+        if selector == "#failure-view-details" and self._error_details is not None:
+            return _FakeElement("See details", on_click=self._open_details)
+        if selector == "#failure-view-details-panel" and self._is_details_open:
+            return _FakeElement(self._error_details or "")
         return None
+
+    def _open_details(self) -> None:
+        # The page redraws after the click handler returns, so the panel is not drawn yet.
+        self._is_details_redraw_pending = True
+
+    def wait_for_selector(self, selector: str, *, state: str, timeout: float) -> _FakeElement:
+        if selector == "#failure-view-details-panel" and self._is_details_redraw_pending:
+            self._is_details_open = True
+        element = self.query_selector(selector)
+        if element is None:
+            raise PlaywrightTimeoutError(f"{selector} not {state} within {timeout}ms")
+        return element
 
     def wait_for_timeout(self, timeout_ms: float) -> None:
         self.wait_for_timeout_calls += 1
@@ -172,11 +202,13 @@ def test_wait_raises_with_surfaced_error_on_failure_view() -> None:
         urls=[_PENDING_URL],
         is_visible_results=[True],
         candidate_pages=[_FakeContentPage(urls=[_PENDING_URL])],
-        error_message="unknown or invalid runtime name: runsc",
+        error_message="Couldn't create alpha. Try again. If this persists, report a bug.",
+        error_details="mngr create failed (exit code 1):\nunknown or invalid runtime name: runsc",
     )
     with pytest.raises(WorkspaceCreateAttemptFailedError) as exc_info:
         wait_for_workspace_ready_or_failure(cast(Browser, creating.browser), cast(Page, creating), timeout_seconds=5)
-    # The surfaced error text rides along so the failure is diagnosable.
+    # The page's sentence names no cause; the raw error behind See details rides along so the failure is diagnosable.
+    assert "Couldn't create alpha." in str(exc_info.value)
     assert "runsc" in str(exc_info.value)
 
 

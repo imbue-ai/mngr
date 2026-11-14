@@ -17,8 +17,9 @@ import m from "mithril";
 import { getAppContext } from "../../app-context";
 import { accountHubRoute } from "../shell/classify";
 import { electronBridge } from "../../electron-bridge";
-import type { CreateFormDefaults } from "../../models/create";
+import type { CreateFormDefaults, CreateSubmitResult } from "../../models/create";
 import { fetchCreateFormDefaults, submitCreateRequest } from "../../models/create";
+import { fallbackErrorSentence } from "../../models/errors";
 import { VERIFICATION_POLL_MS, fetchIsEmailVerified, resendVerificationEmail } from "../../models/emailVerification";
 import { fetchSigninLanding, markOnboardingComplete, recordErrorReportingConsent } from "../../models/onboarding";
 import type { SigninLanding } from "../../models/onboarding";
@@ -74,7 +75,7 @@ import type {
 import { webLogin } from "../../models/webLogin";
 import { createFormModal } from "./CreatePage";
 import type { PresetName } from "./create/form-model";
-import { CreateFormModel, normalizeCreateApiError } from "./create/form-model";
+import { CreateFormModel, createSubmitRefusal } from "./create/form-model";
 import {
   TRANSCRIPT_COLUMN_CLASS,
   agentTurn,
@@ -196,6 +197,19 @@ export function areDefaultsStale(
   accountId: string,
 ): boolean {
   return defaults === null || defaults.account?.user_id !== accountId;
+}
+
+/**
+ * What the start chat says when its cloud create is refused: the refusal's own
+ * sentence, which the create form shows too, or the fallback when it carries
+ * none. A request that got no answer may still have been taken, so it claims
+ * nothing about what was created.
+ */
+export function cloudCreateRefusal(result: CreateSubmitResult): string {
+  if (result.status === 0) return "Imbue Studio didn't respond. Pick again.";
+  const reason = createSubmitRefusal(result, "").message;
+  if (reason === "") return fallbackErrorSentence("I couldn't set that up");
+  return `I couldn't set that up: ${/[.!?]$/.test(reason) ? reason : `${reason}.`}`;
 }
 
 /**
@@ -450,9 +464,7 @@ export const StartPage: m.ClosureComponent = () => {
         enterCreation(result.data.operation_id, true);
         return;
       }
-      const message =
-        result.status === 0 ? "Could not reach the app backend." : normalizeCreateApiError(result.data).message;
-      flow.state = settleCloudCreate(flow.state, `That did not work: ${message}`);
+      flow.state = settleCloudCreate(flow.state, cloudCreateRefusal(result));
       redraw();
     };
     const cached = defaults;
@@ -460,9 +472,9 @@ export const StartPage: m.ClosureComponent = () => {
       cached !== null && !areDefaultsStale(cached, accountId)
         ? Promise.resolve(cached)
         : fetchCreateFormDefaults(null, accountId, true);
-    const fail = (message: string): void => {
+    const fail = (refusal: string): void => {
       isSubmittingCloud = false;
-      flow.state = settleCloudCreate(flow.state, `That did not work: ${message}`);
+      flow.state = settleCloudCreate(flow.state, refusal);
       redraw();
     };
     // The rejection handler belongs to the read it names, not to the whole
@@ -470,9 +482,9 @@ export const StartPage: m.ClosureComponent = () => {
     void ready.then(
       (loaded) => {
         defaults = loaded;
-        return submit(loaded).catch(() => fail("could not send the create request."));
+        return submit(loaded).catch(() => fail(fallbackErrorSentence("I couldn't set that up")));
       },
-      () => fail("could not load the create settings."),
+      () => fail(fallbackErrorSentence("I couldn't load the options for your workspace")),
     );
   }
 

@@ -6,16 +6,20 @@ import type { UiAccountEntry } from "../../channel/messages";
 import type { AnyVnode } from "../../testing";
 import {
   allText,
+  renderDeep,
   attrsOf,
   classTokensOf,
   collectVnodes,
   createFormDefaults,
   jsonResponse,
+  retryPrefill,
   secondAccountEntry,
   settle,
+  withMindsNative,
 } from "../../testing";
 import type { CreateFormDefaults } from "../../models/create";
 import { webLogin } from "../../models/webLogin";
+import { ErrorNotice } from "../components/ErrorDisplay";
 import { DialogCloseButton } from "../components/Modal";
 import type { CreatePageAttrs } from "./CreatePage";
 import {
@@ -28,6 +32,7 @@ import { ENABLE_SHARING_LABEL, SHARING_SENTENCE } from "./workspace/ShareTab";
 import { SLOW_START_WARNING } from "./create/ComputeNotices";
 import { PresetCards } from "./create/PresetCards";
 import type { PresetName } from "./create/form-model";
+import { CREATE_NO_RESPONSE } from "./create/form-model";
 
 // The sign-in the page asks for when Imbue Cloud needs an account: the tests
 // report its outcome through this stand-in rather than run the real flow.
@@ -64,6 +69,8 @@ afterEach(() => {
   clearAppContextForTests();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  // The webLogin stand-in outlives each test; every test counts its calls from zero.
+  vi.mocked(webLogin.start).mockClear();
 });
 
 function byId(root: unknown, id: string): AnyVnode | undefined {
@@ -233,19 +240,111 @@ describe("CreatePage", () => {
   });
 });
 
+/** Press Create: the form's submit, as Enter or the button sends it. */
+function submit(
+  page: m.Component<CreatePageAttrs>,
+  vnode: m.Vnode<CreatePageAttrs>,
+): void {
+  const form = byId(page.view.call(page, vnode), "create-form") as AnyVnode;
+  (attrsOf(form).onsubmit as (event: unknown) => void)({
+    preventDefault: () => undefined,
+  });
+}
+
+describe("CreatePage's refused create", () => {
+  async function refusedBy(answer: () => Promise<Response>): Promise<m.Vnode> {
+    const { page, vnode } = await loadedPage();
+    const simple = page.view.call(page, vnode);
+    const cards = collectVnodes(simple).find((node) => node.tag === PresetCards) as AnyVnode;
+    (attrsOf(cards).onSelect as (name: PresetName) => void)("local");
+    vi.stubGlobal("fetch", answer);
+    submit(page, vnode);
+    await settle();
+    return page.view.call(page, vnode) as m.Vnode;
+  }
+
+  it("draws a refusal that names a field under that field, not at the top", async () => {
+    const view = await refusedBy(() =>
+      Promise.resolve(jsonResponse({ error: "Repository URL is required.", field: "git_url" }, 400)),
+    );
+
+    expect(allText(renderDeep(byId(view, "git_url-error")))).toBe("Repository URL is required.");
+    expect(collectVnodes(view).some((node) => node.tag === ErrorNotice)).toBe(false);
+  });
+
+  it("keeps a refusal at the top when the field it names isn't on the form", async () => {
+    const sentence = "Leave the password out -- Imbue Studio gives each workspace its own.";
+    const view = await refusedBy(() =>
+      Promise.resolve(jsonResponse({ error: sentence, field: "backup_api_key_env" }, 400)),
+    );
+
+    expect(byId(view, "backup_api_key_env-error")).toBeUndefined();
+    const notice = collectVnodes(view).find((node) => node.tag === ErrorNotice) as AnyVnode;
+    expect(attrsOf(notice).error).toEqual({ message: sentence, details: "" });
+  });
+
+  it("words a refusal that carries no sentence of its own with the fallback", async () => {
+    const view = await refusedBy(() =>
+      Promise.resolve(jsonResponse({ errors: [{ field: "git_url", message: "field required" }] }, 422)),
+    );
+
+    const notice = collectVnodes(view).find((node) => node.tag === ErrorNotice) as AnyVnode;
+    expect((attrsOf(notice).error as { message: string }).message).toBe(
+      "Couldn't create the workspace. Try again. If this persists, report a bug.",
+    );
+  });
+
+  it("offers Restart Imbue Studio when the create got no answer", async () => {
+    const retry = vi.fn();
+    await withMindsNative({ retry }, async () => {
+      const view = await refusedBy(() => Promise.reject(new TypeError("Failed to fetch")));
+      const notice = collectVnodes(view).find((node) => node.tag === ErrorNotice) as AnyVnode;
+
+      expect(attrsOf(notice).error).toEqual({ message: CREATE_NO_RESPONSE, details: "" });
+      const actions = attrsOf(notice).actions as { label: string; onclick: () => void }[];
+      expect(actions.map((action) => action.label)).toEqual(["Restart Imbue Studio"]);
+      actions[0].onclick();
+    });
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it("offers Sign in when the create is refused for want of a signed-in account", async () => {
+    const view = await refusedBy(() =>
+      Promise.resolve(
+        jsonResponse(
+          { error: "This account isn't signed in any more. Sign in to it again, then try again.", field: "account_id" },
+          400,
+        ),
+      ),
+    );
+    const notice = collectVnodes(view).find((node) => node.tag === ErrorNotice) as AnyVnode;
+    const actions = attrsOf(notice).actions as { label: string; onclick: () => void }[];
+
+    expect(actions.map((action) => action.label)).toEqual(["Sign in"]);
+    actions[0].onclick();
+    expect(webLogin.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks for a restart, not the auth layer's words, when the create is refused for this window's lapsed login", async () => {
+    const { page, vnode } = await loadedPage();
+    const simple = page.view.call(page, vnode);
+    const cards = collectVnodes(simple).find((node) => node.tag === PresetCards) as AnyVnode;
+    (attrsOf(cards).onSelect as (name: PresetName) => void)("local");
+    vi.stubGlobal("fetch", () => Promise.resolve(jsonResponse({ error: "Not authenticated" }, 401)));
+
+    submit(page, vnode);
+    await settle();
+
+    const notice = collectVnodes(page.view.call(page, vnode)).find((node) => node.tag === ErrorNotice) as AnyVnode;
+    expect(attrsOf(notice).error).toEqual({
+      message: "Imbue Studio needs to restart to reconnect this window.",
+      details: "",
+    });
+  });
+});
+
 describe("CreatePage's sign-in for Imbue Cloud", () => {
   const BOB = secondAccountEntry();
-
-  /** Press Create: the form's submit, as Enter or the button sends it. */
-  function submit(
-    page: m.Component<CreatePageAttrs>,
-    vnode: m.Vnode<CreatePageAttrs>,
-  ): void {
-    const form = byId(page.view.call(page, vnode), "create-form") as AnyVnode;
-    (attrsOf(form).onsubmit as (event: unknown) => void)({
-      preventDefault: () => undefined,
-    });
-  }
 
   it("offers no Imbue Cloud card on the device and opens on this computer instead", async () => {
     const { page, vnode, requests } = await loadedPage(
@@ -298,6 +397,24 @@ describe("CreatePage's sign-in for Imbue Cloud", () => {
       "/ui/api/create/form-defaults?account=local",
       `/ui/api/create/form-defaults?account=${BOB.user_id}`,
     ]);
+  });
+
+  it("moves a retried Imbue Cloud attempt to this computer for Run on this computer, keeping its repository and name", async () => {
+    const prefill = retryPrefill();
+    const { page, vnode } = await loadedPage(
+      { retryId: "create-attempt-w", initialPreset: "local", isImbueCloudRefused: true },
+      createFormDefaults({ prefill }),
+    );
+
+    const view = page.view.call(page, vnode);
+
+    expect(classTokensOf(byId(view, "advanced-view") as AnyVnode)).not.toContain("hidden");
+    expect(attrsOf(byId(view, "launch_mode") as AnyVnode).value).toBe("DOCKER");
+    expect(attrsOf(byId(view, "backup_provider") as AnyVnode).value).toBe("CONFIGURE_LATER");
+    expect(attrsOf(byId(view, "enable_web_access") as AnyVnode)["aria-checked"]).toBe("false");
+    expect(attrsOf(byId(view, "git_url") as AnyVnode).value).toBe(prefill.git_url);
+    expect(attrsOf(byId(view, "branch") as AnyVnode).value).toBe(prefill.branch);
+    expect(attrsOf(byId(view, "host_name") as AnyVnode).value).toBe(prefill.host_name);
   });
 });
 

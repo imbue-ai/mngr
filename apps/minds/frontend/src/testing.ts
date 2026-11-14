@@ -16,6 +16,7 @@ import type { BrowserImportResult } from "./models/browserImport";
 import type {
   ConnectionBackendOption,
   CreateFormDefaults,
+  CreateRetryPrefill,
 } from "./models/create";
 import { createAppQueryClient } from "./models/queryClient";
 import type { SettingsOverview } from "./models/settings";
@@ -258,6 +259,29 @@ export function createFormDefaults(
     prefill: null,
     local_prerequisites: [],
     local_launch_mode: "DOCKER",
+    ...overrides,
+  };
+}
+
+/** A retry's prefill: the settings of an Imbue Cloud attempt under accountEntry's account. */
+export function retryPrefill(overrides: Partial<CreateRetryPrefill> = {}): CreateRetryPrefill {
+  return {
+    git_url: "https://github.com/acme/widgets.git",
+    branch: "main",
+    host_name: "widgets",
+    launch_mode: "IMBUE_CLOUD",
+    docker_runtime: "RUNSC",
+    backup_provider: "IMBUE_CLOUD",
+    backup_api_key_env: "",
+    region: "",
+    cloud_account: "",
+    instance_type: "",
+    cpu_count: null,
+    memory_gb: null,
+    disk_gb: null,
+    color: "#123456",
+    is_onboarding_driven_by_agent: false,
+    unavailable_reason: "",
     ...overrides,
   };
 }

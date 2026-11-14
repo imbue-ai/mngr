@@ -1,3 +1,5 @@
+from collections.abc import Mapping
+
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import MngrError
 
@@ -91,6 +93,9 @@ class ImbueCloudQuotaExceededError(ImbueCloudError):
         self.limit = limit
         self.current = current
 
+    def event_details(self) -> Mapping[str, str | float]:
+        return {"entitlement": self.entitlement, "limit": self.limit, "current": self.current}
+
 
 class ImbueCloudEmailNotVerifiedError(ImbueCloudError):
     """Raised when the connector refuses an action because the account's email is unverified.
@@ -130,6 +135,13 @@ class ImbueCloudAccountError(ImbueCloudError):
 
 class ImbueCloudUserNotFoundError(ImbueCloudAccountError):
     """The connector knows no user for the given id, or no verified account for the given email."""
+
+
+class ImbueCloudPlanRefusedError(ImbueCloudAccountError):
+    """The connector refused a plan switch with a stated reason (e.g. the ally plan needs a paid-listed email).
+
+    The message is the connector's reason. Retrying cannot change the answer.
+    """
 
 
 class ImbueCloudRateLimitedError(ImbueCloudAccountError):

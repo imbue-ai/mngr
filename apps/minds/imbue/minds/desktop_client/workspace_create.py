@@ -602,16 +602,14 @@ def build_backup_request_or_error(
     if backup_provider is BackupProvider.CONFIGURE_LATER:
         return BackupSetupRequest(backup_provider=BackupProvider.CONFIGURE_LATER), None
     if backup_provider is BackupProvider.IMBUE_CLOUD and not account_email:
-        return None, (
-            "imbue_cloud backups require a selected account. Choose an account or pick a different backup provider."
-        )
+        return None, "Backups to Imbue Cloud need a signed-in account. Sign in, or turn backups off."
     # The user never sets the repository password: Imbue Studio initializes the repo
     # and assigns each workspace its own random RESTIC_PASSWORD, so reject it
     # if a user puts one in the api_key env block.
     if backup_provider is BackupProvider.API_KEY and env_text_defines_restic_password(api_key_env):
         return None, (
-            "Don't set RESTIC_PASSWORD in the backup env -- Imbue Studio assigns each workspace its own random "
-            "repository password. Provide RESTIC_REPOSITORY and any backend credentials only."
+            "Leave the password out -- Imbue Studio gives each workspace its own. "
+            "Provide only the backup location and the keys it needs."
         )
     return (
         BackupSetupRequest(
