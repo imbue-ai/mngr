@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-14
+
+Alpha moves to Imbue Studio 0.10.4 on mac, Linux and the web: `[channels.alpha]` points at build `261114pjrwvyx8y` (version 0.10.4, `fallback_branch` `minds-v0.10.4`, 100%, mac gated at `minimumSystemVersion` 22.0.0) and `[web_channels.alpha]` at `minds-v0.10.4`, so alpha desktops take the 0.10.4 update and alpha browser creates lease the `minds-v0.10.4` rows production is baked at. Beta and stable stay on 0.9.4.
+
 ## 2026-11-13
 
 Removed the "How should Imbue Studio notify you?" card that appeared after the first notification. Notifications now stay on the default (in-app cards and system banners) until changed in Settings > Notifications. The settings overview's `notification_prefs` no longer carries `has_chosen`.

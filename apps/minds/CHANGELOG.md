@@ -184,7 +184,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Notifications (feed, toast, OS banner) when an Imbue account is signed out by session expiry or a workspace stops responding and cannot be restarted.
 - Added: The titlebar account switcher marks accounts with no session on this device as "(signed out)" and offers a per-row "Sign in".
 - Added: `custom-service` permission requests may use Latchkey 3.22.0's `mcp` login flow, checked against the metadata the MCP server publishes.
-- Added: Released Imbue Studio 0.10.4, a patch over 0.10.3 pinning template `minds-v0.10.4` (Claude Code 2.1.323 / Claude Fable 5.2, Codex 0.169.0, OpenCode 1.19.5), carrying the error-copy rewrite, system-browser sign-ins, latchkey 3.24.0 and paramiko 5.0.1.
+- Added: Released Imbue Studio 0.10.4, a patch over 0.10.3 pinning template `minds-v0.10.4` (Claude Code 2.1.323 / Claude Fable 5.2, Codex 0.169.0, OpenCode 1.19.5), carrying the error-copy rewrite, system-browser sign-ins, latchkey 3.24.0 and paramiko 5.0.1, and promoted it to the alpha desktop (mac, Linux) and browser channels; beta and stable stay on 0.9.4.
 
 ### Changed
 
