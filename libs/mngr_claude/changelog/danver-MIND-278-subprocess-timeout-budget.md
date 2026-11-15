@@ -1,0 +1,1 @@
+The two `provision()` remote-trust tests no longer carry a hand-written 30-second `pytest-timeout`. Both run the local `claude --version` check as a real subprocess, so both now inherit the 60 seconds imbue-common gives any test running a child program.

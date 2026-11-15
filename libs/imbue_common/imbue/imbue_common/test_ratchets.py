@@ -4,6 +4,7 @@ import pytest
 from inline_snapshot import snapshot
 
 from imbue.imbue_common.ratchet_testing import standard_ratchet_checks as rc
+from imbue.imbue_common.ratchet_testing.ratchets import TEST_FILE_PATTERNS
 
 _DIR = Path(__file__).parent.parent.parent
 
@@ -258,7 +259,8 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(13))
+    excluded = TEST_FILE_PATTERNS + ("pytest_subprocess_budget.py",)
+    rc.check_direct_subprocess(_DIR, snapshot(13), excluded_patterns=excluded)
 
 
 def test_prevent_bare_tmux_targets() -> None:

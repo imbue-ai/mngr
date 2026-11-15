@@ -265,7 +265,6 @@ def test_no_type_errors() -> None:
     check_no_type_errors(_REPO_ROOT)
 
 
-@pytest.mark.timeout(30)
 def test_no_ruff_errors() -> None:
     """Ensure all Python files pass ruff lint and format checks repo-wide.
 

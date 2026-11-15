@@ -50,6 +50,7 @@ from uuid import uuid4
 import pytest
 from coverage.exceptions import CoverageException
 
+from imbue.imbue_common.pytest_subprocess_budget import pytest_timeout_set_timer as _pytest_timeout_set_timer
 from imbue.imbue_common.ratchet_testing.standard_ratchet_checks import preload_ratchet_scan_for_test
 from imbue.imbue_common.test_profiles import ScopedProfile
 from imbue.imbue_common.test_profiles import resolve_active_profile
@@ -1060,6 +1061,7 @@ def register_conftest_hooks(namespace: dict) -> None:
     namespace["pytest_addoption"] = _pytest_addoption
     namespace["pytest_configure"] = _pytest_configure
     namespace["pytest_collection_modifyitems"] = _pytest_collection_modifyitems
+    namespace["pytest_timeout_set_timer"] = _pytest_timeout_set_timer
     namespace["pytest_collection_finish"] = _pytest_collection_finish
     namespace["pytest_runtest_setup"] = _pytest_runtest_setup
     namespace["pytest_terminal_summary"] = _pytest_terminal_summary

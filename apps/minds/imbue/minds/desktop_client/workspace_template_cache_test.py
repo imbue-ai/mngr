@@ -189,7 +189,6 @@ def test_a_create_before_any_prefetch_clones_without_waiting(
     assert cache.status is WorkspaceTemplateCacheStatus.IDLE
 
 
-@pytest.mark.timeout(30)
 def test_a_create_during_the_prefetch_copies_once_it_finishes(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:

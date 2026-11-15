@@ -124,7 +124,6 @@ def _make_release_served_over_dumb_http(tmp_path: Path, payload_bytes: int) -> t
     return origin, bare
 
 
-@pytest.mark.timeout(30)
 def test_a_clone_step_that_outruns_its_timeout_fails_the_clone(tmp_path: Path) -> None:
     with _unanswered_git_remote() as url:
         started_at = time.monotonic()
@@ -135,7 +134,6 @@ def test_a_clone_step_that_outruns_its_timeout_fails_the_clone(tmp_path: Path) -
         assert time.monotonic() - started_at < 10.0
 
 
-@pytest.mark.timeout(30)
 def test_the_missing_ref_probe_after_a_failed_fetch_gives_up_at_the_clone_timeout(tmp_path: Path) -> None:
     with _unanswered_git_remote(refused_request_count=1) as url:
         started_at = time.monotonic()
@@ -146,7 +144,6 @@ def test_the_missing_ref_probe_after_a_failed_fetch_gives_up_at_the_clone_timeou
         assert time.monotonic() - started_at < 10.0
 
 
-@pytest.mark.timeout(30)
 def test_a_create_stops_waiting_on_a_stalled_prefetch_which_gives_up_on_its_own(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
@@ -204,7 +201,6 @@ def test_a_create_waits_out_a_slow_prefetch_that_is_still_receiving_data(
     assert _git(copied, "rev-parse", "HEAD") == _git(origin, "rev-parse", f"{_RELEASE_TAG}^{{commit}}")
 
 
-@pytest.mark.timeout(30)
 def test_a_failed_prefetch_is_retried_after_its_wait(tmp_path: Path, root_concurrency_group: ConcurrencyGroup) -> None:
     origin, bare = _make_release_served_over_dumb_http(tmp_path, payload_bytes=1000)
 

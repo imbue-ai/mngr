@@ -102,10 +102,6 @@ def test_cli_create_via_subprocess(
         )
 
 
-# Shells out to `uv run mngr create`, whose subprocess startup (uv resolve + plugin
-# load) is slow and variable under CI load and intermittently exceeds the default
-# 10s pytest-timeout. Bump it to match the sibling subprocess-create test above.
-@pytest.mark.timeout(30)
 def test_cli_create_rejects_dirty_tree_by_default(
     temp_git_repo: Path,
     temp_host_dir: Path,
@@ -1451,7 +1447,6 @@ def test_cli_create_from_git_url(
 # Shells out to `uv run mngr create` like the sibling subprocess tests, so the
 # JSONL stream is the one a real caller reads off stdout.
 @pytest.mark.tmux
-@pytest.mark.timeout(30)
 def test_cli_create_jsonl_streams_progress_before_the_created_event(
     temp_work_dir: Path,
     temp_host_dir: Path,

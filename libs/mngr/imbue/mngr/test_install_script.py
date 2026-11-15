@@ -12,8 +12,6 @@ import subprocess
 import textwrap
 from pathlib import Path
 
-import pytest
-
 from imbue.mngr.utils.testing import write_executable_script
 
 _THIS_DIR = Path(__file__).resolve().parent
@@ -101,7 +99,6 @@ def _run_install_sh(env: dict[str, str], cwd: Path) -> subprocess.CompletedProce
     )
 
 
-@pytest.mark.timeout(30)
 def test_install_sh_upgrades_when_mngr_already_installed(tmp_path: Path) -> None:
     """When uv reports imbue-mngr already installed, run `uv tool upgrade` (not install)."""
     bin_dir = tmp_path / "bin"
@@ -125,7 +122,6 @@ def test_install_sh_upgrades_when_mngr_already_installed(tmp_path: Path) -> None
     assert "To use mngr, restart your shell" not in result.stdout
 
 
-@pytest.mark.timeout(30)
 def test_install_sh_tells_user_to_reload_shell_after_installing_uv(tmp_path: Path) -> None:
     """When uv is freshly installed, mngr is only on PATH via uv's env file, so the user's shell cannot see it yet."""
     bin_dir = tmp_path / "bin"
@@ -149,7 +145,6 @@ def test_install_sh_tells_user_to_reload_shell_after_installing_uv(tmp_path: Pat
     assert 'To use mngr, restart your shell or run:  source "$HOME/.local/bin/env"' in result.stdout
 
 
-@pytest.mark.timeout(30)
 def test_install_sh_installs_when_mngr_not_present(tmp_path: Path) -> None:
     """When uv reports no imbue-mngr, run `uv tool install` (not upgrade)."""
     bin_dir = tmp_path / "bin"
@@ -171,7 +166,6 @@ def test_install_sh_installs_when_mngr_not_present(tmp_path: Path) -> None:
     assert "mngr config wizard" in calls
 
 
-@pytest.mark.timeout(30)
 def test_install_sh_errors_when_mngr_not_on_path_after_install(tmp_path: Path) -> None:
     """If `command -v mngr` fails after `uv tool install`, exit with a PATH error.
 
@@ -202,7 +196,6 @@ def test_install_sh_errors_when_mngr_not_on_path_after_install(tmp_path: Path) -
     assert "is not on your PATH" in result.stderr
 
 
-@pytest.mark.timeout(30)
 def test_install_sh_continues_when_dependencies_fail(tmp_path: Path) -> None:
     """A failure in `mngr dependencies --install interactive` must not abort step 4 (`mngr extras -i`).
 
@@ -228,7 +221,6 @@ def test_install_sh_continues_when_dependencies_fail(tmp_path: Path) -> None:
     assert "Some dependencies could not be installed" in result.stderr
 
 
-@pytest.mark.timeout(30)
 def test_install_sh_continues_when_extras_fail(tmp_path: Path) -> None:
     """A failure in `mngr extras -i` must not abort the script."""
     bin_dir = tmp_path / "bin"
@@ -254,7 +246,6 @@ def test_install_sh_continues_when_extras_fail(tmp_path: Path) -> None:
     assert "Get started with: mngr --help" in result.stdout
 
 
-@pytest.mark.timeout(30)
 def test_install_sh_continues_when_config_wizard_fails(tmp_path: Path) -> None:
     """A failure in `mngr config wizard` (step 5) must not abort the script."""
     bin_dir = tmp_path / "bin"

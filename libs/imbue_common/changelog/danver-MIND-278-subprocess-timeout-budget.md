@@ -1,0 +1,5 @@
+A test that runs a real child program -- a bash script, git, a fresh interpreter, a nested pytest -- now gets 60 seconds instead of the repo-wide 10-second `pytest-timeout` default, which was sized for work that stays inside the pytest process.
+
+The budget follows what the test actually does rather than a marker someone has to remember: the first time a test's call phase starts a child program, its deadline moves out to the class budget. A test that starts nothing keeps the tight 10-second deadline, and a test that declares a `@pytest.mark.timeout` of its own still wins. When an extended deadline does fire, the failure reports the budget that was enforced, not the one it replaced.
+
+This is what was turning CI red: measured across the suite's 25,676 tests, the 3,326 that start a child program cost p99 5.1s and p999 8.9s on the offload runners, so a loaded runner regularly pushed them past 10s even though nothing was wrong with the product. The other 22,350 tests cost p99 0.71s and are unaffected either way.

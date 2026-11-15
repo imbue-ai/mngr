@@ -528,7 +528,6 @@ def test_lock_timeout(host_with_temp_dir: tuple[Host, Path]) -> None:
 
 
 @pytest.mark.acceptance
-@pytest.mark.timeout(30)
 def test_remote_lock_cooperatively_releases_lock_on_error(
     ssh_host_factory: Callable[[str], Host],
 ) -> None:
@@ -547,7 +546,6 @@ def test_remote_lock_cooperatively_releases_lock_on_error(
 
 
 @pytest.mark.acceptance
-@pytest.mark.timeout(30)
 def test_remote_lock_cooperatively_retains_lock_on_error_when_env_var_set(
     ssh_host_factory: Callable[[str], Host],
     monkeypatch: pytest.MonkeyPatch,
@@ -572,7 +570,6 @@ def test_remote_lock_cooperatively_retains_lock_on_error_when_env_var_set(
 
 
 @pytest.mark.acceptance
-@pytest.mark.timeout(30)
 def test_remote_lock_cooperatively_releases_lock_on_success(
     ssh_host_factory: Callable[[str], Host],
 ) -> None:

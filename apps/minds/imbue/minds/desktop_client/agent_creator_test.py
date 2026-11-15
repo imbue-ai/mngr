@@ -1468,7 +1468,6 @@ def test_clone_git_repo_raises_on_missing_branch(tmp_path: Path) -> None:
         clone_git_repo(GitUrl("file://{}".format(origin)), dest, branch=GitBranch("nonexistent"))
 
 
-@pytest.mark.timeout(30)
 def test_clone_git_repo_raises_on_missing_branch_despite_a_ref_ending_in_its_name(tmp_path: Path) -> None:
     """``ls-remote`` tail-matches patterns, so a bare ``main`` probe would match
     ``refs/heads/release/main``; the probe is qualified so ``git fetch``'s
@@ -1481,7 +1480,6 @@ def test_clone_git_repo_raises_on_missing_branch_despite_a_ref_ending_in_its_nam
         clone_git_repo(GitUrl("file://{}".format(origin)), tmp_path / "clone", branch=GitBranch("main"))
 
 
-@pytest.mark.timeout(30)
 def test_clone_git_repo_does_not_call_a_missing_commit_sha_a_missing_ref(tmp_path: Path) -> None:
     """A full SHA is never probed with ``ls-remote`` (which lists refs, not
     commits), so an unknown SHA stays a plain clone failure."""
@@ -1519,7 +1517,6 @@ def _serve_always_unauthorized_git_remote() -> Generator[GitUrl, None, None]:
         thread.join(timeout=5)
 
 
-@pytest.mark.timeout(30)
 def test_clone_git_repo_fails_fast_with_auth_shaped_error_when_remote_requires_auth(tmp_path: Path) -> None:
     """A remote that answers with an auth challenge fails the clone quickly and
     with an authentication-shaped error, instead of hanging on a credential
@@ -1537,7 +1534,6 @@ def test_clone_git_repo_fails_fast_with_auth_shaped_error_when_remote_requires_a
     assert "terminal prompts disabled" in message or "Authentication failed" in message, message
 
 
-@pytest.mark.timeout(30)
 def test_clone_git_repo_with_a_branch_on_a_remote_that_requires_auth_is_not_a_missing_ref(tmp_path: Path) -> None:
     """When the remote never answers with its refs, the ``ls-remote`` probe
     fails too (exit 128, not 2), so the failure stays a plain clone error
@@ -1639,7 +1635,6 @@ def _fail_a_create_on_a_missing_ref(
     return error_records
 
 
-@pytest.mark.timeout(30)
 def test_a_create_naming_a_missing_branch_fails_as_ref_not_found_without_an_error_log(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1650,7 +1645,6 @@ def test_a_create_naming_a_missing_branch_fails_as_ref_not_found_without_an_erro
     assert error_records == []
 
 
-@pytest.mark.timeout(30)
 def test_a_missing_ref_on_the_default_template_repo_still_logs_an_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2081,9 +2075,9 @@ def _wait_until_finished(
     """Poll ``get_create_attempt_info`` until status is DONE or FAILED, then return.
 
     The deadline is only a ceiling -- the loop returns the instant the status is
-    terminal, so a passing test never waits for it. It is set to 30s (matching the
-    ``@pytest.mark.timeout(30)`` on the create attempt tests) so heavy setup under
-    offload CI contention does not trip a spurious timeout at the old 10s.
+    terminal, so a passing test never waits for it. It is set below the budget these tests
+    get for running real child processes, so an attempt that never finishes is reported here,
+    by this assertion, rather than killed from outside by pytest-timeout.
     """
     deadline = time.monotonic() + deadline_seconds
     while time.monotonic() < deadline:
@@ -2094,7 +2088,6 @@ def _wait_until_finished(
     raise AssertionError(f"create attempt {create_attempt_id} did not finish within {deadline_seconds}s")
 
 
-@pytest.mark.timeout(30)
 def test_start_create_attempt_never_mints_a_litellm_key(tmp_path: Path) -> None:
     """CreateAttempt injects no Anthropic credentials: even with an imbue_cloud
     account supplied (for compute/backups), no LiteLLM key is minted -- the
@@ -2392,7 +2385,6 @@ def test_start_create_attempt_writes_pending_record_before_spawn(tmp_path: Path)
     creator.wait_for_all()
 
 
-@pytest.mark.timeout(30)
 def test_failed_create_attempt_marks_pending_record_failed_with_log_tail(tmp_path: Path) -> None:
     store = PendingCreateAttemptStore(records_dir=tmp_path / "pending")
     creator = _make_test_creator(tmp_path, pending_create_attempt_store=store)
@@ -2414,6 +2406,10 @@ def test_failed_create_attempt_marks_pending_record_failed_with_log_tail(tmp_pat
     assert record.log_tail, "the FAILED record must carry the create attempt log tail"
 
 
+# The credential check fails before any build, so this is the only create-attempt test that
+# runs no child process -- and running one is what earns the wider budget the shared conftest
+# hands out (imbue_common/pytest_subprocess_budget.py). It keeps a budget of its own because
+# ``_wait_until_finished`` may wait 30s, which is past the repo-wide default.
 @pytest.mark.timeout(30)
 def test_a_private_pin_without_a_credential_fails_the_create_attempt_with_the_remedy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2542,7 +2538,6 @@ def _install_fake_vault_and_recording_mngr(tmp_path: Path, monkeypatch: pytest.M
     return record
 
 
-@pytest.mark.timeout(30)
 @pytest.mark.parametrize("repo_url", [INTERNAL_MNGR_REPO_URL, PUBLIC_MNGR_REPO_URL])
 def test_run_mngr_create_hands_a_private_pin_credential_to_the_subprocess_and_a_public_pin_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo_url: str
@@ -2582,7 +2577,6 @@ class _TerminalWriteFailingPendingCreateAttemptStore(PendingCreateAttemptStore):
         super().write_record(record)
 
 
-@pytest.mark.timeout(30)
 def test_create_attempt_survives_pending_store_write_failure_on_terminal_flip(tmp_path: Path) -> None:
     """Store write errors are downgraded to warnings, never thread crashes.
 
@@ -2714,7 +2708,6 @@ def test_list_create_attempt_infos_snapshots_every_tracked_create_attempt(tmp_pa
     creator.wait_for_all()
 
 
-@pytest.mark.timeout(30)
 def test_on_create_attempts_changed_fires_on_start_and_terminal_state(tmp_path: Path) -> None:
     fired = threading.Event()
     fire_count: list[int] = []
@@ -2847,7 +2840,6 @@ def test_implicit_discard_deletes_record_when_no_leftover_host_exists(tmp_path: 
     assert store.read_record(dead_record.create_attempt_id) is None
 
 
-@pytest.mark.timeout(30)
 def test_canonical_agent_id_is_published_during_ready_wait(tmp_path: Path, monkeypatch) -> None:
     """The workspace-list handoff (``derive_create_attempt_rows``) suppresses the
     "Creating..." row by matching ``info.agent_id`` against discovered ids. The id
@@ -2888,7 +2880,6 @@ def test_canonical_agent_id_is_published_during_ready_wait(tmp_path: Path, monke
         creator.wait_for_all()
 
 
-@pytest.mark.timeout(30)
 def test_create_attempts_change_after_canonical_ids_follows_the_host_permissions_link(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -3025,7 +3016,6 @@ def _create_log(creator: AgentCreator, create_attempt_id: CreateAttemptId) -> tu
     return log_sink.tail_lines(CREATE_ATTEMPT_LOG_REPLAY_MAX_LINES)
 
 
-@pytest.mark.timeout(30)
 def test_a_create_of_the_cached_template_release_runs_mngr_create_in_a_copy_of_the_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
 ) -> None:
@@ -3047,7 +3037,6 @@ def test_a_create_of_the_cached_template_release_runs_mngr_create_in_a_copy_of_t
     assert not any(line.startswith("[Imbue Studio] Cloning") for line in create_log)
 
 
-@pytest.mark.timeout(30)
 def test_a_create_clones_from_the_network_when_the_cached_copy_is_gone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_concurrency_group: ConcurrencyGroup
 ) -> None:
@@ -3068,7 +3057,6 @@ def test_a_create_clones_from_the_network_when_the_cached_copy_is_gone(
     assert cache.status is WorkspaceTemplateCacheStatus.UNAVAILABLE
 
 
-@pytest.mark.timeout(30)
 @pytest.mark.parametrize(
     ("error_class", "message"),
     [
@@ -3105,7 +3093,6 @@ def test_an_account_refused_create_fails_the_attempt_without_an_error_log(
     assert error_records == []
 
 
-@pytest.mark.timeout(30)
 def test_a_create_failing_for_any_other_reason_still_logs_an_error(tmp_path: Path, monkeypatch) -> None:
     install_stub_mngr_on_path(tmp_path / "fake-bin", monkeypatch, 'if [ "$1" = "create" ]; then exit 1; fi\nexit 0')
     creator = _make_test_creator(tmp_path)
