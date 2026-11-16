@@ -57,7 +57,8 @@
  *       refuses file-sharing requests with HTTP 503.
  *       For ``type=="custom-service"`` the payload is
  *         ``{domain: <hostname>, scheme: "https"|"http", login: {url, flow, flow_params}|null,
- *           header: <header line with {token}>|null, credential_instructions: <text>|null}``,
+ *           header: <header line with {token}>|null, credential_instructions: <text>|null,
+ *           proxy?: <boolean>}``,
  *       a request to reach an origin the asking workspace's latchkey has no
  *       service for: the desktop creates the service unless it already has
  *       it, and grants this workspace access to it, in one decision.
@@ -87,6 +88,8 @@
  *       ``credential_instructions`` is optional plain text, at most 500
  *       characters and likewise only without ``login``: the agent's note on where
  *       the user finds the credential, shown beside the input they paste it into.
+ *       ``proxy: true`` asks for the same thing it does on a ``predefined``
+ *       request, for the service being connected.
  *       There is deliberately **no** display-name field -- a custom service is
  *       labelled by its origin, which is the one string that cannot
  *       misdescribe what it reaches. The effect is always empty: the desktop
@@ -1023,6 +1026,20 @@ function validateOptionalAccount(rawAccount, fieldPrefix) {
 }
 
 /**
+ * Validate a payload's optional ``proxy`` field. Returns whether the request
+ * asks for a proxy; an absent field, ``null`` and ``false`` all ask for none.
+ */
+function validateOptionalProxy(rawProxy) {
+  if (rawProxy === undefined || rawProxy === null) {
+    return false;
+  }
+  if (typeof rawProxy !== 'boolean') {
+    throw new InvalidRequestBodyError("payload.'proxy' must be a boolean when present.");
+  }
+  return rawProxy;
+}
+
+/**
  * Validate the payload object for a ``predefined`` permission request.
  * Returns the canonical payload shape (``{scope, permissions, account}``,
  * plus ``proxy: true`` when the request asked for one).
@@ -1046,15 +1063,10 @@ function validatePredefinedPayload(payload) {
     permissions: [...payload.permissions],
     account: validateOptionalAccount(payload.account, 'payload.'),
   };
-  if (payload.proxy !== undefined && payload.proxy !== null) {
-    if (typeof payload.proxy !== 'boolean') {
-      throw new InvalidRequestBodyError("payload.'proxy' must be a boolean when present.");
-    }
-    // Only an ask is stored: a request that asks for no proxy reads the same
-    // whether it said so or said nothing.
-    if (payload.proxy) {
-      canonical.proxy = true;
-    }
+  // Only an ask is stored: a request that asks for no proxy reads the same
+  // whether it said so or said nothing.
+  if (validateOptionalProxy(payload.proxy)) {
+    canonical.proxy = true;
   }
   return canonical;
 }
@@ -1359,7 +1371,8 @@ function validateCustomServiceLogin(login, domain, scheme) {
 
 /**
  * Validate the payload object for a ``custom-service`` permission request.
- * Returns the canonical payload shape (``{domain, scheme, login, header, credential_instructions}``).
+ * Returns the canonical payload shape (``{domain, scheme, login, header, credential_instructions}``,
+ * plus ``proxy: true`` when the request asked for one).
  *
  * There is deliberately no display-name field. A custom service is labelled by
  * its origin, because that is the one string that cannot misdescribe what the
@@ -1371,7 +1384,11 @@ function validateCustomServicePayload(payload) {
   if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
     throw new InvalidRequestBodyError("'payload' must be a JSON object for type 'custom-service'.");
   }
-  ensureNoExtraneousFields('payload ', ['domain', 'scheme', 'login', 'header', 'credential_instructions'], payload);
+  ensureNoExtraneousFields(
+    'payload ',
+    ['domain', 'scheme', 'login', 'header', 'credential_instructions', 'proxy'],
+    payload,
+  );
   const domain = validateCustomServiceDomain(payload.domain);
   const scheme = validateCustomServiceScheme(payload.scheme);
   const login = validateCustomServiceLogin(payload.login, domain, scheme);
@@ -1393,7 +1410,11 @@ function validateCustomServicePayload(payload) {
     }
     credentialInstructions = validateCredentialInstructions(payload.credential_instructions);
   }
-  return { domain, scheme, login, header, credential_instructions: credentialInstructions };
+  const canonical = { domain, scheme, login, header, credential_instructions: credentialInstructions };
+  if (validateOptionalProxy(payload.proxy)) {
+    canonical.proxy = true;
+  }
+  return canonical;
 }
 
 /**

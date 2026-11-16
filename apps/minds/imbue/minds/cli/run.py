@@ -548,12 +548,11 @@ def run(
     # seconds of work; started here so the first Permissions tab open finds it
     # done rather than paying for it under a spinner.
     machine_operator.access.warm()
+    services_catalog = ServicesCatalog(latchkey_directory=latchkey.latchkey_directory, is_including_every_machine=True)
     latchkey_permission_handler = LatchkeyPermissionGrantHandler(
         data_dir=data_directory,
         latchkey=latchkey,
-        services_catalog=ServicesCatalog(
-            latchkey_directory=latchkey.latchkey_directory, is_including_every_machine=True
-        ),
+        services_catalog=services_catalog,
         mngr_message_sender=mngr_message_sender,
         gateway_client=gateway_client,
         carry_grant_to_machine=machine_operator.connect_service_with_permissions,
@@ -588,8 +587,13 @@ def run(
         data_dir=data_directory,
         latchkey=latchkey,
         gateway_client=gateway_client,
+        services_catalog=services_catalog,
         mngr_message_sender=mngr_message_sender,
         carry_grant_to_machine=machine_operator.connect_service_with_permissions,
+        carry_grant_and_desktop_egress_rules_to_machine=(
+            machine_operator.connect_service_with_permissions_and_desktop_egress_rules
+        ),
+        refresh_machine_copies=machine_operator.refresh,
     )
     remote_execution_handler = RemoteExecutionGrantHandler(
         data_dir=data_directory,

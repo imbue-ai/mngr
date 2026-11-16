@@ -1711,13 +1711,15 @@ def create_custom_service_permission_request(
     login: CustomServiceLogin | None = None,
     header: str | None = None,
     credential_instructions: str | None = None,
+    proxy: bool = False,
 ) -> StreamedPermissionRequest:
     """Build a custom-service permission request as the gateway would stream it.
 
     ``login`` is the browser sign-in when the service has one; ``None`` is the
     other real case, where the user supplies a token instead, sent as ``header``
     (or the bearer default), with ``credential_instructions`` saying where it
-    comes from.
+    comes from. ``proxy`` is whether it also asks for the service's requests to
+    leave through the approving computer.
     """
     return _streamed_request(
         agent_id=agent_id,
@@ -1729,6 +1731,7 @@ def create_custom_service_permission_request(
             login=login,
             header=header,
             credential_instructions=credential_instructions,
+            proxy=proxy,
         ),
         target="/tmp/permissions.json",
     )

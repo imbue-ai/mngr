@@ -55,6 +55,13 @@ Approve does three things, in this order:
    and a rule referring to a definition the file does not have fails detent's
    whole check for that host.
 
+A request may also ask for a *proxy*, exactly as a predefined one may (see
+:mod:`.requested_proxy`). When the dialog's switch was left on, the machine is
+read back before anything is registered here -- the read adopts the machine's
+custom services and credentials over whatever this computer has not pushed
+yet -- and this computer is put first on the new service's route in the change
+that carries the grant to the machine.
+
 A failure at any step leaves the request **pending** with no response event, so
 the user can fix the problem and click Approve again. That is the same contract
 :mod:`.predefined` has, and it matters here because the flow has more ways to
@@ -64,7 +71,9 @@ The account handling is much simpler than :mod:`.predefined`'s. That handler has
 to reconcile a dialog's account picker against whatever latchkey has stored; a
 service being *created* has no accounts at all, so there is nothing to pick
 between and the only question is how to establish the first one. A retry after
-a failed sign-in finds the service registered and goes straight to the sign-in.
+a failed sign-in finds the service registered and goes straight to the sign-in,
+unless the approval sets a route: its read of the machine drops a registration
+that was never pushed, so the retry registers the service again first.
 """
 
 import json
@@ -95,6 +104,15 @@ from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_CUST
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.recovery import maybe_recover_host_permissions
+from imbue.minds.desktop_client.latchkey.handlers.requested_proxy import PROXY_FIELD
+from imbue.minds.desktop_client.latchkey.handlers.requested_proxy import PROXY_NO_LONGER_SUPPORTED_SENTENCE
+from imbue.minds.desktop_client.latchkey.handlers.requested_proxy import ProxyNoLongerSupportedError
+from imbue.minds.desktop_client.latchkey.handlers.requested_proxy import RequestedProxyError
+from imbue.minds.desktop_client.latchkey.handlers.requested_proxy import build_requested_proxy
+from imbue.minds.desktop_client.latchkey.handlers.requested_proxy import carry_grant_with_desktop_egress
+from imbue.minds.desktop_client.latchkey.handlers.requested_proxy import decide_desktop_egress
+from imbue.minds.desktop_client.latchkey.handlers.requested_proxy import format_proxy_failed_message
+from imbue.minds.desktop_client.latchkey.handlers.requested_proxy import format_route_note
 from imbue.minds.desktop_client.latchkey.handlers.resolution import resolve_request
 from imbue.minds.desktop_client.latchkey.machine_latchkey import machine_latchkey_for_host
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
@@ -102,6 +120,7 @@ from imbue.minds.desktop_client.latchkey.machine_operations import describe_mach
 from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
 from imbue.minds.desktop_client.latchkey.permission_overview import probe_system_browser_login_support
 from imbue.minds.desktop_client.latchkey.permission_overview import resolve_workspace_host_id
+from imbue.minds.desktop_client.latchkey.permission_toggles import PermissionToggleError
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.request_handler import RequestDetailPayload
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
@@ -143,6 +162,7 @@ from imbue.mngr_latchkey.mcp_metadata import FetchJson
 from imbue.mngr_latchkey.mcp_metadata import McpLoginVerdictKind
 from imbue.mngr_latchkey.mcp_metadata import describe_published_authorization_servers
 from imbue.mngr_latchkey.mcp_metadata import verify_mcp_login
+from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.services_catalog import WILDCARD_PERMISSION_NAME
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
@@ -332,6 +352,12 @@ class CustomServiceGrantHandler(RequestEventHandler):
             "extension and ``DELETE /permission-requests/<id>`` on its ``permission-requests`` extension."
         ),
     )
+    services_catalog: ServicesCatalog = Field(
+        description=(
+            "The desktop's catalog, which names the custom services of every machine this computer manages; "
+            "what a requested proxy's route and the grants it needs are built from."
+        ),
+    )
     mngr_message_sender: MngrMessageSender = Field(
         description="Nudges the request's chat with the verdict on resolution (see :mod:`.messaging`).",
     )
@@ -343,6 +369,21 @@ class CustomServiceGrantHandler(RequestEventHandler):
             "in the same script, ahead of the credential, read from the machine store it was written to -- "
             "its gateway cannot route a request to a service its config does not name. A no-op for a "
             "workspace whose agents run on this computer."
+        ),
+    )
+    carry_grant_and_desktop_egress_rules_to_machine: Callable[[str, str, str], None] = Field(
+        description=(
+            "What ``carry_grant_to_machine`` does, with the desktop egress rules of the workspace pushed in "
+            "the same change: how a grant that also changes the service's route reaches the machine, once "
+            "the route has been written here. Raises MachineOperationError when the machine does not take it."
+        ),
+    )
+    refresh_machine_copies: Callable[[str], None] = Field(
+        description=(
+            "Makes this computer's copies of the asking agent's workspace say what its machine holds, "
+            "blocking until they do. Run before an approval that sets a route registers or edits anything "
+            "here, because the route write rebuilds every service's route from the copy here and pushes the "
+            "result whole. Raises MachineOperationError when the machine cannot be read."
         ),
     )
     fetch_well_known_json: FetchJson = Field(
@@ -377,7 +418,8 @@ class CustomServiceGrantHandler(RequestEventHandler):
         ws_name = resolve_workspace_display_name(
             backend_resolver, parsed_agent_id, fallback=permission_request.agent_id
         )
-        machine_latchkey = self._machine_latchkey_for_dialog(backend_resolver, parsed_agent_id)
+        host_id = resolve_workspace_host_id(backend_resolver, str(parsed_agent_id))
+        machine_latchkey = self._machine_latchkey_for_dialog(host_id)
         service_name = custom_service_name(payload.domain, payload.scheme)
         existing = self._existing_registration(machine_latchkey, service_name)
         return UiCustomServicePermissionDetail(
@@ -394,6 +436,14 @@ class CustomServiceGrantHandler(RequestEventHandler):
             ),
             credential_header=_credential_header(existing, payload),
             rationale=permission_request.rationale,
+            proxy=build_requested_proxy(
+                latchkey=self.latchkey,
+                gateway_client=self.gateway_client,
+                services_catalog=self.services_catalog,
+                is_proxy_requested=payload.proxy,
+                host_id=host_id,
+                service_name=service_name,
+            ),
         )
 
     def apply_grant_request(
@@ -430,6 +480,33 @@ class CustomServiceGrantHandler(RequestEventHandler):
                 _connection_setup_failed_sentence(payload.domain), status_code=400, detail=str(e)
             )
         service_name = custom_service_name(domain, payload.scheme)
+
+        try:
+            desktop_egress = decide_desktop_egress(
+                latchkey=self.latchkey,
+                gateway_client=self.gateway_client,
+                services_catalog=self.services_catalog,
+                is_proxy_requested=payload.proxy,
+                host_id=host_id,
+                service_name=service_name,
+                raw_proxy=request.form.get(PROXY_FIELD),
+            )
+        except ProxyNoLongerSupportedError as e:
+            return make_json_error_response(PROXY_NO_LONGER_SUPPORTED_SENTENCE, status_code=400, detail=str(e))
+        except RequestedProxyError as e:
+            return make_json_error_response(_connection_setup_failed_sentence(domain), status_code=400, detail=str(e))
+        if desktop_egress.is_this_computer_put_first:
+            # The route write rebuilds every service's route and grants from the copies here, and they
+            # are pushed whole, so they must first say what the machine holds. Read before the
+            # registration and the sign-in: a refresh adopts the machine's custom services and
+            # credentials over whatever here is not pushed yet.
+            try:
+                self.refresh_machine_copies(str(parsed_agent_id))
+            except MachineOperationError as e:
+                logger.warning("Could not read the machine of host {} before setting a route: {}", host_id, e)
+                return make_failure_response(
+                    describe_machine_failure(e, format_proxy_failed_message(domain)), status_code=502, detail=str(e)
+                )
 
         # The service belongs to the machine the agent runs on, like the
         # credentials: it is registered in that machine's store, and the
@@ -520,7 +597,17 @@ class CustomServiceGrantHandler(RequestEventHandler):
         # grant is reported only once the machine has taken all of it. A
         # machine that will not leaves the request pending for a retry.
         try:
-            self.carry_grant_to_machine(str(parsed_agent_id), service_name, account)
+            proxied = carry_grant_with_desktop_egress(
+                latchkey=self.latchkey,
+                gateway_client=self.gateway_client,
+                services_catalog=self.services_catalog,
+                workspace_agent_id=str(parsed_agent_id),
+                service_name=service_name,
+                account=account,
+                desktop_egress=desktop_egress,
+                carry_grant_to_machine=self.carry_grant_to_machine,
+                carry_grant_and_desktop_egress_rules_to_machine=self.carry_grant_and_desktop_egress_rules_to_machine,
+            )
         except MachineOperationError as e:
             logger.warning("The workspace's machine did not take the custom-service grant for host {}: {}", host_id, e)
             return make_failure_response(
@@ -530,11 +617,26 @@ class CustomServiceGrantHandler(RequestEventHandler):
                 status_code=502,
                 detail=str(e),
             )
+        except PermissionToggleError as e:
+            logger.warning("Could not set the route of {} for host {}: {}", service_name, host_id, e)
+            return make_json_error_response(format_proxy_failed_message(domain), status_code=502, detail=str(e))
+        except LatchkeyGatewayClientError as e:
+            logger.warning("Could not set the route of {} via the gateway: {}", service_name, e)
+            return make_failure_response(
+                describe_gateway_failure(
+                    e, format_proxy_failed_message(domain), PERMISSION_SERVICE_NOT_RUNNING_FOR_CHANGE
+                ),
+                status_code=502,
+                detail=str(e),
+            )
 
         # The record goes before the verdict is written, so a reconnect of the
         # follow stream cannot redeliver an already-resolved request.
         _drop_gateway_record(self.gateway_client, request_event_id)
-        message = _format_granted_message(base_api_url_for_domain(domain, payload.scheme))
+        base_api_url = base_api_url_for_domain(domain, payload.scheme)
+        message = _format_granted_message(base_api_url) + (
+            desktop_egress.note if proxied is None else format_route_note(base_api_url, proxied)
+        )
         resolve_request(
             self.mngr_message_sender,
             self.data_dir,
@@ -583,7 +685,9 @@ class CustomServiceGrantHandler(RequestEventHandler):
 
     def _is_unconnectable_from_dialog(self, agent_id: AgentId, payload: CustomServiceRequestPayload) -> bool:
         """Whether the dialog offered no way to connect the service: registered, no sign-in, and no form."""
-        machine_latchkey = self._machine_latchkey_for_dialog(get_state().backend_resolver, agent_id)
+        machine_latchkey = self._machine_latchkey_for_dialog(
+            resolve_workspace_host_id(get_state().backend_resolver, str(agent_id))
+        )
         service_name = custom_service_name(payload.domain, payload.scheme)
         existing = self._existing_registration(machine_latchkey, service_name)
         if existing is None or _sign_in_url(existing, payload) is not None:
@@ -642,7 +746,11 @@ class CustomServiceGrantHandler(RequestEventHandler):
             case unreachable:
                 assert_never(unreachable)
 
-    def _machine_latchkey_for_dialog(self, backend_resolver: BackendResolverInterface, agent_id: AgentId) -> Latchkey:
+    def _machine_latchkey_for_dialog(
+        self,
+        # The asking workspace's host, or ``None`` when it cannot be placed.
+        host_id: HostId | None,
+    ) -> Latchkey:
         """The store of the asking workspace's machine, or this computer's when the machine cannot be placed.
 
         The dialog says whether the service already exists where the agent
@@ -650,7 +758,6 @@ class CustomServiceGrantHandler(RequestEventHandler):
         is answered from here, as its accounts are, rather than refused a
         dialog -- the approval resolves the host for real.
         """
-        host_id = resolve_workspace_host_id(backend_resolver, str(agent_id))
         if host_id is None:
             return self.latchkey
         try:

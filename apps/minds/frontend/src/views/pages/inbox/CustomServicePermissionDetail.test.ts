@@ -18,6 +18,7 @@ const DETAIL: CustomServicePermissionDetail = {
   login_url: null,
   is_system_browser_login_supported: false,
   credential_header: "X-Api-Key: {token}",
+  proxy: null,
 };
 
 interface ShellAttrs {
@@ -27,7 +28,10 @@ interface ShellAttrs {
 
 // Render without a DOM: instantiate the closure component and call view() directly,
 // as the sibling detail tests do. The root is a PermissionsShell vnode.
-function renderBody(detail: CustomServicePermissionDetail): {
+function renderBody(
+  detail: CustomServicePermissionDetail,
+  model: InboxModel = new InboxModel(),
+): {
   body: m.Children;
   toggle: () => void;
   /** Re-render the same instance, as Mithril does when the request changes. */
@@ -35,7 +39,6 @@ function renderBody(detail: CustomServicePermissionDetail): {
 } {
   const instance =
     CustomServicePermissionDetailView() as unknown as m.Component;
-  const model = new InboxModel();
   const render = (shown: CustomServicePermissionDetail): ShellAttrs => {
     const vnode = m(instance, {
       model,
@@ -106,6 +109,49 @@ describe("CustomServicePermissionDetailView", () => {
     expect(findHeaderDisclosure(rendered.body)).toBeUndefined();
     expect(collectText(rendered.body).join(" ")).toContain(
       "You will be sent to",
+    );
+  });
+
+  it("draws no proxy switch for a request that asked for none", () => {
+    const rendered = renderBody(DETAIL);
+    expect(
+      collectVnodes(rendered.body).filter(
+        (vnode) => vnode.attrs?.role === "switch",
+      ),
+    ).toHaveLength(0);
+    expect(collectText(rendered.body).join(" ")).not.toContain(
+      "Proxy through my desktop",
+    );
+  });
+
+  it("draws the proxy switch the agent asked for, naming the origin, and flips the model's choice", () => {
+    const withProxy: CustomServicePermissionDetail = {
+      ...DETAIL,
+      proxy: {
+        resulting_route: ["host-a", "self"],
+        desktops: [{ device_id: "host-a", is_this_computer: true }],
+      },
+    };
+    const model = new InboxModel();
+    model.isProxyOn = true;
+    const rendered = renderBody(withProxy, model);
+    const text = collectText(rendered.body).join(" ");
+    expect(text).toContain(
+      "The agent asked for this workspace's requests to https://api.example.com/ to leave through this computer.",
+    );
+    expect(text).toContain("Requests will leave from");
+    const switches = collectVnodes(rendered.body).filter(
+      (vnode) => vnode.attrs?.role === "switch",
+    );
+    expect(switches).toHaveLength(1);
+    expect(switches[0].attrs?.["aria-label"]).toBe("Proxy through my desktop");
+    expect(switches[0].attrs?.["aria-checked"]).toBe("true");
+
+    (switches[0].attrs?.onclick as () => void)();
+
+    expect(model.isProxyOn).toBe(false);
+    expect(collectText(rendered.rerender()).join(" ")).toContain(
+      "Requests will keep leaving from where they do now.",
     );
   });
 

@@ -1,0 +1,1 @@
+A `custom-service` permission request may carry `"proxy": true`, as a `predefined` one may: the agent asks that the service being connected also send its requests out through the computer that approves the request. The `permission-requests` extension accepts only a boolean (anything else is an HTTP 400), stores `true` on the request's payload and never acts on it.

@@ -30,12 +30,12 @@ from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPa
 from imbue.minds.desktop_client.latchkey.gateway_client import PermissionEffect
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
-from imbue.minds.desktop_client.latchkey.handlers.predefined import DesktopEgressDecision
 from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantOutcome
 from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantResult
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.predefined import ManualCredentialSubmission
-from imbue.minds.desktop_client.latchkey.handlers.predefined import NO_DESKTOP_EGRESS_CHANGE
+from imbue.minds.desktop_client.latchkey.handlers.requested_proxy import DesktopEgressDecision
+from imbue.minds.desktop_client.latchkey.handlers.requested_proxy import NO_DESKTOP_EGRESS_CHANGE
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.latchkey.response_events import create_request_response_event

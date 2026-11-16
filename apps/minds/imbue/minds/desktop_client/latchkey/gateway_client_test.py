@@ -15,6 +15,7 @@ import pytest
 from pydantic import JsonValue
 
 from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPayload
+from imbue.minds.desktop_client.latchkey.gateway_client import CustomServiceRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
@@ -278,30 +279,48 @@ def test_iter_permission_requests_parses_jsonl_stream() -> None:
     assert workspace_payload.target_workspace_id == "agent-" + "1" * 32
 
 
-def test_iter_permission_requests_parses_whether_a_predefined_request_asks_for_a_proxy() -> None:
-    """A predefined request line may carry ``proxy: true``; one without it asks for no proxy."""
+@pytest.mark.parametrize(
+    "request_type,effect,payload,expected_payload_class",
+    [
+        pytest.param(
+            "predefined",
+            {"rules": [{"slack-api": ["slack-read-all"]}]},
+            {"scope": "slack-api", "permissions": ["slack-read-all"], "account": None},
+            PredefinedRequestPayload,
+            id="predefined",
+        ),
+        pytest.param(
+            "custom-service",
+            {},
+            {
+                "domain": "api.example.com",
+                "scheme": "https",
+                "login": None,
+                "header": None,
+                "credential_instructions": None,
+            },
+            CustomServiceRequestPayload,
+            id="custom-service",
+        ),
+    ],
+)
+def test_iter_permission_requests_parses_whether_a_request_asks_for_a_proxy(
+    request_type: str,
+    effect: dict[str, JsonValue],
+    # The request's payload without the ``proxy`` field.
+    payload: dict[str, JsonValue],
+    expected_payload_class: type[PredefinedRequestPayload] | type[CustomServiceRequestPayload],
+) -> None:
+    """A request line may carry ``proxy: true``; one without it asks for no proxy."""
     base = {
         "agent_id": "a1",
         "rationale": "why",
-        "request_type": "predefined",
+        "request_type": request_type,
         "target": "/tmp/permissions.json",
-        "effect": {"rules": [{"slack-api": ["slack-read-all"]}]},
+        "effect": effect,
     }
-    with_proxy = {
-        **base,
-        "request_id": "with-proxy",
-        "payload": {
-            "scope": "slack-api",
-            "permissions": ["slack-read-all"],
-            "account": None,
-            "proxy": True,
-        },
-    }
-    without_proxy = {
-        **base,
-        "request_id": "without-proxy",
-        "payload": {"scope": "slack-api", "permissions": ["slack-read-all"], "account": None},
-    }
+    with_proxy = {**base, "request_id": "with-proxy", "payload": {**payload, "proxy": True}}
+    without_proxy = {**base, "request_id": "without-proxy", "payload": payload}
     body = "".join(json.dumps(item) + "\n" for item in (with_proxy, without_proxy)).encode("utf-8")
 
     def _handler(request: httpx2.Request) -> httpx2.Response:
@@ -312,9 +331,9 @@ def test_iter_permission_requests_parses_whether_a_predefined_request_asks_for_a
 
     assert [item.request_id for item in items] == ["with-proxy", "without-proxy"]
     payload_with_proxy, payload_without_proxy = items[0].payload, items[1].payload
-    assert isinstance(payload_with_proxy, PredefinedRequestPayload)
+    assert isinstance(payload_with_proxy, expected_payload_class)
     assert payload_with_proxy.proxy is True
-    assert isinstance(payload_without_proxy, PredefinedRequestPayload)
+    assert isinstance(payload_without_proxy, expected_payload_class)
     assert payload_without_proxy.proxy is False
 
 

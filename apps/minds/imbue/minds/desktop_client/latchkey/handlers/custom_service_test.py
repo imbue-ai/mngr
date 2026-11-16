@@ -35,11 +35,18 @@ from imbue.minds.desktop_client.latchkey.response_events import load_response_ev
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.testing import FixedHostBackendResolver
 from imbue.minds.desktop_client.latchkey.testing import RecordedSetPermissionCall
+from imbue.minds.desktop_client.latchkey.testing import UnreadablePermissionsGatewayClient
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
+from imbue.minds.desktop_client.latchkey.testing import leave_copies_on_this_computer_as_they_are
 from imbue.minds.desktop_client.latchkey.testing import leave_grant_on_this_computer
+from imbue.minds.desktop_client.latchkey.testing import read_desktop_egress_rules_copy
+from imbue.minds.desktop_client.latchkey.testing import record_grant_carry
+from imbue.minds.desktop_client.latchkey.testing import write_desktop_egress_rules_copy
 from imbue.minds.desktop_client.request_handler import UiCustomServicePermissionDetail
+from imbue.minds.desktop_client.request_handler import UiRequestedProxy
 from imbue.minds.desktop_client.testing import StaticPendingRequests
 from imbue.minds.desktop_client.testing import create_custom_service_permission_request
+from imbue.minds.desktop_client.ui_models import UiWorkspaceDesktop
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.account_scopes import account_scope_key
@@ -50,13 +57,18 @@ from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyServiceInfo
 from imbue.mngr_latchkey.core import ServiceAccountCredential
 from imbue.mngr_latchkey.core import read_registered_services
+from imbue.mngr_latchkey.core import remove_custom_service_registration
 from imbue.mngr_latchkey.custom_services import DomainWarning
 from imbue.mngr_latchkey.custom_services import LoginFlow
 from imbue.mngr_latchkey.custom_services import Scheme
 from imbue.mngr_latchkey.custom_services import build_custom_service_registration
 from imbue.mngr_latchkey.custom_services import build_custom_service_scope_schema
 from imbue.mngr_latchkey.custom_services import registration_credential_header
+from imbue.mngr_latchkey.desktop_egress import build_desktop_egress_route
+from imbue.mngr_latchkey.desktop_egress import desktop_egress_scope_key
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
+from imbue.mngr_latchkey.services_catalog import ServicesCatalog
+from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
 
@@ -138,6 +150,11 @@ class _Harness:
         latchkey: _StubLatchkey | None = None,
         carry_grant_to_machine: Callable[[str, str, str], None] = leave_grant_on_this_computer,
         published_metadata: Mapping[str, JsonValue] | None = None,
+        carry_grant_and_desktop_egress_rules_to_machine: Callable[
+            [str, str, str], None
+        ] = leave_grant_on_this_computer,
+        refresh_machine_copies: Callable[[str], None] = leave_copies_on_this_computer_as_they_are,
+        gateway: FakeLatchkeyGatewayClient | None = None,
     ) -> None:
         self.metadata_reads: list[str] = []
         documents: Mapping[str, JsonValue] = published_metadata if published_metadata is not None else {}
@@ -149,15 +166,20 @@ class _Harness:
         self.sender = _RecordingMessageSender(
             concurrency_group=ConcurrencyGroup(name="recording-message-sender-unused"), sent_messages=[]
         )
-        self.gateway: FakeLatchkeyGatewayClient = build_fake_gateway_client()
+        self.gateway: FakeLatchkeyGatewayClient = gateway if gateway is not None else build_fake_gateway_client()
         self.latchkey = latchkey if latchkey is not None else _StubLatchkey(latchkey_directory=tmp_path / "latchkey")
         self.latchkey.latchkey_directory.mkdir(parents=True, exist_ok=True)
         self.handler = CustomServiceGrantHandler(
             data_dir=tmp_path,
             latchkey=self.latchkey,
             gateway_client=self.gateway,
+            services_catalog=ServicesCatalog(
+                latchkey_directory=self.latchkey.latchkey_directory, is_including_every_machine=True
+            ),
             mngr_message_sender=self.sender,
             carry_grant_to_machine=carry_grant_to_machine,
+            carry_grant_and_desktop_egress_rules_to_machine=carry_grant_and_desktop_egress_rules_to_machine,
+            refresh_machine_copies=refresh_machine_copies,
             fetch_well_known_json=fetch_well_known_json,
         )
 
@@ -193,6 +215,7 @@ def _make_event(
     scheme: Scheme = Scheme.HTTPS,
     header: str | None = None,
     credential_instructions: str | None = None,
+    proxy: bool = False,
 ) -> StreamedPermissionRequest:
     if not has_login:
         return create_custom_service_permission_request(
@@ -202,12 +225,14 @@ def _make_event(
             scheme=scheme,
             header=header,
             credential_instructions=credential_instructions,
+            proxy=proxy,
         )
     return create_custom_service_permission_request(
         agent_id=str(agent_id),
         domain=domain,
         rationale="needs the widget API",
         scheme=scheme,
+        proxy=proxy,
         login=CustomServiceLogin(
             url=f"https://{domain}/login",
             flow=LoginFlow.COOKIE_CAPTURE,
@@ -221,6 +246,7 @@ def _build_authenticated_client(
     handler: CustomServiceGrantHandler,
     inbox: StaticPendingRequests,
     backend_resolver: BackendResolverInterface | None = None,
+    device_id: str = "",
 ) -> FlaskClient:
     auth_store = FileAuthStore(data_directory=tmp_path / "auth")
     if backend_resolver is None:
@@ -238,6 +264,7 @@ def _build_authenticated_client(
         paths=InstallationPaths(data_dir=tmp_path),
         pending_requests=inbox,
         request_event_handlers=(handler,),
+        device_id=device_id,
     )
     client = app.test_client()
     client.set_cookie(SESSION_COOKIE_NAME, create_session_cookie(signing_key=auth_store.get_signing_key()))
@@ -258,8 +285,16 @@ def _detail(
     return payload
 
 
-def _grant(client: FlaskClient, event_id: str, manual_credentials: str | None = None) -> TestResponse:
+def _grant(
+    client: FlaskClient,
+    event_id: str,
+    manual_credentials: str | None = None,
+    # The dialog's proxy field; ``None`` when it drew no proxy switch.
+    raw_proxy: str | None = None,
+) -> TestResponse:
     data = {} if manual_credentials is None else {"manual_credentials": manual_credentials}
+    if raw_proxy is not None:
+        data["proxy"] = raw_proxy
     return client.post(f"/requests/{event_id}/grant", data=data)
 
 
@@ -895,3 +930,440 @@ def test_a_service_on_this_computers_machine_does_not_count_as_registered_for_a_
     assert _grant(client, event.request_id).get_json()["outcome"] == "NEEDS_MANUAL_CREDENTIALS"
     assert registration_credential_header(_store_registration(store_dir, _SERVICE_NAME)) == "X-Api-Key: {token}"
     assert "mindsCredentialHeader" not in harness.registration()
+
+
+_THIS_DEVICE_ID: str = "desktop-this-4417"
+_OTHER_DEVICE_ID: str = "desktop-other-9026"
+_THIS_DESKTOP: UiWorkspaceDesktop = UiWorkspaceDesktop(device_id=_THIS_DEVICE_ID, is_this_computer=True)
+_BASE_API_URL: str = "https://api.example.com/"
+
+
+def _write_fake_latchkey_binary(tmp_path: Path) -> Path:
+    """A latchkey binary whose sign-ins succeed and which reports one stored account.
+
+    A remote host's store is opened as a plain ``Latchkey`` over the desktop's
+    binary, so the scripted methods of :class:`_StubLatchkey` do not reach it.
+    """
+    binary = tmp_path / "fake-latchkey"
+    service_info = {
+        "credentials": {"me@example.com": {"credentialType": "oauth", "credentialStatus": "valid"}},
+        "authOptions": ["browser"],
+        "setCredentialsExample": None,
+    }
+    binary.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "if sys.argv[1:3] == ['services', 'info']:\n"
+        f"    print({json.dumps(service_info)!r})\n"
+    )
+    binary.chmod(0o755)
+    return binary
+
+
+def _remote_harness(
+    tmp_path: Path,
+    carry_grant_to_machine: Callable[[str, str, str], None] = leave_grant_on_this_computer,
+    carry_grant_and_desktop_egress_rules_to_machine: Callable[[str, str, str], None] = leave_grant_on_this_computer,
+    refresh_machine_copies: Callable[[str], None] = leave_copies_on_this_computer_as_they_are,
+    gateway: FakeLatchkeyGatewayClient | None = None,
+) -> _Harness:
+    """A harness whose host has a machine of its own, which is what lets its services be routed through a desktop."""
+    harness = _Harness(
+        tmp_path,
+        latchkey=_StubLatchkey(
+            latchkey_directory=tmp_path / "latchkey", latchkey_binary=str(_write_fake_latchkey_binary(tmp_path))
+        ),
+        carry_grant_to_machine=carry_grant_to_machine,
+        carry_grant_and_desktop_egress_rules_to_machine=carry_grant_and_desktop_egress_rules_to_machine,
+        refresh_machine_copies=refresh_machine_copies,
+        gateway=gateway,
+    )
+    _give_the_host_a_machine_of_its_own(harness)
+    return harness
+
+
+def _build_this_desktop_client(
+    tmp_path: Path, harness: _Harness, event: StreamedPermissionRequest, device_id: str = _THIS_DEVICE_ID
+) -> FlaskClient:
+    return _build_authenticated_client(
+        tmp_path, harness.handler, StaticPendingRequests(pending=(event,)), device_id=device_id
+    )
+
+
+def _detail_proxy(harness: _Harness, client: FlaskClient, event: StreamedPermissionRequest) -> UiRequestedProxy | None:
+    """What the detail payload of ``event`` gives the dialog to draw its proxy switch from."""
+    resolver = FixedHostBackendResolver(
+        url_by_agent_and_service={}, fixed_host_id=_HOST_ID, known_agent_ids=(AgentId(event.agent_id),)
+    )
+    with client.application.app_context():
+        return _detail(harness, event, resolver).proxy
+
+
+def _rules_copy_path(harness: _Harness) -> Path:
+    return desktop_egress_rules_path_for_host(harness.latchkey.plugin_data_dir, _HOST_ID)
+
+
+def test_detail_payload_carries_the_proxy_a_remote_workspace_asked_for(tmp_path: Path) -> None:
+    harness = _remote_harness(tmp_path)
+    event = _make_event(AgentId(), proxy=True)
+    client = _build_this_desktop_client(tmp_path, harness, event)
+
+    proxy = _detail_proxy(harness, client, event)
+
+    # The service does not exist yet, so its route is the machine itself.
+    assert proxy == UiRequestedProxy(resulting_route=(_THIS_DEVICE_ID, "self"), desktops=(_THIS_DESKTOP,))
+
+
+def test_detail_payload_puts_this_computer_ahead_of_a_route_left_from_an_earlier_connection(tmp_path: Path) -> None:
+    harness = _remote_harness(tmp_path)
+    write_desktop_egress_rules_copy(
+        harness.latchkey.plugin_data_dir,
+        _HOST_ID,
+        {_SERVICE_NAME: build_desktop_egress_route((_OTHER_DEVICE_ID, "self"))},
+    )
+    event = _make_event(AgentId(), proxy=True)
+    client = _build_this_desktop_client(tmp_path, harness, event)
+
+    proxy = _detail_proxy(harness, client, event)
+
+    assert proxy == UiRequestedProxy(
+        resulting_route=(_THIS_DEVICE_ID, _OTHER_DEVICE_ID, "self"),
+        desktops=(_THIS_DESKTOP, UiWorkspaceDesktop(device_id=_OTHER_DEVICE_ID, is_this_computer=False)),
+    )
+
+
+def test_detail_payload_carries_no_proxy_when_the_request_asks_for_none(tmp_path: Path) -> None:
+    harness = _remote_harness(tmp_path)
+    event = _make_event(AgentId(), proxy=False)
+    client = _build_this_desktop_client(tmp_path, harness, event)
+
+    assert _detail_proxy(harness, client, event) is None
+
+
+def test_detail_payload_carries_no_proxy_for_a_workspace_on_this_computer(tmp_path: Path) -> None:
+    harness = _Harness(tmp_path)
+    event = _make_event(AgentId(), proxy=True)
+    client = _build_this_desktop_client(tmp_path, harness, event)
+
+    assert _detail_proxy(harness, client, event) is None
+
+
+def test_grant_with_the_proxy_on_reads_the_machine_then_carries_the_grant_with_the_route(tmp_path: Path) -> None:
+    steps: list[str] = []
+    carried_with_rules: list[tuple[str, str, str]] = []
+
+    def refresh(workspace_agent_id: str) -> None:
+        # Reading the machine adopts its custom services over the store's, so a service
+        # registered before the read would be lost to it.
+        is_registered = _SERVICE_NAME in read_registered_services(store_dir)
+        steps.append("refresh after registering" if is_registered else "refresh")
+
+    def carry_with_rules(workspace_agent_id: str, service_name: str, account: str) -> None:
+        steps.append("carry with rules")
+        carried_with_rules.append((workspace_agent_id, service_name, account))
+
+    harness = _remote_harness(
+        tmp_path,
+        carry_grant_to_machine=lambda workspace_agent_id, service_name, account: steps.append("carry"),
+        carry_grant_and_desktop_egress_rules_to_machine=carry_with_rules,
+        refresh_machine_copies=refresh,
+    )
+    store_dir = machine_latchkey_for_host(harness.latchkey, _HOST_ID).latchkey_directory
+    agent_id = AgentId()
+    event = _make_event(agent_id, proxy=True)
+    client = _build_this_desktop_client(tmp_path, harness, event)
+
+    response = _grant(client, event.request_id, raw_proxy="true")
+
+    assert response.status_code == 200, response.text
+    body = response.get_json()
+    assert body["outcome"] == "GRANTED"
+    note = f" Requests to {_BASE_API_URL} now leave from the desktop {_THIS_DEVICE_ID}, then your machine itself."
+    assert body["message"].endswith(note)
+    assert harness.sender.sent_messages == [
+        (str(agent_id), format_resolution_notice(body["message"], event.request_id, RequestStatus.GRANTED))
+    ]
+    assert steps == ["refresh", "carry with rules"]
+    assert carried_with_rules == [(str(agent_id), _SERVICE_NAME, "me@example.com")]
+    assert _store_registration(store_dir, _SERVICE_NAME)["baseApiUrl"] == _BASE_API_URL
+    # The grant itself, then the grant that lets this computer forward the service, which carries
+    # the scope's own definition like the account grant does.
+    egress_rule_key = desktop_egress_scope_key(_SERVICE_NAME, _THIS_DEVICE_ID)
+    assert [call.rule_key for call in harness.gateway.set_calls] == [
+        account_scope_key(_SERVICE_NAME, "me@example.com"),
+        egress_rule_key,
+    ]
+    assert harness.gateway.set_calls[1].schemas[_SERVICE_NAME] == build_custom_service_scope_schema(_DOMAIN, "https")
+    assert read_desktop_egress_rules_copy(harness.latchkey.plugin_data_dir, _HOST_ID) == {
+        _SERVICE_NAME: build_desktop_egress_route((_THIS_DEVICE_ID, "self"))
+    }
+    assert [entry.status for entry in load_response_events(tmp_path)] == ["GRANTED"]
+
+
+def test_grant_with_typed_credentials_and_the_proxy_on_carries_the_default_account_with_the_route(
+    tmp_path: Path,
+) -> None:
+    carried_with_rules: list[tuple[str, str, str]] = []
+    refreshed: list[str] = []
+    harness = _remote_harness(
+        tmp_path,
+        carry_grant_and_desktop_egress_rules_to_machine=record_grant_carry(carried_with_rules),
+        refresh_machine_copies=refreshed.append,
+    )
+    agent_id = AgentId()
+    event = _make_event(agent_id, has_login=False, proxy=True)
+    client = _build_this_desktop_client(tmp_path, harness, event)
+
+    asked = _grant(client, event.request_id, raw_proxy="true")
+    assert asked.get_json()["outcome"] == "NEEDS_MANUAL_CREDENTIALS"
+    assert carried_with_rules == []
+    assert not _rules_copy_path(harness).exists()
+
+    granted = _grant(client, event.request_id, json.dumps({"token": "secret-token"}), raw_proxy="true")
+
+    assert granted.get_json()["outcome"] == "GRANTED"
+    assert carried_with_rules == [(str(agent_id), _SERVICE_NAME, "")]
+    assert refreshed == [str(agent_id), str(agent_id)]
+    assert read_desktop_egress_rules_copy(harness.latchkey.plugin_data_dir, _HOST_ID) == {
+        _SERVICE_NAME: build_desktop_egress_route((_THIS_DEVICE_ID, "self"))
+    }
+
+
+def test_a_second_approve_registers_again_the_service_its_read_of_the_machine_dropped(tmp_path: Path) -> None:
+    carried_with_rules: list[tuple[str, str, str]] = []
+    was_registered_at_each_read: list[bool] = []
+
+    def adopt_a_machine_that_has_no_such_service(workspace_agent_id: str) -> None:
+        # The machine's custom services replace the store's, and a registration that was never
+        # pushed is not among them.
+        was_registered_at_each_read.append(_SERVICE_NAME in read_registered_services(store_dir))
+        remove_custom_service_registration(store_dir, _SERVICE_NAME)
+
+    harness = _remote_harness(
+        tmp_path,
+        carry_grant_and_desktop_egress_rules_to_machine=record_grant_carry(carried_with_rules),
+        refresh_machine_copies=adopt_a_machine_that_has_no_such_service,
+    )
+    store_dir = machine_latchkey_for_host(harness.latchkey, _HOST_ID).latchkey_directory
+    agent_id = AgentId()
+    event = _make_event(agent_id, has_login=False, proxy=True)
+    client = _build_this_desktop_client(tmp_path, harness, event)
+
+    asked = _grant(client, event.request_id, raw_proxy="true")
+    assert asked.get_json()["outcome"] == "NEEDS_MANUAL_CREDENTIALS"
+    granted = _grant(client, event.request_id, json.dumps({"token": "secret-token"}), raw_proxy="true")
+
+    assert granted.get_json()["outcome"] == "GRANTED"
+    assert was_registered_at_each_read == [False, True]
+    assert _store_registration(store_dir, _SERVICE_NAME)["baseApiUrl"] == _BASE_API_URL
+    assert carried_with_rules == [(str(agent_id), _SERVICE_NAME, "")]
+
+
+def test_grant_with_the_proxy_switched_off_grants_without_a_route_and_says_so(tmp_path: Path) -> None:
+    carried: list[tuple[str, str, str]] = []
+    carried_with_rules: list[tuple[str, str, str]] = []
+    refreshed: list[str] = []
+    harness = _remote_harness(
+        tmp_path,
+        carry_grant_to_machine=record_grant_carry(carried),
+        carry_grant_and_desktop_egress_rules_to_machine=record_grant_carry(carried_with_rules),
+        refresh_machine_copies=refreshed.append,
+    )
+    agent_id = AgentId()
+    event = _make_event(agent_id, proxy=True)
+    client = _build_this_desktop_client(tmp_path, harness, event)
+
+    body = _grant(client, event.request_id, raw_proxy="false").get_json()
+
+    assert body["outcome"] == "GRANTED"
+    assert body["message"].endswith(" The proxy you asked for was not set up: the user turned it off.")
+    assert refreshed == []
+    assert carried == [(str(agent_id), _SERVICE_NAME, "me@example.com")]
+    assert carried_with_rules == []
+    assert not _rules_copy_path(harness).exists()
+    assert [call.rule_key for call in harness.gateway.set_calls] == [
+        account_scope_key(_SERVICE_NAME, "me@example.com")
+    ]
+
+
+def test_grant_leaves_a_route_that_already_names_this_computer_as_it_is(tmp_path: Path) -> None:
+    carried: list[tuple[str, str, str]] = []
+    carried_with_rules: list[tuple[str, str, str]] = []
+    harness = _remote_harness(
+        tmp_path,
+        carry_grant_to_machine=record_grant_carry(carried),
+        carry_grant_and_desktop_egress_rules_to_machine=record_grant_carry(carried_with_rules),
+    )
+    route = build_desktop_egress_route((_OTHER_DEVICE_ID, _THIS_DEVICE_ID))
+    write_desktop_egress_rules_copy(harness.latchkey.plugin_data_dir, _HOST_ID, {_SERVICE_NAME: route})
+    agent_id = AgentId()
+    event = _make_event(agent_id, proxy=True)
+    client = _build_this_desktop_client(tmp_path, harness, event)
+
+    # The dialog draws no switch for a route that already names this computer.
+    assert _detail_proxy(harness, client, event) is None
+    body = _grant(client, event.request_id).get_json()
+
+    assert body["outcome"] == "GRANTED"
+    assert body["message"].endswith(
+        f" Requests to {_BASE_API_URL} already leave from the desktop {_OTHER_DEVICE_ID}, then the desktop "
+        f"{_THIS_DEVICE_ID}, so the proxy you asked for changed nothing."
+    )
+    assert read_desktop_egress_rules_copy(harness.latchkey.plugin_data_dir, _HOST_ID) == {_SERVICE_NAME: route}
+    # The rules did not change, so the grant travels without them.
+    assert carried == [(str(agent_id), _SERVICE_NAME, "me@example.com")]
+    assert carried_with_rules == []
+
+
+def test_grant_for_a_workspace_on_this_computer_tells_the_agent_the_proxy_was_not_set_up(tmp_path: Path) -> None:
+    refreshed: list[str] = []
+    harness = _Harness(tmp_path, refresh_machine_copies=refreshed.append)
+    event = _make_event(AgentId(), proxy=True)
+    client = _build_this_desktop_client(tmp_path, harness, event)
+
+    body = _grant(client, event.request_id).get_json()
+
+    assert body["outcome"] == "GRANTED"
+    message = body["message"]
+    assert "The proxy you asked for was not set up: This workspace does not run on a machine of its own" in message
+    assert refreshed == []
+    assert not _rules_copy_path(harness).exists()
+
+
+def test_grant_refuses_a_proxy_choice_on_a_request_that_asked_for_none(tmp_path: Path) -> None:
+    harness = _remote_harness(tmp_path)
+    event = _make_event(AgentId(), proxy=False)
+    client = _build_this_desktop_client(tmp_path, harness, event)
+
+    response = _grant(client, event.request_id, raw_proxy="true")
+
+    assert response.status_code == 400
+    assert response.get_json()["error"].startswith(f"Imbue Studio couldn't set up the connection to {_DOMAIN}.")
+    assert "asked for no proxy" in response.get_json()["detail"]
+    assert harness.gateway.set_calls == ()
+    assert load_response_events(tmp_path) == []
+
+
+def test_grant_refuses_the_proxy_for_a_workspace_that_cannot_be_routed(tmp_path: Path) -> None:
+    harness = _Harness(tmp_path)
+    event = _make_event(AgentId(), proxy=True)
+    client = _build_this_desktop_client(tmp_path, harness, event)
+
+    response = _grant(client, event.request_id, raw_proxy="true")
+
+    assert response.status_code == 400
+    assert response.get_json()["error"].startswith(
+        "This workspace can't send its requests through this computer any more."
+    )
+    assert "does not run on a machine of its own" in response.get_json()["detail"]
+    assert harness.gateway.set_calls == ()
+    assert not _rules_copy_path(harness).exists()
+    assert load_response_events(tmp_path) == []
+
+
+def test_a_machine_that_cannot_be_read_leaves_a_proxied_request_pending_with_nothing_registered(
+    tmp_path: Path,
+) -> None:
+    def refuse(workspace_agent_id: str) -> None:
+        raise MachineOperationError("Could not read that workspace's connections: it is unreachable", None)
+
+    harness = _remote_harness(tmp_path, refresh_machine_copies=refuse)
+    store_dir = machine_latchkey_for_host(harness.latchkey, _HOST_ID).latchkey_directory
+    event = _make_event(AgentId(), proxy=True)
+    client = _build_this_desktop_client(tmp_path, harness, event)
+
+    response = _grant(client, event.request_id, raw_proxy="true")
+
+    assert response.status_code == 502
+    assert response.get_json()["error"].startswith(
+        f"Imbue Studio couldn't send {_DOMAIN}'s requests through this computer"
+    )
+    assert "unreachable" in response.get_json()["detail"]
+    assert _SERVICE_NAME not in read_registered_services(store_dir)
+    assert harness.gateway.set_calls == ()
+    assert harness.gateway.deleted_request_ids == ()
+    assert load_response_events(tmp_path) == []
+    assert harness.sender.sent_messages == []
+
+
+def test_a_machine_that_will_not_take_the_grant_with_the_route_leaves_the_request_pending(tmp_path: Path) -> None:
+    def refuse(workspace_agent_id: str, service_name: str, account: str) -> None:
+        raise MachineOperationError("the machine is unreachable", None)
+
+    carried: list[tuple[str, str, str]] = []
+    harness = _remote_harness(
+        tmp_path,
+        carry_grant_to_machine=record_grant_carry(carried),
+        carry_grant_and_desktop_egress_rules_to_machine=refuse,
+    )
+    event = _make_event(AgentId(), proxy=True)
+    client = _build_this_desktop_client(tmp_path, harness, event)
+
+    response = _grant(client, event.request_id, raw_proxy="true")
+
+    assert response.status_code == 502
+    assert "didn't take the change" in response.get_json()["error"]
+    assert "unreachable" in response.get_json()["detail"]
+    # The grant has no other way to the machine than the carry that was refused.
+    assert carried == []
+    assert harness.gateway.deleted_request_ids == ()
+    assert load_response_events(tmp_path) == []
+    assert harness.sender.sent_messages == []
+
+
+def test_a_route_that_cannot_be_set_here_leaves_a_proxied_request_pending(tmp_path: Path) -> None:
+    carried: list[tuple[str, str, str]] = []
+    carried_with_rules: list[tuple[str, str, str]] = []
+    harness = _remote_harness(
+        tmp_path,
+        carry_grant_to_machine=record_grant_carry(carried),
+        carry_grant_and_desktop_egress_rules_to_machine=record_grant_carry(carried_with_rules),
+    )
+    rules_path = _rules_copy_path(harness)
+    rules_path.parent.mkdir(parents=True, exist_ok=True)
+    rules_path.write_text("not a rules file")
+    event = _make_event(AgentId(), proxy=True)
+    client = _build_this_desktop_client(tmp_path, harness, event)
+
+    response = _grant(client, event.request_id, raw_proxy="true")
+
+    assert response.status_code == 502
+    assert response.get_json()["error"].startswith(
+        f"Imbue Studio couldn't send {_DOMAIN}'s requests through this computer"
+    )
+    assert response.get_json()["detail"] != ""
+    assert carried == []
+    assert carried_with_rules == []
+    assert rules_path.read_text() == "not a rules file"
+    assert harness.gateway.deleted_request_ids == ()
+    assert load_response_events(tmp_path) == []
+    assert harness.sender.sent_messages == []
+
+
+def test_a_gateway_that_cannot_be_asked_while_setting_the_route_leaves_a_proxied_request_pending(
+    tmp_path: Path,
+) -> None:
+    carried: list[tuple[str, str, str]] = []
+    carried_with_rules: list[tuple[str, str, str]] = []
+    harness = _remote_harness(
+        tmp_path,
+        carry_grant_to_machine=record_grant_carry(carried),
+        carry_grant_and_desktop_egress_rules_to_machine=record_grant_carry(carried_with_rules),
+        gateway=UnreadablePermissionsGatewayClient(),
+    )
+    event = _make_event(AgentId(), proxy=True)
+    client = _build_this_desktop_client(tmp_path, harness, event)
+
+    response = _grant(client, event.request_id, raw_proxy="true")
+
+    assert response.status_code == 502
+    assert response.get_json()["error"].startswith(
+        f"Imbue Studio couldn't send {_DOMAIN}'s requests through this computer"
+    )
+    assert response.get_json()["detail"] != ""
+    assert carried == []
+    assert carried_with_rules == []
+    assert not _rules_copy_path(harness).exists()
+    assert harness.gateway.deleted_request_ids == ()
+    assert load_response_events(tmp_path) == []
+    assert harness.sender.sent_messages == []

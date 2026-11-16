@@ -2601,6 +2601,52 @@ def test_post_accepts_a_custom_service_that_already_exists(tmp_path: Path) -> No
         assert json.loads(body)["effect"] == {}
 
 
+def test_post_carries_a_custom_service_proxy_ask_without_touching_the_effect(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests", _custom_service_body({"domain": "example.com", "proxy": True})
+    )
+    assert status == 201, body
+    parsed = json.loads(body)
+    assert parsed["payload"] == {
+        "domain": "example.com",
+        "scheme": "https",
+        "login": None,
+        "header": None,
+        "credential_instructions": None,
+        "proxy": True,
+    }
+    assert parsed["effect"] == {}
+
+
+@pytest.mark.parametrize("proxy", [False, None])
+def test_post_omits_proxy_from_a_custom_service_payload_that_asked_for_none(
+    node_extension: tuple[str, Path, Path],
+    proxy: object,
+) -> None:
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests", _custom_service_body({"domain": "example.com", "proxy": proxy})
+    )
+    assert status == 201, body
+    assert "proxy" not in json.loads(body)["payload"]
+
+
+@pytest.mark.parametrize("proxy", ["true", "", 1, 0, ["host-a"], {}])
+def test_post_rejects_a_custom_service_proxy_that_is_not_a_boolean(
+    node_extension: tuple[str, Path, Path],
+    proxy: object,
+) -> None:
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests", _custom_service_body({"domain": "example.com", "proxy": proxy})
+    )
+    assert status == 400, body
+    assert json.loads(body)["error"] == "Invalid request body: payload.'proxy' must be a boolean when present."
+
+
 @pytest.mark.parametrize("header", ACCEPTED_CREDENTIAL_HEADERS)
 def test_post_accepts_custom_service_header(node_extension: tuple[str, Path, Path], header: str) -> None:
     base_url, _, _ = node_extension

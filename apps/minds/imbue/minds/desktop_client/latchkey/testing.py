@@ -6,6 +6,7 @@ are exercised through the tests that import them.
 
 import json
 import os
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
@@ -32,6 +33,9 @@ from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyServiceInfo
 from imbue.mngr_latchkey.core import ServiceAccountCredential
+from imbue.mngr_latchkey.desktop_egress import DesktopEgressRoute
+from imbue.mngr_latchkey.desktop_egress import parse_desktop_egress_rules
+from imbue.mngr_latchkey.desktop_egress import serialize_desktop_egress_rules
 from imbue.mngr_latchkey.devices import DesktopDeviceId
 from imbue.mngr_latchkey.file_sharing import FileSharingAccess
 from imbue.mngr_latchkey.file_sharing import FileSharingGrant
@@ -39,6 +43,7 @@ from imbue.mngr_latchkey.file_sharing import file_sharing_permission_name
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
+from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import save_permissions
 
@@ -253,6 +258,13 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
         self._filed_elsewhere[request_id] = (dict(body), target)
 
 
+class UnreadablePermissionsGatewayClient(FakeLatchkeyGatewayClient):
+    """A gateway that cannot be asked for a host's permissions."""
+
+    def get_permissions_config(self, permissions_file_path: Path) -> LatchkeyPermissionsConfig:
+        raise LatchkeyGatewayClientError(f"the gateway did not answer for {permissions_file_path.name}")
+
+
 class FixedHostBackendResolver(StaticBackendResolver):
     """Static resolver mapping every known agent to one fixed host.
 
@@ -270,6 +282,11 @@ class FixedHostBackendResolver(StaticBackendResolver):
         if agent_id not in self.known_agent_ids:
             return None
         return AgentDisplayInfo(agent_name=str(agent_id), host_id=str(self.fixed_host_id))
+
+
+def record_grant_carry(carried: list[tuple[str, str, str]]) -> Callable[[str, str, str], None]:
+    """A grant handover that records the workspace, service and account it was asked to carry."""
+    return lambda workspace_agent_id, service, account: carried.append((workspace_agent_id, service, account))
 
 
 def leave_grant_on_this_computer(workspace_agent_id: str, service_name: str, account: str) -> None:
@@ -562,3 +579,20 @@ def seed_connector_grant(
         permissions_path_for_host(plugin_data_dir, host_id),
         LatchkeyPermissionsConfig(rules=({rule_key: list(granted)},), schemas=schemas),
     )
+
+
+def write_desktop_egress_rules_copy(
+    plugin_data_dir: Path, host_id: HostId, route_by_service_name: Mapping[str, DesktopEgressRoute]
+) -> str:
+    """Write this computer's copy of the host's desktop egress rules file and return its text."""
+    rules_json = serialize_desktop_egress_rules(route_by_service_name)
+    rules_path = desktop_egress_rules_path_for_host(plugin_data_dir, host_id)
+    rules_path.parent.mkdir(parents=True, exist_ok=True)
+    rules_path.write_text(rules_json)
+    return rules_json
+
+
+def read_desktop_egress_rules_copy(plugin_data_dir: Path, host_id: HostId) -> dict[str, DesktopEgressRoute]:
+    """The routes this computer's copy of the host's desktop egress rules file names."""
+    rules_path = desktop_egress_rules_path_for_host(plugin_data_dir, host_id)
+    return parse_desktop_egress_rules(rules_path.read_text()).route_by_service_name

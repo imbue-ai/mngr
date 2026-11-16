@@ -266,8 +266,11 @@ class UiCustomServicePermissionDetail(FrozenModel):
     The simplest of the dialogs: no account picker, because a service being
     created has no accounts to choose between, and no permission editor, because
     the grant is a single catch-all permission on a scope already pinned to one
-    domain. Every string here is the domain, a URL derived from it, or the
-    agent's rationale -- there is nothing the agent can name.
+    domain. The one choice it can carry is the proxy switch, drawn when the
+    agent asked for the connection's requests to leave through this computer.
+    Every string here is the domain, a URL derived from it, the route that
+    switch would set, or the agent's rationale -- there is nothing the agent
+    can name.
     """
 
     kind: Literal["custom_service"] = "custom_service"
@@ -311,6 +314,14 @@ class UiCustomServicePermissionDetail(FrozenModel):
         ),
     )
     rationale: str = Field(description="Agent's stated reason for the request")
+    proxy: UiRequestedProxy | None = Field(
+        default=None,
+        description=(
+            "Set when the agent also asked for the service's requests to leave through this computer, the "
+            "workspace has a machine of its own to route them from, and this computer is not on the "
+            "service's route yet. None hides the option."
+        ),
+    )
 
 
 class UiUnknownScopeDetail(FrozenModel):

@@ -1474,6 +1474,7 @@ describe("InboxModel custom-service requests", () => {
     login_url: "https://api.example.com/login",
     is_system_browser_login_supported: false,
     rationale: "needs the widget API",
+    proxy: null,
   };
 
   let calls: { url: string; init?: RequestInit }[] = [];
@@ -1563,6 +1564,56 @@ describe("InboxModel custom-service requests", () => {
 
     const body = calls[calls.length - 1].init?.body as FormData;
     expect(JSON.parse(String(body.get("manual_credentials")))).toEqual({ token: "secret-token" });
+  });
+
+  it("starts a request that asks for the proxy with it on, and keeps the choice across the credential form", async () => {
+    const prompt: ManualCredentialsPrompt = {
+      parameters: [{ name: "token", label: "Token" }],
+      message: "needs credentials",
+    };
+    let isFirstGrant = true;
+    const model = await openCustomService({
+      "GET /ui/api/inbox/evt-a/detail": () =>
+        jsonResponse({
+          detail: {
+            ...CUSTOM_SERVICE_DETAIL,
+            proxy: {
+              resulting_route: ["host-a", "self"],
+              desktops: [{ device_id: "host-a", is_this_computer: true }],
+            },
+          },
+        }),
+      "POST /requests/evt-a/grant": () => {
+        if (isFirstGrant) {
+          isFirstGrant = false;
+          return jsonResponse({ outcome: "NEEDS_MANUAL_CREDENTIALS", manual_credentials: prompt });
+        }
+        return jsonResponse({ outcome: "GRANTED", message: "granted" });
+      },
+    });
+    expect(model.isProxyOn).toBe(true);
+
+    await model.approve();
+    model.isProxyOn = false;
+    model.manualCredentialValues.token = "secret-token";
+    await model.approve();
+
+    const grants = calls
+      .filter((call) => call.url.includes("/grant"))
+      .map((call) => call.init?.body as FormData);
+    expect(grants.map((form) => form.getAll("proxy"))).toEqual([["true"], ["false"]]);
+  });
+
+  it("sends no proxy field for a custom-service request that did not ask for one", async () => {
+    const model = await openCustomService({
+      "POST /requests/evt-a/grant": () => jsonResponse({ outcome: "GRANTED", message: "granted" }),
+    });
+    expect(model.isProxyOn).toBe(false);
+
+    await model.approve();
+
+    const form = calls[calls.length - 1].init?.body as FormData;
+    expect(form.has("proxy")).toBe(false);
   });
 
   it("reports a rejected token as a failure, unlike the form's first appearance", async () => {

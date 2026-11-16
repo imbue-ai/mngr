@@ -959,7 +959,8 @@ consume the stream and approve/delete on resolution.
     extension only checks that `proxy` is a boolean (anything else is a 400)
     and stores `true`; `false`, `null` and an absent `proxy` store nothing.
     It never acts on it: like a file-sharing `sync` it is not a permission,
-    so it does not enter the `effect`.
+    so it does not enter the `effect`. A `custom-service` payload takes the
+    same optional `proxy`, for the service the request connects.
   * `"file-sharing"` -- access to one path through the `minds-api-proxy`
     extension, with payload `{"path": "<absolute-path>", "access":
     "READ"|"WRITE"}`. The path must be absolute (or start with `~`, which is

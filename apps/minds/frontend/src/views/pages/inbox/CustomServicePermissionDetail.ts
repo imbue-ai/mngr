@@ -4,8 +4,10 @@
 // The simplest of the kinds. No account picker -- the workspace's machine has
 // no account for the service yet, whether it is being created or this computer
 // already has it -- and no permission editor, since the grant is all-or-nothing
-// on a scope already pinned to a single domain. Everything
-// shown as fact is the domain, a URL derived from it, or fixed copy; the only
+// on a scope already pinned to a single domain. The one choice it can carry is
+// the proxy switch, drawn when the agent asked for the connection's requests
+// to leave through this computer. Everything shown as fact is the domain, a
+// URL derived from it, the route that switch would set, or fixed copy; the only
 // agent-authored text is the rationale, which the shell renders under Reason.
 
 import m from "mithril";
@@ -17,6 +19,7 @@ import { Disclosure } from "../../components/Disclosure";
 import { Icon16 } from "../../components/Icon";
 import { Notice } from "../../components/Notice";
 import { PermissionsShell } from "./PermissionsShell";
+import { renderProxySection } from "./ProxySection";
 
 /** The header line as the user reads it: the placeholder becomes the thing they paste. */
 function describeCredentialHeader(header: string): string {
@@ -170,9 +173,12 @@ export function CustomServicePermissionDetailView(): m.Component<CustomServicePe
           detail.login_url === null
             ? `Storing the credentials for ${detail.domain}…`
             : `Opening a browser window for you to sign in to ${detail.domain}…`,
-        body: summary(detail, isHeaderOpen, () => {
-          openHeaderRequestId = isHeaderOpen ? null : detail.request_id;
-        }),
+        body: [
+          summary(detail, isHeaderOpen, () => {
+            openHeaderRequestId = isHeaderOpen ? null : detail.request_id;
+          }),
+          renderProxySection(model, detail.proxy, detail.base_api_url),
+        ],
       });
     },
   };

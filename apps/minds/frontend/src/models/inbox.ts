@@ -118,8 +118,8 @@ export interface PredefinedPermissionDetail {
   proxy: RequestedProxy | null;
 }
 
-/** What approving a predefined request with its proxy on does to the
- * service's desktop egress route. */
+/** What approving a request with its proxy on does to the service's desktop
+ * egress route. */
 export interface RequestedProxy {
   /** The route the service will then have: this computer, then its route now. */
   resulting_route: string[];
@@ -220,6 +220,9 @@ export interface CustomServicePermissionDetail {
    * null when a browser sign-in applies and no token is pasted. */
   credential_header: string | null;
   rationale: string;
+  /** Set when the agent asked for the service to also be proxied through the
+   * approving computer, and that can be offered. */
+  proxy: RequestedProxy | null;
 }
 
 export interface UnknownScopeDetail {
@@ -650,6 +653,8 @@ export class InboxModel {
       this.selectedAccount = detail.selected_account_value;
       // On because the agent asked; the user can still switch it off.
       this.isProxyOn = detail.proxy !== null;
+    } else if (detail.kind === "custom_service") {
+      this.isProxyOn = detail.proxy !== null;
     } else if (detail.kind === "workspace") {
       this.checkedPermissions = new Set(detail.checked_permissions);
       this.targetScope = detail.show_target_choice ? "selected" : "all";
@@ -868,9 +873,13 @@ export class InboxModel {
       form.append("sync", this.isSharePathSynced ? "true" : "false");
       form.append("sync_conflict", this.sharePathSyncConflict);
     } else if (detail.kind === "custom_service") {
-      // The domain is fixed at request time, so the only thing a custom-service
-      // approval can carry is the credentials the server asked for (a service
-      // with no browser sign-in); the first Approve sends none.
+      // The domain is fixed at request time, so a custom-service approval
+      // carries only the proxy choice, when the dialog drew the switch, and
+      // the credentials the server asked for (a service with no browser
+      // sign-in); the first Approve sends none.
+      if (detail.proxy !== null) {
+        form.append("proxy", this.isProxyOn ? "true" : "false");
+      }
       this.appendManualCredentialFields(form);
     } else {
       // Accounts and remote-execution grants carry no parameters (all-or-nothing approve).

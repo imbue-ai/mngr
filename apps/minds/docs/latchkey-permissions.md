@@ -329,6 +329,10 @@ The dialog is the simplest of the kinds, and deliberately so:
   need typing (see [Manual credential entry](#manual-credential-entry)). A
   rejected value re-shows the form with the reason, rather than failing the
   request.
+* When the agent also asked for the connection's requests to leave through
+  this computer, the dialog draws the **Proxy through my desktop** switch a
+  predefined request gets (see [An agent asking for a
+  proxy](#an-agent-asking-for-a-proxy)).
 
 Approving registers the service on the workspace's machine -- in the
 `config.json` of that machine's latchkey store, which is this computer's own
@@ -1499,12 +1503,23 @@ request, so a grant that is left behind allows nothing by itself.
 
 An agent that finds a service refusing its machine's requests can ask, as part
 of its permission request, for the service to be proxied through the user's
-desktop: it sets a `predefined` payload's optional `proxy` field to `true`.
+desktop: it sets the optional `proxy` field of a `predefined` or
+`custom-service` payload to `true`.
 
 ```json
 {
   "scope": "slack-api",
   "permissions": ["slack-read-all"],
+  "proxy": true
+}
+```
+
+On a `custom-service` request the ask is for the connection being created:
+
+```json
+{
+  "domain": "api.example.com",
+  "scheme": "https",
   "proxy": true
 }
 ```
@@ -1516,8 +1531,9 @@ same with or without it. A payload that leaves the field out, or sets it to
 `false` or `null`, is stored as a request that asks for no proxy.
 
 The approval dialog draws a **Proxy through my desktop** switch under the
-permission list, with a line saying the agent asked for the service's requests
-to leave through this computer. The switch starts on, because the agent asked,
+permission list (under the summary, for a `custom-service` request), with a
+line saying the agent asked for the service's requests to leave through this
+computer. The switch starts on, because the agent asked,
 and the line beside it spells out the route the service would then have: this
 computer first, then the places its route names now. For a service at `[self]`
 that is this computer and then the workspace's own machine, so the requests
@@ -1573,6 +1589,16 @@ Such an approval costs two round trips to the machine, one read and one write:
 When the machine turns out to hold a route that already names this computer,
 the route is left as it is, and the grant is carried without the rules file, as
 it is for a request that asked for no proxy.
+
+A `custom-service` approval follows the same steps, with the service
+registered between the read and the sign-in: the read also adopts the custom
+services the machine has registered over the ones in this computer's copy of
+its store, so a service registered before it would be discarded. For a service
+that takes typed credentials, both Approve clicks start from the read, and the
+second registers the service again. The registration then travels to the
+machine in the one push that carries the credential, the permissions file and
+the rules file. The notice names the service by its origin ("Requests to
+https://api.example.com/ now leave from ...").
 
 A machine that cannot be read, or a route that cannot be set, fails the
 approval and leaves the request pending with the reason, like a grant the
@@ -1823,9 +1849,9 @@ Agents are expected to:
   and, if it wants a copy it can reach while the user's computer is offline,
   a `sync` (see [An agent asking for a synchronized
   copy](#an-agent-asking-for-a-synchronized-copy)).
-  A request for a catalog service may also carry `"proxy": true`, when the
-  service refuses requests from the workspace's machine (see [An agent asking
-  for a proxy](#an-agent-asking-for-a-proxy)).
+  A `predefined` or `custom-service` request may also carry `"proxy": true`,
+  when the service refuses requests from the workspace's machine (see [An agent
+  asking for a proxy](#an-agent-asking-for-a-proxy)).
 * Stop the turn and wait. The agent will receive a message from the
   desktop (through the workspace's chat app) with the decision and can
   decide whether to retry.

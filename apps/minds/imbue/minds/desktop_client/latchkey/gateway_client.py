@@ -292,6 +292,13 @@ class CustomServiceRequestPayload(FrozenModel):
             "into. Only without a login flow, which has nothing to paste."
         ),
     )
+    proxy: bool = Field(
+        default=False,
+        description=(
+            "Whether the agent also asks for the service's requests to leave through the desktop that "
+            "approves the request, as on a predefined request."
+        ),
+    )
 
     @model_validator(mode="after")
     def _credential_shape_is_valid(self) -> Self:
