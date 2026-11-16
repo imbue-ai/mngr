@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -10,9 +11,12 @@ from pydantic import AnyUrl
 from pydantic import SecretStr
 
 from imbue.imbue_common.profiling import drain_events
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_imbue_cloud.connector.auth_helper import force_refresh
+from imbue.mngr_imbue_cloud.connector.auth_helper import get_active_token
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
+from imbue.mngr_imbue_cloud.connector.testing import make_jwt_expiring_in
 from imbue.mngr_imbue_cloud.data_types import AuthSession
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
@@ -46,8 +50,13 @@ def test_force_refresh_maps_the_connectors_refused_refresh_to_the_auth_error(tmp
     client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx2.MockTransport(handler))
     store = _store_with_a_session(tmp_path)
 
-    with pytest.raises(ImbueCloudAuthError, match="Refresh rejected by connector: refresh token revoked"):
-        force_refresh(store, client, _ACCOUNT)
+    with capture_loguru(level="WARNING") as log_output:
+        with pytest.raises(ImbueCloudAuthError, match="Refresh rejected by connector: refresh token revoked"):
+            force_refresh(store, client, _ACCOUNT)
+    assert (
+        "imbue_cloud connector refused the session refresh with status ERROR: refresh token revoked"
+        in log_output.getvalue()
+    )
 
     assert refresh_paths == ["/auth/session/refresh"]
     # The refusal rotated nothing: the stored session still carries the refused tokens.
@@ -81,3 +90,27 @@ def test_force_refresh_runs_inside_a_token_refresh_span_enclosing_the_connector_
     # The request span is nested inside the refresh span on the timeline.
     assert refresh_span["ts"] <= request_span["ts"]
     assert request_span["ts"] + request_span["dur"] <= refresh_span["ts"] + refresh_span["dur"]
+
+
+def test_get_active_token_logs_the_lifetime_a_refresh_granted(tmp_path: Path) -> None:
+    """A refresh records the new token's lifetime, so a later 401 can be weighed against when the token was minted."""
+    new_access = make_jwt_expiring_in(3600)
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200, json={"status": "OK", "tokens": {"access_token": new_access, "refresh_token": "rt-2"}}
+        )
+
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx2.MockTransport(handler))
+    store = _store_with_a_session(tmp_path)
+
+    with capture_loguru(level="INFO") as log_output:
+        token = get_active_token(store, client, _ACCOUNT)
+
+    assert token.get_secret_value() == new_access
+    match = re.search(
+        r"Refreshed the imbue_cloud access token; the new one is valid for (\d+)s", log_output.getvalue()
+    )
+    assert match is not None, log_output.getvalue()
+    assert 3590 <= int(match.group(1)) <= 3600
+    assert new_access not in log_output.getvalue()

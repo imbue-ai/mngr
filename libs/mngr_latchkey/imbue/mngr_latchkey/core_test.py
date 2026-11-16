@@ -2933,6 +2933,39 @@ def test_non_transient_tunnel_failure_is_reported_as_an_error_at_once(
     assert streaks == {}
 
 
+def test_non_transient_failure_says_when_the_step_last_succeeded(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """A refusal right after a success reads differently from one on a step that never worked, so the report says which."""
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    tunnel_manager = _ConfigurableFailureTunnelManager()
+    agent_id = AgentId()
+    host_id = HostId()
+    ssh_info = RemoteSSHInfo(user="root", host="agent-host.example", port=2222, key_path=tmp_path / "k")
+    non_transient_error = SSHTunnelError("No SSH key file at /nowhere", SSHTunnelPhase.LOCAL_SETUP)
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = LatchkeyDiscoveryHandler(
+            latchkey=manager,
+            tunnel_manager=tunnel_manager,
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
+        )
+        with _captured_log_records() as captured:
+            tunnel_manager._error_to_raise = non_transient_error
+            handler._setup_desktop_gateway_reachability(agent_id, host_id, ssh_info, 41989)
+            tunnel_manager._error_to_raise = None
+            handler._setup_desktop_gateway_reachability(agent_id, host_id, ssh_info, 41989)
+            tunnel_manager._error_to_raise = non_transient_error
+            handler._setup_desktop_gateway_reachability(agent_id, host_id, ssh_info, 41989)
+
+    error_messages = [message for level, message in captured if level == "ERROR" and str(agent_id) in message]
+    assert len(error_messages) == 2, captured
+    assert "step DESKTOP_GATEWAY_TUNNEL" in error_messages[0]
+    assert "has not succeeded since this process started" in error_messages[0]
+    assert "step DESKTOP_GATEWAY_TUNNEL" in error_messages[1]
+    assert "last succeeded at 20" in error_messages[1]
+
+
 def test_stopping_a_host_forgets_its_transient_failure_streaks(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
     """A streak counts consecutive cycles while the host runs, so a stop ends it and a restart starts afresh.
 

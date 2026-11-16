@@ -44,10 +44,10 @@ class _AccountIndexEntry(FrozenModel):
     user_id: SuperTokensUserId
 
 
-def _decode_jwt_exp(access_token: str) -> datetime | None:
+def decode_jwt_exp(access_token: str) -> datetime | None:
     """Best-effort: decode a JWT and return its `exp` claim as a UTC datetime.
 
-    Returns None when the token isn't a recognizable JWT or has no exp.
+    Returns None when the token isn't a recognizable JWT or has no usable exp.
     Used to know when to refresh transparently before expiry.
     """
     parts = access_token.split(".")
@@ -62,13 +62,17 @@ def _decode_jwt_exp(access_token: str) -> datetime | None:
         return None
     try:
         payload = json.loads(payload_bytes)
-    except json.JSONDecodeError as exc:
+    except ValueError as exc:
+        # JSONDecodeError, or UnicodeDecodeError for a payload that is not UTF-8.
         logger.warning("Skipping JWT exp decode: payload is not JSON ({})", exc)
         return None
-    exp = payload.get("exp")
+    exp = payload.get("exp") if isinstance(payload, dict) else None
     if not isinstance(exp, (int, float)):
         return None
-    return datetime.fromtimestamp(float(exp), tz=timezone.utc)
+    try:
+        return datetime.fromtimestamp(float(exp), tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 class ImbueCloudSessionStore(MutableModel):
@@ -319,7 +323,7 @@ def make_session_from_tokens(
         profile_picture_url=profile_picture_url,
         access_token=SecretStr(access_token),
         refresh_token=SecretStr(refresh_token) if refresh_token else None,
-        access_token_expires_at=_decode_jwt_exp(access_token),
+        access_token_expires_at=decode_jwt_exp(access_token),
     )
 
 

@@ -7,8 +7,9 @@ import pytest
 from pydantic import SecretStr
 
 from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
-from imbue.mngr_imbue_cloud.connector.session_store import _decode_jwt_exp
+from imbue.mngr_imbue_cloud.connector.session_store import decode_jwt_exp
 from imbue.mngr_imbue_cloud.connector.session_store import make_session_from_tokens
+from imbue.mngr_imbue_cloud.connector.testing import make_jwt_with_payload
 from imbue.mngr_imbue_cloud.data_types import AuthSession
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
@@ -107,8 +108,21 @@ def test_is_access_token_near_expiry_respects_buffer(tmp_path: Path) -> None:
 
 
 def test_decode_jwt_exp_returns_none_for_garbage() -> None:
-    assert _decode_jwt_exp("not-a-jwt") is None
-    assert _decode_jwt_exp("a.b.c") is None  # invalid base64 payload
+    assert decode_jwt_exp("not-a-jwt") is None
+    assert decode_jwt_exp("a.b.c") is None  # invalid base64 payload
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(b"\x80", id="not_utf8"),
+        pytest.param(b"[]", id="not_an_object"),
+        pytest.param(b'{"exp": 1e20}', id="exp_out_of_range"),
+        pytest.param(b'{"exp": NaN}', id="exp_not_a_number"),
+    ],
+)
+def test_decode_jwt_exp_returns_none_for_a_payload_it_cannot_read(payload: bytes) -> None:
+    assert decode_jwt_exp(make_jwt_with_payload(payload)) is None
 
 
 def test_make_session_from_tokens_extracts_exp() -> None:

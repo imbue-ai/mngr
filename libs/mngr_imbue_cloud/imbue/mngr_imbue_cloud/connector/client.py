@@ -43,7 +43,11 @@ from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.profiling import get_profiler
 from imbue.imbue_common.profiling import render_traceparent
+from imbue.imbue_common.suspension import ClockReading
+from imbue.imbue_common.suspension import read_clocks
+from imbue.imbue_common.suspension import was_suspended_since
 from imbue.mngr.primitives import PublishedPortDeclaration
+from imbue.mngr_imbue_cloud.connector.session_store import decode_jwt_exp
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.errors import CLIENT_TOO_OLD_FALLBACK_MESSAGE
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountDeletedError
@@ -221,6 +225,52 @@ def _warn_before_retry_sleep(retry_state: RetryCallState, method: str, url: str)
     )
 
 
+def _bearer_seconds_left(headers: Mapping[str, str] | None, at: ClockReading) -> float | None:
+    """Seconds from ``at`` until the request's bearer token expires (negative once past), or None when unknown."""
+    authorization = (headers or {}).get("Authorization", "")
+    if not authorization.startswith("Bearer "):
+        return None
+    expires_at = decode_jwt_exp(authorization.removeprefix("Bearer "))
+    if expires_at is None:
+        return None
+    return expires_at.timestamp() - at.wall_seconds
+
+
+def _format_seconds_left(seconds_left: float | None) -> str:
+    return "unknown" if seconds_left is None else f"{seconds_left:+.0f}s"
+
+
+def _log_unauthenticated_response(
+    method: str,
+    url: str,
+    headers: Mapping[str, str] | None,
+    attempt_number: int,
+    # Both clocks at the start of each attempt ``_send`` made, in order
+    attempt_clocks: Sequence[ClockReading],
+) -> None:
+    """Log the evidence that tells a token which expired mid-``_send`` from one the connector refused outright.
+
+    A transport retry re-sends the token captured before the first attempt, so
+    the line names the attempt that drew the 401, the token's validity left at
+    the first attempt and at the refused one, and whether the machine was
+    suspended between them, which is when a token can expire under a hung
+    first attempt.
+    """
+    first_attempt = attempt_clocks[0]
+    refused_attempt = attempt_clocks[-1]
+    logger.info(
+        "imbue_cloud connector {} {} answered 401 on attempt {}/{}; access token validity left at the first "
+        "attempt: {}, at the refused attempt: {}; machine suspended between the two: {}",
+        method,
+        urlsplit(url).path,
+        attempt_number,
+        _TRANSPORT_RETRY_ATTEMPTS,
+        _format_seconds_left(_bearer_seconds_left(headers, first_attempt)),
+        _format_seconds_left(_bearer_seconds_left(headers, refused_attempt)),
+        "yes" if was_suspended_since(first_attempt, now=refused_attempt) else "no",
+    )
+
+
 class ImbueCloudConnectorClient(MutableModel):
     """Thin synchronous HTTP wrapper over the connector endpoints."""
 
@@ -233,6 +283,13 @@ class ImbueCloudConnectorClient(MutableModel):
         description=(
             "Optional httpx2 transport override. Tests inject an httpx2.MockTransport here so "
             "requests never leave the process; production leaves it None (module-level httpx2 calls)."
+        ),
+    )
+    clock_fn: Callable[[], ClockReading] = Field(
+        default=read_clocks,
+        description=(
+            "Injectable pair-of-clocks sampler, read at the start of each request attempt; "
+            "overridden in tests to pose a suspension."
         ),
     )
 
@@ -472,7 +529,10 @@ class ImbueCloudConnectorClient(MutableModel):
         connect-phase errors -- where the request never reached the server --
         are retried, avoiding a double-allocation on a post-send blip. Each
         attempt is its own ``connector.request`` span (see ``_http_call_in_span``).
+
+        A 401 response is also logged (``_log_unauthenticated_response``).
         """
+        attempt_clocks: list[ClockReading] = []
         retrying = Retrying(
             retry=retry_if_exception(lambda exc: _is_retryable_transport_error(exc, idempotent=idempotent)),
             stop=stop_after_attempt(_TRANSPORT_RETRY_ATTEMPTS) | stop_after_delay(_TRANSPORT_RETRY_TOTAL_SECONDS_CAP),
@@ -481,12 +541,13 @@ class ImbueCloudConnectorClient(MutableModel):
             # keeps synchronized clients from re-arriving in lockstep.
             wait=wait_exponential(multiplier=_TRANSPORT_RETRY_BASE_SLEEP_SECONDS / 2)
             + wait_random_exponential(multiplier=_TRANSPORT_RETRY_BASE_SLEEP_SECONDS / 2),
+            before=lambda _retry_state: attempt_clocks.append(self.clock_fn()),
             before_sleep=lambda retry_state: _warn_before_retry_sleep(retry_state, method=method, url=url),
             reraise=True,
         )
         try:
             # tenacity's statistics name the attempt in flight, which is what the span records.
-            return retrying(
+            response = retrying(
                 lambda: self._http_call_in_span(method, url, retrying.statistics["attempt_number"], **kwargs)
             )
         except httpx2.TransportError as exc:
@@ -494,6 +555,11 @@ class ImbueCloudConnectorClient(MutableModel):
             raise exc_cls(
                 f"could not reach the imbue_cloud connector at {url} after {attempt_count} attempt(s): {exc}"
             ) from exc
+        if response.status_code == 401:
+            _log_unauthenticated_response(
+                method, url, kwargs.get("headers"), retrying.statistics["attempt_number"], attempt_clocks
+            )
+        return response
 
     # Auth (no bearer token required)
 

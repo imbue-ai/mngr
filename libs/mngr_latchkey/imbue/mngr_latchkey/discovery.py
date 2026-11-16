@@ -404,6 +404,10 @@ class LatchkeyDiscoveryHandler(MutableModel):
     _transient_failure_streak_by_key: dict[_TransientFailureStreakKey, _TransientFailureStreak] = PrivateAttr(
         default_factory=dict
     )
+    # When each host's wiring step last succeeded, reported with a failure that
+    # retrying cannot fix so a one-off refusal between successes can be told from
+    # a persistent one. Guarded by ``_remote_hosts_lock``.
+    _last_success_at_by_key: dict[_TransientFailureStreakKey, datetime] = PrivateAttr(default_factory=dict)
     # The state discovery last reported for each host, reported with a failure
     # streak so a streak that began right after a restart can be told from one on
     # a long-running host. Guarded by ``_remote_hosts_lock``.
@@ -692,6 +696,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
         container may be recreated before it comes back. The host's
         transient-failure streaks are forgotten too: they count consecutive
         cycles while the host reports as running, and a stop ends that run.
+        So are its steps' last-success times, which describe that same run.
         """
         removed_tunnel_count = self.tunnel_manager.remove_reverse_tunnels_for_agent(
             AgentInstanceKey.build(agent_id, host_id)
@@ -703,6 +708,8 @@ class LatchkeyDiscoveryHandler(MutableModel):
             self._last_announcement_at_by_host_id.pop(str(host_id), None)
             for key in [key for key in self._transient_failure_streak_by_key if key.host_id == host_id]:
                 del self._transient_failure_streak_by_key[key]
+            for key in [key for key in self._last_success_at_by_key if key.host_id == host_id]:
+                del self._last_success_at_by_key[key]
 
     def _setup_desktop_gateway_reachability(
         self, agent_id: AgentId, host_id: HostId, ssh_info: RemoteSSHInfo, host_side_port: int
@@ -874,10 +881,11 @@ class LatchkeyDiscoveryHandler(MutableModel):
         logger.debug("Announced this computer to the machine of host {} on port {}", host_id, device_port)
 
     def _record_wiring_step_success(self, host_id: HostId, step: _RemoteWiringStep) -> None:
-        """Forget a host's transient-failure streak for a step that just succeeded."""
+        """Forget a host's transient-failure streak for a step that just succeeded, and note when it did."""
         key = _TransientFailureStreakKey(host_id=host_id, step=step)
         with self._remote_hosts_lock:
             self._transient_failure_streak_by_key.pop(key, None)
+            self._last_success_at_by_key[key] = datetime.now(timezone.utc)
 
     def _record_wiring_step_failure(
         self,
@@ -891,7 +899,8 @@ class LatchkeyDiscoveryHandler(MutableModel):
     ) -> None:
         """Log a wiring-step failure at a level that reflects whether retrying is expected to fix it.
 
-        A failure that is not transient is an error right away. A transient one
+        A failure that is not transient is an error right away, naming the step
+        and when it last succeeded for this host. A transient one
         is expected to clear on the next discovery cycle, so it is only noted
         (once per streak at info, then at debug) until the streak reaches
         ``TRANSIENT_FAILURE_REPORT_THRESHOLD``, when it is reported as an error
@@ -906,10 +915,20 @@ class LatchkeyDiscoveryHandler(MutableModel):
         unreachable connect, and whether this machine slept during the streak;
         the streak's first (info) line carries the provider and errnos too.
         """
-        if not is_transient_remote_wiring_error(error):
-            logger.opt(exception=error).error("Failed to {}: {}", attempt_description, error)
-            return
         key = _TransientFailureStreakKey(host_id=host_id, step=step)
+        if not is_transient_remote_wiring_error(error):
+            with self._remote_hosts_lock:
+                last_success_at = self._last_success_at_by_key.get(key)
+            logger.opt(exception=error).error(
+                "Failed to {}: {} (step {}; {})",
+                attempt_description,
+                error,
+                step,
+                "has not succeeded since this process started or the host's agent last stopped"
+                if last_success_at is None
+                else f"last succeeded at {last_success_at.isoformat()}",
+            )
+            return
         with self._remote_hosts_lock:
             streak = _advance_transient_failure_streak(
                 self._transient_failure_streak_by_key.get(key), ssh_info, read_clocks()

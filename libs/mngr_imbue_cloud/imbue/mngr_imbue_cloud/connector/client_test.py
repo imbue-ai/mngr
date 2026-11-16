@@ -8,6 +8,7 @@ and makes them deterministic.
 import ast
 import inspect
 import json as _json
+import re
 from typing import Any
 
 import httpx2
@@ -20,12 +21,17 @@ from imbue.imbue_common.profiling import TraceContext
 from imbue.imbue_common.profiling import drain_events
 from imbue.imbue_common.profiling import get_profiler
 from imbue.imbue_common.profiling import parse_traceparent
+from imbue.imbue_common.suspension import ClockReading
+from imbue.imbue_common.suspension import read_clocks
 from imbue.mngr.primitives import parse_published_port_declarations
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_imbue_cloud.connector import client as connector_client_module
 from imbue.mngr_imbue_cloud.connector.client import CLIENT_ID_HEADER
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.connector.client import TRACEPARENT_HEADER
 from imbue.mngr_imbue_cloud.connector.client import create_litellm_key_rotating_on_exists
+from imbue.mngr_imbue_cloud.connector.testing import make_jwt_expiring_in
+from imbue.mngr_imbue_cloud.connector.testing import make_jwt_with_payload
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountDeletedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountError
@@ -980,6 +986,91 @@ def test_send_does_not_retry_http_status_errors(monkeypatch: pytest.MonkeyPatch)
     with pytest.raises(ImbueCloudShareError):
         client.list_shares(SecretStr("tok"))
     assert state["calls"] == 1
+
+
+def test_a_401_after_a_transport_retry_logs_the_attempt_and_the_tokens_remaining_validity() -> None:
+    """A 401 on a retried request names the attempt and how long the re-sent token had left, never the token."""
+    calls: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        calls.append(request.url.path)
+        if len(calls) == 1:
+            raise httpx2.ReadTimeout("The read operation timed out", request=request)
+        return httpx2.Response(401, json={"detail": "Invalid token"})
+
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx2.MockTransport(handler))
+    token = make_jwt_expiring_in(600)
+
+    with capture_loguru(level="INFO") as log_output:
+        with pytest.raises(ImbueCloudAuthError):
+            client.list_workspaces(SecretStr(token))
+
+    assert calls == ["/workspaces", "/workspaces"]
+    log_text = log_output.getvalue()
+    assert "imbue_cloud connector GET /workspaces answered 401 on attempt 2/3" in log_text
+    seconds_left = [int(value) for value in re.findall(r"at the (?:first|refused) attempt: \+(\d+)s", log_text)]
+    assert len(seconds_left) == 2, log_text
+    assert all(590 <= value <= 600 for value in seconds_left), seconds_left
+    assert "machine suspended between the two: no" in log_text
+    assert token not in log_text
+
+
+def test_a_401_on_a_retry_after_a_sleep_reports_the_suspension_and_the_expired_token() -> None:
+    """A token that expired while the machine slept between attempts is the case the 401 line exists to spot."""
+    calls: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        calls.append(request.url.path)
+        if len(calls) == 1:
+            raise httpx2.ReadTimeout("The read operation timed out", request=request)
+        return httpx2.Response(401, json={"detail": "Invalid token"})
+
+    first_attempt = read_clocks()
+    # The wall clock ran an hour further than the monotonic one before the retry: a sleep.
+    retry_after_a_sleep = ClockReading(
+        wall_seconds=first_attempt.wall_seconds + 3600.0, monotonic_seconds=first_attempt.monotonic_seconds + 1.0
+    )
+    client = ImbueCloudConnectorClient(
+        base_url=AnyUrl("https://example.com"),
+        transport=httpx2.MockTransport(handler),
+        clock_fn=iter((first_attempt, retry_after_a_sleep)).__next__,
+    )
+
+    with capture_loguru(level="INFO") as log_output:
+        with pytest.raises(ImbueCloudAuthError):
+            client.list_workspaces(SecretStr(make_jwt_expiring_in(600)))
+
+    log_text = log_output.getvalue()
+    assert "answered 401 on attempt 2/3" in log_text
+    validity = re.search(r"at the first attempt: \+(\d+)s, at the refused attempt: -(\d+)s", log_text)
+    assert validity is not None, log_text
+    assert 590 <= int(validity.group(1)) <= 600
+    assert 3000 <= int(validity.group(2)) <= 3010
+    assert "machine suspended between the two: yes" in log_text
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        pytest.param("opaque-token", id="opaque"),
+        pytest.param(make_jwt_with_payload(b"[]"), id="unreadable_jwt_payload"),
+    ],
+)
+def test_a_401_with_a_bearer_whose_expiry_cannot_be_read_still_raises_the_auth_error(token: str) -> None:
+    """The 401 line reports such a bearer's validity as unknown, and logging it never replaces the auth error."""
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(401, json={"detail": "Invalid token"})
+
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx2.MockTransport(handler))
+
+    with capture_loguru(level="INFO") as log_output:
+        with pytest.raises(ImbueCloudAuthError):
+            client.list_workspaces(SecretStr(token))
+
+    log_text = log_output.getvalue()
+    assert "answered 401 on attempt 1/3" in log_text
+    assert "validity left at the first attempt: unknown, at the refused attempt: unknown" in log_text
 
 
 def test_get_workspace_retries_transient_transport_error(monkeypatch: pytest.MonkeyPatch) -> None:

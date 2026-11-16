@@ -9,14 +9,17 @@ real call is made.
 import fcntl
 from collections.abc import Generator
 from contextlib import contextmanager
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
+from loguru import logger
 from pydantic import SecretStr
 
 from imbue.imbue_common.profiling import profiled
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
-from imbue.mngr_imbue_cloud.connector.session_store import _decode_jwt_exp
+from imbue.mngr_imbue_cloud.connector.session_store import decode_jwt_exp
 from imbue.mngr_imbue_cloud.data_types import AuthSession
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
@@ -87,6 +90,13 @@ def _refresh_locked(
         )
     refreshed = client.auth_refresh_session(session.refresh_token)
     if refreshed.get("status") not in (None, "OK"):
+        # Every session error answers status "ERROR"; the message is what names
+        # a revoked or theft-detected session.
+        logger.warning(
+            "imbue_cloud connector refused the session refresh with status {}: {}",
+            refreshed.get("status"),
+            refreshed.get("message"),
+        )
         raise ImbueCloudAuthError(
             f"Refresh rejected by connector: {refreshed.get('message') or refreshed.get('status')}"
         )
@@ -107,9 +117,17 @@ def _refresh_locked(
         profile_picture_url=session.profile_picture_url,
         access_token=SecretStr(new_access),
         refresh_token=SecretStr(new_refresh),
-        access_token_expires_at=_decode_jwt_exp(new_access),
+        access_token_expires_at=decode_jwt_exp(new_access),
     )
     store.save(refreshed_session)
+    # Info, not debug, so it reaches the Sentry breadcrumbs of a later 401.
+    expires_at = refreshed_session.access_token_expires_at
+    logger.info(
+        "Refreshed the imbue_cloud access token; the new one is valid for {}",
+        "an unknown time"
+        if expires_at is None
+        else f"{(expires_at - datetime.now(timezone.utc)).total_seconds():.0f}s",
+    )
     return refreshed_session
 
 
