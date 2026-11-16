@@ -1,4 +1,6 @@
 import json
+import os
+import shlex
 from pathlib import Path
 from uuid import uuid4
 
@@ -20,6 +22,7 @@ from imbue.mngr.cli.issue_reporting import handle_unexpected_error
 from imbue.mngr.cli.issue_reporting import search_for_existing_issue
 from imbue.mngr.cli.issue_reporting import write_diagnose_prompt_file
 from imbue.mngr.utils.testing import capture_loguru
+from imbue.mngr.utils.testing import write_executable_script
 
 
 def _fake_finished_process(returncode: int, stdout: str, command: tuple[str, ...] = ("fake",)) -> FinishedProcess:
@@ -105,18 +108,26 @@ def test_build_new_issue_url_truncates_long_body() -> None:
 
 
 def test_search_for_existing_issue_returns_none_when_both_fail(
-    cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
+    cg: ConcurrencyGroup, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """When both GitHub API and gh CLI fail, search returns None.
 
-    Points at a nonexistent GitHub repo so both curl and gh CLI fail
-    with real errors rather than mocking the failure.
+    Failing ``curl`` and ``gh`` stand first on PATH, so both searches fail through
+    the real subprocess path without reaching GitHub.
     """
-    fake_repo = f"nonexistent-org/nonexistent-repo-{uuid4().hex}"
-    monkeypatch.setattr("imbue.mngr.cli.issue_reporting.GITHUB_REPO", fake_repo)
+    fake_bin_dir = tmp_path / "failing-search-bin"
+    fake_bin_dir.mkdir()
+    invocation_log = tmp_path / "invocations.log"
+    for program in ("curl", "gh"):
+        write_executable_script(
+            fake_bin_dir / program, f"#!/bin/sh\necho {program} >> {shlex.quote(str(invocation_log))}\nexit 1\n"
+        )
+    monkeypatch.setenv("PATH", f"{fake_bin_dir}{os.pathsep}{os.environ['PATH']}")
 
     result = search_for_existing_issue("some error", cg)
+
     assert result is None
+    assert invocation_log.read_text().split() == ["curl", "gh"]
 
 
 def test_search_for_existing_issue_falls_back_to_gh_cli(monkeypatch: pytest.MonkeyPatch, cg: ConcurrencyGroup) -> None:

@@ -31,6 +31,7 @@ from imbue.mngr.primitives import TransferMode
 from imbue.mngr.utils.logging import LoggingConfig
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import capture_tmux_pane_contents
+from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import tmux_session_exists
 from imbue.mngr.utils.testing import wait_for_agent_session
@@ -1391,22 +1392,21 @@ def test_create_with_idle_timeout_rejected_on_local_provider(
     assert "not supported" in result.output.lower() or "remote provider" in result.output.lower()
 
 
-@pytest.mark.acceptance
 @pytest.mark.tmux
-@pytest.mark.timeout(300)
 def test_cli_create_from_git_url(
     cli_runner: CliRunner,
     temp_host_dir: Path,
+    tmp_path: Path,
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """create --source <git URL> clones the repo and produces an agent with the repo contents.
 
-    Uses this project's own public GitHub URL. Network access is required; the
-    assertion is against a long-stable top-level file (README.md, which the
-    public mirror's filtering keeps) so the test does not break on repo
-    layout churn.
+    The URL names a local repo over file://, which takes the same clone path as an
+    https URL without reaching the network.
     """
+    source_repo = tmp_path / "source-repo"
+    init_git_repo(source_repo)
     agent_name = f"test-git-url-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
@@ -1419,7 +1419,7 @@ def test_cli_create_from_git_url(
                 "--type",
                 "command",
                 "--source",
-                "https://github.com/imbue-ai/mngr",
+                f"file://{source_repo}",
                 "--no-connect",
                 "--",
                 "sleep",
