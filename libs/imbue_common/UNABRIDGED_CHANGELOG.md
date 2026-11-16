@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-15
+
+A test that runs a real child program -- a bash script, git, a fresh interpreter, a nested pytest -- now gets 60 seconds instead of the repo-wide 10-second `pytest-timeout` default, which was sized for work that stays inside the pytest process.
+
+The budget follows what the test actually does rather than a marker someone has to remember: the first time a test's call phase starts a child program, its deadline moves out to the class budget. A test that starts nothing keeps the tight 10-second deadline, and a test that declares a `@pytest.mark.timeout` of its own still wins. When an extended deadline does fire, the failure reports the budget that was enforced, not the one it replaced.
+
+This is what was turning CI red: measured across the suite's 25,676 tests, the 3,326 that start a child program cost p99 5.1s and p999 8.9s on the offload runners, so a loaded runner regularly pushed them past 10s even though nothing was wrong with the product. The other 22,350 tests cost p99 0.71s and are unaffected either way.
+
 ## 2026-11-10
 
 `imbue_common` gains `imbue.imbue_common.profiling`, the tracer behind Imbue Studio's opt-in profiling mode. It records named spans and instants as Chrome JSON trace events on the system monotonic clock, keeps a per-thread trace context with W3C `traceparent` parsing and rendering so a span can join a trace started in another process, and attaches Perfetto flow links between spans in different processes. It has two modes: `enable_writer(path)` appends events to one trace file, buffered and flushed on the recording thread by count, by age, on `flush()`, and at exit, and `enable_collector()` keeps events in memory for `drain_events()`, so a child process can hand its spans back to the writer. Until a mode is enabled, `get_profiler()` is a no-op that costs about 160 ns per span; enabled, a span costs about 6 microseconds in collector mode and about 10 microseconds in writer mode, at about 100 bytes per span on disk. Each mode is capped (one million of the writer's own events, fifty thousand of a collector's) and records a single `overflow` instant past its cap; events another process recorded are written verbatim and are not counted. A file the writer produces opens in Perfetto as is, with one lane per process, named threads, nested slices, and arrows between the spans that share a flow id. A span's handle can set its flow links after it opens (`set_flow_out`, `set_flow_in`), so a span can be the source of a flow bound to its own span id, and `complete(name, start_us, end_us)` records a span that already finished from explicit timestamps.

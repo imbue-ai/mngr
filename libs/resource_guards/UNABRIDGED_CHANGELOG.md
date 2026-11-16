@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-15
+
+The blocked-resource reporting test no longer carries a hand-written 30-second `pytest-timeout`. It runs a nested pytest in a subprocess, so it inherits the 60 seconds imbue-common gives any test running a child program -- the same budget its siblings in that file get, instead of a tighter one of its own.
+
 ## 2026-11-09
 
 Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.

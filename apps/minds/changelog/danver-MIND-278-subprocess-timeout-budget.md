@@ -1,3 +1,0 @@
-Twenty-two tests in the desktop client's agent-creator and workspace-template-cache suites no longer carry a hand-written 30-second `pytest-timeout`. Each one clones a repo, runs `git`, or runs `mngr`, so each now inherits the 60 seconds that imbue-common gives any test running a real child program -- more headroom than the marker gave them, in one place instead of twenty-two. The template-cache tests that exercise clone and prefetch timeouts keep asserting their own bounds, all well under that budget.
-
-The one create-attempt test that runs no child process keeps its own 30 seconds, and now says why: its polling helper may wait that long, which is past the repo-wide default.

@@ -18,6 +18,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: The owner-exec client's HTTP requests now use `httpx2` (dependency `httpx2>=2.13.1` in place of `httpx`); TLS is verified against the OS trust store unless `SSL_CERT_FILE` names a bundle.
 - Changed: `check_no_type_errors` now fails on any ty diagnostic, warnings included, and lists warnings in its failure message.
 - Changed: `find_bash_scripts_without_strict_mode` excludes sourced `*_lib.sh` shell libraries.
+- Changed: The shared conftest hooks extend a test's `pytest-timeout` deadline from 10s to 60s the first time it starts a child program (subprocess, exec, spawn); an explicit `@pytest.mark.timeout` still wins.
 
 ### Fixed
 

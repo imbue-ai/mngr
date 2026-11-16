@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-15
+
+The two `provision()` remote-trust tests no longer carry a hand-written 30-second `pytest-timeout`. Both run the local `claude --version` check as a real subprocess, so both now inherit the 60 seconds imbue-common gives any test running a child program.
+
 ## 2026-11-13
 
 The Claude Code TUI dialog registry is now read against Claude Code 2.1.323, the version the release Dockerfile and default-workspace-template install. Every dialog pattern, option label and the shell-mode footer were checked against the 2.1.323 executable and are unchanged.
