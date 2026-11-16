@@ -15,6 +15,7 @@ from imbue.concurrency_group.errors import OutputNotAccumulatedError
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.event_utils import ShutdownEvent
+from imbue.concurrency_group.subprocess_utils import DEFAULT_SIGTERM_GRACE_SECONDS
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.concurrency_group.subprocess_utils import OUTPUT_NOT_ACCUMULATED_PLACEHOLDER
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
@@ -184,6 +185,20 @@ class RunningProcess:
         ]
         return tuple(reversed(names))
 
+    def wait_for_termination(self, timeout_seconds: float) -> bool:
+        """Request a shutdown and wait for it to finish, reporting whether it did.
+
+        The non-raising counterpart to ``terminate``, which reports both a wait that ran
+        out and a failure the reader thread recorded by raising. Cleanup wants neither:
+        it is usually already unwinding an exception of its own, and the group reports
+        strand failures separately afterwards.
+        """
+        self._shutdown_event.set()
+        thread = self._thread
+        assert thread is not None
+        thread.join_without_raising(timeout=timeout_seconds)
+        return not thread.is_alive()
+
     def start(self, kwargs: dict) -> None:
         context = contextvars.copy_context()
         queue: Queue[BaseException | None] = Queue(maxsize=1)
@@ -246,7 +261,7 @@ def run_background(
     is_checked: bool = False,
     cwd: Path | None = None,
     shutdown_event: ShutdownEvent | None = None,
-    shutdown_timeout_sec: float = 30.0,
+    shutdown_timeout_sec: float = DEFAULT_SIGTERM_GRACE_SECONDS,
     env: Mapping[str, str] | None = None,
     # Open file descriptors to keep open in (and inherit into) the spawned child, by their fd numbers.
     pass_fds: Sequence[int] = (),
@@ -255,7 +270,7 @@ def run_background(
     name: str | None = None,
     is_output_accumulated: bool = True,
     stdin_bytes: bytes | None = None,
-    is_own_process_group: bool = False,
+    is_own_process_group: bool = True,
 ) -> ProcessClassType:
     """
     Run a subprocess command in a non-blocking manner with output handling.
@@ -280,9 +295,10 @@ def run_background(
     ``stdin_bytes`` is written to the child's standard input, which is then closed; see
     ``run_local_command_modern_version`` for the size limit that applies to it.
 
-    ``is_own_process_group`` spawns the child as the leader of its own process group and signals
-    the whole group on shutdown or timeout, so what it forked dies with it (see
-    ``run_local_command_modern_version``).
+    ``is_own_process_group`` (on by default) spawns the child as the leader of its own process group
+    and signals the whole group on shutdown or timeout, so what it forked dies with it (see
+    ``run_local_command_modern_version``). Pass False for a command that must prompt the user on
+    the terminal, which a child in a session of its own cannot reach.
     """
     true_shutdown_event = shutdown_event if shutdown_event is not None else ShutdownEvent.build_root()
     process = process_class(

@@ -38,11 +38,10 @@ SUBPROCESS_STOPPED_BY_REQUEST_EXIT_CODE: Final[int] = -9999
 _READ_SIZE: Final[int] = 2**20
 
 # Wall-clock bound on the final drain of a killed process's pipes. The drain runs
-# with the shutdown short-circuit disabled, so this is its only escape hatch, and it
-# needs one: only the direct child is signalled, and a grandchild that inherited the
-# pipes keeps the write ends open and can keep producing output indefinitely. The
-# data the drain is actually after is already sitting in the pipe buffers, so it
-# never needs more than a moment.
+# with the shutdown short-circuit disabled, so this is its only escape hatch, and a
+# process whose descendants somehow survived the kill would otherwise hold it open
+# through the pipe write ends they inherited. The data the drain is actually after is
+# already sitting in the pipe buffers, so it never needs more than a moment.
 _POST_KILL_DRAIN_TIMEOUT_SECONDS: Final[float] = 2.0
 
 # How long a child gets to be reaped after SIGKILL before it is reported unkillable.
@@ -50,6 +49,20 @@ _POST_SIGKILL_WAIT_SECONDS: Final[float] = 2.0
 
 # Only a handful of wakeup bytes are ever pending, and any left over just wake the loop once more.
 _WAKEUP_PIPE_DRAIN_SIZE: Final[int] = 4096
+
+# How long a subprocess gets to exit on SIGTERM before its whole process group is
+# SIGKILLed. Deliberately short: a grace a shutting-down caller cannot afford to wait
+# out means the SIGKILL is never sent at all and the process is simply abandoned, and
+# by the time SIGTERM is sent the process has usually already had a far longer window
+# to finish on its own (ConcurrencyGroup gives it the whole exit timeout first).
+DEFAULT_SIGTERM_GRACE_SECONDS: Final[float] = 3.0
+
+# Wall-clock ceiling on stopping one subprocess and collecting what it last wrote. A caller
+# that wants the escalation to complete rather than be abandoned partway must budget at
+# least this much.
+MAX_PROCESS_SHUTDOWN_SECONDS: Final[float] = (
+    DEFAULT_SIGTERM_GRACE_SECONDS + _POST_SIGKILL_WAIT_SECONDS + _POST_KILL_DRAIN_TIMEOUT_SECONDS
+)
 
 # Stands in for stdout/stderr on a FinishedProcess produced with
 # ``is_output_accumulated=False``. Never an empty string: "we did not keep this"
@@ -240,6 +253,7 @@ def _shutdown_popen(
             process.pid,
             process.returncode,
         )
+        _kill_what_the_child_left_behind(process, is_own_process_group)
         return process.returncode
     # ``reason`` distinguishes the two ways this is reached -- a per-command
     # timeout vs. an externally requested shutdown -- because the two look
@@ -255,6 +269,7 @@ def _shutdown_popen(
     ):
         _send_shutdown_signal(process, signal.SIGTERM, is_own_process_group)
         if exited_event.wait(timeout=shutdown_timeout_sec):
+            _kill_what_the_child_left_behind(process, is_own_process_group)
             return process.returncode
         logger.warning("Process didn't die within {} seconds of SIGTERM", shutdown_timeout_sec)
         _send_shutdown_signal(process, signal.SIGKILL, is_own_process_group)
@@ -262,6 +277,18 @@ def _shutdown_popen(
             return process.returncode
         logger.error("Process didn't die after kill()")
         return None
+
+
+def _kill_what_the_child_left_behind(process: subprocess.Popen[bytes], is_own_process_group: bool) -> None:
+    """SIGKILL the rest of an exited child's process group.
+
+    A child that exits -- on cue or on its own -- takes nothing it spawned with it, and
+    the usual leak here has exactly that shape: a wrapper that starts a tool which has
+    already begun work of its own. The group id stays reserved while any member lives,
+    so signalling it after the leader is gone reaches only what the child left.
+    """
+    if is_own_process_group:
+        _send_shutdown_signal(process, signal.SIGKILL, is_own_process_group=True)
 
 
 def _send_shutdown_signal(
@@ -421,7 +448,7 @@ def run_local_command_modern_version(
     cwd: Path | None = None,
     trace_on_line_callback: Callable[[str, bool], None] | None = None,
     shutdown_event: ShutdownEvent | None = None,
-    shutdown_timeout_sec: float = 30.0,
+    shutdown_timeout_sec: float = DEFAULT_SIGTERM_GRACE_SECONDS,
     env: Mapping[str, str] | None = None,
     # Open file descriptors to keep open in (and inherit into) the spawned child, by their fd numbers.
     pass_fds: Sequence[int] = (),
@@ -431,8 +458,9 @@ def run_local_command_modern_version(
     stdin_bytes: bytes | None = None,
     monotonic_fn: Callable[[], float] = time.monotonic,
     # Spawn the child as the leader of its own session and process group, and signal the whole group
-    # on shutdown or timeout, so what the child forked dies with it.
-    is_own_process_group: bool = False,
+    # on shutdown or timeout, so what the child forked dies with it. A child in its own session has
+    # no controlling terminal, so a command that must prompt the user there passes False.
+    is_own_process_group: bool = True,
 ) -> FinishedProcess:
     """
     Run a subprocess command and return the result.

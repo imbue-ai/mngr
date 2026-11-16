@@ -1,5 +1,7 @@
 import contextlib
+import os
 import signal
+import subprocess
 import sys
 from pathlib import Path
 from threading import Event
@@ -345,13 +347,10 @@ def test_all_failure_modes_get_combined() -> None:
     assert any(isinstance(e, ProcessError) for e in exception_info.value.exceptions)
     assert any(isinstance(e, _IntentionalTestError) for e in exception_info.value.exceptions)
     assert any(isinstance(e, StrandTimedOutError) for e in exception_info.value.exceptions)
-    # CG's timeout path is fire-and-forget: `process.terminate(force_kill_seconds=0.0)`
-    # signals the background thread but does not wait for it to reap the
-    # subprocess. Without this explicit wait, pytest's session-level leak
-    # detector can scan before the SIGTERM+reap completes and blame whichever
-    # test ran last in the shard.
+    # The group does not return from its context manager until the processes it had to
+    # terminate are actually dead.
     assert sleep_process is not None
-    assert poll_until(sleep_process.is_finished, timeout=10.0)
+    assert sleep_process.is_finished()
 
 
 def test_nesting_in_the_same_thread_just_works() -> None:
@@ -582,12 +581,10 @@ def test_shutdown_propagates_to_children_and_kills_processes() -> None:
         process_started_event.wait(timeout=5.0)
         cg.shutdown()
     assert closure["i"] == 10
-    # CG's timeout path is fire-and-forget (`terminate(force_kill_seconds=0.0)`
-    # signals the supervisor thread but does not wait for it to reap the
-    # subprocess). Wait explicitly so pytest's session-level leak detector
-    # cannot scan before SIGTERM+reap completes.
+    # A shutdown reaches the nested group's process the same way an exit does, and the
+    # outer group waits for that whole teardown.
     assert len(process_holder) == 1
-    assert poll_until(process_holder[0].is_finished, timeout=10.0)
+    assert process_holder[0].is_finished()
 
 
 def _create_nested_concurrency_group_and_run_process_while_shutting_down(
@@ -661,6 +658,113 @@ def test_new_resources_cannot_be_created_when_ancestor_has_failed_strands() -> N
                     with pytest.raises(ConcurrencyExceptionGroup) as exception_info_thread:
                         cg_inner.start_new_thread(target=lambda: 1)
     assert exception_info_thread.value.only_exception_is_instance_of(AncestorConcurrentFailure)
+
+
+# Each poll shells out to ``ps``, so this is coarser than the default: the processes it
+# waits on die at once or not at all, and a tighter interval only adds subprocesses.
+_PROCESS_POLL_INTERVAL: Final[float] = 0.1
+
+
+# A command that spawns a process of its own, reports that process's pid, and only then
+# becomes a long-running process itself: the shape that orphans processes in practice,
+# a wrapper that execs a tool which has already started work of its own.
+_SPAWNING_COMMAND: Final[tuple[str, ...]] = (
+    "bash",
+    "-c",
+    f'sleep {LONG_SLEEP_SECONDS} & echo "$!"; exec sleep {LONG_SLEEP_SECONDS}',
+)
+
+# A command that cannot be stopped with SIGTERM, so that only an escalation to SIGKILL
+# can ever end it. It reports that it is ready once the signal is ignored, so that a
+# test never races the interpreter's startup and kills it before it gets there.
+_SIGTERM_IGNORING_COMMAND: Final[tuple[str, ...]] = (
+    sys.executable,
+    "-c",
+    "import signal, sys; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+    'sys.stdout.write("ready\\n"); sys.stdout.flush(); signal.pause()',
+)
+
+
+def _is_spawned_sleep_alive(pid: int) -> bool:
+    """Whether `pid` is still the sleep the wrapper spawned.
+
+    Checked by pid and confirmed by command line, because each alone gets one case
+    wrong: a pid the kernel has since handed to something else would read as still
+    alive, and a command line is shared with every other test on the machine running
+    the same placeholder sleep. Both together name one process and only that one,
+    which matters because the caller goes on to kill it.
+    """
+    listing = subprocess.run(["ps", "-o", "args=", "-p", str(pid)], capture_output=True, text=True)
+    return listing.stdout.strip() == f"sleep {LONG_SLEEP_SECONDS}"
+
+
+def _read_spawned_pid(process: RunningProcess) -> int:
+    """Block until the wrapper has reported the pid of the process it spawned."""
+    assert poll_until(lambda: "\n" in process.read_stdout(), timeout=5.0)
+    return int(process.read_stdout().splitlines()[0])
+
+
+def test_exiting_a_group_kills_the_processes_that_its_own_processes_spawned() -> None:
+    # Signalling only the pid the group knows about would leave everything below it
+    # running, reparented onto init.
+    spawned_pids: list[int] = []
+    try:
+        with pytest.raises(ConcurrencyExceptionGroup):
+            with ConcurrencyGroup(name="outer", exit_timeout_seconds=SMALL_SLEEP) as cg:
+                process = cg.run_process_in_background(list(_SPAWNING_COMMAND), is_checked_by_group=False)
+                spawned_pids.append(_read_spawned_pid(process))
+                assert _is_spawned_sleep_alive(spawned_pids[0])
+        # The spawned process is reparented as it is killed, so the moment between the
+        # signal landing and init reaping it is not ours to observe directly.
+        assert poll_until(
+            lambda: not _is_spawned_sleep_alive(spawned_pids[0]), timeout=5.0, poll_interval=_PROCESS_POLL_INTERVAL
+        )
+    finally:
+        for pid in spawned_pids:
+            if _is_spawned_sleep_alive(pid):
+                os.kill(pid, signal.SIGKILL)
+
+
+def test_exiting_a_group_kills_a_process_that_ignores_sigterm() -> None:
+    # A process that does not stop on SIGTERM is only ever stopped by the SIGKILL that
+    # follows it, so a group whose cleanup budget cannot cover that escalation has not
+    # cleaned up at all -- it has handed the process to init and returned.
+    with pytest.raises(ConcurrencyExceptionGroup):
+        with ConcurrencyGroup(name="outer", exit_timeout_seconds=SMALL_SLEEP) as cg:
+            process = cg.run_process_in_background(list(_SIGTERM_IGNORING_COMMAND), is_checked_by_group=False)
+            assert poll_until(lambda: "ready" in process.read_stdout(), timeout=5.0)
+    assert process.is_finished()
+    assert process.returncode == -signal.SIGKILL
+
+
+# Prints the pid and process group id of the process itself, so a test can see which group it was put in.
+_PRINT_PID_AND_PGID_COMMAND: Final[tuple[str, ...]] = (
+    sys.executable,
+    "-c",
+    "import os; print(os.getpid(), os.getpgrp())",
+)
+
+
+def _read_pid_and_pgid(output: str) -> tuple[int, int]:
+    pid, pgid = (int(field) for field in output.split())
+    return pid, pgid
+
+
+def test_processes_lead_their_own_process_group_by_default() -> None:
+    with ConcurrencyGroup(name="group") as cg:
+        result = cg.run_process_to_completion(list(_PRINT_PID_AND_PGID_COMMAND))
+    pid, pgid = _read_pid_and_pgid(result.stdout)
+    assert pgid == pid
+    assert pgid != os.getpgrp()
+
+
+def test_run_process_to_completion_can_keep_the_child_in_the_callers_process_group() -> None:
+    # The opt-out for a command that must reach the user's terminal, such as sudo asking for
+    # a password: a child in a session of its own has no controlling terminal to prompt on.
+    with ConcurrencyGroup(name="group") as cg:
+        result = cg.run_process_to_completion(list(_PRINT_PID_AND_PGID_COMMAND), is_own_process_group=False)
+    _, pgid = _read_pid_and_pgid(result.stdout)
+    assert pgid == os.getpgrp()
 
 
 # Long enough that an idle wait dominates the measurement, and unusual enough

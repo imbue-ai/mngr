@@ -1,0 +1,1 @@
+`mngr check-deps` keeps the `sudo apt-get` commands it runs to install missing dependencies in its own process group, so sudo's password prompt still reaches the terminal now that `ConcurrencyGroup` runs every other child in a session of its own.

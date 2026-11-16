@@ -36,6 +36,21 @@ with ConcurrencyGroup(name="outer") as outer_cg:
         inner_cg.start_new_thread(target=my_function)
 ```
 
+## Process Cleanup
+
+By default each process runs in a session of its own, and stopping one signals its whole
+process group -- so a process that spawned work of its own does not leave that work
+running, and whatever it left behind when it exited is swept as well. The group does not
+return from its context manager until the processes it had to stop have actually died:
+they are sent SIGTERM, given a few seconds, and then SIGKILLed. Stopping reaches
+everything still in the process's group; a daemon that starts a session of its own, such
+as a tmux server, is left alone.
+
+The one thing a process gives up for this is the controlling terminal. A command that
+must prompt the user there (`sudo` asking for a password, say) is run with
+`is_own_process_group=False`, which keeps it in the caller's process group; stopping it
+then reaches only that one process.
+
 ## Shutdown Support
 
 ```python

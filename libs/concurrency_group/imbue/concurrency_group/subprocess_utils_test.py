@@ -3,6 +3,7 @@ import gc
 import os
 import signal
 import subprocess
+import sys
 import time
 import warnings
 from io import BytesIO
@@ -23,6 +24,7 @@ from imbue.concurrency_group.subprocess_utils import OutputGatherer
 from imbue.concurrency_group.subprocess_utils import PartialOutputContainer
 from imbue.concurrency_group.subprocess_utils import _POST_KILL_DRAIN_TIMEOUT_SECONDS
 from imbue.concurrency_group.subprocess_utils import _is_timeout
+from imbue.concurrency_group.subprocess_utils import _send_shutdown_signal
 from imbue.concurrency_group.subprocess_utils import _shutdown_popen
 from imbue.concurrency_group.subprocess_utils import _start_exit_waiter
 from imbue.concurrency_group.subprocess_utils import _write_and_close_child_stdin
@@ -30,6 +32,7 @@ from imbue.concurrency_group.subprocess_utils import run_local_command_modern_ve
 from imbue.concurrency_group.test_utils import LONG_SLEEP_SECONDS
 from imbue.concurrency_group.test_utils import is_process_with_marker_running
 from imbue.concurrency_group.test_utils import make_idle_child_script
+from imbue.concurrency_group.test_utils import poll_until
 
 
 def test_check_raises_process_timeout_error_when_timed_out() -> None:
@@ -292,21 +295,130 @@ def test_shutdown_popen_terminates_with_sigterm_and_returns_signal_returncode() 
     assert process.poll() == -signal.SIGTERM
 
 
+def test_shutdown_popen_signals_only_the_child_when_it_is_not_its_own_process_group() -> None:
+    # A child spawned into the caller's process group -- the opt-out for a command that must
+    # keep the user's terminal -- is signalled by pid alone: signalling the group would take
+    # down everything else in it, this test process included. The bystander shares the group
+    # and must come through untouched.
+    process = subprocess.Popen(
+        ["sleep", LONG_SLEEP_SECONDS],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    bystander = subprocess.Popen(
+        ["sleep", LONG_SLEEP_SECONDS],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    exited_event = _start_exit_waiter(process, on_exit=_do_nothing)
+
+    try:
+        returncode = _shutdown_popen(
+            process,
+            exited_event,
+            shutdown_timeout_sec=5.0,
+            reason="the test requested shutdown",
+            is_own_process_group=False,
+        )
+
+        assert returncode == -signal.SIGTERM
+        assert bystander.poll() is None
+    finally:
+        bystander.kill()
+        bystander.wait(timeout=5)
+
+
 def test_shutdown_popen_reaps_already_exited_process_with_its_own_exit_code() -> None:
     # A process that finished before the shutdown request must be reaped with its own
     # exit code rather than reported as SIGTERMed: single-use workers routinely exit
-    # on their own right before the parent's cleanup reaches them.
+    # on their own right before the parent's cleanup reaches them. The group is still
+    # swept, since a child that exits on its own can leave descendants behind; here it
+    # is empty, so the sweep is a no-op rather than an error.
     process = subprocess.Popen(
         ["true"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        start_new_session=True,
     )
     exited_event = _start_exit_waiter(process, on_exit=_do_nothing)
     assert exited_event.wait(timeout=5.0)
 
-    returncode = _shutdown_popen(process, exited_event, shutdown_timeout_sec=5.0, reason="the test requested shutdown")
+    returncode = _shutdown_popen(
+        process,
+        exited_event,
+        shutdown_timeout_sec=5.0,
+        reason="the test requested shutdown",
+        is_own_process_group=True,
+    )
 
     assert returncode == 0
+
+
+# Tokens unique to these tests, carried in the grandchildren's argv so ``pgrep`` finds only them.
+_SIGTERM_IGNORING_GRANDCHILD_MARKER: Final[str] = "36311"
+_ORPHANED_GRANDCHILD_SLEEP_SECONDS: Final[str] = "36312"
+
+
+def _spawn_session_leader(script: str) -> subprocess.Popen[bytes]:
+    """Start ``sh -c script`` as the leader of a session of its own, the way the runner spawns every child."""
+    return subprocess.Popen(
+        ["sh", "-c", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+
+
+def test_shutdown_popen_kills_what_a_child_that_exits_on_sigterm_left_in_its_process_group() -> None:
+    # A child that exits on SIGTERM takes nothing it spawned with it, so its group is
+    # SIGKILLed after the exit as well. This grandchild ignores SIGTERM and says so once
+    # it does, so only that sweep can end it and the test cannot pass by racing its startup.
+    grandchild = (
+        f"{sys.executable} -c 'import signal, sys; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f'sys.stdout.write("ready\\n"); sys.stdout.flush(); signal.pause()\' {_SIGTERM_IGNORING_GRANDCHILD_MARKER}'
+    )
+    process = _spawn_session_leader(f"{grandchild} & wait")
+    exited_event = _start_exit_waiter(process, on_exit=_do_nothing)
+    try:
+        assert process.stdout is not None
+        assert process.stdout.readline() == b"ready\n"
+
+        returncode = _shutdown_popen(
+            process,
+            exited_event,
+            shutdown_timeout_sec=5.0,
+            reason="the test requested shutdown",
+            is_own_process_group=True,
+        )
+
+        assert returncode == -signal.SIGTERM
+        assert poll_until(lambda: not is_process_with_marker_running(_SIGTERM_IGNORING_GRANDCHILD_MARKER))
+    finally:
+        _send_shutdown_signal(process, signal.SIGKILL, is_own_process_group=True)
+
+
+def test_shutdown_popen_kills_what_an_already_exited_child_left_in_its_process_group() -> None:
+    # The commonest leak: a wrapper that starts work in the background and exits at once.
+    # Its exit is reaped with its own code, and the group it led is swept all the same.
+    process = _spawn_session_leader(f"sleep {_ORPHANED_GRANDCHILD_SLEEP_SECONDS} &")
+    exited_event = _start_exit_waiter(process, on_exit=_do_nothing)
+    try:
+        assert exited_event.wait(timeout=5.0)
+        assert is_process_with_marker_running(_ORPHANED_GRANDCHILD_SLEEP_SECONDS)
+
+        returncode = _shutdown_popen(
+            process,
+            exited_event,
+            shutdown_timeout_sec=5.0,
+            reason="the test requested shutdown",
+            is_own_process_group=True,
+        )
+
+        assert returncode == 0
+        assert poll_until(lambda: not is_process_with_marker_running(_ORPHANED_GRANDCHILD_SLEEP_SECONDS))
+    finally:
+        _send_shutdown_signal(process, signal.SIGKILL, is_own_process_group=True)
 
 
 class _SignalRefusingPopen(subprocess.Popen[bytes]):

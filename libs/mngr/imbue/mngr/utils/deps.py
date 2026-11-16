@@ -282,9 +282,13 @@ def _install_via_apt(packages: list[str]) -> bool:
     if shutil.which("apt-get") is None:
         return False
     try:
+        # sudo asks for its password on the controlling terminal, which a child in a
+        # session of its own does not have; keeping it in our process group keeps the prompt.
         with ConcurrencyGroup(name="apt-install") as cg:
-            cg.run_process_to_completion(["sudo", "apt-get", "update", "-qq"])
-            cg.run_process_to_completion(["sudo", "apt-get", "install", "-y", "-qq", *packages])
+            cg.run_process_to_completion(["sudo", "apt-get", "update", "-qq"], is_own_process_group=False)
+            cg.run_process_to_completion(
+                ["sudo", "apt-get", "install", "-y", "-qq", *packages], is_own_process_group=False
+            )
         return True
     except SUBPROCESS_ERRORS:
         return False

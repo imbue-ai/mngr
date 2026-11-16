@@ -16,6 +16,7 @@ from typing import ParamSpec
 from typing import Sequence
 from typing import TypeVar
 
+from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -27,7 +28,9 @@ from imbue.concurrency_group.errors import SingleExceptionExpectedError
 from imbue.concurrency_group.event_utils import ShutdownEvent
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.concurrency_group.local_process import run_background
+from imbue.concurrency_group.subprocess_utils import DEFAULT_SIGTERM_GRACE_SECONDS
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
+from imbue.concurrency_group.subprocess_utils import MAX_PROCESS_SHUTDOWN_SECONDS
 from imbue.concurrency_group.thread_utils import ObservableThread
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.mutable_model import MutableModel
@@ -206,6 +209,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         start_time = time.monotonic()
         timeout_errors: list[StrandTimedOutError] = []
         setup_errors: list[ProcessSetupError] = []
+        terminating_processes: list[RunningProcess] = []
         for process in self._processes:
             if not process.is_finished():
                 remaining_timeout = self._get_remaining_timeout(start_time, timeout_seconds)
@@ -231,10 +235,11 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
                         raise StrandTimedOutError(message) from error
                     except StrandTimedOutError as e:
                         timeout_errors.append(e)
-                    try:
-                        process.terminate(force_kill_seconds=0.0)
-                    except TimeoutExpired:
-                        pass
+                    # Request the shutdown now and wait for it below, so that every
+                    # process that overran spends its SIGTERM grace at the same time
+                    # rather than one after another.
+                    if not process.wait_for_termination(0.0):
+                        terminating_processes.append(process)
         for tracked_thread in self._threads:
             remaining_timeout = self._get_remaining_timeout(start_time, timeout_seconds)
             # Thread.join(timeout=float("inf")) raises OverflowError, so convert to None (wait forever)
@@ -252,6 +257,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
                     raise StrandTimedOutError(message)
                 except StrandTimedOutError as e:
                     timeout_errors.append(e)
+        self._wait_for_terminating_processes(terminating_processes)
         if len(timeout_errors) > 0 or len(setup_errors) > 0:
             message = f"{self.name}: "
             if len(timeout_errors) > 0:
@@ -262,6 +268,27 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
             if len(exceptions) == 1:
                 message += f"\n{exceptions[0]}"
             raise ConcurrencyExceptionGroup(message, exceptions)
+
+    def _wait_for_terminating_processes(self, processes: Sequence[RunningProcess]) -> None:
+        """Block until every process we asked to stop has actually died.
+
+        The escalation from SIGTERM to SIGKILL runs on each process's own reader thread,
+        a daemon thread the interpreter abandons mid-escalation at exit -- so returning
+        early is how a process outlives the group that owned it. This budget is separate
+        from the one spent waiting for strands to finish on their own, and is shared by
+        all of them, since their graces are already running concurrently.
+        """
+        if len(processes) == 0:
+            return
+        deadline = time.monotonic() + MAX_PROCESS_SHUTDOWN_SECONDS
+        for process in processes:
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                logger.warning("Ran out of time terminating the processes of concurrency group `{}`", self.name)
+                return
+            # The command is deliberately left out of the log: callers pass secrets in argv.
+            if not process.wait_for_termination(remaining_seconds):
+                logger.warning("A process of concurrency group `{}` did not die when terminated", self.name)
 
     def _get_remaining_timeout(self, start_time_seconds: float, total_timeout_seconds: float) -> float:
         elapsed_seconds = time.monotonic() - start_time_seconds
@@ -442,11 +469,12 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         # that must not appear in ``argv``, such as a secret. Must be small; see
         # ``run_local_command_modern_version``.
         stdin_bytes: bytes | None = None,
-        # How long the process gets to exit after SIGTERM before it is sent SIGKILL.
-        shutdown_timeout_sec: float = 30.0,
+        # How long the process gets to exit after SIGTERM before its process group is SIGKILLed.
+        shutdown_timeout_sec: float = DEFAULT_SIGTERM_GRACE_SECONDS,
         # Spawn the child as the leader of its own process group and signal the whole group on
-        # shutdown or timeout, so what it forked dies with it.
-        is_own_process_group: bool = False,
+        # shutdown or timeout, so what it forked dies with it. Pass False for a command that must
+        # prompt the user: a child in a session of its own has no controlling terminal.
+        is_own_process_group: bool = True,
     ) -> RunningProcess:
         """
         Run a process in the background, returning immediately.
@@ -463,10 +491,12 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         raise `OutputNotAccumulatedError` in that mode, and any error raised for the process (including by
         `is_checked_by_group`) reports a placeholder in place of its output.
 
-        Pass a short `shutdown_timeout_sec` for a process with nothing worth saving on exit (a browser on a
-        throwaway profile, say), so that stopping it is quick even when it is slow to honour SIGTERM. A caller
-        that stops the process with `.terminate()` must give that call a `force_kill_seconds` longer than this
-        grace, or it raises while the shutdown it is waiting on is still within its budget.
+        `shutdown_timeout_sec` is how long the process gets to honour SIGTERM before its whole process group
+        is SIGKILLed. Raise it only for a process with something worth saving on exit, and keep it well inside
+        whatever budget the caller has to spend: a grace nobody can afford to wait out means the SIGKILL is
+        never sent and the process is simply abandoned. A caller that stops the process with `.terminate()`
+        must give that call a `force_kill_seconds` longer than this grace, or it raises while the shutdown it
+        is waiting on is still within its budget.
         """
 
         def process_factory():
@@ -501,6 +531,8 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         name: str | None = None,
         # Bytes handed to the child on stdin (see ``run_process_in_background``).
         stdin_bytes: bytes | None = None,
+        # Whether the child leads its own process group (see ``run_process_in_background``).
+        is_own_process_group: bool = True,
     ) -> FinishedProcess:
         """
         Run a process to completion, blocking until it finishes.
@@ -517,6 +549,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
             is_checked_by_group=False,
             name=name,
             stdin_bytes=stdin_bytes,
+            is_own_process_group=is_own_process_group,
         )
         process.wait()
         if is_checked_after:

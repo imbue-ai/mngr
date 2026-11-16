@@ -74,6 +74,15 @@ class ObservableThread(threading.Thread):
         super().join(timeout)
         self.maybe_raise()
 
+    def join_without_raising(self, timeout: float | None = None) -> None:
+        """Wait for thread completion, leaving any exception it recorded where it is.
+
+        For callers that must not be diverted by this thread's failure -- a cleanup path
+        that is already unwinding an exception of its own, which a failure raised from
+        here would replace. The exception stays available to ``maybe_raise``.
+        """
+        super().join(timeout)
+
     def maybe_raise(self) -> None:
         exception = self.exception_if_not_suppressed
         if exception:
