@@ -21,10 +21,12 @@ import time
 from collections.abc import Callable
 from collections.abc import Generator
 from collections.abc import Mapping
+from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
 from typing import IO
+from urllib.parse import urlsplit
 
 import httpx2
 from loguru import logger
@@ -33,17 +35,21 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Frame
 from playwright.sync_api import Page
 from playwright.sync_api import Playwright
+from playwright.sync_api import Response
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
+from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import SecretStr
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.bootstrap import CI_SNAPSHOT_MINDS_ROOT_NAME
 from imbue.minds.bootstrap import STUDIO_ROOTS_OVERRIDE_ENV_VAR
 from imbue.minds.config.loader import repo_tier_client_config_path
 from imbue.minds.desktop_client.default_workspace_template_worktree import DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE
 from imbue.minds.desktop_client.default_workspace_template_worktree import current_worktree_branch
+from imbue.minds.desktop_client.welcome_chat import SEED_TIMEOUT_SECONDS
 
 # This file lives at apps/minds/imbue/minds/desktop_client/e2e_workspace_runner.py,
 # so parents[5] hops up over desktop_client, minds, imbue, minds, apps to the repo
@@ -147,6 +153,16 @@ _CREATE_OUTCOME_POLL_INTERVAL_MS: Final[int] = 500
 # The desktop's backdrop, which the system_interface frontend renders once it has its desktops
 # (docs/system/blueprint/desktop-interface/contracts.md section 12 in default-workspace-template).
 DESKTOP_BACKDROP_SELECTOR: Final[str] = "[data-desktop-id]"
+
+# The creating page's welcome-chat hand-over, whose statuses ``_handle_seed_welcome_chat`` documents
+# (``ui_api_create.py``).
+_WELCOME_CHAT_HAND_OVER_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"/ui/api/create/attempts/[^/]+/welcome-chat$"
+)
+_WELCOME_CHAT_HELD_STATUS: Final[int] = 202
+_WELCOME_CHAT_SEEDED_STATUS: Final[int] = 200
+# Past the desktop client's own bound on the seed, so a slow seed ends in its verdict rather than this wait's.
+_WELCOME_CHAT_SEED_TIMEOUT_SECONDS: Final[float] = SEED_TIMEOUT_SECONDS + 30.0
 
 
 def configure_logging() -> None:
@@ -664,6 +680,10 @@ class WorkspaceCreateAttemptFailedError(RuntimeError):
     """
 
 
+class WelcomeChatSeedFailedError(RuntimeError):
+    """Raised when the desktop client answers the new workspace's welcome-chat seed with a failure."""
+
+
 def _read_failure_message(page: Page) -> str:
     """Return the failure view's sentence ('#error-message') and the raw cause behind its See details.
 
@@ -739,6 +759,52 @@ def wait_for_workspace_ready_or_failure(browser: Browser, creating_page: Page, t
     )
 
 
+def _is_welcome_chat_seed_answer(response: Response) -> bool:
+    return (
+        response.request.method == "POST"
+        and _WELCOME_CHAT_HAND_OVER_PATH_PATTERN.search(urlsplit(response.url).path) is not None
+        and response.status != _WELCOME_CHAT_HELD_STATUS
+    )
+
+
+def _wait_for_welcome_chat_seed(page: Page, responses_so_far: Sequence[Response], timeout_seconds: float) -> None:
+    """Block until the desktop client answers the new workspace's welcome-chat seed; raise if it failed.
+
+    The workspace is entered while its welcome chat is still being seeded, so the workspace being on
+    screen says nothing about the seed. A caller that tears the app down at that point kills the
+    seed's ``mngr`` call and leaves a half-seeded chat in the workspace.
+
+    ``responses_so_far`` are the responses ``page`` received from the create form's submission on: the
+    seed can be answered before the desktop renders.
+    """
+    answer: Response | None = next(
+        (response for response in responses_so_far if _is_welcome_chat_seed_answer(response)), None
+    )
+    if answer is None:
+        answer = page.wait_for_event(
+            "response", predicate=_is_welcome_chat_seed_answer, timeout=timeout_seconds * 1000
+        )
+    if answer.status != _WELCOME_CHAT_SEEDED_STATUS:
+        raise WelcomeChatSeedFailedError(
+            f"The new workspace's welcome chat was not seeded ({answer.status}): {answer.text()}"
+        )
+
+
+class _ResponseLog(MutableModel):
+    """The responses a page received while ``record`` was one of its ``response`` listeners.
+
+    The listener is a method rather than ``list.append`` because Playwright tags each listener
+    with an attribute, which a builtin cannot take.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    responses: list[Response] = Field(default_factory=list, description="The responses, in the order they arrived.")
+
+    def record(self, response: Response) -> None:
+        self.responses.append(response)
+
+
 def drive_create_flow(
     browser: Browser,
     page: Page,
@@ -747,7 +813,7 @@ def drive_create_flow(
     launch_mode: str = "DOCKER",
     region: str | None = None,
 ) -> Frame:
-    """Drive the create form to a ready workspace; return the workspace frame.
+    """Drive the create form to a ready workspace whose welcome chat is seeded; return the workspace frame.
 
     ``page`` is the chrome page the form is driven on; the ready workspace
     opens inside that page's sandboxed content iframe, whose frame this
@@ -800,28 +866,35 @@ def drive_create_flow(
         page.wait_for_selector("#region:visible", timeout=5_000)
         page.select_option("#region", region)
 
-    logger.info("Submitting create form")
-    page.click("#create-submit")
+    response_log = _ResponseLog()
+    page.on("response", response_log.record)
+    try:
+        logger.info("Submitting create form")
+        page.click("#create-submit")
 
-    # Submitting starts create attempt in the background and lands on the
-    # creating/loading page, which streams progress and redirects into
-    # the workspace once the create attempt completes.
-    page.wait_for_selector("#creating", state="attached", timeout=10_000)
+        # Submitting starts create attempt in the background and lands on the
+        # creating/loading page, which streams progress and redirects into
+        # the workspace once the create attempt completes.
+        page.wait_for_selector("#creating", state="attached", timeout=10_000)
 
-    # Race the workspace-ready content page against the create flow's failure
-    # view, so a `mngr create` failure (e.g. an unregistered docker runtime)
-    # fails this run fast with the surfaced error rather than blocking the whole
-    # navigation budget. The ready workspace opens inside the chrome page's
-    # content iframe once the page routes onto /workspace/<id>.
-    workspace_page = wait_for_workspace_ready_or_failure(browser, page, _CREATE_FORM_TIMEOUT_SECONDS)
-    logger.info("Machine ready at {}", workspace_page.url)
+        # Race the workspace-ready content page against the create flow's failure
+        # view, so a `mngr create` failure (e.g. an unregistered docker runtime)
+        # fails this run fast with the surfaced error rather than blocking the whole
+        # navigation budget. The ready workspace opens inside the chrome page's
+        # content iframe once the page routes onto /workspace/<id>.
+        workspace_page = wait_for_workspace_ready_or_failure(browser, page, _CREATE_FORM_TIMEOUT_SECONDS)
+        logger.info("Machine ready at {}", workspace_page.url)
 
-    workspace_page.wait_for_selector(
-        DESKTOP_BACKDROP_SELECTOR,
-        state="visible",
-        timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000,
-    )
-    logger.info("system_interface desktop rendered; machine create attempt complete")
+        workspace_page.wait_for_selector(
+            DESKTOP_BACKDROP_SELECTOR,
+            state="visible",
+            timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000,
+        )
+        logger.info("system_interface desktop rendered; waiting for the welcome chat's seed")
+        _wait_for_welcome_chat_seed(page, response_log.responses, _WELCOME_CHAT_SEED_TIMEOUT_SECONDS)
+    finally:
+        page.remove_listener("response", response_log.record)
+    logger.info("Welcome chat seeded; machine create attempt complete")
     return workspace_page
 
 
@@ -862,10 +935,10 @@ def _attempt_create_workspace_via_electron(
     create flow itself propagate unchanged so real test failures are not retried.
 
     ``on_workspace_ready``, if given, is called with the workspace (content-iframe)
-    page once the workspace's ``system_interface`` has rendered, while the browser
-    is still connected (e.g. to send a chat message). Its exceptions propagate
-    unchanged -- they are real failures, not launch flakes, so they are not
-    retried.
+    page once the workspace's ``system_interface`` has rendered and its welcome
+    chat is seeded, while the browser is still connected (e.g. to send a chat
+    message). Its exceptions propagate unchanged -- they are real failures, not
+    launch flakes, so they are not retried.
     """
     with _launched_electron(default_workspace_template_path, debug_port, host_config_dir):
         with sync_playwright() as playwright:
@@ -976,11 +1049,12 @@ def create_workspace_via_electron(
     and ignored (the row is hidden) for others.
 
     ``on_workspace_ready`` is called with the workspace (content-view) page once
-    the workspace has rendered, before teardown -- e.g. to send a chat message and
-    await the reply on the same Electron session.
+    the workspace has rendered and its welcome chat is seeded, before teardown --
+    e.g. to send a chat message and await the reply on the same Electron session.
 
     Returns once the workspace's ``system_interface`` desktop has
-    rendered through the desktop client proxy. Does NOT clean up the
+    rendered through the desktop client proxy and its welcome chat is seeded,
+    so the caller may close the app at once. Does NOT clean up the
     resulting mngr agent or its Docker container -- the caller decides
     whether to destroy or to capture the state.
 
