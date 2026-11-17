@@ -37,6 +37,7 @@ from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.concurrency_group.thread_utils import ObservableThread
 from imbue.imbue_common.logging import info_span
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.logging import trace_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.profiling import get_profiler
 from imbue.imbue_common.pure import pure
@@ -1741,7 +1742,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         remote read of every ``data.json`` is bounded by that wall-clock so a wedged
         host self-terminates it rather than leaving the discovery thread running forever.
         """
-        with log_span("Loading all agents from host {}", self.id):
+        with trace_span("Loading all agents from host {}", self.id):
             agents_dir = get_agents_root_dir(self.host_dir)
             content_by_agent_dir_name = self._read_agent_data_files(timeout_seconds=timeout_seconds, agent_ids=None)
             if content_by_agent_dir_name is None:

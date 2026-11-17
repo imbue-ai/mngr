@@ -13,7 +13,7 @@ from pydantic import PrivateAttr
 
 from imbue.concurrency_group.thread_utils import ObservableThread
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.logging import trace_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.imbue_common.tracebacks import format_exception_traceback
@@ -650,7 +650,7 @@ class _ProviderDiscoveryPoller(MutableModel):
                 # Expected transient failures (a failed snapshot write, a provider-config
                 # error) must not kill this provider's poll loop.
                 try:
-                    with log_span("Polling discovery for provider {}", self.provider_name):
+                    with trace_span("Polling discovery for provider {}", self.provider_name):
                         self.poll_and_emit(
                             lambda provider: executor.submit(
                                 _discover_one_provider,

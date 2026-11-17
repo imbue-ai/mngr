@@ -23,6 +23,7 @@ from uuid import uuid4
 
 import pluggy
 import pytest
+from loguru import logger
 from paramiko import Channel
 from paramiko import ChannelException
 from paramiko import SFTPAttributes
@@ -232,6 +233,28 @@ def test_discover_agents_returns_refs_with_certified_data(
     assert refs[0].certified_data == agent_data
     assert refs[0].agent_type == "claude"
     assert refs[0].work_dir == Path("/tmp/work")
+
+
+def test_discover_agents_logs_nothing_at_debug(
+    host_with_agents_dir: tuple[Host, Path],
+) -> None:
+    """The observer calls discover_agents every few seconds forever, so it must not write the DEBUG file log."""
+    host, agents_dir = host_with_agents_dir
+    agent_id = AgentId.generate()
+    (agents_dir / str(agent_id)).mkdir()
+    (agents_dir / str(agent_id) / "data.json").write_text(
+        json.dumps({"id": str(agent_id), "name": "test-agent", "type": "claude", "work_dir": "/tmp/work"})
+    )
+
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="DEBUG", format="{message}")
+    try:
+        refs = host.discover_agents()
+    finally:
+        logger.remove(handler_id)
+
+    assert len(refs) == 1
+    assert messages == []
 
 
 def test_discover_agents_returns_empty_when_no_agents_dir(
