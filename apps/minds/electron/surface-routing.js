@@ -32,6 +32,14 @@ function parseWorkspaceId(url) {
   }
 }
 
+// The id segment of the SPA's workspace routes: a workspace's agent or host
+// coordinate, or the `shared-<hex>` alias a pasted shared link's row goes by
+// (its share key is a bare digest; see frontend/src/models/sharedWithMe.ts).
+// Mirrors ID_SEGMENT in frontend/src/views/shell/classify.ts.
+const SPA_WORKSPACE_ID = '(?:agent|host|shared)-[a-f0-9]{1,64}';
+const SPA_WORKSPACE_ROUTE_RE = new RegExp(`^/workspace/(${SPA_WORKSPACE_ID})(?:/|$)`, 'i');
+const SPA_WORKSPACE_ID_RE = new RegExp(`^${SPA_WORKSPACE_ID}$`, 'i');
+
 // Extract the workspace id from the SPA's own /workspace/<id> route paths --
 // the shapes notification deep links use: /workspace/<agent-id>?review=...
 // (a request), ?chat=... (an agent message), and the workspace-scoped
@@ -43,7 +51,7 @@ function parseSpaWorkspaceRouteId(url) {
   if (!url) return null;
   try {
     const parsed = new URL(url);
-    const match = parsed.pathname.match(/^\/workspace\/((?:agent|host)-[a-f0-9]+)(?:\/|$)/i);
+    const match = parsed.pathname.match(SPA_WORKSPACE_ROUTE_RE);
     return match ? match[1] : null;
   } catch {
     return null;
@@ -78,7 +86,7 @@ function parseOverlayBehindWorkspaceId(url) {
     const parsed = new URL(url);
     if (!OVERLAY_BEHIND_WORKSPACE_PATHS.has(parsed.pathname)) return null;
     const workspace = parsed.searchParams.get('workspace');
-    return workspace && /^(?:agent|host)-[a-f0-9]+$/i.test(workspace) ? workspace : null;
+    return workspace && SPA_WORKSPACE_ID_RE.test(workspace) ? workspace : null;
   } catch {
     return null;
   }
@@ -95,6 +103,8 @@ function popoutRoutePath(workspaceId, windowId, { isReopened }) {
 }
 
 module.exports = {
+  SPA_WORKSPACE_ID,
+  SPA_WORKSPACE_ID_RE,
   parseWorkspaceId,
   parseSpaWorkspaceRouteId,
   parsePopoutRoute,

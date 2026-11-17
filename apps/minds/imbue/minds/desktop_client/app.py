@@ -28,11 +28,13 @@ from werkzeug.middleware.dispatcher import DispatcherMiddleware
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.account_settings_store import AccountSettingsStore
 from imbue.minds.desktop_client.agent_address import build_agent_address
+from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
@@ -74,8 +76,10 @@ from imbue.minds.desktop_client.connections.provider_settings import ProviderSet
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
+from imbue.minds.desktop_client.create_attempt_rows import CreateAttemptOwner
 from imbue.minds.desktop_client.create_attempt_rows import CreateAttemptRow
 from imbue.minds.desktop_client.create_attempt_rows import derive_create_attempt_rows
+from imbue.minds.desktop_client.create_attempt_rows import derive_settling_create_owners
 from imbue.minds.desktop_client.create_progress_history import make_progress_history_store
 from imbue.minds.desktop_client.data_types import BackupAccessState
 from imbue.minds.desktop_client.data_types import CloudRowKeyState
@@ -128,6 +132,7 @@ from imbue.minds.desktop_client.minds_config import effective_auto_update
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification_feed import NotificationDispatchPreferences
 from imbue.minds.desktop_client.notification_feed import NotificationFeed
+from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.program_resolution import LoginShellPath
 from imbue.minds.desktop_client.provider_display import connection_backend_label_for_name
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
@@ -149,6 +154,9 @@ from imbue.minds.desktop_client.settings.resolve import resolve_notification_sty
 from imbue.minds.desktop_client.settings.resolve import resolve_notifications_enabled
 from imbue.minds.desktop_client.settings.resolve import resolve_update_window
 from imbue.minds.desktop_client.settings.storage import load_settings_context
+from imbue.minds.desktop_client.shared_with_me_gate import register_shared_workspace_gate
+from imbue.minds.desktop_client.shared_with_me_store import SharedWithMeStore
+from imbue.minds.desktop_client.shared_with_me_store import shared_workspace_ui_entries
 from imbue.minds.desktop_client.sharing_handler import delete_share_for_host
 from imbue.minds.desktop_client.sign_in_browser import InstalledSignInBrowsers
 from imbue.minds.desktop_client.sign_in_browser import SignInBrowsersInterface
@@ -169,6 +177,7 @@ from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.system_interface_health import RecoveryFailureCause
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.turn_credentials import TurnCredentialBroker
+from imbue.minds.desktop_client.ui_api import SPA_INDEX_ENDPOINT_PREFIX
 from imbue.minds.desktop_client.ui_api import create_ui_blueprint
 from imbue.minds.desktop_client.ui_api import serve_spa_index
 from imbue.minds.desktop_client.ui_api_inbox import build_notification_card
@@ -205,8 +214,13 @@ from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
 from imbue.minds.desktop_client.update_service import read_workspace_update_facts
 from imbue.minds.desktop_client.update_status import format_update_window
 from imbue.minds.desktop_client.update_workspace_command import UpdateWorkspaceFacts
+from imbue.minds.desktop_client.wallpaper_cache import CACHE_DIRNAME as WALLPAPER_CACHE_DIRNAME
+from imbue.minds.desktop_client.wallpaper_cache import WALLPAPER_FETCH_TIMEOUT_SECONDS
+from imbue.minds.desktop_client.wallpaper_cache import WallpaperCache
+from imbue.minds.desktop_client.wallpaper_cache import WallpaperRefresher
 from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.desktop_client.welcome_chat import WelcomeChatSeeder
+from imbue.minds.desktop_client.workspace_apps import resolve_workspace_apps
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
 from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsCache
@@ -245,6 +259,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.primitives import BROWSER_BRIDGE_PATH
+from imbue.mngr_forward.tls import local_ca_cert_path
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 
@@ -1531,7 +1546,26 @@ def _build_providers_state_payload(
     )
 
 
-def _visible_create_attempt_rows(backend_resolver: BackendResolverInterface) -> list[CreateAttemptRow]:
+def _create_attempt_sources() -> tuple[Sequence[AgentCreateAttemptInfo], Sequence[PendingCreateAttemptRecord]]:
+    """The live create attempts and the persisted pending-create-attempt records, read once per derivation.
+
+    Both the visible create attempt rows and the owners of the still-settling
+    creates derive from them; listing the records parses every file in the
+    store, so a derivation reads them one time.
+    """
+    agent_creator: AgentCreator | None = get_state().agent_creator
+    if agent_creator is None:
+        return (), ()
+    store = agent_creator.pending_create_attempt_store
+    records = store.list_records() if store is not None else []
+    return agent_creator.list_create_attempt_infos(), records
+
+
+def _visible_create_attempt_rows(
+    backend_resolver: BackendResolverInterface,
+    live_infos: Sequence[AgentCreateAttemptInfo],
+    records: Sequence[PendingCreateAttemptRecord],
+) -> list[CreateAttemptRow]:
     """Derive the create attempt rows currently visible in the workspace list.
 
     Merges the live in-memory create attempts with the persisted pending-create-attempt
@@ -1539,13 +1573,8 @@ def _visible_create_attempt_rows(backend_resolver: BackendResolverInterface) -> 
     create attempt whose workspace a discovery snapshot has already confirmed --
     the real workspace row takes over in place.
     """
-    agent_creator: AgentCreator | None = get_state().agent_creator
-    if agent_creator is None:
-        return []
-    store = agent_creator.pending_create_attempt_store
-    records = store.list_records() if store is not None else []
     known_agent_id_strs = frozenset(str(aid) for aid in backend_resolver.list_known_workspace_ids())
-    return derive_create_attempt_rows(agent_creator.list_create_attempt_infos(), records, known_agent_id_strs)
+    return derive_create_attempt_rows(live_infos, records, known_agent_id_strs)
 
 
 def _create_attempt_row_entry(row: CreateAttemptRow) -> dict[str, str]:
@@ -1582,6 +1611,10 @@ def _build_workspace_list(
     # Why each stopped cloud machine is stopped (host id -> kind), from the
     # stop-kind tracker; None (or an absent host) leaves the entry's kind empty.
     stop_kind_by_host_id: Mapping[str, str] | None = None,
+    # The account each still-running create was submitted under, by agent id
+    # (``derive_settling_create_owners``): a row discovery already lists but
+    # whose association is written only when its create completes.
+    settling_create_owner_by_agent_id: Mapping[str, CreateAttemptOwner] | None = None,
 ) -> list[dict[str, str]]:
     """Build a JSON-serializable list of workspaces from the backend resolver.
 
@@ -1670,6 +1703,20 @@ def _build_workspace_list(
             owner_user_id = session_store.get_owner_user_id_for_workspace(str(aid))
             if owner_user_id is not None:
                 entry["account_user_id"] = owner_user_id
+            else:
+                # With no association yet, the create that made this workspace
+                # may still be settling under its account (the association lands
+                # when it completes); until then the row is that account's, not
+                # the device's.
+                settling_owner = (
+                    settling_create_owner_by_agent_id.get(str(aid))
+                    if settling_create_owner_by_agent_id is not None
+                    else None
+                )
+                if settling_owner is not None:
+                    entry["account_user_id"] = settling_owner.account_id
+                    if settling_owner.account_email:
+                        entry["account"] = settling_owner.account_email
             account = session_store.get_account_for_workspace(str(aid))
             if account is not None:
                 entry["account"] = account.email
@@ -2228,6 +2275,25 @@ def _ui_workspace_entry_from_legacy_dict(entry: Mapping[str, str]) -> UiWorkspac
     )
 
 
+def _with_home_assets(
+    entry: UiWorkspaceEntry, backend_resolver: BackendResolverInterface, wallpaper_cache: WallpaperCache | None
+) -> UiWorkspaceEntry:
+    """A live owned row with its apps and its cached wallpaper's version (specs/home-screen-redesign, 4.10 and 4.12).
+
+    A create attempt or a remote record has no registry and no wallpaper to
+    read, so it is returned as it is.
+    """
+    if entry.is_remote or entry.create_attempt_state != "":
+        return entry
+    return entry.model_copy_update(
+        to_update(entry.field_ref().apps, resolve_workspace_apps(backend_resolver, AgentId(entry.id))),
+        to_update(
+            entry.field_ref().wallpaper_version,
+            wallpaper_cache.version_for(entry.id) if wallpaper_cache is not None else "",
+        ),
+    )
+
+
 def _derive_ui_workspaces_message(
     app: Flask,
     backend_resolver: BackendResolverInterface,
@@ -2236,14 +2302,16 @@ def _derive_ui_workspaces_message(
     machine_stop_kind_tracker: MachineStopKindTracker | None,
 ) -> UiWorkspacesMessage:
     with app.app_context():
+        live_create_infos, create_records = _create_attempt_sources()
         rows = _build_workspace_list(
             backend_resolver,
             session_store,
             tracker=get_state().system_interface_health_tracker,
-            create_attempt_rows=_visible_create_attempt_rows(backend_resolver),
+            create_attempt_rows=_visible_create_attempt_rows(backend_resolver, live_create_infos, create_records),
             stop_kind_by_host_id=(
                 machine_stop_kind_tracker.stop_kind_by_host_id() if machine_stop_kind_tracker is not None else None
             ),
+            settling_create_owner_by_agent_id=derive_settling_create_owners(live_create_infos, create_records),
         )
         restorable_ids = [str(aid) for aid in backend_resolver.list_restorable_workspace_ids()] + [
             str(hid) for hid in backend_resolver.list_restorable_workspace_host_ids()
@@ -2254,8 +2322,25 @@ def _derive_ui_workspaces_message(
         destroying_marker = _finalize_and_mark_destroying(
             paths, backend_resolver, session_store, get_state().imbue_cloud_cli, get_state().minds_config
         )
+        # Workspaces shared with each signed-in account ride the same list,
+        # flagged ``is_owned=False`` and carrying their share, so a window
+        # lists its account's own and shared rows together (specs/shared-with-me, 4.7).
+        shared_entries: list[UiWorkspaceEntry] = []
+        shared_with_me_store = get_state().shared_with_me_store
+        if shared_with_me_store is not None and session_store is not None:
+            for account in session_store.list_accounts():
+                shared_entries.extend(
+                    shared_workspace_ui_entries(
+                        str(account.user_id), account.email, shared_with_me_store.list_rows(str(account.user_id))
+                    )
+                )
+        wallpaper_cache = get_state().wallpaper_cache
+        owned_entries = tuple(
+            _with_home_assets(_ui_workspace_entry_from_legacy_dict(row), backend_resolver, wallpaper_cache)
+            for row in rows
+        )
         return UiWorkspacesMessage(
-            workspaces=tuple(_ui_workspace_entry_from_legacy_dict(row) for row in rows),
+            workspaces=owned_entries + tuple(shared_entries),
             destroying_agent_ids=tuple(destroying_marker),
             failed_destroy_agent_ids=tuple(
                 agent_id for agent_id, marker_status in destroying_marker.items() if marker_status == "failed"
@@ -2942,6 +3027,7 @@ def create_desktop_client(
     account_settings_store: AccountSettingsStore | None = None,
     workspace_facts_cache: WorkspaceFactsCache | None = None,
     workspace_profile_writer: WorkspaceProfileWriter | None = None,
+    shared_with_me_store: SharedWithMeStore | None = None,
 ) -> Flask:
     """Create the bare-origin Imbue Studio Flask application.
 
@@ -3070,6 +3156,25 @@ def create_desktop_client(
         mngr_binary=mngr_binary,
         mngr_host_dir=resolved_mngr_host_dir,
     )
+    # The wallpapers the home page paints cards with (specs/home-screen-redesign, 4.12): cached
+    # under the data dir, fetched through the forward when a workspace is loaded.
+    wallpaper_cache = WallpaperCache(cache_dir=paths.data_dir / WALLPAPER_CACHE_DIRNAME) if paths is not None else None
+    wallpaper_refresher = (
+        WallpaperRefresher(
+            cache=wallpaper_cache,
+            mngr_forward_port=mngr_forward_port,
+            make_probe_client=_WorkspaceProbeClientFactory(
+                preauth_cookie=mngr_forward_preauth_cookie,
+                ca_cert_path=local_ca_cert_path(resolved_mngr_host_dir),
+            ),
+            concurrency_group=root_concurrency_group,
+        )
+        if wallpaper_cache is not None
+        and mngr_forward_port != 0
+        and mngr_forward_preauth_cookie
+        and root_concurrency_group is not None
+        else None
+    )
     ui_publisher = _create_ui_state_publisher(
         app=app,
         broadcaster=ui_channel_broadcaster,
@@ -3087,6 +3192,12 @@ def create_desktop_client(
     )
     # The publisher exists only now; the tracker's changes re-derive the list through it.
     machine_stop_kind_tracker.on_change = ui_publisher.notify_change
+    # Likewise a refetched shared-with-me listing or a recorded verdict: the
+    # publisher is edge-driven, so the store wakes it itself.
+    if shared_with_me_store is not None:
+        shared_with_me_store.on_change = ui_publisher.notify_change
+    if wallpaper_cache is not None:
+        wallpaper_cache.on_change = ui_publisher.notify_change
 
     # The durable notification feed behind the channel's notifications frame,
     # reconciled by the notifications derive on every publish tick. Its OS
@@ -3201,6 +3312,9 @@ def create_desktop_client(
         connection_store=connection_store,
         provider_materializer=provider_materializer,
         account_settings_store=account_settings_store,
+        shared_with_me_store=shared_with_me_store,
+        wallpaper_cache=wallpaper_cache,
+        wallpaper_refresher=wallpaper_refresher,
         workspace_facts_cache=workspace_facts_cache,
         workspace_profile_writer=workspace_profile_writer,
         ui_channel_broadcaster=ui_channel_broadcaster,
@@ -3291,6 +3405,9 @@ def create_desktop_client(
 
     # Mount the SPA surface (/ui, /ui/ws, /ui/api/*).
     app.register_blueprint(create_ui_blueprint())
+    # Every owner action naming a workspace shared with an account here is
+    # refused before its handler, on every route (specs/shared-with-me, S12).
+    register_shared_workspace_gate(app)
 
     if workspace_update_service is not None:
         _wire_workspace_updates(
@@ -3343,6 +3460,8 @@ def create_desktop_client(
         "/settings/ai-keys",
         "/accounts",
         "/workspaces/destroyed",
+        # The imbue-studio://shared/<host-id> deep link's landing page (specs/shared-with-me, 4.11).
+        "/shared/<host_id>",
         # The workspace-display route: renders the shell around the sandboxed
         # workspace iframe (the SPA twin of the deleted /_chrome wrapper).
         # Electron's wrapperUrlForWorkspace + session restore load it, and it
@@ -3362,7 +3481,7 @@ def create_desktop_client(
         "/consent",
         "/_dev/styleguide",
     ):
-        app.add_url_rule(spa_route, endpoint=f"spa_index:{spa_route}", view_func=serve_spa_index)
+        app.add_url_rule(spa_route, endpoint=f"{SPA_INDEX_ENDPOINT_PREFIX}{spa_route}", view_func=serve_spa_index)
 
     # Core action routes (POST/GET actions the SPA drives; page GETs are above)
     app.add_url_rule("/consent", view_func=_handle_consent_submit, methods=["POST"])
@@ -3503,6 +3622,20 @@ class _ScreenLockedReader(FrozenModel):
 
     def __call__(self) -> bool:
         return any(state.is_screen_locked for state in self.broadcaster.get_connected_client_states())
+
+
+class _WorkspaceProbeClientFactory(FrozenModel):
+    """Builds the client the wallpaper refresher reads a workspace's shell with: the readiness probes' own."""
+
+    preauth_cookie: str = Field(frozen=True, description="The cookie the forward admits as the owner")
+    ca_cert_path: Path = Field(frozen=True, description="The forward's CA certificate to pin")
+
+    def __call__(self) -> httpx2.Client:
+        return make_workspace_probe_client(
+            preauth_cookie=self.preauth_cookie,
+            probe_timeout_seconds=WALLPAPER_FETCH_TIMEOUT_SECONDS,
+            ca_cert_path=self.ca_cert_path,
+        )
 
 
 class _MindsApiKeyProvider(FrozenModel):

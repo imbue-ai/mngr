@@ -66,6 +66,7 @@ from imbue.minds.desktop_client.cookie_manager import _COOKIE_MAX_AGE_SECONDS
 from imbue.minds.desktop_client.cookie_manager import _COOKIE_SALT
 from imbue.minds.desktop_client.cookie_manager import _SESSION_PAYLOAD
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.create_attempt_rows import CreateAttemptOwner
 from imbue.minds.desktop_client.data_types import BackupAccessState
 from imbue.minds.desktop_client.data_types import RemoteWorkspaceKind
 from imbue.minds.desktop_client.dek_store import bundle_mirror_path
@@ -745,6 +746,52 @@ def test_build_workspace_list_names_each_rows_owning_account_signed_in_or_not(tm
     assert (rows[str(gone_agent)]["account_user_id"], rows[str(gone_agent)]["account"]) == (
         "user-gone",
         "gone@example.com",
+    )
+    assert "account_user_id" not in rows[str(device_agent)]
+    assert "account" not in rows[str(device_agent)]
+
+
+def test_build_workspace_list_lists_a_settling_creates_row_under_its_account(tmp_path: Path) -> None:
+    """A row whose create is still running is its account's from the moment discovery lists it.
+
+    The association is written only when the create completes, so until then
+    the in-flight create's owner names the row's account; a row with an
+    association keeps it, and a row with neither stays the device's.
+    """
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-here", email="here@example.com")
+    session_store = make_session_store_for_test(tmp_path, cli=cli)
+    associated_agent, settling_agent, device_agent = AgentId.generate(), AgentId.generate(), AgentId.generate()
+    backend_resolver = make_resolver_with_data(
+        agents_json=make_agents_json(associated_agent, settling_agent, device_agent, host_name="ws")
+    )
+    session_store.associate_created_workspace(
+        user_id="user-here",
+        agent_id=str(associated_agent),
+        host_id="host-here",
+        display_name="here-ws",
+        color=None,
+        is_cloud_row=False,
+    )
+    settling_owners = {
+        str(settling_agent): CreateAttemptOwner(account_id="user-creating", account_email="creating@example.com"),
+        str(associated_agent): CreateAttemptOwner(account_id="user-stale", account_email="stale@example.com"),
+    }
+
+    rows = {
+        row["id"]: row
+        for row in _build_workspace_list(
+            backend_resolver, session_store, settling_create_owner_by_agent_id=settling_owners
+        )
+    }
+
+    assert (rows[str(settling_agent)]["account_user_id"], rows[str(settling_agent)]["account"]) == (
+        "user-creating",
+        "creating@example.com",
+    )
+    assert (rows[str(associated_agent)]["account_user_id"], rows[str(associated_agent)]["account"]) == (
+        "user-here",
+        "here@example.com",
     )
     assert "account_user_id" not in rows[str(device_agent)]
     assert "account" not in rows[str(device_agent)]

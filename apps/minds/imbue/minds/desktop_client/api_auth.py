@@ -87,6 +87,11 @@ def _is_bearer_authenticated() -> bool:
     return expected_key is not None and is_request_authenticated(request.headers.get("authorization"), expected_key)
 
 
+def is_api_or_cookie_authenticated() -> bool:
+    """Whether the request came over the local socket, carries the bearer key, or carries the session cookie."""
+    return is_local_trusted_environ(request.environ) or _is_bearer_authenticated() or _is_cookie_authenticated()
+
+
 def require_api_or_cookie_auth(view: Callable[_ViewParams, Response]) -> Callable[_ViewParams, Response]:
     """Allow the central bearer key (agents, via the gateway), the session cookie (the UI), or the local socket.
 
@@ -99,7 +104,7 @@ def require_api_or_cookie_auth(view: Callable[_ViewParams, Response]) -> Callabl
 
     @wraps(view)
     def wrapper(*args: _ViewParams.args, **kwargs: _ViewParams.kwargs) -> Response:
-        if is_local_trusted_environ(request.environ) or _is_bearer_authenticated() or _is_cookie_authenticated():
+        if is_api_or_cookie_authenticated():
             return view(*args, **kwargs)
         return json_error("Not authenticated", 401)
 

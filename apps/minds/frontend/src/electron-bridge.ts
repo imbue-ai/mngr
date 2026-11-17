@@ -216,10 +216,39 @@ interface MindsNativeSurface {
   // Optional: a preload from before immersive mode lacks it, and the browser
   // build has no accelerators or relays to silence.
   setImmersive?(on: boolean): void;
+  // Shared workspaces (specs/shared-with-me, 4.7 and 4.8). Optional: a preload
+  // from before them lacks them, and the browser build holds the accounts
+  // session itself.
+  onSharedFrameVerdict?(callback: (report: SharedFrameVerdictReport) => void): void;
+  onSharedFrameRedeemRefused?(callback: (report: SharedFrameRedeemRefusedReport) => void): void;
+  onSharedFrameLoginNeeded?(callback: (report: SharedFrameLoginReport) => void): void;
   // This window's renderer process id, which names its lane in a profiling
   // trace beside Chromium's own. Optional: a preload from before profiling
   // lacks it, and the browser build has no process of its own to name.
   rendererPid?: number;
+}
+
+/** What a shared workspace's frame document answered, as main read it off
+ * the response: which host, and the verdict the tile records. */
+export interface SharedFrameVerdictReport {
+  hostname: string;
+  verdict: "admitted" | "refused" | "misconfigured" | "offline";
+}
+
+/** How the redeem page refused the frame navigated to it: `session_mismatch`
+ * when the partition held another account's session (main has signed it out,
+ * and a fresh open redeems into a clean partition), `refused` for any other
+ * answer but the redirect onto the share. */
+export interface SharedFrameRedeemRefusedReport {
+  refusal: "session_mismatch" | "refused";
+}
+
+/** A shared workspace's frame landed on the accounts login page instead of
+ * the share: with `isSignInFailed`, the redeem itself failed (a spent code);
+ * without it, the broker wanted a confirmation the redeem did not carry. */
+export interface SharedFrameLoginReport {
+  hostname: string;
+  isSignInFailed: boolean;
 }
 
 /** This launch's app version against the previous launch's, as main recorded
@@ -559,6 +588,16 @@ export const electronBridge = {
    * menu shortcuts and key relays stay out of the way while it lasts. */
   setImmersive(on: boolean): void {
     native()?.setImmersive?.(on);
+  },
+
+  onSharedFrameVerdict(callback: (report: SharedFrameVerdictReport) => void): void {
+    native()?.onSharedFrameVerdict?.(callback);
+  },
+  onSharedFrameRedeemRefused(callback: (report: SharedFrameRedeemRefusedReport) => void): void {
+    native()?.onSharedFrameRedeemRefused?.(callback);
+  },
+  onSharedFrameLoginNeeded(callback: (report: SharedFrameLoginReport) => void): void {
+    native()?.onSharedFrameLoginNeeded?.(callback);
   },
   /** This window's renderer process id; null in the browser, and on a
    * desktop build older than profiling. */

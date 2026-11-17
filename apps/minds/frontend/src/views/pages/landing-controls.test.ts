@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   backupsControlFor,
+  badgeToneFor,
   healthBadgeLabelFor,
   isOutageExplainedByDevice,
   isMachineStateKnown,
+  isSpinningBadgeLabel,
   keyStateChipFor,
   lifecycleConfirmation,
   lifecycleFailureError,
@@ -137,7 +139,7 @@ describe("livenessBadgeFor", () => {
   });
 
   it("says on the badge why a held row has no Start", () => {
-    expect(livenessBadgeFor("STOPPED", "retired").tooltip).toContain("Its backups are still available from the Backups button.");
+    expect(livenessBadgeFor("STOPPED", "retired").tooltip).toContain("Its backups are still available from Backups in the card's menu.");
     // A tooltip is a plain attribute, so the sentence reaches it without its
     // markup.
     expect(livenessBadgeFor("STOPPED", "suspension").tooltip).toBe(
@@ -507,5 +509,34 @@ describe("remoteTileEntries", () => {
   it("leaves a failed destroy whose host is gone to its own row", () => {
     const entries = [remote("agent-a"), remote("agent-orphaned")];
     expect(remoteTileEntries(entries, ["agent-orphaned"], () => false).map((e) => e.id)).toEqual(["agent-a"]);
+  });
+});
+
+describe("badgeToneFor", () => {
+  it("reads broken as alarm, needs-you as warn, and everything else as the neutral chip", () => {
+    expect(badgeToneFor("Not responding")).toBe("alarm");
+    expect(badgeToneFor("Can't connect from this device")).toBe("alarm");
+    expect(badgeToneFor("Couldn't reconnect")).toBe("alarm");
+    expect(badgeToneFor("Create failed")).toBe("alarm");
+    expect(badgeToneFor("Removal failed")).toBe("alarm");
+    expect(badgeToneFor("No longer shared with you")).toBe("alarm");
+    expect(badgeToneFor("Connection removed")).toBe("alarm");
+    expect(badgeToneFor("Interrupted")).toBe("warn");
+    expect(badgeToneFor("Enter your master password to open")).toBe("warn");
+    expect(badgeToneFor("Needs a newer app")).toBe("warn");
+    expect(badgeToneFor("Stopped")).toBe("neutral");
+    expect(badgeToneFor("Starting…")).toBe("neutral");
+    expect(badgeToneFor("Offline")).toBe("neutral");
+    expect(badgeToneFor("Pasted link")).toBe("neutral");
+  });
+
+  it("keeps a spinner only on the labels whose state is still moving", () => {
+    expect(isSpinningBadgeLabel("Starting…")).toBe(true);
+    expect(isSpinningBadgeLabel("Creating…")).toBe(true);
+    expect(isSpinningBadgeLabel("Confirming removal…")).toBe(true);
+    expect(isSpinningBadgeLabel("Connecting…")).toBe(true);
+    expect(isSpinningBadgeLabel("Reconnecting...")).toBe(true);
+    expect(isSpinningBadgeLabel("Stopped")).toBe(false);
+    expect(isSpinningBadgeLabel("Not responding")).toBe(false);
   });
 });

@@ -209,6 +209,17 @@ to the window's account: that account's section (its Imbue Cloud instance and it
 with a status; an empty signed-out section for an account that is signed out), the local profile's
 section, and the device providers (docker, lima, vultr).
 
+The home screen's cards and app icons (`specs/home-screen-redesign/spec.md`) read the rest of what
+they draw from the `/ui/ws` channel's ``workspaces`` frame: each live owned entry carries its ``apps``
+(the app-kind services of its registry, with a display name, origin label, and icon version) and the
+``wallpaper_version`` of its cached wallpaper. The images behind them are served under
+`/ui/api/workspaces/<agent_id>/` (`ui_api_workspace_assets.py`, requires the session):
+    `apps/<name>/icon.svg` (GET) answers the app's accepted icon markup, `wallpaper` (GET) the cached
+    wallpaper bytes, both immutable under the version the SPA appends as `?v=`; `wallpaper/refresh`
+    (POST) reads a loaded workspace's wallpaper through the forward into `<data_dir>/wallpapers/`
+    (`wallpaper_cache.py`) and answers 202 at once. A workspace shared with an account here is
+    refused by the shared-with-me gate (`403 not_owned`), as every owner route is.
+
 `[<service>.]agent-<hex>.localhost:PORT/*` (workspace-origin catch-all, requires auth):
     a host-header middleware and a catch-all WebSocket route recognize
     `[<service>.]agent-<hex>.localhost(:port)` hosts and byte-forward the

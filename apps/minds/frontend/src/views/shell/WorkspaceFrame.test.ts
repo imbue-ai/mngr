@@ -115,6 +115,7 @@ function makeHandlers(
     relayAnswer?: ProviderRelayAnswer;
     opensExternalLinks?: boolean;
     canImmerse?: boolean;
+    isShared?: boolean;
   } = {},
 ) {
   const contract = makeContract();
@@ -152,6 +153,7 @@ function makeHandlers(
       relayStops.push(flowId);
     },
     workspaceAgentId: () => WORKSPACE_AGENT_ID,
+    isSharedWorkspace: () => options.isShared === true,
     openRequestPopup: (requestId) => popupOpens.push(requestId),
     onWorkspaceReady: (promises) => readyAnnouncements.push(promises),
     onChatReportingKnown: (reportsChatOnScreen) =>
@@ -283,6 +285,19 @@ describe("buildEmbedHandlers", () => {
         opensCustomSchemeLinks: false,
         opensLocalFiles: true,
         immersive: false,
+      },
+    ]);
+    // Someone else's workspace is neither pulled out nor given local files,
+    // whatever the desktop could do for an owned one.
+    const shared = makeHandlers({ canPopOut: true, opensExternalLinks: true, isShared: true });
+    shared.handlers[shared.contract.WORKSPACE_READY]({});
+    expect(shared.ackPayloads).toEqual([
+      {
+        canPopOut: false,
+        opensExternalLinks: true,
+        opensCustomSchemeLinks: true,
+        opensLocalFiles: false,
+        immersive: true,
       },
     ]);
   });
@@ -503,6 +518,15 @@ describe("buildEmbedHandlers", () => {
         params: { tab: "share" },
       },
     ]);
+  });
+
+  it("keeps the owner-only overlays closed over a shared workspace, still answering the AI-keys request", () => {
+    const { contract, handlers, navigations, acks } = makeHandlers({ isShared: true });
+    handlers[contract.OPEN_SHARE_SETTINGS]({ serviceName: "web" });
+    handlers[contract.OPEN_LOCAL_FILES]({});
+    handlers[contract.OPEN_AI_KEYS_PAGE]({});
+    expect(navigations).toEqual([]);
+    expect(acks).toEqual([contract.OPEN_AI_KEYS_ACK]);
   });
 
   it("rings the chrome control a tour names, and clears the ring on null or on an anchor it does not know", () => {

@@ -321,6 +321,12 @@ export interface SharePanelModelOptions {
   serviceDisplayNames?: Record<string, string>;
   /** The mail providers a domain grant may never name. */
   publicEmailDomains: string[];
+  /** The one domain the granter may grant as a whole: their own address's
+   * (specs/shared-with-me, S6). "" when the granter has none (an address at a
+   * public provider), in which case every domain grant is refused as the save
+   * refuses it; absent from a payload that predates the rule, which refuses
+   * nothing. */
+  grantableEmailDomain?: string;
   fetchJson?: FetchJson;
   redraw?: () => void;
   /** Injected timer hooks so tests drive the readiness poll deterministically. */
@@ -1608,6 +1614,13 @@ export class SharePanelModel {
     if (!isEmailDomain(normalized)) return `${normalized} is not a domain.`;
     if (this.publicEmailDomains.has(normalized))
       return `${normalized} cannot be granted permissions because it is a public email provider.`;
+    // An options payload from before the rule carries no domain and refuses nothing.
+    if (this.options.grantableEmailDomain === undefined) return null;
+    const ownDomain = normalizeGrantDomain(this.options.grantableEmailDomain);
+    if (ownDomain === "")
+      return `${normalized} cannot be granted: domain grants need an account at a non-public email domain, and yours is at a public provider.`;
+    if (normalized !== ownDomain)
+      return `${normalized} is not your domain; you can only share with everyone at ${ownDomain}.`;
     return null;
   }
 

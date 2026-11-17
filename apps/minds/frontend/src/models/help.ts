@@ -151,6 +151,11 @@ export interface HelpModelOptions {
   storage?: Pick<Storage, "getItem" | "setItem">;
   /** Injectable clipboard write, for tests; defaults to navigator.clipboard. */
   clipboardWrite?: (text: string) => Promise<void>;
+  /** Whether the launch's workspace is the account's own (every workspace is,
+   * by default). One shared with the account is someone else's: the desktop
+   * refuses every owner action naming it, so a launch over it is filed as the
+   * device's own report, with no agent to ask. */
+  isWorkspaceOwned?: (workspaceAgentId: string) => boolean;
 }
 
 // How long the report-ID chip flashes its copied confirmation, matching the
@@ -184,6 +189,16 @@ export class HelpModel {
     this.options = options;
     const staged = takePendingHelpLaunch();
     if (staged !== null) this.launch = staged;
+    if (
+      this.launch.workspaceAgentId !== "" &&
+      !(options.isWorkspaceOwned?.(this.launch.workspaceAgentId) ?? true)
+    ) {
+      this.launch = {
+        ...this.launch,
+        workspaceAgentId: "",
+        isAssistAvailable: false,
+      };
+    }
     this.description = this.launch.description;
     // Agent help is the default when available -- except for an /assist
     // agent's escalated diagnosis (pre-filled description), which must land

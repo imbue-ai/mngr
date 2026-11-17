@@ -59,6 +59,41 @@ class CreateAttemptRow(FrozenModel):
     error_kind: str | None = Field(default=None, description="Machine-readable failure classification, if any")
 
 
+class CreateAttemptOwner(FrozenModel):
+    """The account a create attempt was submitted under, for the live row its workspace shows before its association lands."""
+
+    account_id: str = Field(description="Owning account's user id")
+    account_email: str = Field(default="", description="Owning account's email, when the record carries one")
+
+
+@pure
+def derive_settling_create_owners(
+    live_infos: Sequence[AgentCreateAttemptInfo],
+    records: Sequence[PendingCreateAttemptRecord],
+) -> dict[str, CreateAttemptOwner]:
+    """The owner of every workspace whose create has not failed, by canonical agent id.
+
+    From the moment ``mngr create`` returns until the create's completion
+    writes its account association, the workspace is in discovery (a live
+    row) with no association, so the row would read as the device's for the
+    whole boot wait. The create attempt's record names the account the row is
+    really for. A DONE attempt stays in the map: DONE is published before the
+    association is written, and once that lands the association is read first.
+    """
+    record_by_create_attempt_id = {record.create_attempt_id: record for record in records}
+    owners: dict[str, CreateAttemptOwner] = {}
+    for info in live_infos:
+        if info.agent_id is None or info.status is AgentCreateAttemptStatus.FAILED:
+            continue
+        record = record_by_create_attempt_id.get(str(info.create_attempt_id))
+        if record is None or not record.request.account_id:
+            continue
+        owners[str(info.agent_id)] = CreateAttemptOwner(
+            account_id=record.request.account_id, account_email=record.request.account_email
+        )
+    return owners
+
+
 def _row_from_live_info(
     info: AgentCreateAttemptInfo, record: PendingCreateAttemptRecord | None
 ) -> CreateAttemptRow | None:

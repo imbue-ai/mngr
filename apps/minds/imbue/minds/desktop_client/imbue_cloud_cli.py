@@ -17,6 +17,7 @@ import json as _json
 import os
 import tempfile
 import time
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from enum import auto
@@ -42,7 +43,11 @@ from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.mngr_imbue_cloud.errors import CLIENT_TOO_OLD_FALLBACK_MESSAGE
+from imbue.mngr_imbue_cloud.errors import GRANTS_REFUSED_CODE
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
+from imbue.mngr_imbue_cloud.errors import RATE_LIMITED_CODE
+from imbue.mngr_imbue_cloud.errors import SHARED_WITH_ME_UNAVAILABLE_CODE
+from imbue.mngr_imbue_cloud.errors import SHARE_NOT_FOUND_CODE
 from imbue.mngr_imbue_cloud.wire import WireModel
 
 _DEFAULT_TIMEOUT_SECONDS = 60.0
@@ -244,22 +249,40 @@ class ImbueCloudSyncConflictCliError(ImbueCloudCliError):
 # The connector's structured refusals of a grants push or an invitation,
 # relayed by the plugin as the JSON body's ``code``.
 _SHARE_REFUSAL_CODES: Final[frozenset[str]] = frozenset(
-    {"not_published", "grants_out_of_date", "not_invitable", "no_workspace_link"}
+    {
+        GRANTS_REFUSED_CODE,
+        "not_published",
+        "grants_out_of_date",
+        "not_invitable",
+        "no_workspace_link",
+        "already_reported",
+        RATE_LIMITED_CODE,
+        SHARE_NOT_FOUND_CODE,
+        SHARED_WITH_ME_UNAVAILABLE_CODE,
+    }
 )
 
 
 class ImbueCloudShareRefusedCliError(ImbueCloudCliError):
-    """The connector refused a grants push, an invitation, or a mobile access link with a structured 409.
+    """The connector refused a grants push, an invitation, a mobile access link, or a share response with a structured code.
 
     ``code`` is the reason: ``not_published`` (the workspace is unpublished),
     ``grants_out_of_date`` (the centralized grants table holds no open grant
     for the subject: push the document, then try once more), ``not_invitable``
-    (the grantee has already joined), or ``no_workspace_link`` (the workspace's
+    (the grantee has already joined), ``no_workspace_link`` (the workspace's
     shell has registered no address or name yet, so there is nothing to invite
-    to or email).
+    to or email), ``already_reported`` (the account reported the share, and a
+    report is never withdrawn), ``rate_limited`` (the day's share-report
+    allowance is spent), ``share_not_found`` (the share names no identity of
+    the account, so the cached listing is stale), ``shared_with_me_unavailable``
+    (the connector does not serve the listing yet, so nothing is shared as far
+    as this app can tell), or ``grants_refused`` (the push adds a domain grant
+    the connector's rules forbid; ``refusals`` names each entry the way the
+    desktop's own do).
     """
 
     code: str = ""
+    refusals: tuple[dict[str, Any], ...] = ()
 
 
 class AuthRefreshOutcome(UpperCaseStrEnum):
@@ -456,6 +479,82 @@ class NotificationPreferencesCliInfo(WireModel):
     in_app_enabled: bool = True
 
 
+class SharedWithMeOwnerCliInfo(WireModel):
+    """The owner's identity record on one row of `mngr imbue_cloud shares shared-with-me` (email only when verified)."""
+
+    user_id: str
+    email: str | None = None
+    display_name: str | None = None
+    profile_picture_url: str | None = None
+
+
+class SharedWithMeTargetCliInfo(WireModel):
+    """One target the recipient may open, on a row of `mngr imbue_cloud shares shared-with-me`."""
+
+    app: str
+    display_name: str | None = None
+    link: str | None = None
+    granted_via: str = "unknown"
+    is_granted_as_app: bool = False
+
+
+class SharedWithMeShareCliInfo(WireModel):
+    """One row of `mngr imbue_cloud shares shared-with-me`: a share whose grants name the account.
+
+    ``share_key`` is the share's durable key (its workspace id, else its host
+    id); ``status`` is ``invited``, ``accepted``, or ``declined``, and
+    ``granted_via`` the strongest kind of grant admitting the account
+    (``user``, ``email``, or ``domain``); both arrive as the connector's
+    lowercase strings, and a value the plugin does not recognize arrives as
+    ``unknown``, since its wire enums coerce one before printing.
+    """
+
+    host_id: str
+    workspace_id: str | None = None
+    share_key: str
+    workspace_domain: str
+    workspace_name: str | None = None
+    owner: SharedWithMeOwnerCliInfo
+    status: str = "unknown"
+    granted_via: str = "unknown"
+    last_seen_at: str | None = None
+    latest_grant_at: str = ""
+    first_visited_at: str | None = None
+    last_visited_at: str | None = None
+    targets: tuple[SharedWithMeTargetCliInfo, ...] = ()
+
+
+class SharedWithMeMatchCliInfo(WireModel):
+    """One entry of the match set a listing and the records pull carry: compared whole to detect a changed listing."""
+
+    share_key: str
+    version: int
+    response: str | None = None
+    is_visited: bool = False
+
+
+class SharedWithMeListingCliInfo(WireModel):
+    """What `mngr imbue_cloud shares shared-with-me` prints: the match set the listing was built from, and the rows."""
+
+    matches: tuple[SharedWithMeMatchCliInfo, ...] = ()
+    shares: tuple[SharedWithMeShareCliInfo, ...] = ()
+
+
+class ShareResponseCliResult(WireModel):
+    """What `mngr imbue_cloud shares respond|clear-response` prints."""
+
+    host_id: str
+    share_key: str
+    response: str | None = None
+
+
+class BrowserSessionCodeCliInfo(WireModel):
+    """What `mngr imbue_cloud auth browser-session-code` prints: the single-use code of the reverse device handoff."""
+
+    code: str
+    expires_in_seconds: int = 60
+
+
 # How long a readiness poll may reuse a cached connector share lookup. The
 # share's domain is immutable for its lifetime and the progress stamps riding
 # along (cert expiry, tunnel login) change on the scale of the ACME/tunnel
@@ -486,6 +585,13 @@ class SyncRecordsPullResult(FrozenModel):
     records: tuple[dict[str, Any], ...] = Field(description="The account's workspace records, as wire dicts")
     shared_agent_ids: tuple[str, ...] = Field(
         description="Agent ids of the account's actively shared workspaces (the connector's shares index)"
+    )
+    shared_with_me_matches: tuple[SharedWithMeMatchCliInfo, ...] | None = Field(
+        default=None,
+        description=(
+            "The account's shared-with-me match set (specs/shared-with-me, section 4.4), which a changed listing "
+            "moves; None against a connector or plugin too old to report it"
+        ),
     )
 
 
@@ -589,6 +695,8 @@ class ImbueCloudCli(MutableModel):
         *,
         cg_name: str,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+        # Runs once the command holds its mngr process (see MngrCaller.call).
+        on_process_claimed: Callable[[], None] | None = None,
     ) -> MngrCallResult:
         argv = ["imbue_cloud", *args]
         # Layer the connector URL onto the warm process's inherited env so the
@@ -618,6 +726,7 @@ class ImbueCloudCli(MutableModel):
                 timeout=float(timeout_seconds),
                 env_overrides=env_overrides,
                 cwd=Path.home(),
+                on_process_claimed=on_process_claimed,
             )
             span.add_args(returncode=result.returncode, is_timed_out=result.is_timed_out)
         logger.debug(
@@ -1103,6 +1212,9 @@ class ImbueCloudCli(MutableModel):
             return None
         refused = ImbueCloudShareRefusedCliError(f"{command_repr}: {body['error'] if body else code}")
         refused.code = code
+        raw_refusals = body.get("refusals") if body is not None else None
+        if isinstance(raw_refusals, list):
+            refused.refusals = tuple(entry for entry in raw_refusals if isinstance(entry, dict))
         refused.exit_code = result.returncode if result.returncode is not None else 1
         refused.stdout = result.stdout
         refused.stderr = result.stderr
@@ -1231,6 +1343,58 @@ class ImbueCloudCli(MutableModel):
         return NotificationPreferencesCliInfo.model_validate(
             self._expect_success(result, "account notification-preferences set")
         )
+
+    # The recipient's side of sharing (specs/shared-with-me/spec.md)
+
+    def list_shared_with_me(self, *, account: str) -> SharedWithMeListingCliInfo:
+        """Every active share whose grants name the account, with what it may open and where each stands.
+
+        Raises :class:`ImbueCloudShareRefusedCliError` with code
+        ``shared_with_me_unavailable`` against a connector that predates the listing.
+        """
+        result = self._run(["shares", "shared-with-me", "--account", account], cg_name="imbue-cloud-shared-with-me")
+        refused = self._share_refusal_from(result, "shares shared-with-me")
+        if refused is not None:
+            raise refused
+        return SharedWithMeListingCliInfo.model_validate(self._expect_success(result, "shares shared-with-me"))
+
+    def respond_to_share(self, *, account: str, host_id: str, response: str) -> ShareResponseCliResult:
+        """Record the account's response (accepted, declined, reported) to a share that names it.
+
+        Raises :class:`ImbueCloudShareRefusedCliError` with code ``already_reported``
+        on a share the account reported, ``rate_limited`` when the day's report
+        allowance is spent, or ``share_not_found`` when the share names no
+        identity of the account.
+        """
+        result = self._run(
+            ["shares", "respond", host_id, "--response", response, "--account", account],
+            cg_name="imbue-cloud-shares-respond",
+        )
+        refused = self._share_refusal_from(result, "shares respond")
+        if refused is not None:
+            raise refused
+        return ShareResponseCliResult.model_validate(self._expect_success(result, "shares respond"))
+
+    def clear_share_response(self, *, account: str, host_id: str) -> ShareResponseCliResult:
+        """Remove the account's response to a share (a declined share becomes an invitation again); never a report."""
+        result = self._run(
+            ["shares", "clear-response", host_id, "--account", account], cg_name="imbue-cloud-shares-clear-response"
+        )
+        refused = self._share_refusal_from(result, "shares clear-response")
+        if refused is not None:
+            raise refused
+        return ShareResponseCliResult.model_validate(self._expect_success(result, "shares clear-response"))
+
+    def mint_browser_session_code(
+        self, *, account: str, on_process_claimed: Callable[[], None] | None = None
+    ) -> BrowserSessionCodeCliInfo:
+        """Mint the single-use code the embedded browser redeems for a session on the accounts origin."""
+        result = self._run(
+            ["auth", "browser-session-code", "--account", account],
+            cg_name="imbue-cloud-auth-browser-session-code",
+            on_process_claimed=on_process_claimed,
+        )
+        return BrowserSessionCodeCliInfo.model_validate(self._expect_success(result, "auth browser-session-code"))
 
     def list_share_relays(self, *, account: str) -> dict[str, tuple[str, ...]]:
         """The relay fleet as ``{region: tunnel-control endpoints}`` (for latency-based region picking)."""
@@ -1471,9 +1635,17 @@ class ImbueCloudCli(MutableModel):
         raw_shared_agent_ids = body.get("shared_agent_ids", [])
         if not isinstance(raw_records, list) or not isinstance(raw_shared_agent_ids, list):
             raise ImbueCloudCliError("Malformed sync records pull output: records and shared_agent_ids must be lists")
+        raw_matches = body.get("shared_with_me_matches")
         return SyncRecordsPullResult(
             records=tuple(entry for entry in raw_records if isinstance(entry, dict)),
             shared_agent_ids=tuple(agent_id for agent_id in raw_shared_agent_ids if isinstance(agent_id, str)),
+            shared_with_me_matches=(
+                tuple(
+                    SharedWithMeMatchCliInfo.model_validate(entry) for entry in raw_matches if isinstance(entry, dict)
+                )
+                if isinstance(raw_matches, list)
+                else None
+            ),
         )
 
     def sync_record_push(self, account: str, record: Mapping[str, Any]) -> dict[str, Any]:

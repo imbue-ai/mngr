@@ -146,7 +146,7 @@ The VM modes (`AWS`, `GCP`, `AZURE`) take `instance_type` (one of the sizes the 
 A `MODAL` sandbox is sized by `cpu_count` and `memory_gb`, like a container.
 An `IMBUE_CLOUD` machine needs `account_id` and sizes itself; the size fields are dropped.
 An AWS, GCP or Azure connection pins its region, so `region` is not sent for them; a Modal connection places each sandbox per create, so `region` may be sent or left out.
-Unless the user asks for a different machine, place the new workspace like your own: your entry in `GET /api/v1/workspaces` (the one whose `agent_id` is your workspace's id, resolved as above) carries `provider_name` (the `cloud_account` value when it starts with `aws_`, `gcp_`, `azure_` or `modal_`), `launch_mode`, `instance_type`, and the host's `cpu_count`, `memory_gb` and `disk_gb`.
+Unless the user asks for a different machine, place the new workspace like your own: your entry in `GET /api/v1/workspaces` (the one with `is_owned` true whose `agent_id` is your workspace's id, resolved as above; a workspace shared with an account here can be listed under the same id) carries `provider_name` (the `cloud_account` value when it starts with `aws_`, `gcp_`, `azure_` or `modal_`), `launch_mode`, `instance_type`, and the host's `cpu_count`, `memory_gb` and `disk_gb`.
 A workspace created before the placement was stamped still reports `launch_mode` (read off its provider) but a null `instance_type`; the size fields come from what the host's provider recorded, and when they are null, `nproc` and `MemTotal` in `/proc/meminfo` give your size class, and `df` on your home gives your data volume.
 When the user names a connection by its alias, or yours is not the one to use, `GET /api/v1/workspaces/cloud-accounts` lists every connection usable from the user's computer (`name`, alias, backend, pinned region, a masked key hint, and `owner_user_id`; never a credential); it rides the same read grant.
 A connection is offered only under the account that owns it, so send its `owner_user_id` as `account_id`; one owned by `local` (this device's profile) goes with any account or none.
@@ -163,7 +163,7 @@ Send `backup_provider: "CONFIGURE_LATER"` only when the user asks for a workspac
 REF=$(latchkey curl http://latchkey-self.invalid/minds-api-proxy/api/v1/app/version | jq -er .workspace_template_ref) || exit 1
 WORKSPACE_ID=$(mngr ls --include 'has(labels.is_primary)' --ids)
 ME=$(latchkey curl http://latchkey-self.invalid/minds-api-proxy/api/v1/workspaces \
-  | jq -ec --arg id "${WORKSPACE_ID:-$MNGR_AGENT_ID}" '.workspaces[] | select(.agent_id == $id)') || exit 1
+  | jq -ec --arg id "${WORKSPACE_ID:-$MNGR_AGENT_ID}" '.workspaces[] | select(.is_owned and .agent_id == $id)') || exit 1
 BODY=$(jq -n --arg ref "$REF" --argjson me "$ME" '{
   git_url: "<template-repo-url>", branch: $ref, launch_mode: $me.launch_mode, account_id: $me.account_id,
   cloud_account: (if ($me.launch_mode | IN("AWS", "GCP", "AZURE", "MODAL")) then $me.provider_name else null end),

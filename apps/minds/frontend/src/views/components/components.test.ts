@@ -56,6 +56,9 @@ describe("Card", () => {
     expect(cardClass("block", "default", false, "div", "")).toBe(
       "minds-card p-4",
     );
+    expect(cardClass("block", "none", false, "div", "px-3 pt-1.5")).toBe(
+      "minds-card px-3 pt-1.5",
+    );
   });
 
   it("renders an anchor with href for as=a", () => {

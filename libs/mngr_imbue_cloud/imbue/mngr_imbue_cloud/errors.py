@@ -1,4 +1,6 @@
 from collections.abc import Mapping
+from collections.abc import Sequence
+from typing import Final
 
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import MngrError
@@ -62,16 +64,32 @@ class ImbueCloudShareError(ImbueCloudError):
     """Raised when a self-hosted share operation fails."""
 
 
+# The refusal code of a shared-with-me listing against a connector that does not serve it yet.
+SHARED_WITH_ME_UNAVAILABLE_CODE: Final[str] = "shared_with_me_unavailable"
+# The refusal code of a share response on a share that names no identity of the caller (any more).
+SHARE_NOT_FOUND_CODE: Final[str] = "share_not_found"
+# The refusal code of a request past the caller's rolling rate limit (HTTP 429).
+RATE_LIMITED_CODE: Final[str] = "rate_limited"
+# The connector refused a grants push because of what it adds (a domain grant the rules forbid), naming each entry.
+GRANTS_REFUSED_CODE: Final[str] = "grants_refused"
+
+
 class ImbueCloudShareRefusedError(ImbueCloudShareError):
-    """Raised when the connector refuses a grants push, an invitation, or a mobile access link with a structured 409.
+    """Raised when the connector refuses a grants push, an invitation, a mobile access link, or a share response.
 
     ``code`` is the connector's reason: ``not_published``, ``grants_out_of_date``
-    (the panel pushes its document and retries once), ``not_invitable``, or
-    ``no_workspace_link`` (the share's shell has registered no address yet).
+    (the panel pushes its document and retries once), ``not_invitable``,
+    ``no_workspace_link`` (the share's shell has registered no address yet),
+    ``already_reported`` (a report is never withdrawn), ``share_not_found``
+    (the share names no identity of the caller, so there is nothing to respond
+    to), ``shared_with_me_unavailable`` (the connector predates the listing),
+    or ``grants_refused`` (the push adds a domain grant the rules forbid;
+    ``refusals`` names each entry by scope, kind, value, and message).
     """
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, refusals: Sequence[Mapping[str, str]] = ()) -> None:
         self.code = code
+        self.refusals = tuple(dict(refusal) for refusal in refusals)
         super().__init__(message)
 
 
@@ -145,7 +163,7 @@ class ImbueCloudPlanRefusedError(ImbueCloudAccountError):
 
 
 class ImbueCloudRateLimitedError(ImbueCloudAccountError):
-    """The connector refused a lookup because the caller's rolling rate limit is exhausted (HTTP 429)."""
+    """The connector refused a request because the caller's rolling rate limit is exhausted (HTTP 429)."""
 
 
 class ImbueCloudWorkspacesPresentError(ImbueCloudAccountError):

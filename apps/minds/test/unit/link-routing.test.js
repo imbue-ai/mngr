@@ -12,6 +12,7 @@ const {
   isCustomSchemeUrl,
   decidePopup,
   decideFrameNavigation,
+  isSharedFlowRedirectRefused,
   externalOpenPrompt,
   createExternalOpener,
   createLinkRouter,
@@ -34,6 +35,23 @@ const CUSTOM_SCHEME_URLS = ['paseo://open?workspace=1', 'slack://channel?id=C1',
 const workspaceAddress = (id, app = 'web') => `https://${app}.${id}.localhost:8421/notes?x=1`;
 const shellAddress = (id) => `https://${id}.localhost:8421/`;
 const LOCAL_URL = 'http://localhost:3000/preview';
+// A workspace shared with an account here, and the accounts origin its broker signs visitors in on.
+const SHARE_DOMAIN = `${HOST}.ab12.us1.shares.example`;
+const ACCOUNTS_ORIGIN = 'https://accounts.example';
+const isSharedWorkspaceUrl = (url) => {
+  try {
+    return new URL(url).hostname.endsWith(`.${SHARE_DOMAIN}`);
+  } catch {
+    return false;
+  }
+};
+const isSharedFlowUrl = (url) => {
+  try {
+    return isSharedWorkspaceUrl(url) || new URL(url).origin === ACCOUNTS_ORIGIN;
+  } catch {
+    return false;
+  }
+};
 
 function decide(url, { referrer = '', mount = ANNOUNCING } = {}) {
   return decidePopup({ url, referrer, appOrigins: APP_ORIGINS, mount });
@@ -157,10 +175,17 @@ const disposedFrame = () => ({
   get url() {
     throw new Error('Render frame was disposed before WebFrameMain could be accessed');
   },
+  get parent() {
+    throw new Error('Render frame was disposed before WebFrameMain could be accessed');
+  },
+  get top() {
+    throw new Error('Render frame was disposed before WebFrameMain could be accessed');
+  },
   isDestroyed: () => true,
 });
 
-function makeRouter() {
+// A router over recording side effects; `sharedFlow` supplies the shared-workspace predicates, none by default.
+function makeRouter(sharedFlow = {}) {
   const opened = [];
   const forwarded = [];
   const router = createLinkRouter({
@@ -168,6 +193,7 @@ function makeRouter() {
     forward: (webContents, url) => forwarded.push([webContents, url]),
     appOrigins: () => APP_ORIGINS,
     workspaceAliases: (id) => (id === AGENT ? [AGENT, HOST] : [id]),
+    ...sharedFlow,
   });
   return { router, opened, forwarded };
 }
@@ -209,6 +235,14 @@ test('the router forgets a mount when the page reports none or goes away', () =>
   assert.deepEqual(wc.openPopup(workspaceAddress(AGENT)), { action: 'allow' });
   assert.equal(router.workspaceOf(wc), null);
   assert.deepEqual(forwarded, []);
+});
+
+test("a pasted share link's row mounts under its shared- alias", () => {
+  const { router } = makeRouter();
+  const wc = makeWebContents();
+  const alias = 'shared-' + 'a'.repeat(40);
+  assert.equal(router.recordMount(wc, { workspaceId: alias, opensLinks: true, opensCustomSchemeLinks: false }), true);
+  assert.equal(router.workspaceOf(wc), alias);
 });
 
 test('the router ignores an off-shape mount report and keeps the last good one', () => {
@@ -303,6 +337,140 @@ test('a frame navigation is forwarded only for an external URL in a frame of the
   assert.equal(navigation('https://example.com/', ''), OPEN_EXTERNALLY);
   assert.equal(navigation(LOCAL_URL, workspaceAddress(AGENT)), ALLOW);
   assert.equal(navigation(workspaceAddress(AGENT, 'files'), workspaceAddress(AGENT)), ALLOW);
+});
+
+test("a frame navigation to a shared workspace's origin or its accounts origin is allowed in a frame, not in the window's own page", () => {
+  const navigation = (url, { isMainFrame = false, mount = null } = {}) =>
+    decideFrameNavigation({ url, frameUrl: `${BACKEND_ORIGIN}/`, isMainFrame, mount, isSharedFlowUrl });
+  // The share's shell, one of its apps, and the broker's "Continue as" step, with and without a mount.
+  for (const mount of [null, ANNOUNCING, SILENT]) {
+    assert.equal(navigation(`https://shell-1.${SHARE_DOMAIN}/`, { mount }), ALLOW);
+    assert.equal(navigation(`https://notes-7f2k.${SHARE_DOMAIN}/some/page`, { mount }), ALLOW);
+    assert.equal(navigation(`${ACCOUNTS_ORIGIN}/share/authorize?confirmed=1`, { mount }), ALLOW);
+  }
+  assert.equal(navigation('https://example.com/'), OPEN_EXTERNALLY);
+  assert.equal(navigation(`https://shell-1.${SHARE_DOMAIN}/`, { isMainFrame: true }), OPEN_EXTERNALLY);
+  // Without the predicate nothing off localhost is in-app.
+  assert.equal(decideFrameNavigation({ url: `https://shell-1.${SHARE_DOMAIN}/`, frameUrl: '', isMainFrame: false, mount: null }), OPEN_EXTERNALLY);
+});
+
+test("an owned workspace's page cannot steer a frame onto the shared flow; a window showing a shared one may, nested frames included", () => {
+  const navigation = (url, frameUrl, { isNestedFrame = false, isShown = false } = {}) =>
+    decideFrameNavigation({
+      url, frameUrl, isMainFrame: false, isNestedFrame, mount: ANNOUNCING, isSharedFlowUrl,
+      isSharedWorkspaceShown: () => isShown,
+    });
+  const login = `${ACCOUNTS_ORIGIN}/login?next=%2Fshare%2Fauthorize`;
+  const app = `https://notes-7f2k.${SHARE_DOMAIN}/`;
+  // From an owned workspace's page (which opens links, so it gets them back as
+  // any external site), or a frame it nests: never rendered in the frame.
+  assert.equal(navigation(login, workspaceAddress(AGENT)), FORWARD);
+  assert.equal(navigation(app, workspaceAddress(AGENT)), FORWARD);
+  assert.equal(navigation(login, 'about:blank', { isNestedFrame: true }), OPEN_EXTERNALLY);
+  // A fresh frame (a cold start, before the rows reached main) and one already on the flow.
+  assert.equal(navigation(app, 'about:blank'), ALLOW);
+  assert.equal(navigation(app, ''), ALLOW);
+  // A blob: or data: document an owned workspace's page put in the frame is
+  // that page, not a fresh frame.
+  assert.equal(navigation(login, `blob:${workspaceAddress(AGENT)}0f2a7c9e-1d2b-4c3d-8e4f-5a6b7c8d9e0f`), OPEN_EXTERNALLY);
+  assert.equal(navigation(login, 'data:text/html,<p>hi</p>'), OPEN_EXTERNALLY);
+  assert.equal(navigation(login, `https://shell-1.${SHARE_DOMAIN}/`), ALLOW);
+  // A window showing a shared workspace: its frame and the app frames it nests.
+  assert.equal(navigation(app, workspaceAddress(AGENT), { isShown: true }), ALLOW);
+  assert.equal(navigation(app, `https://shell-1.${SHARE_DOMAIN}/`, { isNestedFrame: true, isShown: true }), ALLOW);
+  assert.equal(navigation(login, `https://shell-1.${SHARE_DOMAIN}/`, { isNestedFrame: true, isShown: true }), ALLOW);
+});
+
+test("a popup a shared workspace's frame asked for is the mounted workspace's, forwarded when it opens links", () => {
+  const popup = (referrer, mount) =>
+    decidePopup({ url: 'https://example.com/', referrer, appOrigins: APP_ORIGINS, mount, isSharedWorkspaceUrl });
+  assert.equal(popup(`https://shell-1.${SHARE_DOMAIN}/`, ANNOUNCING), FORWARD);
+  assert.equal(popup(`https://notes-7f2k.${SHARE_DOMAIN}/page`, ANNOUNCING), FORWARD);
+  assert.equal(popup(`https://shell-1.${SHARE_DOMAIN}/`, SILENT), OPEN_EXTERNALLY);
+  assert.equal(popup(`https://shell-1.${SHARE_DOMAIN}/`, null), OPEN_EXTERNALLY);
+  assert.equal(popup('https://elsewhere.example/', ANNOUNCING), OPEN_EXTERNALLY);
+  // Without the predicate a relay origin is no workspace's.
+  assert.equal(decide('https://example.com/', { referrer: `https://shell-1.${SHARE_DOMAIN}/` }), OPEN_EXTERNALLY);
+  // A custom-scheme popup from the share's frame is the mounted workspace's too, when it takes them.
+  const schemePopup = (mount) =>
+    decidePopup({
+      url: CUSTOM_SCHEME_URLS[0],
+      referrer: `https://shell-1.${SHARE_DOMAIN}/`,
+      appOrigins: APP_ORIGINS,
+      mount,
+      isSharedWorkspaceUrl,
+    });
+  assert.equal(schemePopup(TAKES_SCHEMES), FORWARD);
+  assert.equal(schemePopup(ANNOUNCING), OPEN_EXTERNALLY);
+  assert.equal(schemePopup(null), OPEN_EXTERNALLY);
+});
+
+test("the router lets a frame load a shared workspace the predicate names and cancels the rest", () => {
+  const { router, opened } = makeRouter({ isSharedFlowUrl });
+  const wc = makeWebContents();
+  router.install(wc);
+  const prevented = [];
+  const navigate = (url) =>
+    wc.listeners['will-frame-navigate']({ url, isMainFrame: false, frame: liveFrame(`${BACKEND_ORIGIN}/`), preventDefault: () => prevented.push(url) });
+  navigate(`https://shell-1.${SHARE_DOMAIN}/`);
+  navigate('https://example.com/');
+  assert.deepEqual(prevented, ['https://example.com/']);
+  assert.deepEqual(opened.map(([url]) => url), ['https://example.com/']);
+});
+
+test("the router asks each window whether it shows a shared workspace before a nested frame may take the shared flow", () => {
+  const sharedWindow = makeWebContents();
+  const ownedWindow = makeWebContents();
+  const { router, opened } = makeRouter({
+    isSharedFlowUrl,
+    isSharedWorkspaceShown: (webContents) => webContents === sharedWindow,
+  });
+  router.install(sharedWindow);
+  router.install(ownedWindow);
+  // A frame below another frame of the page, as Electron's WebFrameMain reports it.
+  const top = liveFrame(`${BACKEND_ORIGIN}/`);
+  const nestedFrame = { ...liveFrame(`https://shell-1.${SHARE_DOMAIN}/`), parent: { url: '' }, top };
+  const prevented = [];
+  const navigate = (wc, url) =>
+    wc.listeners['will-frame-navigate']({ url, isMainFrame: false, frame: nestedFrame, preventDefault: () => prevented.push(url) });
+  const app = `https://notes-7f2k.${SHARE_DOMAIN}/`;
+  navigate(sharedWindow, app);
+  navigate(ownedWindow, app);
+  assert.deepEqual(prevented, [app]);
+  assert.deepEqual(opened.map(([url]) => url), [app]);
+});
+
+test("a redirect onto the shared flow is refused where a navigation there would be, and left alone elsewhere", () => {
+  const redirect = (url, frameUrl, { isNestedFrame = false, isShown = false } = {}) =>
+    isSharedFlowRedirectRefused({ url, frameUrl, isNestedFrame, isSharedFlowUrl, isSharedWorkspaceShown: () => isShown });
+  const login = `${ACCOUNTS_ORIGIN}/share/authorize?next=x`;
+  const app = `https://notes-7f2k.${SHARE_DOMAIN}/`;
+  // An owned workspace's page redirecting the window's frame, or one it nests, onto the flow.
+  assert.equal(redirect(login, workspaceAddress(AGENT)), true);
+  assert.equal(redirect(app, workspaceAddress(AGENT)), true);
+  assert.equal(redirect(login, 'about:blank', { isNestedFrame: true }), true);
+  // Where a shared workspace's frame may be: a fresh frame, one already on the flow, or any frame of a window showing one.
+  assert.equal(redirect(login, ''), false);
+  assert.equal(redirect(login, `https://shell-1.${SHARE_DOMAIN}/`), false);
+  assert.equal(redirect(app, workspaceAddress(AGENT), { isNestedFrame: true, isShown: true }), false);
+  // A redirect anywhere else is not this rule's.
+  assert.equal(redirect('https://example.com/', workspaceAddress(AGENT)), false);
+});
+
+test("the router cancels a frame's redirect onto the shared flow from an owned workspace's page and leaves the window's own page to main", () => {
+  const { router, opened } = makeRouter({ isSharedFlowUrl });
+  const wc = makeWebContents();
+  router.install(wc);
+  const prevented = [];
+  const redirect = (url, frame, isMainFrame = false) =>
+    wc.listeners['will-redirect']({ isMainFrame, frame, preventDefault: () => prevented.push(url) }, url);
+  const login = `${ACCOUNTS_ORIGIN}/share/authorize?next=x`;
+  redirect(login, liveFrame(workspaceAddress(AGENT)));
+  redirect(login, liveFrame(`${BACKEND_ORIGIN}/`));
+  redirect('https://example.com/', liveFrame(workspaceAddress(AGENT)));
+  redirect(login, liveFrame(workspaceAddress(AGENT)), true);
+  assert.deepEqual(prevented, [login]);
+  assert.deepEqual(opened, []);
 });
 
 test('a custom-scheme popup opens outside the app instead of a window when no workspace that takes them is mounted', () => {

@@ -33,6 +33,7 @@ import tomllib
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
 from enum import auto
 from typing import Any
 from typing import Final
@@ -85,12 +86,15 @@ from imbue.minds.desktop_client.share_materials_injection import read_share_gate
 from imbue.minds.desktop_client.share_materials_injection import read_share_state_from_agent
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
 from imbue.minds.desktop_client.share_materials_injection import render_share_identities_json
+from imbue.minds.desktop_client.share_targets import SharePushTargets
 from imbue.minds.desktop_client.share_targets import WHOLE_MACHINE_SERVICE
+from imbue.minds.desktop_client.share_targets import resolve_share_push_targets
 from imbue.minds.desktop_client.share_targets import resolve_share_target_display_names
 from imbue.minds.desktop_client.share_targets import resolve_share_target_labels
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_imbue_cloud.errors import GRANTS_REFUSED_CODE
 
 # How long the readiness probe waits on a single fetch of the shared hostname
 # before treating the share as not-ready-yet.
@@ -538,7 +542,15 @@ _UNPUBLISHED: Final[_GrantsSync] = _GrantsSync(
 
 
 def _sync_grants_with_connector(
-    cli: ImbueCloudCli, account_email: str, host_id: str, grants: SharingGrantsDocument
+    cli: ImbueCloudCli,
+    account_email: str,
+    host_id: str,
+    grants: SharingGrantsDocument,
+    # What the push says about the share's targets (labels, display names, the
+    # workspace name), from which a recipient's listing renders links and
+    # names (specs/shared-with-me, 4.3). None carries nothing about them, which
+    # leaves what the connector already recorded untouched.
+    push_targets: SharePushTargets | None,
 ) -> _GrantsSync:
     """Push the document to Imbue Cloud's centralized grants table, which invitations are made from.
 
@@ -548,13 +560,21 @@ def _sync_grants_with_connector(
     outcomes, and the grantees' identities. The table never admits anyone, so
     a push that did not land changes no access: the document is reported as
     not yet synced, and the next save or load retries. A ``not_published``
-    refusal is the connector saying the workspace is unpublished.
+    refusal is the connector saying the workspace is unpublished. A
+    ``grants_refused`` refusal (the connector applies the domain rules the
+    desktop does, for pushes made any other way) is raised as the desktop's
+    own :class:`GrantsRefusedError`, naming the entries the same way.
     """
+    document: dict[str, Any] = grants.model_dump(mode="json")
+    if push_targets is not None:
+        document.update(push_targets.as_push_fields())
     try:
-        result = cli.push_share_grants(account=account_email, host_id=host_id, document=grants.model_dump(mode="json"))
+        result = cli.push_share_grants(account=account_email, host_id=host_id, document=document)
     except ImbueCloudShareRefusedCliError as exc:
         if exc.code == "not_published":
             return _UNPUBLISHED
+        if exc.code == GRANTS_REFUSED_CODE:
+            raise GrantsRefusedError([GrantRefusal.model_validate(entry) for entry in exc.refusals]) from exc
         logger.warning("Could not push the grants document for {} to Imbue Cloud: {}", host_id, exc)
         return _PUSH_FAILED
     except ImbueCloudCliError as exc:
@@ -683,6 +703,7 @@ def publish_workspace(host_id: str, backend_resolver: BackendResolverInterface) 
         forward_identity=state.forward_identity,
         owner_account=owner_account_for_workspace(session_store, agent_id),
         grants=None,
+        push_targets=resolve_share_push_targets(backend_resolver, agent_id),
     )
 
 
@@ -715,6 +736,7 @@ def publish_workspace_with_grants(
         forward_identity=state.forward_identity,
         owner_account=owner_account_for_workspace(session_store, agent_id),
         grants=grants,
+        push_targets=resolve_share_push_targets(backend_resolver, agent_id),
     )
 
 
@@ -744,6 +766,7 @@ def save_grants(
         resolve_account_email_for_workspace(session_store, agent_id),
         service_labels=resolve_share_target_labels(backend_resolver, agent_id),
         identity_cache=state.identity_cache,
+        push_targets=resolve_share_push_targets(backend_resolver, agent_id),
     )
 
 
@@ -791,6 +814,7 @@ def _publish_workspace_with_cli(
     # A granter's document to store as part of this publish. None publishes
     # whatever the workspace already grants.
     grants: SharingGrantsDocument | None,
+    push_targets: SharePushTargets | None,
 ) -> dict[str, Any]:
     with get_profiler().span("sharing.publish", host_id=host_id, is_cloud_row=is_cloud_row) as span:
         # One exec answers everything the flow needs from the workspace: whether
@@ -854,7 +878,7 @@ def _publish_workspace_with_cli(
 
         _mark_shared_on_forward(agent_id, forward_identity, owner_account)
         # The create (or the status read above) is the authority on the share, not the push.
-        sync = _sync_grants_with_connector(cli, account_email, host_id, saved_grants)
+        sync = _sync_grants_with_connector(cli, account_email, host_id, saved_grants, push_targets)
         return _share_status_document(
             host_id,
             share,
@@ -874,6 +898,7 @@ def _save_grants_with_cli(
     account_email: str,
     service_labels: Mapping[str, str],
     identity_cache: IdentityCache | None,
+    push_targets: SharePushTargets | None,
 ) -> dict[str, Any]:
     with get_profiler().span("sharing.save_grants", host_id=host_id) as span:
         # One read answers everything this save needs of the workspace: whether the
@@ -896,7 +921,7 @@ def _save_grants_with_cli(
         if not probe.has_share_env:
             return _share_status_document(host_id, None, saved_grants, service_labels, identities, None, None)
         # Materials present means the workspace believes itself published; the push says what the share is.
-        sync = _sync_grants_with_connector(cli, account_email, host_id, saved_grants)
+        sync = _sync_grants_with_connector(cli, account_email, host_id, saved_grants, push_targets)
         return _share_status_document(
             host_id,
             _share_after_sync(sync, lambda: _read_active_share(cli, account_email, host_id)),
@@ -1071,6 +1096,7 @@ def migrate_stale_share(
     identity_cache: IdentityCache | None,
     forward_identity: ForwardIdentityPublisher | None,
     owner_account: AccountSession | None,
+    push_targets: SharePushTargets | None,
 ) -> dict[str, Any]:
     """Move a share the tier left on a previous content domain onto the current one.
 
@@ -1109,7 +1135,7 @@ def migrate_stale_share(
         ) from exc
     logger.info("Moved sharing for {} from {} to {}", host_id, stale_share.workspace_domain, share.workspace_domain)
     _mark_shared_on_forward(agent_id, forward_identity, owner_account)
-    sync = _sync_grants_with_connector(cli, account_email, host_id, grants)
+    sync = _sync_grants_with_connector(cli, account_email, host_id, grants, push_targets)
     identities = _identities_after_sync(
         sync,
         identity_cache,
@@ -1162,6 +1188,7 @@ def enable_web_access_for_workspace(
         forward_identity=forward_identity,
         owner_account=owner_account_for_workspace(session_store, agent_id),
         grants=None,
+        push_targets=resolve_share_push_targets(backend_resolver, agent_id),
     )
 
 
@@ -1290,6 +1317,7 @@ def get_sharing(
                 _unknown_grants_document(host_id, None, {}), PublicationUnknownReason.UNREADABLE
             )
         service_labels = resolve_share_target_labels(backend_resolver, agent_id)
+        push_targets = resolve_share_push_targets(backend_resolver, agent_id)
         agent_address = build_agent_address(agent_id, backend_resolver)
         account_email: str | None = None
         publication_without_account = SharePublicationRead(share=None, unknown_reason=None)
@@ -1328,7 +1356,7 @@ def get_sharing(
         # that failed between the create and the injection); such a share still
         # gets its document pushed.
         if probe.has_share_env:
-            sync = _sync_grants_with_connector(cli, account_email, host_id, grants)
+            sync = _sync_grants_with_connector(cli, account_email, host_id, grants, push_targets)
             publication = (
                 SharePublicationRead(share=sync.share, unknown_reason=None)
                 if sync.is_share_known
@@ -1337,7 +1365,7 @@ def get_sharing(
         else:
             publication = _read_share_publication_for_account(cli, account_email, host_id)
             sync = (
-                _sync_grants_with_connector(cli, account_email, host_id, grants)
+                _sync_grants_with_connector(cli, account_email, host_id, grants, push_targets)
                 if publication.share is not None
                 else _NOTHING_PUSHED
             )
@@ -1362,6 +1390,7 @@ def get_sharing(
                 identity_cache,
                 forward_identity,
                 owner_account_for_workspace(session_store, agent_id),
+                push_targets,
             )
         identities = _identities_after_sync(
             sync,
@@ -1569,11 +1598,17 @@ def _workspace_display_name(backend_resolver: BackendResolverInterface, agent_id
     return backend_resolver.get_workspace_name(agent_id) or None
 
 
-def _push_current_document(cli: ImbueCloudCli, account_email: str, host_id: str, agent_address: str) -> None:
+def _push_current_document(
+    cli: ImbueCloudCli, account_email: str, host_id: str, agent_address: str, push_targets: SharePushTargets | None
+) -> None:
     """Push the document the workspace holds right now, so an invitation refused as out of date can be tried again."""
     probe = _probe_share_state(agent_address, cli)
     _sync_grants_with_connector(
-        cli, account_email, host_id, _readable_grants_document(probe.grants_toml_text) or SharingGrantsDocument()
+        cli,
+        account_email,
+        host_id,
+        _readable_grants_document(probe.grants_toml_text) or SharingGrantsDocument(),
+        push_targets,
     )
 
 
@@ -1636,17 +1671,27 @@ def invite_grantee_for_workspace(
             workspace_name=_workspace_display_name(backend_resolver, agent_id),
             app_display_name=resolve_share_target_display_names(backend_resolver, agent_id).get(target),
         )
-        return _invite_with_one_retry(cli, attempt, build_agent_address(agent_id, backend_resolver))
+        return _invite_with_one_retry(
+            cli,
+            attempt,
+            build_agent_address(agent_id, backend_resolver),
+            resolve_share_push_targets(backend_resolver, agent_id),
+        )
 
 
-def _invite_with_one_retry(cli: ImbueCloudCli, attempt: _InvitationAttempt, agent_address: str) -> InvitationCliResult:
+def _invite_with_one_retry(
+    cli: ImbueCloudCli,
+    attempt: _InvitationAttempt,
+    agent_address: str,
+    push_targets: SharePushTargets | None,
+) -> InvitationCliResult:
     """Invite; a refusal as ``grants_out_of_date`` pushes the workspace's document and tries once more."""
     try:
         return _invite_through_cli(cli, attempt)
     except ImbueCloudShareRefusedCliError as exc:
         if exc.code != "grants_out_of_date":
             raise
-        _push_current_document(cli, attempt.account_email, attempt.host_id, agent_address)
+        _push_current_document(cli, attempt.account_email, attempt.host_id, agent_address, push_targets)
         try:
             with get_profiler().span("sharing.invite_retry", host_id=attempt.host_id):
                 return _invite_through_cli(cli, attempt)
@@ -1733,6 +1778,22 @@ def list_invitation_outcomes_for_workspace(
         raise connector_failure_error("Could not read the invitation outcomes", exc) from exc
 
 
+def probe_share_origin(http_client: httpx2.Client, url: str, alive_status_codes: AbstractSet[int] | None) -> bool:
+    """Whether one GET at a share origin's URL answers (with one of ``alive_status_codes``, or at all when None).
+
+    Reaching the workspace's gateway means DNS, the relay's SNI splice, the
+    tunnel, caddy's TLS termination with a real certificate, and the gateway
+    itself all work; transport errors (DNS, TLS, connection) mean it is not
+    reachable yet.
+    """
+    try:
+        response = http_client.get(url, timeout=SHARE_READINESS_PROBE_TIMEOUT_SECONDS)
+    except httpx2.HTTPError as exc:
+        logger.debug("Probed {} but it did not answer: {}", url, exc)
+        return False
+    return alive_status_codes is None or response.status_code in alive_status_codes
+
+
 def probe_share_readiness(http_client: httpx2.Client, probe_host: str) -> bool:
     """Report whether the shared hostname is live end to end.
 
@@ -1742,20 +1803,11 @@ def probe_share_readiness(http_client: httpx2.Client, probe_host: str) -> bool:
     ``<label>.<machine domain>`` origins are claimed on the relay and served by
     caddy, so the bare domain never routes.
 
-    Reaching the workspace's gateway means DNS, the relay's SNI splice, the
-    tunnel, caddy's TLS termination with a real certificate, and the gateway
-    itself all work -- any HTTP response (the broker redirect for an
-    unauthenticated visit, a 403, anything) counts as ready. Transport errors
-    (DNS, TLS, connection) mean not-ready-yet. The host is derived from the
-    connector's share record + the workspace's own service labels, never from
-    caller input.
+    Any HTTP response (the broker redirect for an unauthenticated visit, a
+    403, anything) counts as ready. The host is derived from the connector's
+    share record + the workspace's own service labels, never from caller input.
     """
     with get_profiler().span("sharing.readiness_probe", probe_host=probe_host) as span:
-        try:
-            http_client.get(f"https://{probe_host}/", timeout=SHARE_READINESS_PROBE_TIMEOUT_SECONDS)
-        except httpx2.HTTPError as exc:
-            logger.debug("Probed share host {} but it is not ready yet: {}", probe_host, exc)
-            span.add_args(is_ready=False)
-            return False
-        span.add_args(is_ready=True)
-        return True
+        is_ready = probe_share_origin(http_client, f"https://{probe_host}/", None)
+        span.add_args(is_ready=is_ready)
+        return is_ready

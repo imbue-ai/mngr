@@ -2,11 +2,13 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 
+from imbue.imbue_common.model_update import to_update
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.agent_creator import CreateAttemptErrorKind
 from imbue.minds.desktop_client.create_attempt_rows import CreateAttemptRowKind
 from imbue.minds.desktop_client.create_attempt_rows import derive_create_attempt_rows
+from imbue.minds.desktop_client.create_attempt_rows import derive_settling_create_owners
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
@@ -149,3 +151,40 @@ def test_record_only_rows_sort_oldest_first() -> None:
     )
     rows = derive_create_attempt_rows([], [newer, older], frozenset())
     assert [row.create_attempt_id for row in rows] == [older.create_attempt_id, newer.create_attempt_id]
+
+
+def _owned_record(
+    create_attempt_id: CreateAttemptId, state: PendingCreateAttemptState, account_id: str
+) -> PendingCreateAttemptRecord:
+    record = _record(str(create_attempt_id), state)
+    return record.model_copy_update(
+        to_update(
+            record.field_ref().request,
+            record.request.model_copy_update(to_update(record.request.field_ref().account_id, account_id)),
+        )
+    )
+
+
+def test_settling_create_owners_name_the_account_of_an_unfailed_create_whose_agent_id_is_known() -> None:
+    """A running or just-done create names its account; a failed one, one with no agent id yet, and a private one do not."""
+    waiting_id, done_id, failed_id, early_id, private_id = (CreateAttemptId() for _ in range(5))
+    waiting_agent, done_agent, failed_agent, private_agent = (AgentId.generate() for _ in range(4))
+    live_infos = [
+        _live_info(AgentCreateAttemptStatus.WAITING_FOR_READY, create_attempt_id=waiting_id, agent_id=waiting_agent),
+        _live_info(AgentCreateAttemptStatus.DONE, create_attempt_id=done_id, agent_id=done_agent),
+        _live_info(AgentCreateAttemptStatus.FAILED, create_attempt_id=failed_id, agent_id=failed_agent, error="boom"),
+        _live_info(AgentCreateAttemptStatus.CLONING_REPO, create_attempt_id=early_id, agent_id=None),
+        _live_info(AgentCreateAttemptStatus.WAITING_FOR_READY, create_attempt_id=private_id, agent_id=private_agent),
+    ]
+    records = [
+        _owned_record(waiting_id, PendingCreateAttemptState.IN_FLIGHT, "user-1"),
+        _owned_record(done_id, PendingCreateAttemptState.DONE, "user-1"),
+        _owned_record(failed_id, PendingCreateAttemptState.FAILED, "user-1"),
+        _owned_record(early_id, PendingCreateAttemptState.IN_FLIGHT, "user-1"),
+        _record(str(private_id), PendingCreateAttemptState.IN_FLIGHT),
+    ]
+
+    owners = derive_settling_create_owners(live_infos, records)
+
+    assert list(owners) == [str(waiting_agent), str(done_agent)]
+    assert {(owner.account_id, owner.account_email) for owner in owners.values()} == {("user-1", "owner@example.com")}

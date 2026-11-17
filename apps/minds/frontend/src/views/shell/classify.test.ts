@@ -349,3 +349,11 @@ describe("the hub routes' account segment", () => {
     expect(isHubPage("/create/")).toBe(false);
   });
 });
+
+describe("the shared route alias", () => {
+  it("accepts a pasted shared link's `shared-<hex>` id wherever a workspace coordinate is accepted", () => {
+    expect(workspaceDisplayIdFromPath("/workspace/shared-0f3a9c")).toBe("shared-0f3a9c");
+    expect(classifyRoute("/workspace/shared-0f3a9c")).toMatchObject({ kind: "workspace", workspaceAnyId: "shared-0f3a9c" });
+    expect(workspaceDisplayIdFromPath("/workspace/other-0f3a9c")).toBeNull();
+  });
+});

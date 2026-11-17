@@ -285,6 +285,25 @@ export function AccountSwitcherMenu(): m.Component<AccountSwitcherMenuAttrs> {
                 m("span", "Add account"),
               ],
             ),
+            // The account page (specs/home-screen-redesign, 4.14): last, under a line.
+            m("div", { class: "border-t border-subtle my-1", role: "separator" }),
+            m(
+              "button#account-switcher-settings",
+              {
+                type: "button",
+                role: "menuitem",
+                class:
+                  "flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0 text-left",
+                onclick: () => {
+                  shell.closeAccountSwitcher();
+                  m.route.set("/accounts", shell.overlayQuery());
+                },
+              },
+              [
+                m(Icon16, { name: "settings", extra: "shrink-0" }),
+                m("span", "Account settings"),
+              ],
+            ),
           ],
         ),
       );

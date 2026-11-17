@@ -129,6 +129,34 @@ contextBridge.exposeInMainWorld('mindsNative', {
   // close-active-tab) pause, so every key reaches the frame.
   setImmersive: (on) => ipcRenderer.send('set-immersive', Boolean(on)),
 
+  // Shared workspaces (specs/shared-with-me, 4.7 and 4.8). The page navigates
+  // the workspace frame to the reverse handoff's redeem URL, which signs this
+  // window's session partition in on the accounts origin and sends the frame
+  // on to the share. Main reports what the frame's document answered
+  // (admitted / refused / misconfigured / offline) for the tile, how the
+  // redeem page refused the frame when it did (a partition signed in as
+  // another account, which main has signed out, or any other refusal), and
+  // when the frame landed on the accounts login page instead, so the page can
+  // open the workspace again or show the open as failed.
+  onSharedFrameVerdict: (callback) => {
+    ipcRenderer.on('shared-frame-verdict', (_event, report) => {
+      if (!report || typeof report.hostname !== 'string' || typeof report.verdict !== 'string') return;
+      callback({ hostname: report.hostname, verdict: report.verdict });
+    });
+  },
+  onSharedFrameRedeemRefused: (callback) => {
+    ipcRenderer.on('shared-frame-redeem-refused', (_event, report) => {
+      if (!report || typeof report.refusal !== 'string') return;
+      callback({ refusal: report.refusal });
+    });
+  },
+  onSharedFrameLoginNeeded: (callback) => {
+    ipcRenderer.on('shared-frame-login-needed', (_event, report) => {
+      if (!report || typeof report.hostname !== 'string') return;
+      callback({ hostname: report.hostname, isSignInFailed: report.isSignInFailed === true });
+    });
+  },
+
   // Link routing (electron/link-routing.js).
   reportWorkspaceLinkHandling: (report) => ipcRenderer.send('workspace-link-handling', report),
   openExternalLink: (url) => ipcRenderer.send('open-external-link', url),

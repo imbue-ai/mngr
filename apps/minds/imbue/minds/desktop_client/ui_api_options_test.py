@@ -175,17 +175,13 @@ def test_options_data_carries_the_ssh_command_for_a_remote_machine(tmp_path: Pat
     assert data["ssh_command"] == "ssh -i /k/id -p 2222 root@203.0.113.7"
 
 
-def test_options_data_carries_the_owning_accounts_name_and_profile_picture(tmp_path: Path) -> None:
-    # The Share tab's owner row renders from these fields alone (no connector
-    # fetch), so the payload must carry exactly what the signed-in account says.
+def _client_for_owner_account(
+    tmp_path: Path, email: str, display_name: str | None = None, profile_picture_url: str | None = None
+) -> FlaskClient:
+    """A client whose one signed-in account, with the given identity, owns the seeded workspace."""
     cli = FakeImbueCloudCli(connector_url=FAKE_CONNECTOR_URL)
     user_id = "44444444-4444-4444-4444-444444444444"
-    cli.add_account(
-        user_id=user_id,
-        email="owner@example.com",
-        display_name="Owner Person",
-        profile_picture_url="https://pictures.example/owner.png",
-    )
+    cli.add_account(user_id=user_id, email=email, display_name=display_name, profile_picture_url=profile_picture_url)
     session_store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
     session_store.associate_created_workspace(
         user_id=user_id, agent_id=_AGENT_ID, host_id=_HOST_ID, display_name="", color=None, is_cloud_row=False
@@ -196,6 +192,18 @@ def test_options_data_carries_the_owning_accounts_name_and_profile_picture(tmp_p
         backend_resolver=_seeded_resolver(),
         imbue_cloud_cli=cli,
         session_store=session_store,
+    )
+    return client
+
+
+def test_options_data_carries_the_owning_accounts_name_and_profile_picture(tmp_path: Path) -> None:
+    # The Share tab's owner row renders from these fields alone (no connector
+    # fetch), so the payload must carry exactly what the signed-in account says.
+    client = _client_for_owner_account(
+        tmp_path,
+        "owner@example.com",
+        display_name="Owner Person",
+        profile_picture_url="https://pictures.example/owner.png",
     )
 
     response = client.get(f"/ui/api/workspaces/{_AGENT_ID}/options")
@@ -211,20 +219,7 @@ def test_options_data_carries_the_owning_accounts_name_and_profile_picture(tmp_p
 def test_options_data_carries_what_the_panel_refuses_a_grant_by(tmp_path: Path) -> None:
     # The share panel refuses an entry before it becomes a row, so it needs the
     # public-provider list and the granter's own address.
-    cli = FakeImbueCloudCli(connector_url=FAKE_CONNECTOR_URL)
-    user_id = "55555555-5555-5555-5555-555555555555"
-    cli.add_account(user_id=user_id, email="owner@example.com")
-    session_store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
-    session_store.associate_created_workspace(
-        user_id=user_id, agent_id=_AGENT_ID, host_id=_HOST_ID, display_name="", color=None, is_cloud_row=False
-    )
-    client, _app, _auth_store = build_desktop_client_for_test(
-        tmp_path,
-        is_authenticated=True,
-        backend_resolver=_seeded_resolver(),
-        imbue_cloud_cli=cli,
-        session_store=session_store,
-    )
+    client = _client_for_owner_account(tmp_path, "owner@example.com")
 
     response = client.get(f"/ui/api/workspaces/{_AGENT_ID}/options")
 
@@ -235,6 +230,21 @@ def test_options_data_carries_what_the_panel_refuses_a_grant_by(tmp_path: Path) 
     # Sorted, so a diff of the payload is stable.
     assert data["public_email_domains"] == sorted(data["public_email_domains"])
     assert data["account_email"] == "owner@example.com"
+    # A domain grant may only name the granter's own domain.
+    assert data["grantable_email_domain"] == "example.com"
+
+
+def test_options_data_advertises_no_grantable_domain_for_a_public_provider_account(tmp_path: Path) -> None:
+    # A public provider's domain can never be granted, so the panel must not
+    # offer it as the one domain the account may grant.
+    client = _client_for_owner_account(tmp_path, "owner@gmail.com")
+
+    response = client.get(f"/ui/api/workspaces/{_AGENT_ID}/options")
+
+    assert response.status_code == 200
+    data = json.loads(response.get_data(as_text=True))
+    assert data["account_email"] == "owner@gmail.com"
+    assert data["grantable_email_domain"] == ""
 
 
 def test_options_data_flags_stale_and_leased_workspaces(tmp_path: Path) -> None:

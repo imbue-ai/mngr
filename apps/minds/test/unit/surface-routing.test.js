@@ -55,8 +55,14 @@ test('parseSpaWorkspaceRouteId matches the SPA /workspace/<id> routes', () => {
   // A host-scoped id counts too (a route may carry it before discovery
   // re-confirms the agent alias), as does a trailing slash.
   assert.equal(parseSpaWorkspaceRouteId(`${BASE}/workspace/${HOST}/`), HOST);
-  // The id must be the whole path segment.
+  // So does the `shared-<hex>` alias a pasted shared link's row goes by.
+  assert.equal(parseSpaWorkspaceRouteId(`${BASE}/workspace/shared-0f3a9c`), 'shared-0f3a9c');
+  assert.equal(parseSpaWorkspaceRouteId(`${BASE}/workspace/other-0f3a9c`), null);
+  // The id must be the whole path segment, and no longer than any real id
+  // (main.js validates renderer-supplied ids with the same segment).
   assert.equal(parseSpaWorkspaceRouteId(`${BASE}/workspace/${AGENT}zz`), null);
+  assert.equal(parseSpaWorkspaceRouteId(`${BASE}/workspace/agent-${'a'.repeat(64)}`), `agent-${'a'.repeat(64)}`);
+  assert.equal(parseSpaWorkspaceRouteId(`${BASE}/workspace/agent-${'a'.repeat(65)}`), null);
   // The shapes parseWorkspaceId owns are not this route.
   assert.equal(parseSpaWorkspaceRouteId(`${BASE}/goto/${HOST}/`), null);
   assert.equal(parseSpaWorkspaceRouteId(`http://${HOST}.localhost:8080/`), null);
@@ -86,6 +92,7 @@ test('parseOverlayBehindWorkspaceId names the workspace an app overlay keeps mou
   assert.equal(parseOverlayBehindWorkspaceId(`${BASE}/help?workspace=${AGENT}`), AGENT);
   assert.equal(parseOverlayBehindWorkspaceId(`${BASE}/inbox?selected=evt-1&workspace=${AGENT}`), AGENT);
   assert.equal(parseOverlayBehindWorkspaceId(`${BASE}/settings/ai-keys?workspace=${HOST}`), HOST);
+  assert.equal(parseOverlayBehindWorkspaceId(`${BASE}/help?workspace=shared-0f3a9c`), 'shared-0f3a9c');
   // Opened over Home, or a route that never floats over a workspace.
   assert.equal(parseOverlayBehindWorkspaceId(`${BASE}/help`), null);
   assert.equal(parseOverlayBehindWorkspaceId(`${BASE}/accounts?workspace=${AGENT}`), null);

@@ -2,7 +2,8 @@ import m from "mithril";
 import { joinClasses, splitAttrs } from "./attrs";
 
 export type CardLayout = "block" | "row" | "row-spread";
-export type CardPadding = "default" | "tight";
+/** "none" leaves the inset to the caller's own classes. */
+export type CardPadding = "default" | "tight" | "none";
 
 const LAYOUTS: Record<CardLayout, string> = {
   block: "",
@@ -13,6 +14,7 @@ const LAYOUTS: Record<CardLayout, string> = {
 const PADDINGS: Record<CardPadding, string> = {
   default: "p-4",
   tight: "px-4 py-2",
+  none: "",
 };
 
 export function cardClass(

@@ -35,7 +35,7 @@ WHOLE_MACHINE_SERVICE: Final[str] = "system_interface"
 # predates the default-workspace-template release whose shell announces
 # ``system`` and ``internal`` on every service registration.
 _LEGACY_SYSTEM_SERVICES: Final[frozenset[str]] = frozenset(
-    {"chat", "chats", "terminal", "terminals", "browser", "browsers", "getting-started"}
+    {"chat", "chats", "terminal", "terminals", "browser", "browsers", "getting-started", "files", "routines"}
 )
 _LEGACY_INTERNAL_SERVICES: Final[frozenset[str]] = frozenset({"owner-exec", "vm-exec", "terminal-pty"})
 
@@ -159,4 +159,74 @@ def resolve_share_target_display_names(
     }
     return share_target_display_names(
         resolve_share_targets(backend_resolver, agent_id).per_app_services, display_names
+    )
+
+
+class SharePushTarget(FrozenModel):
+    """What a grants push tells Imbue Cloud about one target: its origin label and the name a person reads."""
+
+    label: str = Field(description="The target's current origin label under the workspace domain")
+    display_name: str = Field(description="The display name the share panel shows, or the service name")
+
+
+class SharePushTargets(FrozenModel):
+    """The targets and workspace name a grants push carries, so a recipient's listing can render links and names.
+
+    The targets ride along only as a complete set: the connector replaces its
+    recorded rows with whatever ``targets`` it is sent, so a push made while
+    some grantable target has no label yet (a brand-new workspace whose apps
+    are still registering, the registrations not having reached this client
+    yet) would delete that target's link for every recipient. Such a push
+    carries no ``targets`` at all and the connector keeps what an earlier
+    push recorded; the next push (every panel load) carries the full set once
+    every registration has reached this client (specs/shared-with-me, 4.3).
+    """
+
+    targets: dict[str, SharePushTarget] = Field(description="Per grantable target with a label, by service name")
+    workspace_name: str | None = Field(description="The workspace's display name; None when it has none")
+
+    def as_push_fields(self) -> dict[str, object]:
+        """The two optional fields the push document gains; each is left out when there is nothing to say."""
+        fields: dict[str, object] = {}
+        if self.targets:
+            fields["targets"] = {name: target.model_dump(mode="json") for name, target in self.targets.items()}
+        if self.workspace_name is not None:
+            fields["workspace_name"] = self.workspace_name
+        return fields
+
+
+@pure
+def build_share_push_targets(
+    service_labels: Mapping[str, str],
+    service_display_names: Mapping[str, str],
+    workspace_name: str | None,
+) -> SharePushTargets:
+    """Join the label map with the display names; the shell target is named after the workspace itself."""
+    targets: dict[str, SharePushTarget] = {}
+    for service, label in service_labels.items():
+        if service == WHOLE_MACHINE_SERVICE:
+            display_name = workspace_name or service
+        else:
+            display_name = service_display_names.get(service) or service
+        targets[service] = SharePushTarget(label=label, display_name=display_name)
+    return SharePushTargets(targets=targets, workspace_name=workspace_name)
+
+
+@pure
+def complete_share_target_labels(targets: ShareTargets, service_labels: Mapping[str, str]) -> dict[str, str]:
+    """The label map a push may carry: every grantable target's and the shell's, or nothing while one is missing."""
+    target_labels = share_target_labels(targets.per_app_services, service_labels)
+    required = {*targets.per_app_services, WHOLE_MACHINE_SERVICE}
+    return target_labels if required <= target_labels.keys() else {}
+
+
+def resolve_share_push_targets(backend_resolver: BackendResolverInterface, agent_id: AgentId) -> SharePushTargets:
+    """What a grants push of ``agent_id`` should carry about its targets, from the discovered registrations."""
+    labels = {
+        str(service): label for service, label in backend_resolver.list_service_labels_for_agent(agent_id).items()
+    }
+    return build_share_push_targets(
+        complete_share_target_labels(resolve_share_targets(backend_resolver, agent_id), labels),
+        resolve_share_target_display_names(backend_resolver, agent_id),
+        backend_resolver.get_workspace_name(agent_id) or None,
     )

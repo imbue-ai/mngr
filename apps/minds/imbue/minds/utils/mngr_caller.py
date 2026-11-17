@@ -64,6 +64,7 @@ import sys
 import threading
 import time
 import traceback
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from multiprocessing.connection import Connection
@@ -564,6 +565,7 @@ class MngrCaller(MutableModel):
         timeout: float | None = None,
         env_overrides: Mapping[str, str] | None = None,
         cwd: Path | None = None,
+        on_process_claimed: Callable[[], None] | None = None,
     ) -> MngrCallResult:
         """Run ``mngr <argv>`` in a pre-warmed process and return its result.
 
@@ -574,7 +576,9 @@ class MngrCaller(MutableModel):
         the CLI (used by callers whose config resolution must not depend on the
         Imbue Studio backend's cwd). On timeout the warm process is terminated and a
         result with ``is_timed_out=True`` and a non-zero ``returncode`` is
-        returned.
+        returned. ``on_process_claimed`` runs once this call holds its process:
+        there is one warm process at a time, so a caller with a second, less
+        urgent command to run alongside waits for it before issuing that one.
 
         Only the branch below that hands back what the CLI printed sets
         ``is_mngr_output``; the ones that write their own stderr because no
@@ -601,6 +605,8 @@ class MngrCaller(MutableModel):
             # buffers in the socket and ``poll`` simply waits for the response.
             is_timed_out = False
             try:
+                if on_process_claimed is not None:
+                    on_process_claimed()
                 connection.send(request)
                 if connection.poll(resolved_timeout):
                     try:

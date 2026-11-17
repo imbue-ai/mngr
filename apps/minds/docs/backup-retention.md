@@ -40,7 +40,7 @@ The same eviction applies when enabling backups later from workspace settings, s
 
 ## The "Recently destroyed workspaces" page
 
-Linked from the bottom-left of the workspace list (`/workspaces/destroyed`):
+Linked from the home page's Workspaces tab, under its sections (`/workspaces/destroyed`):
 
 - every tombstoned workspace still inside the window, newest first, with a days-until-deletion countdown;
 

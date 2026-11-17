@@ -196,6 +196,26 @@ function main(): void {
   electronBridge.onToast((toast) => {
     notificationsUi.showTransientToast(toast.title, toast.body);
   });
+  // A shared workspace's frame answered (specs/shared-with-me, 4.7): main read
+  // the document's status off the response, and the tile records the verdict
+  // under the window's account.
+  electronBridge.onSharedFrameVerdict((report) => {
+    void shell.recordSharedFrameVerdict(report.hostname, report.verdict);
+  });
+  // The redeem page the frame went through refused it (specs/shared-with-me,
+  // 4.8): main signed a partition out of another account's session, and the
+  // shell opens once more with a fresh code, or shows the open as failed.
+  electronBridge.onSharedFrameRedeemRefused((report) => {
+    console.warn(`[shared-with-me] the redeem refused the frame (${report.refusal})`);
+    void shell.handleSharedFrameRedeemRefused(report.refusal);
+  });
+  // The frame landed on the accounts login page instead of the share: the
+  // shell opens the workspace again (which signs the partition in afresh) or
+  // shows the open as failed; the sign-in form is never left in the frame.
+  electronBridge.onSharedFrameLoginNeeded((report) => {
+    console.warn(`[shared-with-me] the frame on ${report.hostname} landed on the login page (sign-in failed: ${String(report.isSignInFailed)})`);
+    void shell.handleSharedFrameLoginLanding(report.isSignInFailed);
+  });
 
   // Register the shared page-level context BEFORE mounting so page
   // components (which the router mounts without attrs) can read the stores.

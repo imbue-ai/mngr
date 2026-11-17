@@ -22,6 +22,7 @@ from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import CreateAttemptLogSink
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.app import _build_workspace_list
+from imbue.minds.desktop_client.app import _create_attempt_sources
 from imbue.minds.desktop_client.app import _visible_create_attempt_rows
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -140,7 +141,9 @@ def test_workspace_list_payload_carries_create_attempt_entries(
 
     with client.application.test_request_context("/"):
         resolver = get_state().backend_resolver
-        entries = _build_workspace_list(resolver, create_attempt_rows=_visible_create_attempt_rows(resolver))
+        entries = _build_workspace_list(
+            resolver, create_attempt_rows=_visible_create_attempt_rows(resolver, *_create_attempt_sources())
+        )
 
     entry_by_id = {entry["id"]: entry for entry in entries}
     assert interrupted_id in entry_by_id

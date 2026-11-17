@@ -32,6 +32,8 @@ from imbue.minds.desktop_client.imbue_cloud_cli import UserIdentityCliInfo
 from imbue.minds.desktop_client.share_materials_injection import read_share_state_from_agent
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
 from imbue.minds.desktop_client.share_materials_injection import render_share_identities_json
+from imbue.minds.desktop_client.share_targets import SharePushTarget
+from imbue.minds.desktop_client.share_targets import SharePushTargets
 from imbue.minds.desktop_client.sharing_handler import GrantsRefusedError
 from imbue.minds.desktop_client.sharing_handler import PublicationUnknownReason
 from imbue.minds.desktop_client.sharing_handler import ShareQuotaExceededError
@@ -607,6 +609,7 @@ def _publish_for_test(
         forward_identity=None,
         owner_account=None,
         grants=grants,
+        push_targets=None,
     )
 
 
@@ -633,6 +636,7 @@ def _migrate_for_test(host_id: str, agent_id: AgentId, cli: ImbueCloudCli) -> di
         "owner@example.com",
         _client_env_config(),
         {"system_interface": "shell-r4nd"},
+        None,
         None,
         None,
         None,
@@ -1034,7 +1038,14 @@ def _save_grants_for_test(
 ) -> dict[str, Any]:
     """Save ``grants`` onto ``host_id`` as its owner, with no service labels known yet."""
     return _save_grants_with_cli(
-        host_id, str(agent_id), grants, cli, "owner@example.com", service_labels={}, identity_cache=None
+        host_id,
+        str(agent_id),
+        grants,
+        cli,
+        "owner@example.com",
+        service_labels={},
+        identity_cache=None,
+        push_targets=None,
     )
 
 
@@ -1093,6 +1104,7 @@ def test_save_grants_writes_what_it_knows_of_the_grantees_beside_the_document(tm
         "owner@example.com",
         service_labels={},
         identity_cache=IdentityCache(path=tmp_path / "identity_cache.json"),
+        push_targets=None,
     )
 
     write_command = [call for call in caller.calls if call and call[0] == "exec"][1][2]
@@ -1202,10 +1214,24 @@ def test_save_grants_reports_the_identities_the_push_answered_and_caches_them(tm
     grants = SharingGrantsDocument(workspace=SharingGrantList(users=("user-gleb",)))
 
     first = _save_grants_with_cli(
-        host_id, "agent-" + "c" * 32, grants, cli, "owner@example.com", service_labels={}, identity_cache=cache
+        host_id,
+        "agent-" + "c" * 32,
+        grants,
+        cli,
+        "owner@example.com",
+        service_labels={},
+        identity_cache=cache,
+        push_targets=None,
     )
     second = _save_grants_with_cli(
-        host_id, "agent-" + "c" * 32, grants, cli, "owner@example.com", service_labels={}, identity_cache=cache
+        host_id,
+        "agent-" + "c" * 32,
+        grants,
+        cli,
+        "owner@example.com",
+        service_labels={},
+        identity_cache=cache,
+        push_targets=None,
     )
 
     assert first["identities"]["user-gleb"]["display_name"] == "Gleb"
@@ -1240,6 +1266,7 @@ def test_publish_pushes_the_document_as_its_last_step() -> None:
         forward_identity=None,
         owner_account=None,
         grants=None,
+        push_targets=None,
     )
 
     assert document["grants_synced"] is True
@@ -1283,3 +1310,94 @@ def test_save_while_unpublished_pushes_nothing() -> None:
 
     assert document["grants_synced"] is None
     assert cli.pushed_grants_documents == []
+
+
+def test_pushes_carry_the_targets_and_workspace_name_a_recipients_listing_needs() -> None:
+    # The recipient's listing renders links and names from what the owner's
+    # client pushed, so the publish and every save ride the labels along.
+    host_id = "host-" + "d" * 32
+    cli = SucceedingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    caller.result = make_share_probe_result(is_gateway_present=True, is_share_env_present=False)
+    push_targets = SharePushTargets(
+        targets={"system_interface": SharePushTarget(label="shell-r4nd", display_name="alpha")},
+        workspace_name="alpha",
+    )
+
+    _publish_workspace_with_cli(
+        host_id,
+        AgentId("agent-" + "c" * 32),
+        "agent-address",
+        cli,
+        "owner@example.com",
+        _client_env_config(),
+        is_cloud_row=True,
+        service_labels={"system_interface": "shell-r4nd"},
+        identity_cache=None,
+        forward_identity=None,
+        owner_account=None,
+        grants=None,
+        push_targets=push_targets,
+    )
+    caller.result = make_share_probe_result(is_gateway_present=True, is_share_env_present=True)
+    _save_grants_with_cli(
+        host_id,
+        "agent-address",
+        SharingGrantsDocument(workspace=SharingGrantList(emails=("friend@example.com",))),
+        cli,
+        "owner@example.com",
+        service_labels={"system_interface": "shell-r4nd"},
+        identity_cache=None,
+        push_targets=push_targets,
+    )
+
+    pushed_documents = [pushed for _account, _host, pushed in cli.pushed_grants_documents]
+    assert len(pushed_documents) == 2
+    for pushed in pushed_documents:
+        assert pushed["targets"] == {"system_interface": {"label": "shell-r4nd", "display_name": "alpha"}}
+        assert pushed["workspace_name"] == "alpha"
+    assert pushed_documents[1]["workspace"]["emails"] == ["friend@example.com"]
+
+
+def test_a_push_without_targets_leaves_them_out_of_the_document() -> None:
+    cli = SucceedingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    caller.result = make_share_probe_result(is_gateway_present=True, is_share_env_present=False)
+
+    _publish_for_test("host-" + "d" * 32, AgentId("agent-" + "c" * 32), cli, is_cloud_row=True)
+
+    ((_account, _host, pushed),) = cli.pushed_grants_documents
+    assert "targets" not in pushed and "workspace_name" not in pushed
+
+
+def test_save_grants_raises_the_connectors_refusal_as_the_desktops_own(tmp_path: Path) -> None:
+    # The connector applies the domain rules too (for pushes made any other
+    # way); a refusal it answers reaches the panel exactly as a local one does.
+    host_id = "host-" + "d" * 32
+    cli = FakeImbueCloudCli(connector_url=FAKE_CONNECTOR_URL)
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    caller.result = make_share_probe_result(is_gateway_present=True, is_share_env_present=True)
+    cli.add_share("owner@example.com", host_id)
+    cli.grants_push_refusals = [
+        {"scope": "notes", "kind": "email_domain", "value": "acme.example", "message": "acme.example is not yours."}
+    ]
+    grants = SharingGrantsDocument(services={"notes": SharingGrantList(email_domains=("acme.example",))})
+
+    with pytest.raises(GrantsRefusedError) as refused:
+        _save_grants_with_cli(
+            host_id,
+            "agent-" + "c" * 32,
+            grants,
+            cli,
+            "owner@acme.example",
+            service_labels={},
+            identity_cache=IdentityCache(path=tmp_path / "identity_cache.json"),
+            push_targets=None,
+        )
+
+    assert [(entry.scope, entry.kind, entry.value) for entry in refused.value.refusals] == [
+        ("notes", "email_domain", "acme.example")
+    ]

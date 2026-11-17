@@ -11,6 +11,12 @@
 
 import type { UiWorkspaceEntry, UiWorkspacesMessage } from "../channel/messages";
 import type { RemoteTileState } from "../generated/ui";
+import {
+  isSharedEntry,
+  isSharedRouteId,
+  primaryLink,
+  shareKeyOfRouteId,
+} from "./sharedWithMe";
 
 // The canonical content origin is agent-keyed (the workspace id); host-keyed
 // origins are the legacy shape a stale frame may still sit on before the
@@ -44,6 +50,13 @@ export class WorkspacesStore {
   private accentByAnyId = new Map<string, AccentCacheEntry>();
   private agentIdByHostId = new Map<string, string>();
   private listeners = new Set<() => void>();
+  /** share key -> the target link the last open chose (the shell's link otherwise), for the frame of a shared row. */
+  private chosenSharedLinkByShareKey = new Map<string, string>();
+  /** share key -> the URL the frame loads for that open instead of the link itself: the reverse handoff's redeem
+   * page, which signs the window's partition in and sends the frame on to the link (specs/shared-with-me, 4.8). */
+  private pendingSharedLoadUrlByShareKey = new Map<string, string>();
+  /** Every id (and host id) a shared row has ever been listed under: a share stays one after its row is gone. */
+  private sharedAnyIds = new Set<string>();
 
   applyWorkspacesMessage(message: UiWorkspacesMessage): void {
     this.workspaces = message.workspaces;
@@ -61,6 +74,10 @@ export class WorkspacesStore {
         this.accentByAnyId.set(entry.host_id, cached);
         this.agentIdByHostId.set(entry.host_id, entry.id);
       }
+      if (isSharedEntry(entry)) {
+        this.sharedAnyIds.add(entry.id);
+        if (entry.host_id) this.sharedAnyIds.add(entry.host_id);
+      }
     }
     this.emitChanged();
   }
@@ -74,7 +91,62 @@ export class WorkspacesStore {
 
   entryByAnyId(anyId: string): UiWorkspaceEntry | null {
     const agentId = this.toAgentScopedId(anyId);
-    return this.workspaces.find((entry) => entry.id === agentId) ?? null;
+    return (
+      this.workspaces.find((entry) => entry.id === agentId) ??
+      // A shared row's route id may be the `shared-<key>` alias of its share key.
+      this.sharedEntryByShareKey(shareKeyOfRouteId(anyId))
+    );
+  }
+
+  /** The row shared with the window's account under `shareKey`, or null. */
+  sharedEntryByShareKey(shareKey: string): UiWorkspaceEntry | null {
+    return this.workspaces.find((entry) => isSharedEntry(entry) && entry.share.share_key === shareKey) ?? null;
+  }
+
+  /** Remember which of a shared row's targets the next frame load shows (the open action's choice), and the URL
+   * that load goes through when the open redeems a sign-in on the way (null loads the link itself). */
+  chooseSharedLink(shareKey: string, link: string, loadUrl: string | null): void {
+    this.chosenSharedLinkByShareKey.set(shareKey, link);
+    if (loadUrl === null) this.pendingSharedLoadUrlByShareKey.delete(shareKey);
+    else this.pendingSharedLoadUrlByShareKey.set(shareKey, loadUrl);
+    // A frame mounted on the share re-arms from this onto the new URL.
+    this.emitChanged();
+  }
+
+  /** Forget the URL an open had the frame go through: a redeem is single-use, so a frame that comes back to the share
+   * without a fresh open loads the link itself (the partition is signed in by then). */
+  forgetSharedLoadUrl(anyId: string): void {
+    const entry = this.entryByAnyId(anyId);
+    if (entry !== null && isSharedEntry(entry)) this.pendingSharedLoadUrlByShareKey.delete(entry.share.share_key);
+    else this.pendingSharedLoadUrlByShareKey.delete(shareKeyOfRouteId(anyId));
+  }
+
+  /** The share URL a shared row's frame is on: the open action's choice, else the shell's link; null for an owned row
+   * or a shared row with no address yet. What the frame reports (its verdict, a login landing) is matched against
+   * this, never against the redeem page an open had it go through. */
+  sharedFrameLink(anyId: string): string | null {
+    const entry = this.entryByAnyId(anyId);
+    if (entry === null || !isSharedEntry(entry)) return null;
+    return this.chosenSharedLinkByShareKey.get(entry.share.share_key) ?? primaryLink(entry.share);
+  }
+
+  /** What a shared row's frame loads: the open's redeem URL while one is pending, else the link itself. */
+  private sharedFrameLoadUrl(anyId: string): string | null {
+    const link = this.sharedFrameLink(anyId);
+    if (link === null) return null;
+    const entry = this.entryByAnyId(anyId);
+    const shareKey = entry !== null && isSharedEntry(entry) ? entry.share.share_key : shareKeyOfRouteId(anyId);
+    return this.pendingSharedLoadUrlByShareKey.get(shareKey) ?? link;
+  }
+
+  /** Whether a route id names a shared row: the `shared-` alias always does, a coordinate when its current row is
+   * shared, or, with no current row, when it was ever listed as shared (a row gone from the list is still no
+   * workspace of this account's; one listed again as owned, after the window switched to the owner's account, is). */
+  isSharedRow(anyId: string): boolean {
+    if (isSharedRouteId(anyId)) return true;
+    const entry = this.entryByAnyId(anyId);
+    if (entry !== null) return isSharedEntry(entry);
+    return this.sharedAnyIds.has(anyId);
   }
 
   accentEntry(anyId: string): AccentCacheEntry | null {
@@ -94,6 +166,17 @@ export class WorkspacesStore {
     // bridge's own `next`, which the /goto/ handler forwards as a same-origin
     // path, with `reopened=1` beside it for a popout the app reopened (a
     // restore), whose shell then trusts the stored layout at once.
+    // A shared row's frame goes to the share URL (specs/shared-with-me, S11),
+    // through the open's redeem page when the open signs the partition in on
+    // the way: there is no local forward for someone else's workspace, and the
+    // relay origin's gateway signs the account in through the broker. A
+    // popout of it is not offered, so the solo parameters do not apply.
+    const sharedLoadUrl = this.sharedFrameLoadUrl(anyId);
+    if (sharedLoadUrl !== null) return sharedLoadUrl;
+    // A shared row with no address (none registered yet, or its row gone from
+    // the list) has nothing to load: never the local forward of someone
+    // else's workspace id.
+    if (this.isSharedRow(anyId)) return "about:blank";
     const workspaceScoped = this.toAgentScopedId(anyId);
     const gotoPath = "/goto/" + workspaceScoped + "/";
     if (soloWindowId === null) return "/forward-bridge?next=" + encodeURIComponent(gotoPath);

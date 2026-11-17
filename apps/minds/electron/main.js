@@ -40,17 +40,39 @@ const { createCertificateVerifyProc, loadForwardProxyCa } = require('./forward-p
 // Workspace-URL classification lives in ./surface-routing so it can be
 // unit-tested under plain node (main.js can't be required outside Electron).
 const {
+  SPA_WORKSPACE_ID,
+  SPA_WORKSPACE_ID_RE,
   parseOverlayBehindWorkspaceId,
   parseWorkspaceId,
   parsePopoutRoute,
   popoutRoutePath,
 } = require('./surface-routing');
+// The SPA routes that show a workspace surface: /workspace/<id> and its
+// /options overlay, which keeps the surface mounted underneath.
+const SPA_WORKSPACE_SURFACE_RE = new RegExp(`^/workspace/(${SPA_WORKSPACE_ID})(?:/options)?/?$`, 'i');
 const {
   DEVICE_ACCOUNT_ID,
   accountHomePath,
   accountIdAfterNavigation,
 } = require('./account-routing');
 const { findWorkspaceRow, withAccountRows, workspaceRowFromFrameEntry } = require('./workspace-lists');
+const {
+  accountIdForWindowUrl,
+  backendSessionCookieOf,
+  BACKEND_SESSION_COOKIE_NAME,
+  headersWithoutFrameAncestors,
+  loginPageLanding,
+  isHostUnderSharedDomain,
+  isSharedRouteId,
+  partitionNameForAccount,
+  redeemFrameRefusal,
+  workspaceRowKeyOfRouteId,
+  sharedCookieRemovals,
+  sharedDomainsOfRows,
+  sharedFramePolicyFor,
+  sharedFrameVerdictOfLoadFailure,
+  sharedRowKeysOfRows,
+} = require('./account-partitions');
 // Pulled-out workspace windows (the pull-out-window spec): the pure decisions
 // live in ./popout-policy so they can be unit-tested under plain node.
 const {
@@ -301,6 +323,268 @@ let appMenuInstalled = false;
 
 let backendBaseUrl = null;
 let mngrForwardBaseUrl = null;
+
+// Per-account session partitions (specs/shared-with-me, S10): every window
+// runs in its account's partition, prepared once with the permission policy,
+// the forward proxy's CA, the forward session cookie, and the shared-workspace
+// frame policy (S11): the `frame-ancestors` directive is dropped from the
+// responses of a shared workspace's origins and from the accounts origin's
+// pages shown in the window's workspace frame (the redeem page the page
+// navigates it to, and the broker's steps), and the frame document's status
+// is relayed to the window as the tile's verdict, or as the redeem's refusal.
+const preparedSessionsByPartition = new Map();
+// Per partition, the cookie writes its preparation started: a window's first
+// page waits for them, or its request could go out before the backend session
+// cookie is in the jar and land on /login.
+const partitionReadyByName = new Map();
+let forwardProxyCaPath = null;
+let forwardPreauthCookie = null;
+// The backend session cookie the one-time login code bought on the default
+// session, mirrored into every partition (the pages run there, main's own
+// net.request calls on the default session).
+let backendSessionCookie = null;
+// The shared workspace domains every account's rows name, as the relayed
+// ``workspaces`` frames last said (account id -> domains), and their union.
+const sharedDomainsByAccount = new Map();
+let sharedDomains = new Set();
+// The row keys of every account's shared rows (account id -> keys) and their
+// union: someone else's workspace, which this device may show but never pull
+// out into a window of its own (specs/shared-with-me, S12).
+const sharedRowKeysByAccount = new Map();
+let sharedRowKeys = new Set();
+// The tier's accounts origin, where a shared workspace's frame signs in
+// through the redeem page and the broker: told by the backend's
+// mngr_forward_started event.
+let accountsOrigin = null;
+
+// The union of the Sets a Map holds (the per-account shared sets, across accounts).
+function unionOfSets(setsByKey) {
+  const union = new Set();
+  for (const values of setsByKey.values()) {
+    for (const value of values) union.add(value);
+  }
+  return union;
+}
+
+function recomputeSharedDomains() {
+  sharedDomains = unionOfSets(sharedDomainsByAccount);
+}
+
+function recomputeSharedRowKeys() {
+  sharedRowKeys = unionOfSets(sharedRowKeysByAccount);
+}
+
+/** Whether a workspace id (either coordinate, or the `shared-` alias) names a row shared with an account here. */
+function isSharedRowWorkspaceId(workspaceId) {
+  if (typeof workspaceId !== 'string') return false;
+  const key = workspaceRowKeyOfRouteId(workspaceId);
+  return sharedRowKeys.has(key) || sharedRowKeys.has(toAgentScopedWorkspaceId(key));
+}
+
+// The host of a URL, '' for one that does not parse.
+function hostnameOf(url) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return '';
+  }
+}
+
+function isSharedWorkspaceUrl(url) {
+  return isHostUnderSharedDomain(hostnameOf(url), sharedDomains);
+}
+
+// Whether a URL is on the accounts origin: where a shared workspace's frame
+// redeems its sign-in, and where the broker may send it. Those pages carry
+// the connector's `frame-ancestors`, which admits the hosted chrome but not
+// the desktop's page, so the frame policy drops it from them as well.
+function isAccountsOriginUrl(url) {
+  if (accountsOrigin === null) return false;
+  try {
+    return new URL(url).origin === accountsOrigin;
+  } catch {
+    return false;
+  }
+}
+
+function sendToBundle(bundle, channel, payload) {
+  if (!bundle || bundle.window.isDestroyed() || bundle.window.webContents.isDestroyed()) return;
+  try {
+    bundle.window.webContents.send(channel, payload);
+  } catch (err) {
+    console.warn(`[shared-with-me] could not send ${channel} to a window:`, err && err.message);
+  }
+}
+
+// The permission policy of one session: openExternal goes through the link
+// router's ask-first opener, and everything else is decided by the immersive
+// policy (lock permissions only for the chrome's own top-level page).
+function installPermissionHandlersOn(ses) {
+  const decide = (contents, permission) =>
+    decidePermissionRequest({
+      permission,
+      topLevelOrigin: originOf(contents && !contents.isDestroyed() ? contents.getURL() : null),
+      chromeOrigin: originOf(backendBaseUrl),
+    });
+  ses.setPermissionRequestHandler((contents, permission, callback, details) => {
+    callback(decide(contents, permission));
+    if (permission === OPEN_EXTERNAL_PERMISSION) linkRouter.openExternalRequested(contents, details);
+  });
+  ses.setPermissionCheckHandler((contents, permission) => decide(contents, permission));
+}
+
+function installSharedFramePolicyOn(ses) {
+  const filter = { urls: ['https://*/*'] };
+  ses.webRequest.onHeadersReceived(filter, (details, callback) => {
+    const policy = sharedFramePolicyFor(details, { sharedDomains, accountsOrigin });
+    if (!policy.isRewritten) {
+      callback({});
+      return;
+    }
+    relaySharedFrameVerdict(details, policy.verdict);
+    relaySharedFrameRedeemRefusal(ses, details, redeemFrameRefusal(details, accountsOrigin));
+    const rewritten = headersWithoutFrameAncestors(details.responseHeaders);
+    callback(rewritten === null ? {} : { responseHeaders: rewritten });
+  });
+  ses.webRequest.onErrorOccurred(filter, (details) => {
+    if (!isSharedWorkspaceUrl(details.url)) return;
+    relaySharedFrameVerdict(details, sharedFrameVerdictOfLoadFailure(details));
+  });
+}
+
+// Report what a shared frame's document answered to the window the request came from.
+function relaySharedFrameVerdict(details, verdict) {
+  if (verdict === null) return;
+  const hostname = hostnameOf(details.url);
+  sendToBundle(bundleOfWebContentsId(details.webContentsId), 'shared-frame-verdict', { hostname, verdict });
+}
+
+// Report how the redeem page refused the window's frame (specs/shared-with-me,
+// 4.8). A 409 means the partition holds another account's session: it is
+// signed out of the accounts origin and of every share gateway it visited
+// first, so the page's next open redeems into a clean partition.
+function relaySharedFrameRedeemRefusal(ses, details, refusal) {
+  if (refusal === null) return;
+  const bundle = bundleOfWebContentsId(details.webContentsId);
+  const report = () => sendToBundle(bundle, 'shared-frame-redeem-refused', { refusal });
+  if (refusal !== 'session_mismatch') {
+    report();
+    return;
+  }
+  signPartitionOutOfSharedOrigins(ses).then(report, (err) => {
+    console.warn('[shared-with-me] could not sign the partition out after a session mismatch:', err);
+    report();
+  });
+}
+
+function applyForwardProxyTrustTo(ses) {
+  if (!forwardProxyCaPath) return;
+  try {
+    ses.setCertificateVerifyProc(createCertificateVerifyProc(loadForwardProxyCa(forwardProxyCaPath)));
+  } catch (err) {
+    // Without the CA every workspace origin fails TLS, which the first
+    // navigation reports; nothing here can stand in for it.
+    console.warn('[startup] Failed to read the forward proxy CA at', forwardProxyCaPath, err);
+  }
+}
+
+async function applyForwardSessionCookieTo(ses) {
+  if (!mngrForwardBaseUrl || !forwardPreauthCookie) return;
+  // The workspace iframe is cross-site to the chrome page, so the pre-set
+  // cookie must be SameSite=None (Electron: 'no_restriction') + Secure to be
+  // sent from inside it -- matching the attributes the plugin itself sets.
+  try {
+    await ses.cookies.set({
+      url: mngrForwardBaseUrl,
+      name: 'mngr_forward_session',
+      value: forwardPreauthCookie,
+      httpOnly: true,
+      sameSite: 'no_restriction',
+      path: '/',
+      secure: true,
+    });
+  } catch (err) {
+    console.warn('[startup] Failed to set mngr_forward_session cookie:', err);
+  }
+}
+
+async function applyBackendSessionCookieTo(ses) {
+  if (!backendSessionCookie) return;
+  try {
+    await ses.cookies.set(backendSessionCookie);
+  } catch (err) {
+    console.warn(`[startup] Failed to set the ${BACKEND_SESSION_COOKIE_NAME} cookie in a partition:`, err);
+  }
+}
+
+// Carry the backend session the one-time code bought into every prepared
+// partition; a partition prepared later picks it up in preparePartition.
+async function mirrorBackendSessionIntoPartitions() {
+  if (!backendBaseUrl) return;
+  let cookies;
+  try {
+    cookies = await session.defaultSession.cookies.get({ url: backendBaseUrl, name: BACKEND_SESSION_COOKIE_NAME });
+  } catch (err) {
+    console.warn(`[startup] Failed to read the ${BACKEND_SESSION_COOKIE_NAME} cookie off the default session:`, err);
+    return;
+  }
+  backendSessionCookie = backendSessionCookieOf(cookies, backendBaseUrl);
+  if (!backendSessionCookie) {
+    console.warn(`[startup] The default session holds no ${BACKEND_SESSION_COOKIE_NAME} cookie; windows will land on /login`);
+    return;
+  }
+  for (const ses of preparedSessionsByPartition.values()) await applyBackendSessionCookieTo(ses);
+}
+
+/** The session of `partition`, prepared on first use; the same object afterwards. */
+function preparePartition(partition) {
+  const prepared = preparedSessionsByPartition.get(partition);
+  if (prepared) return prepared;
+  const ses = session.fromPartition(partition);
+  preparedSessionsByPartition.set(partition, ses);
+  installPermissionHandlersOn(ses);
+  installSharedFramePolicyOn(ses);
+  applyForwardProxyTrustTo(ses);
+  partitionReadyByName.set(
+    partition,
+    Promise.all([applyForwardSessionCookieTo(ses), applyBackendSessionCookieTo(ses)]).then(() => undefined),
+  );
+  return ses;
+}
+
+// Load a window's first page once its partition's cookies are in place (at
+// once for a partition prepared earlier); a window gone meanwhile is left alone.
+function loadWhenPartitionReady(bundle, url) {
+  bundle.partitionReady
+    .then(() => {
+      if (bundle.window.isDestroyed() || bundle.window.webContents.isDestroyed()) return undefined;
+      return bundle.window.webContents.loadURL(url);
+    })
+    .catch(() => {});
+}
+
+/** The account the focused window shows, else the device's. */
+function focusedAccountId() {
+  const focused = getMostRecentWindow();
+  return (focused && focused.accountId) || DEVICE_ACCOUNT_ID;
+}
+
+/** The account a window opening on `url` is for: what the URL says, else the focused window's. */
+function accountIdForNewWindow(url) {
+  return accountIdForWindowUrl(url, workspaceAccountIdOf) || focusedAccountId();
+}
+
+/** The account of the window the last session launched on, from its saved URL; the device's when none. */
+function savedLaunchAccountId() {
+  const first = launchWindowEntry(loadSessionState().windows);
+  if (!first || typeof first.url !== 'string') return DEVICE_ACCOUNT_ID;
+  try {
+    const absolute = new URL(first.url, 'http://127.0.0.1').toString();
+    return accountIdForWindowUrl(absolute, workspaceAccountIdOf) || DEVICE_ACCOUNT_ID;
+  } catch {
+    return DEVICE_ACCOUNT_ID;
+  }
+}
 // Each account's rows, as the last ``workspaces`` shell event about that
 // account said: account id -> [{id, name, account, accountUserId}]. Every
 // window's frame is scoped to its own account, so one frame replaces one
@@ -354,8 +638,12 @@ const workspaceHostIdByAgentId = new Map();
 const workspaceAgentIdByHostId = new Map();
 function sameWorkspaceId(a, b) {
   if (!a || !b) return false;
-  if (a === b) return true;
-  return workspaceHostIdByAgentId.get(a) === b || workspaceAgentIdByHostId.get(a) === b;
+  // A pasted share link's row is routed (and recorded) under its `shared-`
+  // alias but listed under its bare key.
+  const keyA = workspaceRowKeyOfRouteId(a);
+  const keyB = workspaceRowKeyOfRouteId(b);
+  if (keyA === keyB) return true;
+  return workspaceHostIdByAgentId.get(keyA) === keyB || workspaceAgentIdByHostId.get(keyA) === keyB;
 }
 
 function toAgentScopedWorkspaceId(workspaceId) {
@@ -398,7 +686,7 @@ function newWindowHomePath() {
 function wrapperUrlForWorkspace(workspaceId) {
   if (!workspaceId || !backendBaseUrl) return null;
   const agentScoped = toAgentScopedWorkspaceId(workspaceId);
-  if (!/^(?:agent|host)-[a-f0-9]+$/i.test(agentScoped)) return backendBaseUrl + '/';
+  if (!SPA_WORKSPACE_ID_RE.test(agentScoped)) return backendBaseUrl + '/';
   return backendBaseUrl + '/workspace/' + encodeURIComponent(agentScoped);
 }
 
@@ -478,26 +766,26 @@ function mostRecentBundleForWorkspace(workspaceId, excludedBundle = null) {
   return null;
 }
 
-function getBundleFromEvent(event) {
-  if (!event || !event.sender) return null;
-  const senderId = event.sender.id;
+// The bundle whose window's webContents has the id (a frame's request carries
+// its window's), or null for a webContents no bundle owns.
+function bundleOfWebContentsId(webContentsId) {
   for (const b of bundles) {
     if (b.window.isDestroyed()) continue;
-    if (!b.window.webContents.isDestroyed() && b.window.webContents.id === senderId) return b;
+    if (!b.window.webContents.isDestroyed() && b.window.webContents.id === webContentsId) return b;
   }
   return null;
+}
+
+function getBundleFromEvent(event) {
+  if (!event || !event.sender) return null;
+  return bundleOfWebContentsId(event.sender.id);
 }
 
 // Label renderer-death Sentry events. With one webContents per window the only
 // distinction left is which window's renderer died.
 function rendererNameForWebContents(contents) {
   if (!contents) return undefined;
-  const id = contents.id;
-  for (const b of bundles) {
-    if (b.window.isDestroyed()) continue;
-    if (!b.window.webContents.isDestroyed() && b.window.webContents.id === id) return 'chrome';
-  }
-  return undefined;
+  return bundleOfWebContentsId(contents.id) ? 'chrome' : undefined;
 }
 
 // After the machine wakes from sleep, a renderer can survive but stop
@@ -681,7 +969,7 @@ function navigateBundle(bundle, url) {
   if (loadTarget) bundle.window.webContents.loadURL(loadTarget).catch(() => {});
 }
 
-function buildBundleWindowOptions(kind, bounds) {
+function buildBundleWindowOptions(kind, bounds, partition) {
   const windowOptions = {
     width: 1200,
     height: 800,
@@ -695,6 +983,8 @@ function buildBundleWindowOptions(kind, bounds) {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      // The window's account's session partition (specs/shared-with-me, S10).
+      partition,
       // The preload cannot see main's environment, so the window controls the
       // bar should draw travel to it as a switch.
       additionalArguments: [windowControlsSwitch(windowControls)],
@@ -728,15 +1018,22 @@ function buildBundleWindowOptions(kind, bounds) {
 // ``kind`` is 'main' (the app's ordinary window: the SPA's hub pages and the
 // workspace surface) or 'popout' (one pulled-out workspace window, see the
 // pull-out-window spec); a popout names its workspace and window up front.
-function createBundle({ kind = 'main', popout = null, bounds = null } = {}) {
+function createBundle({ kind = 'main', popout = null, bounds = null, accountId = null } = {}) {
   // The dock icon comes back before the window, so the window opens into a
   // regular, activatable app rather than an agent-style one with no dock entry.
   syncDockIcon({ isWindowAboutToOpen: true });
-  const win = new BrowserWindow(buildBundleWindowOptions(kind, bounds));
+  // The partition is fixed at creation: a window that later moves to another
+  // account keeps it, and a shared workspace it opens then signs the partition
+  // in as that account through the redeem its frame is navigated to.
+  const partition = partitionNameForAccount(accountId || DEVICE_ACCOUNT_ID);
+  preparePartition(partition);
+  const win = new BrowserWindow(buildBundleWindowOptions(kind, bounds, partition));
 
   const bundle = {
     window: win,
     kind,
+    partition,
+    partitionReady: partitionReadyByName.get(partition) || Promise.resolve(),
     // For a popout: the workspace and window it shows, the follow loop while
     // the cursor drags it, whether its page has settled the window (so an OS
     // close needs no reattach handshake), and the window's title for the OS
@@ -980,7 +1277,7 @@ function wireBundleNavigationEvents(bundle) {
     // Other SPA routes clear the displayed workspace. Either workspace
     // coordinate counts (a cold-start restore may carry the host-scoped id
     // before discovery re-confirms the agent).
-    const workspaceRouteMatch = parsed.pathname.match(/^\/workspace\/((?:agent|host)-[a-f0-9]+)(?:\/options)?\/?$/i);
+    const workspaceRouteMatch = parsed.pathname.match(SPA_WORKSPACE_SURFACE_RE);
     const popoutRoute = parsePopoutRoute(url);
     // An app overlay keeps the workspace it was opened over mounted behind
     // it, so the window still holds that workspace: another window asking for
@@ -998,7 +1295,11 @@ function wireBundleNavigationEvents(bundle) {
     bundle.overlayOverWorkspaceId = overlayBehind ? landedWorkspaceId : null;
     if (workspaceRouteMatch) {
       bundle.currentWorkspaceId = landedWorkspaceId;
-      bundle.currentContentUrl = '/goto/' + bundle.currentWorkspaceId + '/';
+      // A pasted link's row has no /goto entry (its alias is the SPA's
+      // alone), so its page is recorded as the route it is.
+      bundle.currentContentUrl = isSharedRouteId(landedWorkspaceId)
+        ? parsed.pathname + parsed.search
+        : '/goto/' + bundle.currentWorkspaceId + '/';
     } else if (popoutRoute) {
       // A popout persists as its own port-independent route, host-keyed like
       // the workspace windows, and is restored through it.
@@ -1039,6 +1340,18 @@ function wireBundleNavigationEvents(bundle) {
   // derives its own UI state from its navigation intents instead.
   wc.on('did-frame-navigate', (_e, url, _code, _status, isMainFrame) => {
     if (isMainFrame || bundle.isErrorState) return;
+    // A shared workspace's frame that landed on the accounts login page was
+    // not carried onto the share by its redeem (specs/shared-with-me, 4.7):
+    // the page is told, and opens the workspace again or shows the open as
+    // failed; the desktop never shows the sign-in form in the frame.
+    const loginLanding = loginPageLanding(url, accountsOrigin);
+    if (loginLanding !== null) {
+      sendToBundle(bundle, 'shared-frame-login-needed', {
+        hostname: hostnameOf(url),
+        isSignInFailed: loginLanding.isSignInFailed,
+      });
+      return;
+    }
     // A popout's content URL is its own route (recorded above); the frame
     // inside it is that route's workspace by construction.
     if (isPopoutBundle(bundle)) return;
@@ -1259,6 +1572,12 @@ const linkRouter = createLinkRouter({
   workspaceAliases: (workspaceId) => [
     ...new Set([workspaceId, toHostScopedWorkspaceId(workspaceId), toAgentScopedWorkspaceId(workspaceId)]),
   ],
+  isSharedFlowUrl: (url) => isSharedWorkspaceUrl(url) || isAccountsOriginUrl(url),
+  isSharedWorkspaceUrl,
+  isSharedWorkspaceShown: (webContents) => {
+    const bundle = bundleOfWebContentsId(webContents.id);
+    return bundle !== null && isSharedRowWorkspaceId(bundle.currentWorkspaceId);
+  },
 });
 
 // The address is copied either way; the explanation is an in-app toast in
@@ -1300,18 +1619,22 @@ function openNewWindow(url, { showInactive = false } = {}) {
   const popoutRoute = parsePopoutRoute(absolute);
   if (popoutRoute) {
     const popoutUrl = popoutUrlFor(popoutRoute.workspaceId, popoutRoute.windowId, { isReopened: true });
-    const bundle = createBundle({ kind: 'popout', popout: popoutRoute });
+    const bundle = createBundle({
+      kind: 'popout',
+      popout: popoutRoute,
+      accountId: workspaceAccountIdOf(popoutRoute.workspaceId) || focusedAccountId(),
+    });
     if (showInactive) bundle.showInactiveOnFirstShow = true;
     bundle.isLoadingState = false;
-    if (popoutUrl) bundle.window.webContents.loadURL(popoutUrl).catch(() => {});
+    if (popoutUrl) loadWhenPartitionReady(bundle, popoutUrl);
     return bundle;
   }
-  const bundle = createBundle();
+  const bundle = createBundle({ accountId: accountIdForNewWindow(absolute) });
   if (showInactive) bundle.showInactiveOnFirstShow = true;
   bundle.isLoadingState = false;
   const workspaceId = parseWorkspaceId(absolute);
   const target = workspaceId ? wrapperUrlForWorkspace(workspaceId) : absolute;
-  if (target) bundle.window.webContents.loadURL(target).catch(() => {});
+  if (target) loadWhenPartitionReady(bundle, target);
   return bundle;
 }
 
@@ -1321,7 +1644,7 @@ function openNewWindow(url, { showInactive = false } = {}) {
 // app recoverable -- an app whose backend failed or died has no page to load
 // and no window to focus, so without this it could never open a window again.
 function openTakeoverWindow({ loadingHash } = {}) {
-  const bundle = createBundle();
+  const bundle = createBundle({ accountId: focusedAccountId() });
   const takeover = lastErrorTakeover;
   bundle.isErrorState = !!takeover;
   bundle.isLoadingState = !takeover;
@@ -1787,6 +2110,12 @@ function handleShellEvent(evt, senderBundle) {
       evt.workspaces.map(workspaceRowFromFrameEntry),
     );
     workspaceRowsByAccount = rowsByAccount;
+    // The shared rows' domains feed the frame policy of every partition
+    // (specs/shared-with-me, S11); each account's frame replaces its own set.
+    sharedDomainsByAccount.set(accountId, sharedDomainsOfRows(evt.workspaces));
+    recomputeSharedDomains();
+    sharedRowKeysByAccount.set(accountId, sharedRowKeysOfRows(evt.workspaces));
+    recomputeSharedRowKeys();
     // The frame is the projection for the sender's own account, so it names
     // the account outright where the committed URL could not (a workspace
     // window restored before any list had arrived).
@@ -2359,7 +2688,7 @@ async function onReady() {
   // A background start opens no window: the startup sequence runs without
   // one, the one-time code is still consumed, and the first-window route is
   // held for whichever window is asked for first (see startBackendWithRetry).
-  initialBundle = isBackgroundStart ? null : createBundle();
+  initialBundle = isBackgroundStart ? null : createBundle({ accountId: savedLaunchAccountId() });
   if (initialBundle !== null) sizeFromSavedSession(initialBundle);
   updater.init({
     onStatus: (status) => {
@@ -2682,8 +3011,9 @@ function broadcastStartupLogLine(line) {
 }
 
 // Consume the backend's one-time login code so the default session -- used by
-// every window's SPA page (including its /ui/ws channel) and by main's own
-// net.request calls -- gets the minds_session cookie.
+// main's own net.request calls -- gets the minds_session cookie, which
+// mirrorBackendSessionIntoPartitions then carries to the windows' partitions
+// (every window's SPA page, its /ui/ws channel included, runs in one).
 function consumeOneTimeLoginCode(loginUrl) {
   return new Promise((resolve) => {
     const authenticateUrl = loginUrl.replace('/login?', '/authenticate?');
@@ -2873,6 +3203,7 @@ async function startBackendWithRetry() {
         // is minted per backend run, so skipping it because the startup window
         // was closed strands the app on /login for the rest of the run.
         await consumeOneTimeLoginCode(loginUrl);
+        await mirrorBackendSessionIntoPartitions();
         routing = await computeStartupRouting();
       } finally {
         isStartupRoutingBeingComputed = false;
@@ -3140,10 +3471,12 @@ ipcMain.handle('open-full-disk-access-settings', () => {
 });
 
 // Trust the forward proxy's leaf certs for its loopback origins by the local
-// CA that signed them (see forward-proxy-trust.js); every other origin keeps
-// Chromium's default verification.
+// CA that signed them (see forward-proxy-trust.js) in every prepared partition
+// (a partition prepared later picks it up in preparePartition); every other
+// origin keeps Chromium's default verification.
 function trustForwardProxyCerts(caCertPath) {
-  session.defaultSession.setCertificateVerifyProc(createCertificateVerifyProc(loadForwardProxyCa(caCertPath)));
+  forwardProxyCaPath = caCertPath;
+  for (const ses of [session.defaultSession, ...preparedSessionsByPartition.values()]) applyForwardProxyTrustTo(ses);
   console.log('[startup] Trusting the forward proxy\'s local CA for its loopback origins (HTTP/2 on)');
 }
 
@@ -3157,30 +3490,13 @@ async function handleMngrForwardStarted(event) {
   }
   const url = `https://localhost:${port}`;
   mngrForwardBaseUrl = url;
-  try {
-    trustForwardProxyCerts(caCertPath);
-  } catch (err) {
-    // Without the CA every workspace origin fails TLS, which the first
-    // navigation reports; nothing here can stand in for it.
-    console.warn('[startup] Failed to read the forward proxy CA at', caCertPath, err);
+  forwardPreauthCookie = preauth;
+  if (typeof event.accounts_origin === 'string' && event.accounts_origin) accountsOrigin = event.accounts_origin;
+  trustForwardProxyCerts(caCertPath);
+  for (const ses of [session.defaultSession, ...preparedSessionsByPartition.values()]) {
+    await applyForwardSessionCookieTo(ses);
   }
-  // The workspace iframe is cross-site to the chrome page, so the pre-set
-  // cookie must be SameSite=None (Electron: 'no_restriction') + Secure to be
-  // sent from inside it -- matching the attributes the plugin itself sets.
-  try {
-    await session.defaultSession.cookies.set({
-      url,
-      name: 'mngr_forward_session',
-      value: preauth,
-      httpOnly: true,
-      sameSite: 'no_restriction',
-      path: '/',
-      secure: true,
-    });
-    console.log('[startup] mngr_forward_session cookie pre-set on', url);
-  } catch (err) {
-    console.warn('[startup] Failed to set mngr_forward_session cookie:', err);
-  }
+  console.log('[startup] mngr_forward_session cookie pre-set on', url);
 }
 
 function handleAuthEvent(event) {
@@ -3275,34 +3591,51 @@ function setImmersiveFor(bundle, on) {
   console.log(`[immersive] ${isOn ? 'on' : 'off'} (${bundle.kind} window)`);
 }
 
+// Sign a partition out of the accounts origin and of every share gateway it
+// visited: the gateways' own session cookies carry the account the partition
+// was signed in as, and would admit the next account as that one.
+async function signPartitionOutOfSharedOrigins(ses) {
+  try {
+    await ses.clearStorageData({ origin: accountsOrigin, storages: ['cookies'] });
+  } catch (err) {
+    console.warn('[shared-with-me] could not sign the partition out of the accounts origin:', err);
+  }
+  let cookies;
+  try {
+    cookies = await ses.cookies.get({});
+  } catch (err) {
+    console.warn('[shared-with-me] could not read the partition cookies to sign it out of the shares:', err);
+    return;
+  }
+  for (const removal of sharedCookieRemovals(cookies, sharedDomains)) {
+    try {
+      await ses.cookies.remove(removal.url, removal.name);
+    } catch (err) {
+      console.warn(`[shared-with-me] could not remove the ${removal.name} cookie of ${removal.url}:`, err);
+    }
+  }
+}
+
 ipcMain.on('set-immersive', (event, on) => {
   const bundle = getBundleFromEvent(event);
   if (!bundle || bundle.window.isDestroyed()) return;
   setImmersiveFor(bundle, on);
 });
 
-// Which permission requests the default session grants. Electron grants
-// everything when no handler is installed; this keeps that and writes down
-// the two narrowings: fullscreen, keyboard lock and pointer lock go only to a
-// page whose top-level origin is the chrome's own (the workspace frame's
-// requests count, its top-level page being the chrome), so no Chrome lock
-// prompt can appear inside the app, and openExternal is refused so a page
-// launching another app goes through the link router's ask-first opener. The
-// session holds one handler, so both live here. The check handler answers
-// the same way, so a page that asks whether it may before it requests hears
-// one answer.
+// Which permission requests a session grants (the default session too: no
+// window uses it, but anything created outside a window must not be left
+// unpoliced). Electron grants everything when no handler is installed; this
+// keeps that and writes down the two narrowings: fullscreen, keyboard lock
+// and pointer lock go only to a page whose top-level origin is the chrome's
+// own (the workspace frame's requests count, its top-level page being the
+// chrome), so no Chrome lock prompt can appear inside the app, and
+// openExternal is refused so a page launching another app goes through the
+// link router's ask-first opener. The session holds one handler, so both
+// live here. The check handler answers the same way, so a page that asks
+// whether it may before it requests hears one answer.
 function installPermissionHandlers() {
-  const decide = (contents, permission) =>
-    decidePermissionRequest({
-      permission,
-      topLevelOrigin: originOf(contents && !contents.isDestroyed() ? contents.getURL() : null),
-      chromeOrigin: originOf(backendBaseUrl),
-    });
-  session.defaultSession.setPermissionRequestHandler((contents, permission, callback, details) => {
-    callback(decide(contents, permission));
-    if (permission === OPEN_EXTERNAL_PERMISSION) linkRouter.openExternalRequested(contents, details);
-  });
-  session.defaultSession.setPermissionCheckHandler((contents, permission) => decide(contents, permission));
+  installPermissionHandlersOn(session.defaultSession);
+  for (const ses of preparedSessionsByPartition.values()) installPermissionHandlersOn(ses);
 }
 
 ipcMain.on('bring-app-to-front', (event) => {
@@ -3463,6 +3796,12 @@ function isValidPopoutRequest(request, numberKeys) {
 // "open") or under the cursor, following it (mode "drag"). Null when the
 // popout URL cannot be built yet.
 function openPopout(source, request, mode) {
+  // The share's shell is told it cannot pull out (embedder-capabilities); a
+  // page that asks regardless is refused here as well.
+  if (isSharedRowWorkspaceId(request.workspaceId)) {
+    console.warn(`[popout] refusing to pull a window out of the shared workspace ${request.workspaceId}`);
+    return null;
+  }
   const url = popoutUrlFor(request.workspaceId, request.windowId, { isReopened: false });
   if (!url) {
     console.warn(`[popout] no popout URL for ${request.windowId} of ${request.workspaceId}; not opening`);
@@ -3476,6 +3815,7 @@ function openPopout(source, request, mode) {
     kind: 'popout',
     popout: { workspaceId: request.workspaceId, windowId: request.windowId, title: request.title },
     bounds,
+    accountId: workspaceAccountIdOf(request.workspaceId) || source.accountId || DEVICE_ACCOUNT_ID,
   });
   bundle.isLoadingState = false;
   if (mode === 'drag') {
@@ -3489,7 +3829,7 @@ function openPopout(source, request, mode) {
     // appears a beat later wherever the hand has got to.
     bundle.window.showInactive();
   }
-  bundle.window.webContents.loadURL(url).catch(() => {});
+  loadWhenPartitionReady(bundle, url);
   console.log(`[popout] opened ${request.windowId} of ${request.workspaceId} (${mode})`);
   return bundle;
 }
@@ -3688,7 +4028,7 @@ ipcMain.on('set-popout-title', (event, title) => {
 });
 
 function isWorkspaceIdArgument(workspaceId) {
-  return typeof workspaceId === 'string' && /^(?:agent|host)-[a-f0-9]{1,64}$/i.test(workspaceId);
+  return typeof workspaceId === 'string' && SPA_WORKSPACE_ID_RE.test(workspaceId);
 }
 
 // "Open in new window": the workspace's own main window when it has one.

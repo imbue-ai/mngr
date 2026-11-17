@@ -23,6 +23,7 @@ from pydantic import ValidationError
 
 from imbue.imbue_common.model_update import to_update
 from imbue.minds.desktop_client.account_documents.data_types import AccountDocumentRecord
+from imbue.minds.desktop_client.account_documents.store import ACCOUNT_DOCUMENTS_DIRNAME
 from imbue.minds.desktop_client.account_documents.store import AccountDocumentStore
 from imbue.minds.desktop_client.settings.schema import AccountSettings
 from imbue.minds.desktop_client.settings.schema import SUPPORTED_SETTINGS_FORMAT
@@ -35,7 +36,6 @@ SETTINGS_DOCUMENT_KIND: Final[str] = "settings"
 # One settings document per account, so its id within the kind is fixed.
 SETTINGS_DOCUMENT_ID: Final[str] = "default"
 
-_ACCOUNT_DOCUMENTS_DIRNAME: Final[str] = "account_documents"
 
 SETTINGS_RECORD_TOO_NEW_MESSAGE: Final[str] = (
     "These settings were saved by a newer version of Imbue Studio and can only be changed there."
@@ -57,7 +57,7 @@ class AccountSettingsStore(AccountDocumentStore[AccountDocumentRecord]):
         return SETTINGS_DOCUMENT_KIND
 
     def _replica_dir(self) -> Path:
-        return self.data_dir / _ACCOUNT_DOCUMENTS_DIRNAME / SETTINGS_DOCUMENT_KIND
+        return self.data_dir / ACCOUNT_DOCUMENTS_DIRNAME / SETTINGS_DOCUMENT_KIND
 
     def _file_entries_key(self) -> str:
         return "documents"
@@ -133,14 +133,7 @@ class AccountSettingsStore(AccountDocumentStore[AccountDocumentRecord]):
                 AccountSettings.model_validate(metadata)
             except ValidationError as e:
                 raise SettingValueError(f"The settings write for {user_id[:8]} does not validate: {e}") from e
-            if existing is not None:
-                updated = existing.model_copy_update(
-                    to_update(existing.field_ref().metadata, metadata),
-                    to_update(existing.field_ref().is_dirty, True),
-                )
-            else:
-                updated = AccountDocumentRecord(doc_id=SETTINGS_DOCUMENT_ID, metadata=metadata, is_dirty=True)
-            self._set_record_unlocked(user_id, updated)
+            self._write_metadata_unlocked(user_id, SETTINGS_DOCUMENT_ID, metadata)
 
     def seed_if_absent(self, user_id: str, value_by_key: Mapping[str, object]) -> bool:
         """Create the account's record from migrated values when none exists yet; returns whether it did.

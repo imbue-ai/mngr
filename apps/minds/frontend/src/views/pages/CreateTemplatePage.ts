@@ -26,6 +26,7 @@ import {
 import type { LocalBackendPrerequisite } from "../../models/create";
 import type { ErrorAction } from "../../models/errors";
 import { LOCAL_PROFILE_USER_ID } from "../../models/providers";
+import { ownedWorkspaceEntries } from "../../models/sharedWithMe";
 import type { UiWorkspaceEntry } from "../../channel/messages";
 import { Button, ButtonSubmit } from "../components/Button";
 import { Card } from "../components/Card";
@@ -721,7 +722,8 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
         ),
       ]);
     }
-    const machines = getAppContext().stores.workspaces.workspaces.filter(
+    // Adding a template is the owner's action, so a workspace shared with the account is not offered.
+    const machines = ownedWorkspaceEntries(getAppContext().stores.workspaces.workspaces).filter(
       (entry) => !(entry.is_remote ?? false) && (entry.create_attempt_state ?? "") === "",
     );
     return m("div", [

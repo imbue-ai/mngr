@@ -2,14 +2,17 @@
 // Deliberately NOT named *.test.ts so vitest does not collect it as a suite.
 
 import m from "mithril";
+import { vi } from "vitest";
 import { getAppContext, registerAppContext } from "./app-context";
 import type {
   UiAccountEntry,
   UiAccountsMessage,
   UiNotificationEntry,
+  UiWorkspaceEntry,
   UiWorkspaceUpdate,
   UiWorkspacesMessage,
 } from "./channel/messages";
+import type { UiSharedWorkspace } from "./generated/ui";
 import { createEmptyStores } from "./models/boot";
 import type { RequestResult } from "./models/errors";
 import type {
@@ -176,6 +179,74 @@ export function secondAccountEntry(): UiAccountEntry {
     user_id: "user-2",
     email: "bob@example.com",
   });
+}
+
+/** The workspace domain every shared-row fixture's targets are labels under. */
+export const SHARED_WORKSPACE_DOMAIN = "k3j9.a1b2.us1.shares.example";
+
+/** One workspace shared with the window's account, as a "Shared with me" row carries it: an invitation
+ * with a shell target ("Beta") and one app target ("Notes"), each with its link, and no verdict yet. */
+export function sharedWorkspace(
+  overrides: Partial<UiSharedWorkspace> = {},
+): UiSharedWorkspace {
+  return {
+    share_key: "agent-" + "9".repeat(32),
+    host_id: "host-" + "9".repeat(32),
+    workspace_domain: SHARED_WORKSPACE_DOMAIN,
+    owner: {
+      user_id: "owner-id",
+      email: "owner@acme.example",
+      display_name: null,
+      profile_picture_url: null,
+    },
+    status: "invited",
+    granted_via: "user",
+    last_seen_at: null,
+    latest_grant_at: "2026-11-04T09:00:00+00:00",
+    targets: [
+      {
+        app: "system_interface",
+        display_name: "Beta",
+        link: `https://shell-1.${SHARED_WORKSPACE_DOMAIN}/`,
+        granted_via: "user",
+      },
+      {
+        app: "notes",
+        display_name: "Notes",
+        link: `https://notes-1.${SHARED_WORKSPACE_DOMAIN}/`,
+        granted_via: "user",
+      },
+    ],
+    verdict: null,
+    verdict_at: null,
+    is_manual: false,
+    ...overrides,
+  };
+}
+
+/** The workspaces-frame entry of `sharedWorkspace(shareOverrides)`: listed under the account, not owned,
+ * keyed by the share key. */
+export function sharedWorkspaceEntry(
+  shareOverrides: Partial<UiSharedWorkspace> = {},
+  entryOverrides: Partial<UiWorkspaceEntry> = {},
+): UiWorkspaceEntry {
+  const share = sharedWorkspace(shareOverrides);
+  return {
+    id: share.share_key,
+    name: "Beta",
+    accent: "#112233",
+    host_id: share.host_id,
+    is_backend_unreachable: false,
+    supports_shutdown: false,
+    liveness: "",
+    account: "",
+    create_attempt_state: "",
+    is_remote: false,
+    location: "",
+    is_owned: false,
+    share,
+    ...entryOverrides,
+  };
 }
 
 /** One shared-workspaces page row: an active share of a workspace this device runs. */
@@ -877,6 +948,29 @@ export function withAttr(node: unknown, name: string): AnyVnode[] {
 /** The vnode with this `id`, from a tree or an already collected list. */
 export function byId(node: unknown, id: string): AnyVnode | undefined {
   return collectVnodes(node).find((vnode) => attrsOf(vnode).id === id);
+}
+
+/** A vnode the test expects to find; the assertion names the gap when it is missing. */
+export function required<T>(value: T | undefined): T {
+  if (value === undefined) throw new Error("expected a rendered vnode");
+  return value;
+}
+
+/** A sessionStorage for the suite (the vitest environment has none): a map behind the Storage methods the
+ * models use, installed with `vi.stubGlobal`, so `vi.unstubAllGlobals` removes it. */
+export function stubSessionStorage(): Map<string, string> {
+  const store = new Map<string, string>();
+  vi.stubGlobal("sessionStorage", {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      store.set(key, String(value));
+    },
+    removeItem: (key: string) => {
+      store.delete(key);
+    },
+    clear: () => store.clear(),
+  });
+  return store;
 }
 
 /** Every error mark (`errorMark`) in a rendered tree, found by the alert glyph

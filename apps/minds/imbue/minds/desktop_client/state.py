@@ -60,6 +60,7 @@ from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.share_materials_injection import MachineSharingLockRegistry
 from imbue.minds.desktop_client.share_materials_injection import ShareGatewayStatusCache
+from imbue.minds.desktop_client.shared_with_me_store import SharedWithMeStore
 from imbue.minds.desktop_client.sign_in_browser import InstalledSignInBrowsers
 from imbue.minds.desktop_client.sign_in_browser import SignInBrowsersInterface
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
@@ -68,6 +69,8 @@ from imbue.minds.desktop_client.turn_credentials import TurnCredentialBroker
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
+from imbue.minds.desktop_client.wallpaper_cache import WallpaperCache
+from imbue.minds.desktop_client.wallpaper_cache import WallpaperRefresher
 from imbue.minds.desktop_client.welcome_chat import WelcomeChatSeeder
 from imbue.minds.desktop_client.workspace_color_writes import WorkspaceColorWrites
 from imbue.minds.desktop_client.workspace_diagnostics import WorkspaceCollectionQueue
@@ -204,6 +207,21 @@ class DesktopClientState(MutableModel):
         default=None,
         frozen=True,
         description="Per-account replicas of the synced settings document (the device's included)",
+    )
+    shared_with_me_store: SharedWithMeStore | None = Field(
+        default=None,
+        frozen=True,
+        description="What is shared with each signed-in account: the listing cache and the account documents",
+    )
+    wallpaper_cache: WallpaperCache | None = Field(
+        default=None,
+        frozen=True,
+        description="The wallpapers the home page paints owned workspace cards with; None without a data dir",
+    )
+    wallpaper_refresher: WallpaperRefresher | None = Field(
+        default=None,
+        frozen=True,
+        description="Fetches a loaded workspace's wallpaper through the forward; None without a forward to read through",
     )
     workspace_facts_cache: WorkspaceFactsCache | None = Field(
         default=None,

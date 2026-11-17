@@ -72,6 +72,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudLeaseActiveCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudSyncConflictCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import SharedWithMeMatchCliInfo
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import WorkspaceRecordLeaseActiveError
 from imbue.minds.errors import WorkspaceRecordTooNewError
@@ -404,6 +405,9 @@ class SyncPullOutcome(FrozenModel):
     """What a records pull that reached the connector reported besides the merged records."""
 
     shared_agent_ids: tuple[str, ...] = Field(description="The account's actively shared workspaces, by agent id")
+    shared_with_me_matches: tuple[SharedWithMeMatchCliInfo, ...] | None = Field(
+        description="The account's shared-with-me match set; None from an older connector"
+    )
 
 
 class ReconcileOutcome(FrozenModel):
@@ -414,6 +418,13 @@ class ReconcileOutcome(FrozenModel):
     )
     shared_agent_ids_by_user_id: dict[str, tuple[str, ...]] = Field(
         description="user_id -> the account's shared workspaces; only accounts whose pull reached the connector"
+    )
+    shared_with_me_matches_by_user_id: dict[str, tuple[SharedWithMeMatchCliInfo, ...] | None] = Field(
+        default_factory=dict,
+        description=(
+            "user_id -> the shared-with-me match set the pull carried (None from an older connector); only "
+            "accounts whose pull reached the connector"
+        ),
     )
 
 
@@ -1010,7 +1021,9 @@ class WorkspaceRecordStore(MutableModel):
                 if workspace_id not in server_workspace_ids and not by_workspace[workspace_id].is_dirty:
                     del by_workspace[workspace_id]
             self._save_unlocked(user_id)
-        return SyncPullOutcome(shared_agent_ids=pulled.shared_agent_ids)
+        return SyncPullOutcome(
+            shared_agent_ids=pulled.shared_agent_ids, shared_with_me_matches=pulled.shared_with_me_matches
+        )
 
     def push_dirty(self, user_id: str, account_email: str) -> None:
         for record in self.list_records(user_id):
@@ -1458,12 +1471,14 @@ class WorkspaceRecordStore(MutableModel):
             is_legacy_fully_converted = True
             is_pull_ok_by_user_id: dict[str, bool] = {}
             shared_agent_ids_by_user_id: dict[str, tuple[str, ...]] = {}
+            shared_with_me_matches_by_user_id: dict[str, tuple[SharedWithMeMatchCliInfo, ...] | None] = {}
             for user_id, account_email in accounts.items():
                 self._reconcile_key_bundle(user_id, account_email)
                 pull_outcome = self.pull(user_id, account_email)
                 is_pull_ok_by_user_id[user_id] = pull_outcome is not None
                 if pull_outcome is not None:
                     shared_agent_ids_by_user_id[user_id] = pull_outcome.shared_agent_ids
+                    shared_with_me_matches_by_user_id[user_id] = pull_outcome.shared_with_me_matches
                 for agent_id in legacy.get(user_id, []):
                     if self.find_active_record(agent_id) is None:
                         record = self.build_record_from_resolver(user_id, agent_id, resolver)
@@ -1495,7 +1510,9 @@ class WorkspaceRecordStore(MutableModel):
             if legacy and accounts and is_legacy_fully_converted:
                 self._retire_legacy_associations()
             return ReconcileOutcome(
-                is_pull_ok_by_user_id=is_pull_ok_by_user_id, shared_agent_ids_by_user_id=shared_agent_ids_by_user_id
+                is_pull_ok_by_user_id=is_pull_ok_by_user_id,
+                shared_agent_ids_by_user_id=shared_agent_ids_by_user_id,
+                shared_with_me_matches_by_user_id=shared_with_me_matches_by_user_id,
             )
 
     def _reconcile_key_bundle(self, user_id: str, account_email: str) -> None:

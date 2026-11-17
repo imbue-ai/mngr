@@ -19,6 +19,7 @@ import { isWorkspaceOrigin } from "../../models/workspaces";
 import type { ForwardPageActionKind, ForwardPageReport } from "../../models/forwardPages";
 import { ForwardPageTracker, forwardPageNotice, isNoticeSpinnerOnly } from "../../models/forwardPages";
 import { ForwardPageOverlay } from "./ForwardPageOverlay";
+import { SharedFrameOverlay, sharedStallDelayMs } from "./SharedFrameOverlay";
 import type { ImmersiveChange } from "./immersive";
 import { ImmersiveController } from "./immersive";
 import { LOCAL_FILES_SECTION } from "../../models/workspacePermissions";
@@ -34,6 +35,9 @@ import type {
   WorkspaceMessageSender,
 } from "./shell-state";
 import { isAppOverlayPath } from "./classify";
+import { isHostOfShare, isSharedEntry } from "../../models/sharedWithMe";
+import type { SharedEntry } from "../../models/sharedWithMe";
+import { requestWallpaperRefresh } from "../../models/workspaceAssets";
 import type {
   PopoutOpenRequest,
   TearOutReport,
@@ -145,6 +149,9 @@ export interface EmbedHandlerDeps {
   /** The mounted workspace's id, for the ?workspace= an overlay floats
    * over. */
   workspaceAgentId: () => string;
+  /** Whether the mounted workspace is someone else's (a "Shared with me" row,
+   * specs/shared-with-me S12): its owner-only overlays stay closed. */
+  isSharedWorkspace: () => boolean;
   openRequestPopup: (requestId: string | null) => void;
   /** The mounted page announced that its endpoint is listening, and whether
    * it opens the links main hands back (minds:open-link), custom-scheme ones
@@ -197,6 +204,7 @@ export function buildEmbedHandlers(
     armProviderRelay: armRelay,
     stopProviderRelay: stopRelay,
     workspaceAgentId,
+    isSharedWorkspace,
     openRequestPopup,
     onWorkspaceReady,
     onChatReportingKnown,
@@ -215,6 +223,12 @@ export function buildEmbedHandlers(
     navigate("/help", { workspace: workspaceAgentId() });
   };
   handlers[contract.OPEN_AI_KEYS_PAGE] = (message) => {
+    // A key is the owner's to mint; the workspace is still answered so it
+    // does not wait out its timeout.
+    if (isSharedWorkspace()) {
+      sendAck(contract.OPEN_AI_KEYS_ACK);
+      return;
+    }
     // Float the AI-keys mint dialog over this workspace (kept mounted),
     // matching OPEN_HELP above. The mint page keys on the workspace id
     // (ai_keys.py dual-accepts a legacy host id too, which is what workspaces
@@ -242,6 +256,7 @@ export function buildEmbedHandlers(
     stopRelay(String(message.flowId));
   };
   handlers[contract.OPEN_SHARE_SETTINGS] = (message) => {
+    if (isSharedWorkspace()) return;
     // Float the options panel's sharing pane over this machine (kept mounted),
     // focused on the asking app, or on the whole workspace when the message names
     // none (contract v13). A name the pane does not recognize falls back to the
@@ -256,6 +271,7 @@ export function buildEmbedHandlers(
     );
   };
   handlers[contract.OPEN_LOCAL_FILES] = () => {
+    if (isSharedWorkspace()) return;
     // Float the options panel's Permissions pane over this machine, at Local files.
     navigate(`/workspace/${workspaceAgentId()}/options`, {
       tab: "permissions",
@@ -273,13 +289,16 @@ export function buildEmbedHandlers(
     // only where a desktop window can be made, and it hands over the
     // external links it does not open itself only where main opens them.
     // Every chrome that runs these handlers has the options panel, so each
-    // takes OPEN_LOCAL_FILES.
+    // takes OPEN_LOCAL_FILES. Someone else's workspace (specs/shared-with-me,
+    // S12) gets neither: its windows are not this device's to pull out, and
+    // its local files are its owner's.
+    const isShared = isSharedWorkspace();
     sendAck(contract.EMBEDDER_CAPABILITIES, {
-      canPopOut: deps.popout !== null,
+      canPopOut: deps.popout !== null && !isShared,
       opensExternalLinks: deps.openExternalLink !== null,
       immersive: deps.immersive !== null,
       opensCustomSchemeLinks: deps.openExternalLink !== null,
-      opensLocalFiles: true,
+      opensLocalFiles: !isShared,
     });
   };
   handlers[contract.CHAT_ON_SCREEN] = (message) =>
@@ -572,6 +591,31 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
   // redraw that brings in its explanation once its spinner-only seconds end.
   const forwardPage = new ForwardPageTracker();
   let forwardPageTimer: ReturnType<typeof setTimeout> | null = null;
+  // The redraw that turns a shared open's connecting overlay into its
+  // still-connecting state once the open has run long (SharedFrameOverlay).
+  // Armed from view(), so a redraw re-arms it for an open that is still
+  // connecting and not yet stalled; a stalled open arms nothing more.
+  let sharedStallTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function armSharedStallTimer(shell: ShellState): void {
+    if (sharedStallTimer !== null) return;
+    const progress = shell.sharedFrameProgress;
+    const delayMs = progress === null ? null : sharedStallDelayMs(progress, Date.now());
+    if (delayMs === null) return;
+    sharedStallTimer = setTimeout(() => {
+      sharedStallTimer = null;
+      m.redraw();
+    }, delayMs);
+  }
+
+  /** The shared row the frame is armed on while its open is in progress or failed, else null. */
+  function sharedProgressEntry(shell: ShellState): SharedEntry | null {
+    const progress = shell.sharedFrameProgress;
+    if (progress === null || armedWorkspaceAnyId === null) return null;
+    const entry = shell.stores.workspaces.entryByAnyId(armedWorkspaceAnyId);
+    if (entry === null || !isSharedEntry(entry) || entry.share.share_key !== progress.shareKey) return null;
+    return entry;
+  }
 
   function clearForwardPage(): boolean {
     if (forwardPageTimer !== null) {
@@ -613,6 +657,12 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
     isSoloReopened: boolean,
   ): void {
     if (frameElement === null) return;
+    // A shared row's open had the frame go through a single-use redeem; a
+    // frame that leaves the share and comes back without a fresh open loads
+    // the share itself (specs/shared-with-me, 4.8).
+    if (armedWorkspaceAnyId !== null && armedWorkspaceAnyId !== workspaceAnyId) {
+      shell.stores.workspaces.forgetSharedLoadUrl(armedWorkspaceAnyId);
+    }
     armedWorkspaceAnyId = workspaceAnyId;
     armedSoloWindowId = soloWindowId;
     armedIsSoloReopened = isSoloReopened;
@@ -642,6 +692,9 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
   // at the workspace root rather than wherever its own app had routed itself.
   function reloadFrame(shell: ShellState): void {
     if (frameElement === null || armedWorkspaceAnyId === null) return;
+    // A reload never replays a shared open's redeem (its code is spent); the
+    // signed-in partition reaches the share directly.
+    shell.stores.workspaces.forgetSharedLoadUrl(armedWorkspaceAnyId);
     clearForwardPage();
     isMountedPageReady = false;
     immersive?.frameNavigated();
@@ -756,6 +809,10 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
             ),
           workspaceAgentId: () =>
             shell.stores.workspaces.toAgentScopedId(mountedAnyId()),
+          isSharedWorkspace: () => {
+            const mounted = shell.stores.workspaces.entryByAnyId(mountedAnyId());
+            return mounted !== null && isSharedEntry(mounted);
+          },
           openRequestPopup: (requestId) => {
             shell.openInbox(requestId === null ? {} : { selected: requestId });
             m.redraw();
@@ -769,6 +826,18 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
             // A message held while the page was not listening -- a fresh
             // mount, or a click from another workspace -- goes now.
             shell.flushPendingWorkspaceMessage();
+            // The workspace is up and serving its shell: the one moment its
+            // wallpaper can be read for the home page's card
+            // (specs/home-screen-redesign, 4.12). Someone else's workspace
+            // cannot be read by the desktop.
+            const mounted = shell.stores.workspaces.entryByAnyId(mountedAnyId());
+            if (mounted !== null && !isSharedEntry(mounted)) void requestWallpaperRefresh(mounted.id);
+            // A shared workspace's page being up is its open succeeding: the
+            // connecting overlay comes down (specs/shared-with-me, 4.7).
+            if (mounted !== null && isSharedEntry(mounted)) {
+              shell.sharedFrameReady(mounted.share.share_key);
+              m.redraw();
+            }
           },
           onChatReportingKnown: (reportsChatOnScreen) =>
             welcomeChatArrival.noteWorkspaceReady(reportsChatOnScreen),
@@ -814,7 +883,18 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
               return null;
             }
           },
-          isExpectedOrigin: isWorkspaceOrigin,
+          isExpectedOrigin: (origin: string) => {
+            if (isWorkspaceOrigin(origin)) return true;
+            // A shared workspace's frame is on the share's relay origin, a
+            // label under the share's domain (specs/shared-with-me, S11).
+            try {
+              const hostname = new URL(origin).hostname;
+              const mounted = shell.stores.workspaces.entryByAnyId(mountedAnyId());
+              return mounted !== null && isSharedEntry(mounted) && isHostOfShare(hostname, mounted.share);
+            } catch {
+              return false;
+            }
+          },
           handlers,
         });
         closeActiveTabForwarder = () => {
@@ -847,6 +927,11 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
               // The workspace shell routes the type to the app whose
               // manifest registers it; the fields ride beside the type.
               endpoint?.send(message.type, message.fields);
+              return true;
+            case "open-link":
+              // The app's own window, for one of the workspace's app
+              // addresses (an own app opened from the home page).
+              endpoint?.send(loaded.OPEN_LINK, { url: message.url });
               return true;
           }
         };
@@ -960,10 +1045,19 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
       endpoint = null;
       unsubscribeWorkspaces?.();
       unsubscribeWorkspaces = null;
+      if (sharedStallTimer !== null) {
+        clearTimeout(sharedStallTimer);
+        sharedStallTimer = null;
+      }
+      // Home unmounts the frame; a frame mounted again on the share without
+      // a fresh open must load the share itself, never the spent redeem.
+      if (armedWorkspaceAnyId !== null) vnode.attrs.shell.stores.workspaces.forgetSharedLoadUrl(armedWorkspaceAnyId);
       frameElement = null;
     },
     view(vnode) {
       const { shell } = vnode.attrs;
+      const sharedEntry = sharedProgressEntry(shell);
+      if (sharedEntry !== null) armSharedStallTimer(shell);
       // Health is reported by the shell's band, which shrinks this surface
       // rather than covering it: an unresponsive machine's last frame is
       // often the thing the user needs to read, and the band sits clear of it.
@@ -986,6 +1080,14 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
         forwardPage.report === null || armedWorkspaceAnyId === null
           ? null
           : forwardPageOverlay(shell, armedWorkspaceAnyId, forwardPage.report),
+        sharedEntry === null || shell.sharedFrameProgress === null
+          ? null
+          : m(SharedFrameOverlay, {
+              progress: shell.sharedFrameProgress,
+              workspaceName: sharedEntry.name,
+              nowMs: Date.now(),
+              onRetry: () => void shell.retryDisplayedSharedOpen(),
+            }),
       ]);
     },
   };

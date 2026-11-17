@@ -39,6 +39,15 @@ Three invariants carry the whole design:
    `event.origin` belongs to the workspace-origin family it navigated the
    iframe to (it knows the family: it set `iframe.src`).
 
+A workspace shared with the signed-in account (`specs/shared-with-me/spec.md`,
+S11) bends the first and third invariants, and only inside the desktop app:
+its gateway's `frame-ancestors` admits the workspace's own family and the
+hosted chrome, so the Electron shell strips that one directive from the
+responses of a listed share's hosts in its own session partitions, where it is
+the trusted embedder of its own windows; and the embedder's expected origin
+for such a frame is the share's domain (a label under it) rather than the
+local forward family. The structural source check is untouched.
+
 Given (1), outbound messages use `targetOrigin: '*'` -- a disallowed
 embedder can never load the frame, so there is no one else to leak to.
 

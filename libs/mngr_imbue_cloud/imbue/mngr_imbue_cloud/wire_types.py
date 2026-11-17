@@ -792,6 +792,24 @@ class SignupCodeCreated(WireModel):
     revoked_count: int = Field(default=0, description="Older active codes for the email this mint revoked")
 
 
+class ShareResponseKind(WireEnum):
+    """What a recipient said about a share."""
+
+    ACCEPTED = auto()
+    DECLINED = auto()
+    REPORTED = auto()
+    UNKNOWN = auto()
+
+
+class SharedWithMeMatch(WireModel):
+    """One share naming the caller, as a client's change detection compares it: the listing is refetched when the set differs."""
+
+    share_key: str = Field(description="The share's durable key")
+    version: int = Field(description="The share's listing version, advanced by every write that changes the listing")
+    response: ShareResponseKind | None = Field(default=None, description="The caller's current response, if any")
+    is_visited: bool = Field(default=False, description="Whether the caller has an authorized visit on the share")
+
+
 class SyncWorkspaceRecord(WireModel):
     """Wire form of one synced workspace record (transport-only; the plugin never decrypts).
 
@@ -865,6 +883,14 @@ class SyncRecordsListing(WireModel):
             "empty against a connector too old to report it"
         ),
     )
+    shared_with_me_matches: tuple[SharedWithMeMatch, ...] | None = Field(
+        default=None,
+        description=(
+            "The caller's shared-with-me match set (specs/shared-with-me, section 4.4): the key, listing version, "
+            "and the caller's own standing of every share naming them; None against a connector too old to "
+            "report it, or when the connector could not compute it"
+        ),
+    )
 
 
 class SyncKeyBundle(WireModel):
@@ -920,3 +946,85 @@ class SyncDocument(WireModel):
     deleted_at: str | None = Field(
         default=None, description="Server tombstone stamp (response only; set while state is 'deleted')"
     )
+
+
+class ShareStatus(WireEnum):
+    """Where a share listed for its recipient stands (specs/shared-with-me/spec.md, section 4.5)."""
+
+    INVITED = auto()
+    ACCEPTED = auto()
+    DECLINED = auto()
+    UNKNOWN = auto()
+
+
+class ShareGrantedVia(WireEnum):
+    """The kind of grant that admits a recipient: by account id, by verified email, or by its domain."""
+
+    USER = auto()
+    EMAIL = auto()
+    DOMAIN = auto()
+    UNKNOWN = auto()
+
+
+class SharedWithMeTarget(WireModel):
+    """One target of a shared workspace the recipient may open."""
+
+    app: str = Field(description="The app; system_interface for the whole workspace")
+    display_name: str | None = Field(default=None, description="The name a person reads; None when never pushed")
+    link: str | None = Field(
+        default=None, description="The target's share URL; None when the workspace has no address yet"
+    )
+    granted_via: ShareGrantedVia = Field(description="The strongest kind of grant admitting the recipient to it")
+    is_granted_as_app: bool = Field(
+        default=False, description="Whether a grant names this app itself, beside any whole-workspace grant"
+    )
+
+
+class SharedWithMeShare(WireModel):
+    """One share whose grants name the caller, as ``GET /shares/shared-with-me`` lists it."""
+
+    host_id: str = Field(description="The share's host id")
+    workspace_id: str | None = Field(default=None, description="The share's workspace id; None on a legacy row")
+    share_key: str = Field(description="The share's durable key: the workspace id, else the host id")
+    workspace_domain: str = Field(description="The share's bare workspace domain")
+    workspace_name: str | None = Field(
+        default=None, description="The workspace's display name; None when never pushed"
+    )
+    owner: UserIdentity = Field(description="The owner's identity record")
+    status: ShareStatus = Field(description="Where the share stands for the caller")
+    granted_via: ShareGrantedVia = Field(description="The strongest kind of grant admitting the caller anywhere")
+    last_seen_at: str | None = Field(default=None, description="When the share's tunnel was last seen alive")
+    latest_grant_at: str = Field(description="When the newest open grant naming the caller was observed")
+    first_visited_at: str | None = Field(default=None, description="The caller's first authorized visit")
+    last_visited_at: str | None = Field(default=None, description="The caller's latest authorized visit")
+    targets: tuple[SharedWithMeTarget, ...] = Field(
+        default=(), description="What the caller may open, the shell first"
+    )
+
+
+class SharedWithMeListing(WireModel):
+    """What ``GET /shares/shared-with-me`` answers; assembled by the client entry by entry."""
+
+    matches: tuple[SharedWithMeMatch, ...] = Field(default=(), description="The match set the listing was built from")
+    shares: tuple[SharedWithMeShare, ...] = Field(default=(), description="Newest grant first")
+
+
+class SharedWithMeMatches(WireModel):
+    """What ``GET /shares/shared-with-me/matches`` answers."""
+
+    matches: tuple[SharedWithMeMatch, ...] = Field(default=(), description="The caller's match set")
+
+
+class ShareResponseResult(WireModel):
+    """What the response routes of ``/shares/shared-with-me/{host_id}/response`` answer."""
+
+    host_id: str = Field(description="The share's host id")
+    share_key: str = Field(description="The share's durable key")
+    response: ShareResponseKind | None = Field(default=None, description="The recorded response; None once cleared")
+
+
+class BrowserSessionCode(WireModel):
+    """What ``POST /auth/browser-session-code`` answers: the single-use code of the reverse device handoff."""
+
+    code: SecretStr = Field(description="The code the embedded browser redeems at GET /accounts/session")
+    expires_in_seconds: int = Field(description="How long the code stays redeemable")

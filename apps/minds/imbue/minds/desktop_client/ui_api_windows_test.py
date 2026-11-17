@@ -1,6 +1,8 @@
 """Tests for the /ui/api/windows routes: where a switching window lands, and whose account a route is."""
 
 import json
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
 import pytest
@@ -8,10 +10,17 @@ from flask.testing import FlaskClient
 
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.conftest import SHARED_TEST_HOST_ID
+from imbue.minds.desktop_client.conftest import SHARED_TEST_WORKSPACE_ID
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
+from imbue.minds.desktop_client.conftest import make_shared_share
+from imbue.minds.desktop_client.conftest import make_shared_with_me_store_for_test
+from imbue.minds.desktop_client.conftest import seed_shared_with_me_listing
 from imbue.minds.desktop_client.minds_config import MindsConfig
+from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.shared_with_me_store import SharedWithMeStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.testing import build_resolver_with_system_services
 from imbue.minds.desktop_client.testing import write_dead_destroy_marker
@@ -155,6 +164,59 @@ def test_route_account_names_a_workspace_routes_owner_from_the_records_by_either
     # A workspace no record claims is the device's, and a hub route names its account outright.
     assert _route_account(client, f"/workspace/{AgentId.generate()}") == (200, {"account_id": "local"})
     assert _route_account(client, "/account/user-bob/create") == (200, {"account_id": "user-bob"})
+
+
+def _client_with_a_workspace_shared_to_bob(
+    tmp_path: Path,
+) -> tuple[FlaskClient, MultiAccountSessionStore, SharedWithMeStore]:
+    """A client with alice and bob signed in, where bob's listing holds one workspace shared with him."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-alice", email="alice@example.com")
+    cli.add_account(user_id="user-bob", email="bob@example.com")
+    seed_shared_with_me_listing(
+        cli, "bob@example.com", make_shared_share(SHARED_TEST_HOST_ID, SHARED_TEST_WORKSPACE_ID)
+    )
+    session_store = make_session_store_for_test(tmp_path / "session-store", cli)
+    shared_store = make_shared_with_me_store_for_test(tmp_path / "data", cli)
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path,
+        is_authenticated=True,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        imbue_cloud_cli=cli,
+        session_store=session_store,
+        shared_with_me_store=shared_store,
+    )
+    return client, session_store, shared_store
+
+
+def test_route_account_names_the_recipient_of_a_shared_workspace_by_any_of_its_ids(tmp_path: Path) -> None:
+    """A shared workspace's page belongs to the account it was listed for, which no record names (specs/shared-with-me, 4.7)."""
+    client, session_store, shared_store = _client_with_a_workspace_shared_to_bob(tmp_path)
+    shared_store.refresh("user-bob", "bob@example.com", datetime.now(timezone.utc))
+    shared_store.add_manual_link("user-bob", "https://pasted.shares.example/", "")
+    pasted_key = next(row.share_key for row in shared_store.list_rows("user-bob") if row.is_manual)
+
+    assert _route_account(client, f"/workspace/{SHARED_TEST_WORKSPACE_ID}") == (200, {"account_id": "user-bob"})
+    assert _route_account(client, f"/workspace/{SHARED_TEST_HOST_ID}/options") == (200, {"account_id": "user-bob"})
+    assert _route_account(client, f"/workspace/shared-{pasted_key}") == (200, {"account_id": "user-bob"})
+    assert _route_account(client, f"/workspace/{AgentId.generate()}") == (200, {"account_id": "local"})
+
+
+def test_route_account_keeps_the_owner_when_the_device_holds_both_ends_of_a_share(tmp_path: Path) -> None:
+    """The owner's own workspace stays the owner's even while another account here lists it as shared with it."""
+    client, session_store, shared_store = _client_with_a_workspace_shared_to_bob(tmp_path)
+    session_store.associate_created_workspace(
+        user_id="user-alice",
+        agent_id=SHARED_TEST_WORKSPACE_ID,
+        host_id=SHARED_TEST_HOST_ID,
+        display_name="ws",
+        color=None,
+        is_cloud_row=True,
+    )
+    shared_store.refresh("user-bob", "bob@example.com", datetime.now(timezone.utc))
+
+    assert _route_account(client, f"/workspace/{SHARED_TEST_WORKSPACE_ID}") == (200, {"account_id": "user-alice"})
+    assert _route_account(client, f"/workspace/{SHARED_TEST_HOST_ID}/options") == (200, {"account_id": "user-alice"})
 
 
 @pytest.mark.witnesses(

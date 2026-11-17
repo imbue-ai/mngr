@@ -188,3 +188,24 @@ describe("AccountSwitcherMenu", () => {
     expect(start).toHaveBeenCalledWith("", { isClosedOnSignIn: true });
   });
 });
+
+describe("the Account settings item", () => {
+  it("sits last under a separator and opens the account page under the window's account, closing the menu", () => {
+    const shell = new ShellState(createEmptyStores());
+    shell.stores.accounts.applyAccountsMessage(accountsMessage([ALICE], ALICE.user_id));
+    shell.accountId = ALICE.user_id;
+    shell.isAccountSwitcherOpen = true;
+    vi.spyOn(m, "redraw").mockImplementation(() => undefined);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    const menu = AccountSwitcherMenu();
+    const nodes = collectVnodes(menu.view.call(menu, { attrs: { shell } } as m.Vnode<{ shell: ShellState }>));
+
+    const items = nodes.filter((node) => attrsOf(node).role === "menuitem" || attrsOf(node).role === "separator");
+    expect(items.slice(-2).map((node) => attrsOf(node).role)).toEqual(["separator", "menuitem"]);
+    const settings = items[items.length - 1];
+    expect(allText(settings)).toContain("Account settings");
+    (attrsOf(settings).onclick as () => void)();
+    expect(shell.isAccountSwitcherOpen).toBe(false);
+    expect(routeSet).toHaveBeenCalledWith("/accounts", shell.overlayQuery());
+  });
+});

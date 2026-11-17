@@ -19,6 +19,7 @@ import json
 import os
 import re
 from pathlib import Path
+from typing import Final
 
 from flask import Blueprint
 from flask import Response
@@ -42,10 +43,12 @@ from imbue.minds.desktop_client.ui_api_permissions import register_permissions_r
 from imbue.minds.desktop_client.ui_api_profile import register_profile_routes
 from imbue.minds.desktop_client.ui_api_provider_relay import register_provider_relay_routes
 from imbue.minds.desktop_client.ui_api_settings import register_settings_routes
+from imbue.minds.desktop_client.ui_api_shared_with_me import register_shared_with_me_routes
 from imbue.minds.desktop_client.ui_api_updates import register_update_routes
 from imbue.minds.desktop_client.ui_api_users import register_user_routes
 from imbue.minds.desktop_client.ui_api_windows import register_window_routes
 from imbue.minds.desktop_client.ui_api_windows import resolve_request_account_id
+from imbue.minds.desktop_client.ui_api_workspace_assets import register_workspace_asset_routes
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.ui_channel import run_ui_websocket_connection
 from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
@@ -190,6 +193,11 @@ def _build_sentry_head_tags() -> str:
     )
 
 
+# The endpoint-name prefix of every SPA page route (``create_desktop_client``
+# registers each page path under it), so a hook can tell a page load from an action.
+SPA_INDEX_ENDPOINT_PREFIX: Final[str] = "spa_index:"
+
+
 def serve_spa_index(**_path_params: str) -> Response:
     """Serve the SPA index for any hub route.
 
@@ -325,6 +333,8 @@ def create_ui_blueprint() -> Blueprint:
     register_user_routes(blueprint)
     register_provider_relay_routes(blueprint)
     register_window_routes(blueprint)
+    register_shared_with_me_routes(blueprint)
+    register_workspace_asset_routes(blueprint)
     if get_profiler().is_enabled:
         register_profile_routes(blueprint)
     return blueprint

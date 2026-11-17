@@ -34,6 +34,7 @@ import { LandingPage } from "./views/pages/LandingPage";
 import { PopoutPage } from "./views/pages/PopoutPage";
 import { RecoveryPage } from "./views/pages/RecoveryPage";
 import { SettingsPage } from "./views/pages/SettingsPage";
+import { SharedLinkPage } from "./views/pages/SharedLinkPage";
 import { SharedWorkspacesPage } from "./views/pages/SharedWorkspacesPage";
 import { StartPage } from "./views/pages/StartPage";
 import { WorkspaceBackupsPage } from "./views/pages/WorkspaceBackupsPage";
@@ -85,6 +86,9 @@ const ROUTE_ENTRIES: RouteEntry[] = [
   { path: "/destroying/:agentId", component: DestroyingPage },
   { path: "/agents/:agentId/recovery", component: RecoveryPage },
   { path: "/help", component: HelpPage },
+  // The invitation email's "Open it in the app" landing (specs/shared-with-me,
+  // 4.11): refreshes every signed-in account's listing and lands on the tile.
+  { path: "/shared/:hostId", component: SharedLinkPage },
   // The first-run start flow, landed on by Electron's startup router (and the
   // home page's own redirect in plain-browser mode) while onboarding is
   // incomplete and no workspace exists.

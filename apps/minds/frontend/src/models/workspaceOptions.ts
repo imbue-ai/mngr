@@ -68,6 +68,10 @@ export interface WorkspaceOptionsData {
   /** The mail providers a domain grant may never name, so the panel can refuse
    * one before the row. */
   public_email_domains: string[];
+  /** The one domain the window's account may grant as a whole (its own
+   * address's); "" when it may grant none: no account, or one at a public
+   * email provider. */
+  grantable_email_domain: string;
   /** "" when discovery reports no SSH endpoint for the machine. */
   ssh_command: string;
 }
@@ -645,6 +649,7 @@ export class WorkspaceOptionsModel {
       agentId: data.agent_id || this.agentId,
       granterEmail: data.account_email,
       publicEmailDomains: data.public_email_domains,
+      grantableEmailDomain: data.grantable_email_domain,
       wholeService: data.whole_service,
       appServices: data.app_services,
       systemServices: data.system_services,

@@ -65,14 +65,30 @@ def _signed_in_account_id_with_most_workspaces(state: DesktopClientState) -> str
     return str(max(accounts, key=lambda account: len(account.workspace_ids)).user_id)
 
 
+def _workspace_account_id(state: DesktopClientState, any_id: str) -> str:
+    """The account a workspace route belongs to: the records' owner, else the one a share was listed for, else the device's.
+
+    The records win because one device may hold both ends of a share: the
+    owner's account hosts the workspace here while another signed-in account
+    is its recipient, and a window on the owner's own workspace is the owner's.
+    """
+    session_store = state.session_store
+    owner_id = session_store.get_owner_user_id_for_workspace(any_id) if session_store is not None else None
+    if owner_id is not None:
+        return owner_id
+    shared_store = state.shared_with_me_store
+    recipient_id = shared_store.recipient_account_id_of(any_id) if shared_store is not None else None
+    if recipient_id is not None:
+        return recipient_id
+    return get_owning_account_id_for_workspace(session_store=session_store, workspace_any_id=any_id)
+
+
 def resolve_request_account_id(state: DesktopClientState, path: str, query: str) -> str:
     """The account a served URL's window shows at first paint (see ``resolve_window_account_id``)."""
     return resolve_window_account_id(
         path,
         query,
-        resolve_workspace_account_id=lambda any_id: get_owning_account_id_for_workspace(
-            session_store=state.session_store, workspace_any_id=any_id
-        ),
+        resolve_workspace_account_id=lambda any_id: _workspace_account_id(state, any_id),
         resolve_create_attempt_account_id=lambda attempt_id: _create_attempt_account_id(state, attempt_id),
         recent_account_ids=state.minds_config.get_recent_account_ids() if state.minds_config is not None else [],
         resolve_account_id_when_none_recorded=lambda: _signed_in_account_id_with_most_workspaces(state),

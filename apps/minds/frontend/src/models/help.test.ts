@@ -395,6 +395,30 @@ describe("HelpModel", () => {
     expect(third.isTranscriptIncluded).toBe(false);
   });
 
+  it("files a report over a workspace shared with the account as the device's own, with no agent to ask", async () => {
+    const calls: Array<{ url: string; body: unknown }> = [];
+    setPendingHelpLaunch({
+      workspaceAgentId: "agent-shared",
+      isAssistAvailable: true,
+    });
+    const model = new HelpModel({
+      storage: memoryStorage(),
+      isWorkspaceOwned: (workspaceAgentId) => workspaceAgentId !== "agent-shared",
+      fetcher: (url, init) => {
+        calls.push({ url, body: JSON.parse(String(init?.body)) });
+        return Promise.resolve(jsonResponse({ ok: true, event_id: "abc123" }));
+      },
+    });
+    model.description = "it broke";
+
+    await model.submit();
+
+    expect(model.mode).toBe("report");
+    expect(model.launch.workspaceAgentId).toBe("");
+    const reportCall = calls.find((call) => call.url === "/help/report");
+    expect(reportCall?.body).toMatchObject({ workspace_agent_id: "" });
+  });
+
   it("sends the diagnostics choices with the report", async () => {
     setPendingHelpLaunch({ workspaceAgentId: "agent-1" });
     const { calls, fetcher } = recordingFetcher({

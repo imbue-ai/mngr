@@ -1,5 +1,6 @@
 import m from "mithril";
 import type { WorkspaceMessage } from "../../models/workspaceMessage";
+import type { SharedOpenPlan } from "../../models/sharedWithMe";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createEmptyStores } from "../../models/boot";
 import { recoveryRoute } from "../../models/create";
@@ -8,15 +9,18 @@ import { ErrorDialogQueue } from "../../models/errorDialog";
 import { WebLoginModel } from "../../models/webLogin";
 import type { UiChannelClient } from "../../channel/client";
 import {
+  SHARED_WORKSPACE_DOMAIN,
   accountEntry,
   accountsMessage,
   jsonResponse,
   secondAccountEntry,
   settle,
+  sharedWorkspace,
+  sharedWorkspaceEntry,
   workspacesMessage,
 } from "../../testing";
 import type { WaitingRequestList } from "./shell-state";
-import { ShellState } from "./shell-state";
+import { ShellState, workspaceAppUrl } from "./shell-state";
 
 const AGENT = "agent-ab12";
 
@@ -949,6 +953,26 @@ describe("ShellState.switchToAccountSwitcher", () => {
 });
 
 describe("ShellState.openHelp", () => {
+  it("names a shared workspace without offering assist, since it has no agent of the account's to ask", () => {
+    const shell = makeShell();
+    const shareKey = sharedWorkspace().share_key;
+    shell.stores.workspaces.applyWorkspacesMessage(
+      workspacesMessage({ workspaces: [sharedWorkspaceEntry({ status: "accepted" })] }),
+    );
+    land(shell, `/workspace/${shareKey}`);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    shell.openHelp();
+
+    expect(routeSet).toHaveBeenCalledWith(
+      "/help",
+      { workspace: shareKey, assist: "0", account: "local" },
+      undefined,
+    );
+  });
+
   it("floats over the displayed machine as an ordinary push", () => {
     // No titlebar popup is up (the titlebar's own bug button), so dismissing
     // Get help must be able to go back to this machine entry.
@@ -2482,5 +2506,465 @@ describe("ShellState's account", () => {
     expect(shell.isAccountSignedOut()).toBe(true);
     land(shell, "/account/local/");
     expect(shell.isAccountSignedOut()).toBe(false);
+  });
+});
+
+describe("opening a shared workspace", () => {
+  const SHARE_DOMAIN = SHARED_WORKSPACE_DOMAIN;
+  const SHARE_KEY = sharedWorkspace().share_key;
+  const SHELL_LINK = `https://shell-1.${SHARE_DOMAIN}/`;
+
+  /** A shell whose account's rows hold one accepted share, with the frame armed on `armedAnyId` (none when null). */
+  function shellWithShare(armedAnyId: string | null): { shell: ShellState; reloadCount: () => number } {
+    const { shell, reloadCount } = shellWithFrameOn(armedAnyId);
+    shell.stores.workspaces.applyWorkspacesMessage(
+      workspacesMessage({ workspaces: [sharedWorkspaceEntry({ status: "accepted" })] }),
+    );
+    return { shell, reloadCount };
+  }
+
+  /** The desktop's answer to the open route: the accepted share's plan onto the shell link, with no redeem unless
+   * `overrides` say otherwise. */
+  function openPlan(overrides: Partial<SharedOpenPlan> = {}): SharedOpenPlan {
+    return {
+      share_key: SHARE_KEY,
+      host_id: "host-" + "9".repeat(32),
+      link: SHELL_LINK,
+      redeem_url: null,
+      status: "accepted",
+      ...overrides,
+    };
+  }
+
+  /** A fetch answering the open route with the plan; counts the opens. */
+  function stubOpen(redeemUrl: string | null): ReturnType<typeof vi.fn> {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (!url.includes("/open")) throw new Error(`unexpected fetch ${url}`);
+      return jsonResponse(openPlan({ redeem_url: redeemUrl }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    return fetchMock;
+  }
+
+  it("reloads the frame when the share is the one the window already shows, instead of re-setting the route", async () => {
+    const { shell, reloadCount } = shellWithShare(SHARE_KEY);
+    shell.displayedWorkspaceAnyId = SHARE_KEY;
+    stubOpen(null);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    await shell.reopenDisplayedSharedWorkspace();
+
+    expect(reloadCount()).toBe(1);
+    expect(routeSet).not.toHaveBeenCalled();
+    expect(shell.stores.workspaces.sharedFrameLink(SHARE_KEY)).toBe(SHELL_LINK);
+  });
+
+  it("reopens the target the frame was on, not the shell, after a session lapse", async () => {
+    const { shell } = shellWithShare(SHARE_KEY);
+    shell.displayedWorkspaceAnyId = SHARE_KEY;
+    shell.stores.workspaces.chooseSharedLink(SHARE_KEY, `https://notes-1.${SHARE_DOMAIN}/`, null);
+    const opened = stubOpen(null);
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    await shell.reopenDisplayedSharedWorkspace();
+
+    expect(opened).toHaveBeenCalledTimes(1);
+    expect(String(opened.mock.calls[0][1]?.body)).toBe(JSON.stringify({ app: "notes" }));
+  });
+
+  it("reads a login-page landing within half a minute of the frame's load as that open's own, and signs in afresh after that", async () => {
+    const { shell } = shellWithShare(SHARE_KEY);
+    shell.displayedWorkspaceAnyId = SHARE_KEY;
+    const opened = stubOpen(null);
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-11-04T09:00:00Z"));
+      // The desktop takes 25 s to answer the open (a slow partition sign-in would take as long).
+      opened.mockImplementationOnce(async () => {
+        vi.setSystemTime(new Date("2026-11-04T09:00:25Z"));
+        return jsonResponse(openPlan());
+      });
+      await shell.openSharedWorkspace(SHARE_KEY, null);
+      expect(opened).toHaveBeenCalledTimes(1);
+
+      // The frame landed on the login page right after it started loading: this open's redeem did not carry it.
+      vi.setSystemTime(new Date("2026-11-04T09:00:35Z"));
+      await expect(shell.reopenDisplayedSharedWorkspace()).resolves.toBe("not_due");
+      expect(opened).toHaveBeenCalledTimes(1);
+
+      // A landing long after the frame loaded is a session that went away.
+      vi.setSystemTime(new Date("2026-11-04T09:01:25Z"));
+      await expect(shell.reopenDisplayedSharedWorkspace()).resolves.toBe("reopened");
+      expect(opened).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stamps the share before the open's round trip, so a second landing during it does not open again", async () => {
+    const { shell } = shellWithShare(SHARE_KEY);
+    shell.displayedWorkspaceAnyId = SHARE_KEY;
+    const opened = stubOpen(null);
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    await Promise.all([shell.reopenDisplayedSharedWorkspace(), shell.reopenDisplayedSharedWorkspace()]);
+
+    expect(opened).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves the window where the user went during a reopen instead of pulling it back onto the share", async () => {
+    const { shell, reloadCount } = shellWithShare(SHARE_KEY);
+    shell.displayedWorkspaceAnyId = SHARE_KEY;
+    const fetchMock = vi.fn(async (url: string) => {
+      if (!url.includes("/open")) throw new Error(`unexpected fetch ${url}`);
+      // The user went Home while the desktop was answering.
+      shell.displayedWorkspaceAnyId = null;
+      return jsonResponse(openPlan());
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    await shell.reopenDisplayedSharedWorkspace();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(routeSet).not.toHaveBeenCalled();
+    expect(reloadCount()).toBe(0);
+  });
+
+  /** A fetch answering the open route with the plan and the verdict route with its row; counts the opens and
+   * records every verdict. */
+  function stubOpenAndVerdict(redeemUrl: string | null): { openCount: () => number; verdicts: string[] } {
+    const verdicts: string[] = [];
+    let openCount = 0;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("/verdict")) {
+        verdicts.push(String((JSON.parse(String(init?.body)) as { verdict: string }).verdict));
+        return jsonResponse({ share_key: SHARE_KEY, row: null });
+      }
+      if (url.includes("/retry")) return jsonResponse({ share_key: SHARE_KEY, row: null });
+      if (!url.includes("/open")) throw new Error(`unexpected fetch ${url}`);
+      openCount += 1;
+      return jsonResponse(openPlan({ redeem_url: redeemUrl }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    return { openCount: () => openCount, verdicts };
+  }
+
+  it("opens once more with a fresh code when the redeem refused the partition's other session, then gives up", async () => {
+    const { shell } = shellWithShare(SHARE_KEY);
+    shell.displayedWorkspaceAnyId = SHARE_KEY;
+    const { openCount, verdicts } = stubOpenAndVerdict("https://accounts.example/accounts/session?code=c0de&next=x");
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    await shell.openSharedWorkspace(SHARE_KEY, null);
+    expect(shell.sharedFrameProgress).toMatchObject({ shareKey: SHARE_KEY, phase: "connecting", isSignInRetried: false });
+
+    await shell.handleSharedFrameRedeemRefused("session_mismatch");
+    expect(openCount()).toBe(2);
+    expect(shell.sharedFrameProgress).toMatchObject({ phase: "connecting", isSignInRetried: true });
+    expect(verdicts).toEqual([]);
+
+    await shell.handleSharedFrameRedeemRefused("session_mismatch");
+    expect(openCount()).toBe(2);
+    expect(shell.sharedFrameProgress).toMatchObject({ phase: "failed", verdict: "sign_in_failed" });
+    expect(verdicts).toEqual(["sign_in_failed"]);
+  });
+
+  it("drops the open's progress when the user left during the retry after a session mismatch", async () => {
+    const { shell } = shellWithShare(SHARE_KEY);
+    shell.displayedWorkspaceAnyId = SHARE_KEY;
+    const redeem = "https://accounts.example/accounts/session?code=c0de&next=x";
+    let openCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (!url.includes("/open")) throw new Error(`unexpected fetch ${url}`);
+        openCount += 1;
+        // The user went Home while the desktop was answering the retry.
+        if (openCount === 2) shell.displayedWorkspaceAnyId = null;
+        return jsonResponse(openPlan({ redeem_url: redeem }));
+      }),
+    );
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    await shell.openSharedWorkspace(SHARE_KEY, null);
+    expect(shell.sharedFrameProgress).toMatchObject({ shareKey: SHARE_KEY, phase: "connecting" });
+
+    await shell.handleSharedFrameRedeemRefused("session_mismatch");
+
+    expect(openCount).toBe(2);
+    expect(routeSet).not.toHaveBeenCalled();
+    expect(shell.sharedFrameProgress).toBeNull();
+  });
+
+  it("fails the open outright on any other refusal of the redeem", async () => {
+    const { shell } = shellWithShare(SHARE_KEY);
+    shell.displayedWorkspaceAnyId = SHARE_KEY;
+    const { openCount, verdicts } = stubOpenAndVerdict("https://accounts.example/accounts/session?code=c0de&next=x");
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    await shell.openSharedWorkspace(SHARE_KEY, null);
+
+    await shell.handleSharedFrameRedeemRefused("refused");
+
+    expect(openCount()).toBe(1);
+    expect(shell.sharedFrameProgress).toMatchObject({ phase: "failed", verdict: "sign_in_failed" });
+    expect(verdicts).toEqual(["sign_in_failed"]);
+  });
+
+  it("fails the open when the frame lands on the login page with an error, or without one right after the open", async () => {
+    const { shell } = shellWithShare(SHARE_KEY);
+    shell.displayedWorkspaceAnyId = SHARE_KEY;
+    const { openCount, verdicts } = stubOpenAndVerdict(null);
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    await shell.openSharedWorkspace(SHARE_KEY, null);
+
+    await shell.handleSharedFrameLoginLanding(true);
+    expect(shell.sharedFrameProgress).toMatchObject({ phase: "failed", verdict: "sign_in_failed" });
+
+    await shell.openSharedWorkspace(SHARE_KEY, null);
+    await shell.handleSharedFrameLoginLanding(false);
+    expect(shell.sharedFrameProgress).toMatchObject({ phase: "failed", verdict: "sign_in_failed" });
+    expect(openCount()).toBe(2);
+    expect(verdicts).toEqual(["sign_in_failed", "sign_in_failed"]);
+  });
+
+  it("takes the overlay down when the workspace's page is up or its document admitted the account", async () => {
+    const { shell } = shellWithShare(SHARE_KEY);
+    shell.displayedWorkspaceAnyId = SHARE_KEY;
+    stubOpenAndVerdict(null);
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    await shell.openSharedWorkspace(SHARE_KEY, null);
+    shell.sharedFrameReady("some-other-share");
+    expect(shell.sharedFrameProgress).not.toBeNull();
+    shell.sharedFrameReady(SHARE_KEY);
+    expect(shell.sharedFrameProgress).toBeNull();
+
+    await shell.openSharedWorkspace(SHARE_KEY, null);
+    await shell.recordSharedFrameVerdict(`shell-1.${SHARE_DOMAIN}`, "refused");
+    expect(shell.sharedFrameProgress).toMatchObject({ phase: "failed", verdict: "refused" });
+    await shell.recordSharedFrameVerdict(`shell-1.${SHARE_DOMAIN}`, "admitted");
+    expect(shell.sharedFrameProgress).toBeNull();
+  });
+
+  it("logs a refused sign-in again instead of rejecting, since the bridge handler cannot catch it, and shows the refusal", async () => {
+    const { shell } = shellWithShare(SHARE_KEY);
+    shell.displayedWorkspaceAnyId = SHARE_KEY;
+    const fetched: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        fetched.push(url);
+        return jsonResponse({ error: "The desktop is away", code: "not_shared" }, 404);
+      }),
+    );
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    await expect(shell.reopenDisplayedSharedWorkspace()).resolves.toBe("refused");
+
+    expect(warned.mock.calls.some(([line]) => String(line).includes("could not sign"))).toBe(true);
+    // The desktop's refusal is the overlay's words; no sign-in ran, so no verdict is recorded.
+    expect(shell.sharedFrameProgress).toMatchObject({ phase: "failed", verdict: null });
+    expect(shell.sharedFrameProgress?.refusalMessage).toBe("The desktop is away");
+    expect(fetched.some((url) => url.includes("/verdict"))).toBe(false);
+  });
+
+  it("shows the desktop's refusal of a Retry from the overlay in its words, recording no verdict", async () => {
+    const { shell } = shellWithShare(SHARE_KEY);
+    shell.displayedWorkspaceAnyId = SHARE_KEY;
+    const fetched: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        fetched.push(url);
+        if (url.includes("/retry")) return jsonResponse({ share_key: SHARE_KEY, row: null });
+        return jsonResponse({ error: "The workspace has not registered that address yet", code: "no_link" }, 409);
+      }),
+    );
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    await shell.retryDisplayedSharedOpen();
+
+    expect(shell.sharedFrameProgress).toMatchObject({ phase: "failed", verdict: null });
+    expect(shell.sharedFrameProgress?.refusalMessage).toBe("The workspace has not registered that address yet");
+    expect(fetched.some((url) => url.includes("/verdict"))).toBe(false);
+  });
+
+  it("records a verdict only from the frame's own document, not from a nested app frame under the domain", async () => {
+    const { shell } = shellWithShare(SHARE_KEY);
+    const recorded: string[] = [];
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      recorded.push(`${url} ${String(init?.body)}`);
+      return jsonResponse({ share_key: SHARE_KEY, row: null });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await shell.recordSharedFrameVerdict(`notes-1.${SHARE_DOMAIN}`, "refused");
+    await shell.recordSharedFrameVerdict("agent-abc.localhost", "refused");
+    await shell.recordSharedFrameVerdict(`SHELL-1.${SHARE_DOMAIN}`, "admitted");
+
+    expect(recorded).toEqual([
+      `/ui/api/shared-with-me/${SHARE_KEY}/verdict?account=${shell.accountId} {"verdict":"admitted"}`,
+    ]);
+  });
+
+  it("has the frame go through the redeem URL, while the share link stays what the frame is on", async () => {
+    const { shell } = shellWithShare(AGENT);
+    const redeem = "https://accounts.example/accounts/session?code=c0de&next=x";
+    stubOpen(redeem);
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    await shell.openSharedWorkspace(SHARE_KEY, null);
+
+    expect(shell.stores.workspaces.workspaceFrameUrl(SHARE_KEY)).toBe(redeem);
+    expect(shell.stores.workspaces.sharedFrameLink(SHARE_KEY)).toBe(SHELL_LINK);
+    expect(shell.sharedFrameProgress).toMatchObject({ shareKey: SHARE_KEY, phase: "connecting", verdict: null });
+  });
+
+  it("re-arms a frame already on the share onto the fresh redeem through the store, without a reload", async () => {
+    const { shell, reloadCount } = shellWithShare(SHARE_KEY);
+    shell.displayedWorkspaceAnyId = SHARE_KEY;
+    const redeem = "https://accounts.example/accounts/session?code=c0de&next=x";
+    stubOpen(redeem);
+    const changed = vi.fn();
+    shell.stores.workspaces.onChanged(changed);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    await shell.openSharedWorkspace(SHARE_KEY, null);
+
+    expect(changed).toHaveBeenCalled();
+    expect(reloadCount()).toBe(0);
+    expect(routeSet).not.toHaveBeenCalled();
+    expect(shell.stores.workspaces.workspaceFrameUrl(SHARE_KEY)).toBe(redeem);
+  });
+
+  it("re-arms a frame on the share onto another target's link through the store, without a reload, when nothing is redeemed", async () => {
+    const { shell, reloadCount } = shellWithShare(SHARE_KEY);
+    shell.displayedWorkspaceAnyId = SHARE_KEY;
+    const notesLink = `https://notes-1.${SHARE_DOMAIN}/`;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (!url.includes("/open")) throw new Error(`unexpected fetch ${url}`);
+        return jsonResponse(openPlan({ link: notesLink }));
+      }),
+    );
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    await shell.openSharedWorkspace(SHARE_KEY, "notes");
+
+    expect(shell.stores.workspaces.workspaceFrameUrl(SHARE_KEY)).toBe(notesLink);
+    expect(reloadCount()).toBe(0);
+    expect(routeSet).not.toHaveBeenCalled();
+
+    // The same target again, with nothing to redeem, has nothing for the store to move: the frame is reloaded.
+    await shell.openSharedWorkspace(SHARE_KEY, "notes");
+    expect(reloadCount()).toBe(1);
+  });
+
+  it("answers the desktop's refusal code and routes nowhere", async () => {
+    const { shell } = shellWithShare(AGENT);
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ error: "no address yet", code: "no_link" }, 409)));
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    await expect(shell.openSharedWorkspace(SHARE_KEY, "notes")).rejects.toMatchObject({
+      code: "no_link",
+      message: "no address yet",
+      status: 409,
+    });
+
+    expect(routeSet).not.toHaveBeenCalled();
+  });
+
+  it("routes onto the share's surface when the window shows something else", async () => {
+    const { shell, reloadCount } = shellWithShare(AGENT);
+    stubOpen(null);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    await shell.openSharedWorkspace(SHARE_KEY, null);
+
+    expect(reloadCount()).toBe(0);
+    expect(routeSet).toHaveBeenCalledWith(`/workspace/${SHARE_KEY}`);
+  });
+});
+
+describe("opening an own app from the home page", () => {
+  it("names the app's address under the workspace's own origin, and nothing without a label or a forward", () => {
+    expect(workspaceAppUrl("https://localhost:8421", "agent-aa11", "reading-list-k3j9x2ab")).toBe(
+      "https://reading-list-k3j9x2ab.agent-aa11.localhost:8421/",
+    );
+    expect(workspaceAppUrl("https://localhost:8421", "agent-aa11", "")).toBeNull();
+    expect(workspaceAppUrl("", "agent-aa11", "reading-list-k3j9x2ab")).toBeNull();
+  });
+
+  it("enters the workspace as its card does, then hands it the app's address once its page listens", () => {
+    const shell = makeShell();
+    shell.mngrForwardOrigin = "https://localhost:8421";
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    vi.spyOn(shell, "routeTo").mockImplementation((route) => m.route.set(route));
+    const entry = { id: WORKSPACE_ID, name: "alpha", accent: "#aabbcc", supports_shutdown: true, liveness: "RUNNING" };
+    const sent: WorkspaceMessage[] = [];
+    let isReady = false;
+    shell.registerWorkspaceMessageSender((_workspaceAgentId, message) => {
+      if (!isReady) return false;
+      sent.push(message);
+      return true;
+    });
+
+    shell.openWorkspaceApp(entry, { name: "reading-list", display_name: "Reading List", label: "reading-list-k3j9x2ab" }, "RUNNING");
+
+    expect(routeSet).toHaveBeenCalledWith(`/workspace/${WORKSPACE_ID}`);
+    expect(sent).toEqual([]);
+    isReady = true;
+    shell.flushPendingWorkspaceMessage();
+    expect(sent).toEqual([{ kind: "open-link", url: `https://reading-list-k3j9x2ab.${WORKSPACE_ID}.localhost:8421/` }]);
+  });
+
+  it("goes nowhere and holds nothing for a workspace whose card is blocked", () => {
+    const shell = makeShell();
+    shell.mngrForwardOrigin = "https://localhost:8421";
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    const routeTo = vi.spyOn(shell, "routeTo").mockImplementation(() => undefined);
+    const sent: WorkspaceMessage[] = [];
+    shell.registerWorkspaceMessageSender((_workspaceAgentId, message) => {
+      sent.push(message);
+      return true;
+    });
+
+    shell.openWorkspaceApp(
+      { id: WORKSPACE_ID, name: "alpha", accent: "#aabbcc", supports_shutdown: true, liveness: "RUNNING", key_state: "locked" },
+      { name: "reading-list", display_name: "Reading List", label: "reading-list-k3j9x2ab" },
+      "RUNNING",
+    );
+    shell.flushPendingWorkspaceMessage();
+
+    expect(routeSet).not.toHaveBeenCalled();
+    expect(routeTo).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
+  it("opens the workspace alone for an app with no address yet", () => {
+    const shell = makeShell();
+    shell.mngrForwardOrigin = "https://localhost:8421";
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    vi.spyOn(shell, "routeTo").mockImplementation(() => undefined);
+    const sent: WorkspaceMessage[] = [];
+    shell.registerWorkspaceMessageSender((_workspaceAgentId, message) => {
+      sent.push(message);
+      return true;
+    });
+
+    shell.openWorkspaceApp(
+      { id: WORKSPACE_ID, name: "alpha", accent: "#aabbcc", supports_shutdown: true, liveness: "RUNNING" },
+      { name: "zen", display_name: "Zen", label: "" },
+      "RUNNING",
+    );
+
+    expect(sent).toEqual([]);
   });
 });

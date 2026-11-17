@@ -422,7 +422,10 @@ class _VersionReadingMngrCaller(MngrCaller):
         timeout: float | None = None,
         env_overrides: Mapping[str, str] | None = None,
         cwd: Path | None = None,
+        on_process_claimed: Callable[[], None] | None = None,
     ) -> MngrCallResult:
+        if on_process_claimed is not None:
+            on_process_claimed()
         agent_id_str = argv[2]
         with self._read_lock:
             self._read_agent_ids.append(agent_id_str)

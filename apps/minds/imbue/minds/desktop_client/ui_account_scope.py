@@ -44,7 +44,7 @@ _ACCOUNT_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{
 _HUB_PATH_RE: Final[re.Pattern[str]] = re.compile(r"^/account/([^/?#]+)(?:/|$)")
 # The SPA routes that name a workspace, whose account is the workspace's association.
 _WORKSPACE_PATH_RE: Final[re.Pattern[str]] = re.compile(
-    r"^/(?:workspace|popout|destroying)/((?:agent|host)-[a-f0-9]+)(?:/|$)|^/agents/((?:agent|host)-[a-f0-9]+)/recovery(?:/|$)",
+    r"^/(?:workspace|popout|destroying)/((?:agent|host|shared)-[a-f0-9]+)(?:/|$)|^/agents/((?:agent|host)-[a-f0-9]+)/recovery(?:/|$)",
     re.IGNORECASE,
 )
 _CREATING_PATH_RE: Final[re.Pattern[str]] = re.compile(r"^/creating/(create-attempt-[a-f0-9]+)(?:/|$)", re.IGNORECASE)
@@ -88,12 +88,20 @@ class AccountWorkspaceScope(FrozenModel):
 
 @pure
 def account_workspace_scope(workspaces: UiWorkspacesMessage, account_id: str) -> AccountWorkspaceScope:
+    """The scope of one account's windows.
+
+    A row shared with some other account (``is_owned=False``) is listed under
+    that account but says nothing about who hosts the workspace, so it never
+    makes the workspace foreign: when this device also hosts it for the owner's
+    account, the owner's windows keep hearing about it.
+    """
     own: set[str] = set()
     foreign: set[str] = set()
     for entry in workspaces.workspaces:
         if account_id_of_workspace_entry(entry) == account_id:
             own.add(entry.id)
-        else:
+            continue
+        if entry.is_owned:
             foreign.add(entry.id)
     return AccountWorkspaceScope(
         account_id=account_id, own_agent_ids=frozenset(own), foreign_agent_ids=frozenset(foreign)
@@ -102,9 +110,12 @@ def account_workspace_scope(workspaces: UiWorkspacesMessage, account_id: str) ->
 
 @pure
 def project_workspaces(message: UiWorkspacesMessage, account_id: str) -> UiWorkspacesMessage:
-    """The account's rows alone, named as its, with every account's row count.
+    """The account's rows alone, named as its, with every account's count of workspaces of its own.
 
     The install-wide id lists stay, since restore and destroy span accounts.
+    A row shared with an account is someone else's workspace, so it is never
+    counted among the account's workspaces here (the home page offers a
+    window with no rows the accounts that have workspaces of their own).
     """
     kept = tuple(entry for entry in message.workspaces if account_id_of_workspace_entry(entry) == account_id)
     kept_ids = {entry.id for entry in kept}
@@ -113,7 +124,7 @@ def project_workspaces(message: UiWorkspacesMessage, account_id: str) -> UiWorks
         to_update(message.field_ref().workspaces, kept),
         to_update(
             message.field_ref().workspace_count_by_account_id,
-            dict(Counter(account_id_of_workspace_entry(entry) for entry in message.workspaces)),
+            dict(Counter(account_id_of_workspace_entry(entry) for entry in message.workspaces if entry.is_owned)),
         ),
         to_update(
             message.field_ref().remote_workspace_states,
@@ -247,7 +258,7 @@ def account_id_from_hub_path(path: str) -> str | None:
 
 @pure
 def workspace_any_id_from_spa_path(path: str) -> str | None:
-    """The workspace (either coordinate) a workspace-scoped SPA route names, or None."""
+    """The workspace a workspace-scoped SPA route names (either coordinate, or a shared row's ``shared-`` alias), or None."""
     match = _WORKSPACE_PATH_RE.match(path)
     if match is None:
         return None

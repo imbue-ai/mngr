@@ -2,8 +2,9 @@
 
 The same rules run in two places: on the grants route, over the whole document
 a save carries, and in the share panel, before a typed entry becomes a row. The
-panel gets :data:`PUBLIC_EMAIL_DOMAINS` with its workspace options payload so
-the two can never disagree about which domains are public.
+panel gets ``PUBLIC_EMAIL_DOMAINS`` (``imbue_common.public_email_domains``, which
+the connector reads too) with its workspace options payload so the two can
+never disagree about which domains are public.
 
 Addresses and domains are compared, and stored, trimmed and lowercased (a
 domain also loses a leading ``@``), which is the form the in-workspace gateway
@@ -24,68 +25,10 @@ from typing import Final
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.public_email_domains import PUBLIC_EMAIL_DOMAINS
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.api_models import SharingGrantList
 from imbue.minds.desktop_client.api_models import SharingGrantsDocument
-
-# Mail providers anyone can sign up at: granting one of these as a domain would
-# admit the whole internet, so only individual addresses at them can be granted.
-PUBLIC_EMAIL_DOMAINS: Final[frozenset[str]] = frozenset(
-    {
-        "gmail.com",
-        "googlemail.com",
-        "yahoo.com",
-        "yahoo.ca",
-        "yahoo.co.id",
-        "yahoo.co.in",
-        "yahoo.co.jp",
-        "yahoo.co.nz",
-        "yahoo.co.uk",
-        "yahoo.com.ar",
-        "yahoo.com.au",
-        "yahoo.com.br",
-        "yahoo.com.hk",
-        "yahoo.com.mx",
-        "yahoo.com.ph",
-        "yahoo.com.sg",
-        "yahoo.com.tw",
-        "yahoo.com.vn",
-        "yahoo.de",
-        "yahoo.dk",
-        "yahoo.es",
-        "yahoo.fr",
-        "yahoo.gr",
-        "yahoo.ie",
-        "yahoo.it",
-        "yahoo.nl",
-        "yahoo.no",
-        "yahoo.pl",
-        "yahoo.se",
-        "hotmail.com",
-        "outlook.com",
-        "live.com",
-        "msn.com",
-        "aol.com",
-        "icloud.com",
-        "me.com",
-        "mac.com",
-        "proton.me",
-        "protonmail.com",
-        "pm.me",
-        "gmx.com",
-        "gmx.net",
-        "mail.com",
-        "yandex.com",
-        "zoho.com",
-        "qq.com",
-        "163.com",
-        "126.com",
-        "naver.com",
-        "hey.com",
-        "fastmail.com",
-        "tuta.io",
-    }
-)
 
 # The scope a refusal names for the workspace-level lists; every other scope is
 # named by the app whose list carried the entry.
@@ -192,7 +135,7 @@ def _refuse_new_entries(
     return [
         *_refuse_user_entries(grants.users, stored_user_ids, scope),
         *_refuse_email_entries(grants.emails, stored_addresses, scope, granter_email),
-        *_refuse_email_domain_entries(grants.email_domains, stored_domains, scope),
+        *_refuse_email_domain_entries(grants.email_domains, stored_domains, scope, granter_email),
     ]
 
 
@@ -254,12 +197,26 @@ def _email_refusal_message(
 
 
 @pure
-def _refuse_email_domain_entries(values: Sequence[str], stored: AbstractSet[str], scope: str) -> list[GrantRefusal]:
+def grantable_email_domain(granter_email: str) -> str:
+    """The one domain a granter may grant as a whole: their own address's (specs/shared-with-me, S6).
+
+    Empty for an address at a public email provider, which nobody may grant, so
+    such a granter has no grantable domain rather than an impossible one.
+    """
+    own_domain = normalize_grant_address(granter_email).rpartition("@")[2]
+    return "" if own_domain in PUBLIC_EMAIL_DOMAINS else own_domain
+
+
+@pure
+def _refuse_email_domain_entries(
+    values: Sequence[str], stored: AbstractSet[str], scope: str, granter_email: str
+) -> list[GrantRefusal]:
+    own_domain = grantable_email_domain(granter_email)
     already_granted: set[str] = set()
     refusals: list[GrantRefusal] = []
     for value in values:
         normalized = normalize_grant_domain(value)
-        message = _email_domain_refusal_message(normalized, already_granted, stored)
+        message = _email_domain_refusal_message(normalized, own_domain, already_granted, stored)
         if message is not None:
             refusals.append(GrantRefusal(scope=scope, kind=EMAIL_DOMAIN_GRANT_KIND, value=value, message=message))
         already_granted.add(normalized)
@@ -268,7 +225,7 @@ def _refuse_email_domain_entries(values: Sequence[str], stored: AbstractSet[str]
 
 @pure
 def _email_domain_refusal_message(
-    normalized: str, already_granted: AbstractSet[str], stored: AbstractSet[str]
+    normalized: str, own_domain: str, already_granted: AbstractSet[str], stored: AbstractSet[str]
 ) -> str | None:
     if normalized in already_granted:
         return f"{normalized} is already granted here."
@@ -278,4 +235,11 @@ def _email_domain_refusal_message(
         return f"{normalized} is not a domain."
     if normalized in PUBLIC_EMAIL_DOMAINS:
         return f"{normalized} cannot be granted permissions because it is a public email provider."
+    if own_domain == "":
+        return (
+            f"{normalized} cannot be granted: domain grants need an account at a non-public email domain, "
+            "and yours is at a public provider."
+        )
+    if normalized != own_domain:
+        return f"{normalized} is not your domain; you can only share with everyone at {own_domain}."
     return None

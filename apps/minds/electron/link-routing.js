@@ -10,6 +10,12 @@
 // node; the caller supplies the app's own origins, the workspace id aliases,
 // and the side effects.
 
+const { isNestedFrame } = require('./account-partitions');
+// A workspace id as the renderer reports it (never trust the renderer): the
+// SPA's route id shape, the `shared-<digest>` alias of a pasted share link's
+// row included (specs/shared-with-me, 4.10).
+const { SPA_WORKSPACE_ID_RE } = require('./surface-routing');
+
 const POPUP_ACTIONS = Object.freeze({
   OPEN_EXTERNALLY: 'open-externally',
   FORWARD: 'forward',
@@ -21,9 +27,6 @@ const POPUP_ACTIONS = Object.freeze({
 // WORKSPACE_ORIGIN_FAMILY in frontend/src/models/workspaces.ts, less
 // its `.127.0.0.1` form, which no URL can carry (it does not parse).
 const WORKSPACE_HOST_PATTERN = /^(?:[a-z0-9_-]+\.)*((?:agent|host)-[a-f0-9]+)\.localhost$/i;
-// A workspace id as the renderer reports it; mirrors the embed contract's
-// AGENT_ID_PATTERN (never trust the renderer).
-const WORKSPACE_ID_PATTERN = /^(?:agent|host)-[a-f0-9]{1,64}$/i;
 
 // Classify a URL as "external" (open in the user's default browser). All
 // in-app navigation (the Imbue Studio backend, the mngr_forward plugin, and every
@@ -106,12 +109,37 @@ function isOfMountedWorkspace(url, mount) {
   return mount.workspaceIds.map((id) => id.toLowerCase()).includes(workspaceId);
 }
 
+// A frame that has shown nothing yet (a cold start, before the rows reached
+// main). A blob: or data: document is not one: it runs the script of the page
+// that made it, so it counts as that page.
+function isFreshFrameUrl(frameUrl) {
+  return frameUrl === '' || frameUrl === 'about:blank';
+}
+
+// Where a shared workspace's flow (its relay origins, the accounts origin it
+// signs in on) may run: anywhere in a window showing a shared workspace (its
+// frame, and the app frames that frame nests); otherwise only in the window's
+// own frame while it is not on an owned workspace's page (a fresh frame, or
+// one already on the flow), so an owned workspace's page never steers the
+// window's frame, or one it nests, onto those pages.
+function isSharedFlowFrame({ frameUrl, isNestedFrame, isSharedWorkspaceShown }) {
+  if (isSharedWorkspaceShown()) return true;
+  if (isNestedFrame) return false;
+  if (isFreshFrameUrl(frameUrl)) return true;
+  const parsed = parseHttpUrl(frameUrl);
+  return parsed !== null && workspaceIdOfHost(parsed.hostname) === null;
+}
+
 // Whether a popup is the mounted workspace's: its own origin family asked for
 // it, or it is a noreferrer custom-scheme link, since the Imbue Studio page
 // opens no custom-scheme link itself.
-function isPopupOfMountedWorkspace(url, referrer, mount) {
+function isPopupOfMountedWorkspace(url, referrer, mount, isSharedWorkspaceUrl = () => false) {
   if (mount === null) return false;
-  return isOfMountedWorkspace(referrer, mount) || (referrer === '' && isCustomSchemeUrl(url));
+  return (
+    isOfMountedWorkspace(referrer, mount) ||
+    isSharedWorkspaceUrl(referrer) ||
+    (referrer === '' && isCustomSchemeUrl(url))
+  );
 }
 
 // Whether the mounted workspace takes the custom-scheme links handed to it.
@@ -131,7 +159,9 @@ function routesCustomSchemeLinks(mount) {
  * links of its own, which are not the workspace's to route. A custom-scheme
  * link is the workspace's as isPopupOfMountedWorkspace says, and goes to it
  * only when it announced `opensCustomSchemeLinks`; any other opens outside
- * the app.
+ * the app. A shared workspace's frame (specs/shared-with-me, S11) is on a
+ * relay origin rather than the local family: `isSharedWorkspaceUrl` names
+ * those hosts, and a popup they asked for is the mounted workspace's too.
  *
  * @param {object} popup
  * @param {string} popup.url  The resolved URL the popup would open.
@@ -139,16 +169,20 @@ function routesCustomSchemeLinks(mount) {
  * @param {string[]} popup.appOrigins  The Imbue Studio backend's and the forwarder's origins.
  * @param {{workspaceIds: string[], opensLinks: boolean, opensCustomSchemeLinks: boolean} | null} popup.mount
  *   The workspace mounted in the window (every alias of its id), or null when none is.
+ * @param {(url: string) => boolean} [popup.isSharedWorkspaceUrl]  Whether a URL is on a shared
+ *   workspace's origin; nothing is, by default.
  * @returns {string} One of POPUP_ACTIONS.
  */
-function decidePopup({ url, referrer, appOrigins, mount }) {
+function decidePopup({ url, referrer, appOrigins, mount, isSharedWorkspaceUrl = () => false }) {
   if (isCustomSchemeUrl(url)) {
-    const isForwarded = routesCustomSchemeLinks(mount) && isPopupOfMountedWorkspace(url, referrer, mount);
+    const isForwarded =
+      routesCustomSchemeLinks(mount) && isPopupOfMountedWorkspace(url, referrer, mount, isSharedWorkspaceUrl);
     return isForwarded ? POPUP_ACTIONS.FORWARD : POPUP_ACTIONS.OPEN_EXTERNALLY;
   }
   if (isExternalUrl(url)) {
-    if (mount !== null && mount.opensLinks && isOfMountedWorkspace(referrer, mount)) return POPUP_ACTIONS.FORWARD;
-    return POPUP_ACTIONS.OPEN_EXTERNALLY;
+    if (mount === null || !mount.opensLinks) return POPUP_ACTIONS.OPEN_EXTERNALLY;
+    const isOfWorkspace = isOfMountedWorkspace(referrer, mount) || isSharedWorkspaceUrl(referrer);
+    return isOfWorkspace ? POPUP_ACTIONS.FORWARD : POPUP_ACTIONS.OPEN_EXTERNALLY;
   }
   // Not external and not http(s) (about:blank, blob:, data:, file:): no link
   // the workspace could route.
@@ -177,23 +211,65 @@ function decidePopup({ url, referrer, appOrigins, mount }) {
  * to the workspace from any frame but the window's own page (a workspace app
  * launches one from an `about:blank` frame of its own) when it announced
  * `opensCustomSchemeLinks`; otherwise Chromium hands it to its app, through
- * openExternalRequested.
+ * openExternalRequested. A frame of a shared workspace (specs/shared-with-me,
+ * S11) lives on a relay origin and signs in on the accounts origin, neither of
+ * them local: `isSharedFlowUrl` names them, and a frame navigating to one is
+ * allowed as an in-app one is, but only where a shared workspace's frame can
+ * be (isSharedFlowFrame): an owned workspace's page must not steer the window's
+ * frame, or one it nests, onto those pages.
  *
  * @param {object} navigation
  * @param {string} navigation.url  Where the frame is navigating.
  * @param {string} navigation.frameUrl  The URL of the frame's current page, '' when unknown.
  * @param {boolean} navigation.isMainFrame  Whether it is the window's own page.
+ * @param {boolean} [navigation.isNestedFrame]  Whether the frame sits below another frame of the
+ *   page rather than directly under the window's page; false by default.
  * @param {{workspaceIds: string[], opensLinks: boolean, opensCustomSchemeLinks: boolean} | null} navigation.mount
  *   As for decidePopup.
+ * @param {(url: string) => boolean} [navigation.isSharedFlowUrl]  Whether the URL is a shared
+ *   workspace's origin or the accounts origin its frame signs in on; nothing is, by default.
+ * @param {() => boolean} [navigation.isSharedWorkspaceShown]  Whether the window shows a workspace
+ *   shared with its account; never, by default.
  * @returns {string} One of POPUP_ACTIONS.
  */
-function decideFrameNavigation({ url, frameUrl, isMainFrame, mount }) {
+function decideFrameNavigation({
+  url,
+  frameUrl,
+  isMainFrame,
+  isNestedFrame = false,
+  mount,
+  isSharedFlowUrl = () => false,
+  isSharedWorkspaceShown = () => false,
+}) {
   if (isCustomSchemeUrl(url)) {
     return !isMainFrame && routesCustomSchemeLinks(mount) ? POPUP_ACTIONS.FORWARD : POPUP_ACTIONS.ALLOW;
   }
   if (!isExternalUrl(url)) return POPUP_ACTIONS.ALLOW;
+  if (!isMainFrame && isSharedFlowUrl(url) && isSharedFlowFrame({ frameUrl, isNestedFrame, isSharedWorkspaceShown })) {
+    return POPUP_ACTIONS.ALLOW;
+  }
   if (isMainFrame || mount === null || !mount.opensLinks) return POPUP_ACTIONS.OPEN_EXTERNALLY;
   return isOfMountedWorkspace(frameUrl, mount) ? POPUP_ACTIONS.FORWARD : POPUP_ACTIONS.OPEN_EXTERNALLY;
+}
+
+/**
+ * Whether a frame's redirect must be cancelled: will-frame-navigate sees only
+ * where a navigation starts, so a frame of an owned workspace's page could
+ * reach the accounts origin or a shared workspace's host through a local page
+ * that redirects there. The shared-flow rule of decideFrameNavigation is
+ * applied to the redirect's target; every other redirect is left alone, since
+ * its landing's own policy answers it.
+ *
+ * @param {object} redirect
+ * @param {string} redirect.url  Where the redirect sends the frame.
+ * @param {string} redirect.frameUrl  The URL of the frame's current page, '' when unknown.
+ * @param {boolean} redirect.isNestedFrame  As for decideFrameNavigation.
+ * @param {(url: string) => boolean} redirect.isSharedFlowUrl  As for decideFrameNavigation.
+ * @param {() => boolean} redirect.isSharedWorkspaceShown  As for decideFrameNavigation.
+ * @returns {boolean}
+ */
+function isSharedFlowRedirectRefused({ url, frameUrl, isNestedFrame, isSharedFlowUrl, isSharedWorkspaceShown }) {
+  return isSharedFlowUrl(url) && !isSharedFlowFrame({ frameUrl, isNestedFrame, isSharedWorkspaceShown });
 }
 
 // Electron can hand over a frame it has already disposed (an iframe reused
@@ -315,8 +391,22 @@ function createExternalOpener({ confirm, open, appNameFor, permissions }) {
  *   workspace as minds:open-link.
  * @param {() => string[]} deps.appOrigins  The backend's and the forwarder's origins, as known now.
  * @param {(workspaceId: string) => string[]} deps.workspaceAliases  Every id the workspace goes by.
+ * @param {(url: string) => boolean} [deps.isSharedFlowUrl]  Whether a URL is a shared workspace's
+ *   origin or the accounts origin its frame signs in on (see decideFrameNavigation); nothing is, by default.
+ * @param {(url: string) => boolean} [deps.isSharedWorkspaceUrl]  Whether a URL is on a shared
+ *   workspace's origin (see decidePopup); nothing is, by default.
+ * @param {(webContents: object) => boolean} [deps.isSharedWorkspaceShown]  Whether the window
+ *   shows a workspace shared with its account (see decideFrameNavigation); never, by default.
  */
-function createLinkRouter({ openExternal, forward, appOrigins, workspaceAliases }) {
+function createLinkRouter({
+  openExternal,
+  forward,
+  appOrigins,
+  workspaceAliases,
+  isSharedFlowUrl = () => false,
+  isSharedWorkspaceUrl = () => false,
+  isSharedWorkspaceShown = () => false,
+}) {
   const mounts = new WeakMap();
 
   function mountFor(webContents) {
@@ -352,7 +442,7 @@ function createLinkRouter({ openExternal, forward, appOrigins, workspaceAliases 
         return true;
       }
       if (typeof report !== 'object') return false;
-      if (typeof report.workspaceId !== 'string' || !WORKSPACE_ID_PATTERN.test(report.workspaceId)) return false;
+      if (typeof report.workspaceId !== 'string' || !SPA_WORKSPACE_ID_RE.test(report.workspaceId)) return false;
       if (typeof report.opensLinks !== 'boolean' || typeof report.opensCustomSchemeLinks !== 'boolean') return false;
       mounts.set(webContents, {
         workspaceId: report.workspaceId,
@@ -394,9 +484,9 @@ function createLinkRouter({ openExternal, forward, appOrigins, workspaceAliases 
       webContents.setWindowOpenHandler((details) => {
         const referrer = details.referrer ? details.referrer.url : '';
         const mount = mountFor(webContents);
-        const action = decidePopup({ url: details.url, referrer, appOrigins: appOrigins(), mount });
+        const action = decidePopup({ url: details.url, referrer, appOrigins: appOrigins(), mount, isSharedWorkspaceUrl });
         if (action === POPUP_ACTIONS.OPEN_EXTERNALLY) {
-          const isFromWorkspace = isPopupOfMountedWorkspace(details.url, referrer, mount);
+          const isFromWorkspace = isPopupOfMountedWorkspace(details.url, referrer, mount, isSharedWorkspaceUrl);
           openExternal(details.url, webContents, isFromWorkspace ? mountedWorkspaceId(webContents) : null);
           return { action: 'deny' };
         }
@@ -416,12 +506,28 @@ function createLinkRouter({ openExternal, forward, appOrigins, workspaceAliases 
           url: details.url,
           frameUrl: frameUrlOf(details.frame),
           isMainFrame: details.isMainFrame === true,
+          isNestedFrame: isNestedFrame(details.frame),
           mount: mountFor(webContents),
+          isSharedFlowUrl,
+          isSharedWorkspaceShown: () => isSharedWorkspaceShown(webContents),
         });
         if (action === POPUP_ACTIONS.ALLOW) return;
         details.preventDefault();
         if (action === POPUP_ACTIONS.FORWARD) forward(webContents, details.url);
         else openExternal(details.url, webContents, workspaceIdOfFrame(webContents, details.isMainFrame));
+      });
+      // A redirect is not seen by will-frame-navigate; the window's own page is
+      // guarded by main's will-redirect listener.
+      webContents.on('will-redirect', (event, url) => {
+        if (event.isMainFrame) return;
+        const isRefused = isSharedFlowRedirectRefused({
+          url,
+          frameUrl: frameUrlOf(event.frame),
+          isNestedFrame: isNestedFrame(event.frame),
+          isSharedFlowUrl,
+          isSharedWorkspaceShown: () => isSharedWorkspaceShown(webContents),
+        });
+        if (isRefused) event.preventDefault();
       });
     },
   };
@@ -433,6 +539,7 @@ module.exports = {
   isCustomSchemeUrl,
   decidePopup,
   decideFrameNavigation,
+  isSharedFlowRedirectRefused,
   externalOpenPrompt,
   createExternalOpener,
   createLinkRouter,

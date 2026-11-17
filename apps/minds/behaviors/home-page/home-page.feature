@@ -90,3 +90,63 @@ Feature: Home page routing
     When they visit the account's home page
     Then every one of the account's workspaces is listed
     And none of the other account's workspaces is
+
+  @home-tabs
+  Scenario: The home page is three tabs, the third only while an invitation waits or was declined
+    Given an authenticated user who has answered the consent question
+    When they visit the account's home page
+    Then a tab strip offers Workspaces and Apps, opening on Workspaces
+    And an Invitations tab joins the strip, counting the shares still waiting for an answer, only while any listed share is unanswered or declined
+    When they choose a tab
+    Then the window comes back to that tab on its next visit to a home page
+
+  @workspace-cards
+  Scenario: Each workspace is a card painted with its wallpaper, with one run control and its statuses as badges
+    Given an authenticated user who has answered the consent question
+    And the account has workspaces, one of which has been loaded on this installation
+    When they visit the account's home page on the Workspaces tab
+    Then every workspace of the account is a card under "Your workspaces", ending in an "Add workspace" card (or "Sign in" on a signed-out account's hub), with the "Recently destroyed workspaces" link under the grid
+    And the loaded workspace's card is painted with the wallpaper its desktop wears, and every other with its accent
+    And a card carries its name, one run control (Start, Stop, or Restart), "Open in new window", and a menu with where it runs, Backups, and Workspace settings
+    And every status that applies is a badge: red for what is broken, orange for what needs the user, a white chip for information and progress
+
+  @shared-workspace-cards
+  Scenario: A workspace shared with the account is a guest card under "Workspaces shared with you"
+    Given an authenticated user who has answered the consent question
+    And another person's workspace is shared with the account and has been accepted
+    When they visit the account's home page on the Workspaces tab
+    Then the share is a card under "Workspaces shared with you" naming its owner, with no run control
+    And its liveness and the last open's verdict are badges, and open, retry, decline, report, and remove are in its menu
+    And while an open runs the card reads "Connecting…", and the workspace surface shows the workspace connecting until its page is up, never a sign-in form
+    And a link pasted into the section's input whose label is the workspace shell's becomes such a card reading "Pasted link"
+
+  @apps-tab
+  Scenario: The Apps tab lists the account's own apps, then the apps shared with it, as desktop icons
+    Given an authenticated user who has answered the consent question
+    And the account has a live workspace that registered an app
+    And another person shared one app of their workspace with the account
+    When they visit the account's home page on the Apps tab
+    Then the workspace's app is an icon under "Your apps", wearing its registered icon (or a monogram of its name) and the workspace's name
+    And choosing it opens the workspace on that app
+    And the shared app is an icon under "Apps shared with you", wearing a monogram, the sharer's face, and a "From" tooltip
+    And an app of a shared workspace that its owner granted in its own right is an icon there too, beside the workspace's card
+    And under the shared apps an input takes an app link they were given, in place of an empty state
+    And system apps (chat, terminal, files, routines) are listed under neither
+
+  @invitations-tab
+  Scenario: A share not yet answered is an invitation to join or decline
+    Given an authenticated user who has answered the consent question
+    And another person shared a workspace with the account that the account has not answered
+    When they visit the account's home page on the Invitations tab
+    Then the share is a card naming who invited them to a workspace or an app and when, with Decline and Join
+    When they choose Join
+    Then the share opens as a card's click would, which accepts it
+    When they choose Decline instead
+    Then the card stays in place reading "Declined" with Undo until they leave the tab, after which it files under "Declined invitations"
+
+  @settings-and-account
+  Scenario: Studio settings sits in the section head, and the account page is reached from the account switcher
+    Given an authenticated user who has answered the consent question
+    When they visit a home page
+    Then "Studio settings" is at the right of the active tab's first section head
+    And the account switcher's menu ends with "Account settings", under a line, which opens the account page under the window's account

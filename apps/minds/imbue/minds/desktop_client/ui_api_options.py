@@ -31,6 +31,7 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.model_update import to_update
+from imbue.imbue_common.public_email_domains import PUBLIC_EMAIL_DOMAINS
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
@@ -50,7 +51,7 @@ from imbue.minds.desktop_client.machine_size import is_machine_resizable_provide
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
-from imbue.minds.desktop_client.share_grant_validation import PUBLIC_EMAIL_DOMAINS
+from imbue.minds.desktop_client.share_grant_validation import grantable_email_domain
 from imbue.minds.desktop_client.share_targets import resolve_share_target_display_names
 from imbue.minds.desktop_client.share_targets import resolve_share_target_labels
 from imbue.minds.desktop_client.share_targets import resolve_share_targets
@@ -160,6 +161,13 @@ class WorkspaceOptionsData(FrozenModel):
             "The mail providers a domain grant may never name, sorted, so the share panel can "
             "refuse such an entry before it becomes a row"
         )
+    )
+    grantable_email_domain: str = Field(
+        default="",
+        description=(
+            "The one domain the window's account may grant as a whole (its own address's, per "
+            "specs/shared-with-me S6); empty without an account, when no domain can be granted"
+        ),
     )
     ssh_command: str = Field(description="Copy-pasteable SSH command for the machine's host, '' when unknown")
 
@@ -396,6 +404,7 @@ def _handle_workspace_options_data(agent_id: str) -> Response:
         service_display_names=resolve_share_target_display_names(backend_resolver, parsed_agent_id),
         whole_service=share_targets.whole_service,
         public_email_domains=tuple(sorted(PUBLIC_EMAIL_DOMAINS)),
+        grantable_email_domain=grantable_email_domain(current_account.email) if current_account else "",
         ssh_command=build_ssh_command(backend_resolver, parsed_agent_id),
     )
     return make_response(content=data.model_dump_json(), status_code=200, media_type="application/json")

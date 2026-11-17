@@ -1,4 +1,5 @@
 import subprocess
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
@@ -40,7 +41,10 @@ class _GitAnsweringCaller(MngrCaller):
         timeout: float | None = None,
         env_overrides: Mapping[str, str] | None = None,
         cwd: Path | None = None,
+        on_process_claimed: Callable[[], None] | None = None,
     ) -> MngrCallResult:
+        if on_process_claimed is not None:
+            on_process_claimed()
         self._git_commands.append(argv[3])
         return MngrCallResult(returncode=0, stdout=exec_json_envelope(self.stdout))
 
@@ -242,7 +246,10 @@ class _LocalGitCaller(MngrCaller):
         timeout: float | None = None,
         env_overrides: Mapping[str, str] | None = None,
         cwd: Path | None = None,
+        on_process_claimed: Callable[[], None] | None = None,
     ) -> MngrCallResult:
+        if on_process_claimed is not None:
+            on_process_claimed()
         command = argv[3]
         assert OFFICIAL_REMOTE_URL in command, f"nothing to repoint at a local repo in: {command}"
         result = subprocess.run(

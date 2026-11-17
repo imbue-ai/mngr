@@ -23,14 +23,13 @@ import {
   workspacesMessage,
 } from "../../testing";
 import {
-  LandingPage,
   isUnlockBannerDue,
   otherAccountsWithWorkspaces,
   shouldRedirectToStartFlow,
 } from "./LandingPage";
+import { initLandingPage, initPageOnAlicesHub, SETTLED_LANDING_EXTRAS } from "./LandingPage.testing";
 import { BTN_VARIANTS } from "../components/constants";
 
-const settled = { is_discovery_complete: true, has_restorable_workspaces: false, destroying_status_by_agent_id: {}, orphaned_failed_destroys: [], locked_account_emails: [] };
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -38,29 +37,17 @@ afterEach(() => {
   clearAppContextForTests();
 });
 
-/** The page constructed and initialized as the router would, `fetchImpl` answering its fetches. */
-function initLandingPage(fetchImpl: (url: string) => Promise<Response>) {
-  vi.stubGlobal("fetch", fetchImpl);
-  const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
-  const redraw = vi.spyOn(m, "redraw").mockImplementation(() => undefined);
-  const vnode = m(LandingPage, {}) as m.Vnode;
-  const page = (LandingPage as unknown as (v: m.Vnode) => m.Component)(vnode);
-  page.oninit?.call(page, vnode as m.VnodeDOM);
-  const view = () => (page.view as unknown as (v: m.Vnode) => m.Vnode).call(page, vnode);
-  return { page, vnode, routeSet, redraw, view };
-}
-
 describe("shouldRedirectToStartFlow", () => {
 
   it("sends an install that never finished onboarding to the start flow once discovery finds nothing", () => {
-    expect(shouldRedirectToStartFlow(false, false, settled)).toBe(true);
+    expect(shouldRedirectToStartFlow(false, false, SETTLED_LANDING_EXTRAS)).toBe(true);
   });
 
   it("never redirects a completed install, an install with a workspace under any account, or an unfinished discovery", () => {
-    expect(shouldRedirectToStartFlow(true, false, settled)).toBe(false);
-    expect(shouldRedirectToStartFlow(false, true, settled)).toBe(false);
+    expect(shouldRedirectToStartFlow(true, false, SETTLED_LANDING_EXTRAS)).toBe(false);
+    expect(shouldRedirectToStartFlow(false, true, SETTLED_LANDING_EXTRAS)).toBe(false);
     expect(shouldRedirectToStartFlow(false, false, null)).toBe(false);
-    expect(shouldRedirectToStartFlow(false, false, { ...settled, is_discovery_complete: false })).toBe(false);
+    expect(shouldRedirectToStartFlow(false, false, { ...SETTLED_LANDING_EXTRAS, is_discovery_complete: false })).toBe(false);
   });
 });
 
@@ -85,7 +72,7 @@ describe("otherAccountsWithWorkspaces", () => {
 });
 
 describe("isUnlockBannerDue", () => {
-  const aliceLocked = { ...settled, locked_account_emails: ["alice@example.com"] };
+  const aliceLocked = { ...SETTLED_LANDING_EXTRAS, locked_account_emails: ["alice@example.com"] };
 
   it("is due exactly when the loaded extras are the window's account's answer and name it locked", () => {
     expect(isUnlockBannerDue(aliceLocked, "user-alice", "user-alice")).toBe(true);
@@ -93,25 +80,20 @@ describe("isUnlockBannerDue", () => {
 
   it("stays down for another window's answer, an unlocked answer, or no answer yet", () => {
     expect(isUnlockBannerDue(aliceLocked, "user-alice", "local")).toBe(false);
-    expect(isUnlockBannerDue(settled, "local", "local")).toBe(false);
+    expect(isUnlockBannerDue(SETTLED_LANDING_EXTRAS, "local", "local")).toBe(false);
     expect(isUnlockBannerDue(null, null, "user-alice")).toBe(false);
   });
 });
 
 describe("the landing extras fetch", () => {
   /** The page initialized in a window on Alice's hub, with every URL it fetches recorded. */
-  function initPageOnAlicesHub() {
-    const alice = accountEntry({ user_id: "user-alice", email: "alice@example.com" });
-    const shell = updatesShell({}, false);
-    shell.stores.accounts.applyAccountsMessage(accountsMessage([alice], alice.user_id));
-    shell.accountId = alice.user_id;
+  function initRecordedPage() {
     const recorder = recordingFetch();
-    const { page, vnode } = initLandingPage(recorder.fetchImpl);
-    return { page, vnode, shell, recorder };
+    return { ...initPageOnAlicesHub({ fetchImpl: recorder.fetchImpl }), recorder };
   }
 
   it("asks for the window's account", () => {
-    const { recorder } = initPageOnAlicesHub();
+    const { recorder } = initRecordedPage();
 
     expect(recorder.requests).toContain(
       "/ui/api/create/landing-extras?account=user-alice",
@@ -119,7 +101,7 @@ describe("the landing extras fetch", () => {
   });
 
   it("re-asks for the new account when the window's account changes, and only then", () => {
-    const { page, vnode, shell, recorder } = initPageOnAlicesHub();
+    const { page, vnode, shell, recorder } = initRecordedPage();
 
     shell.accountId = "local";
     page.onupdate?.call(page, vnode as m.VnodeDOM);
@@ -212,7 +194,7 @@ async function initSettledDeviceHub(options: {
   );
   shell.accountId = "local";
   const { page, vnode, routeSet, redraw, view } = initLandingPage(
-    recordingFetch(() => Promise.resolve(jsonResponse(settled))).fetchImpl,
+    recordingFetch(() => Promise.resolve(jsonResponse(SETTLED_LANDING_EXTRAS))).fetchImpl,
   );
   await vi.waitFor(() => expect(redraw).toHaveBeenCalled());
   return { shell, page, vnode, routeSet, view };
@@ -316,8 +298,9 @@ describe("a remote row's access chip", () => {
       workspacesMessage({ workspaces: [REMOTE], remote_workspace_states: { [REMOTE.id]: { state, detail } } }),
     );
     shell.accountId = "local";
-    const root = initLandingPage(recordingFetch(() => Promise.resolve(jsonResponse(settled))).fetchImpl).view();
-    return withAttr(root, "data-remote-state");
+    const root = initLandingPage(recordingFetch(() => Promise.resolve(jsonResponse(SETTLED_LANDING_EXTRAS))).fetchImpl).view();
+    // The chip is drawn through the badge component; the reader sees its span.
+    return withAttr(renderDeep(root), "data-remote-state");
   }
 
   it("opens the styled error dialog for a failed setup, with the server's detail behind See details", () => {
@@ -369,7 +352,7 @@ describe("a Start that fails", () => {
         Promise.resolve(
           url.endsWith("/start")
             ? jsonResponse({ error: "Could not start the workspace host: container exited (137)" }, 502)
-            : jsonResponse(settled),
+            : jsonResponse(SETTLED_LANDING_EXTRAS),
         ),
       );
       const { view } = initLandingPage(fetches.fetchImpl);
@@ -485,7 +468,7 @@ describe("the providers panel", () => {
   it("offers a report on a failed check's row, but not on a login to set up, whose own Check again is the next step", () => {
     const profileMissing = PROFILE_MISSING_CONNECTION;
     const { view } = drawOpenPanel(
-      recordingFetch(() => Promise.resolve(jsonResponse(settled))).fetchImpl,
+      recordingFetch(() => Promise.resolve(jsonResponse(SETTLED_LANDING_EXTRAS))).fetchImpl,
       [ERRORED_CONNECTION, profileMissing],
     );
     const root = view();
@@ -508,7 +491,7 @@ describe("the providers panel", () => {
     ["a failed check", ERRORED_CONNECTION, ["Check again", "Report a bug"]],
   ])("offers %s a Check again that waits on the login, and checks the connection again", (_, connection, labels) => {
     const { instance } = connection;
-    const { fetchImpl, requests } = recordingFetch(() => Promise.resolve(jsonResponse(settled)));
+    const { fetchImpl, requests } = recordingFetch(() => Promise.resolve(jsonResponse(SETTLED_LANDING_EXTRAS)));
     const { view } = drawOpenPanel(fetchImpl, [connection]);
     const noticeButtons = () =>
       collectVnodes(byId(connectionRowFor(view(), instance), `connection-problem-${instance}`)).filter(
@@ -536,7 +519,7 @@ describe("the providers panel", () => {
   });
 
   it("counts the rows needing attention in the header, leads each row with the provider's reason, and keeps the raw error behind See details", () => {
-    const { view, header } = drawOpenPanel(recordingFetch(() => Promise.resolve(jsonResponse(settled))).fetchImpl);
+    const { view, header } = drawOpenPanel(recordingFetch(() => Promise.resolve(jsonResponse(SETTLED_LANDING_EXTRAS))).fetchImpl);
     const root = view();
 
     expect(allText(header())).toContain("3 providers, 2 need attention");
@@ -570,7 +553,7 @@ describe("the providers panel", () => {
     const refusal = "This connection still has 1 active workspace. Remove it first, then remove the connection.";
     const fetchImpl = (url: string, init?: RequestInit): Promise<Response> =>
       Promise.resolve(
-        init?.method === "DELETE" ? jsonResponse({ error: refusal, code: "connection_in_use" }, 409) : jsonResponse(settled),
+        init?.method === "DELETE" ? jsonResponse({ error: refusal, code: "connection_in_use" }, 409) : jsonResponse(SETTLED_LANDING_EXTRAS),
       );
     const dialogs = withDialogHost();
     try {
@@ -595,7 +578,7 @@ describe("the providers panel", () => {
   it("says in the styled dialog that the connection form couldn't open, with the failed request behind See details", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     const fetchImpl = (url: string): Promise<Response> =>
-      Promise.resolve(url.includes("form-defaults") ? jsonResponse({ error: "boom" }, 500) : jsonResponse(settled));
+      Promise.resolve(url.includes("form-defaults") ? jsonResponse({ error: "boom" }, 500) : jsonResponse(SETTLED_LANDING_EXTRAS));
     const dialogs = withDialogHost();
     try {
       const { view } = drawOpenPanel(fetchImpl);
@@ -658,9 +641,9 @@ describe("the providers panel's connection actions", () => {
       last_event_at: null,
       last_full_snapshot_at: null,
     });
-    const { view } = initLandingPage(() => Promise.resolve(jsonResponse(settled)));
+    const { view } = initLandingPage(() => Promise.resolve(jsonResponse(SETTLED_LANDING_EXTRAS)));
     vi.stubGlobal("fetch", (url: string) =>
-      Promise.resolve(url.includes("/cloud-accounts/") ? answer() : jsonResponse(settled)),
+      Promise.resolve(url.includes("/cloud-accounts/") ? answer() : jsonResponse(SETTLED_LANDING_EXTRAS)),
     );
     const toggle = collectVnodes(byId(view(), "landing-providers")).find((node) => node.tag === "button");
     (attrsOf(toggle!).onclick as () => void)();

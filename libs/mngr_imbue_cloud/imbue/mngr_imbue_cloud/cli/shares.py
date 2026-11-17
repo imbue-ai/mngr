@@ -16,6 +16,7 @@ from imbue.mngr_imbue_cloud.connector.auth_helper import get_active_token
 from imbue.mngr_imbue_cloud.primitives import WorkspaceId
 from imbue.mngr_imbue_cloud.wire_types import ShareGrantsPushResult
 from imbue.mngr_imbue_cloud.wire_types import ShareInfo
+from imbue.mngr_imbue_cloud.wire_types import ShareResponseKind
 
 
 @click.group(name="shares")
@@ -213,7 +214,9 @@ def set_share_grantees(
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     help=(
         "A JSON file holding the workspace's parsed grants document: "
-        '{"workspace": {"users": [], "emails": [], "email_domains": []}, "services": {"<app>": {...}}}.'
+        '{"workspace": {"users": [], "emails": [], "email_domains": []}, "services": {"<app>": {...}}}, '
+        'optionally with "workspace_name" and "targets" ({"<app>": {"label", "display_name"}}, the origin label '
+        "and display name of every grantable target), from which a recipient's listing renders links and names."
     ),
 )
 @click.option("--account", default=None, help="Account email (defaults to the active account)")
@@ -348,3 +351,76 @@ def list_invitation_outcomes(host_id: str, account: str | None, connector_url: s
     parsed_account = resolve_account_or_active(store, account)
     token = get_active_token(store, client, parsed_account)
     emit_json([entry.model_dump(mode="json") for entry in client.list_invitation_outcomes(token, host_id)])
+
+
+# The recipient's side of sharing (specs/shared-with-me/spec.md).
+
+
+@shares.command(name="shared-with-me")
+@click.option("--account", default=None, help="Account email (defaults to the active account)")
+@click.option("--connector-url", default=None, help="Override connector URL")
+@handle_imbue_cloud_errors
+def list_shared_with_me(account: str | None, connector_url: str | None) -> None:
+    """Print every active share whose grants name this account, with what it may open and where each stands.
+
+    Discovery only: the workspace's own grants file decides whether a visit is
+    admitted. ``matches`` is the match set the listing was built from: a client
+    refetches the listing when it differs from the last one it saw.
+    """
+    client = make_connector_client(connector_url)
+    store = make_session_store()
+    parsed_account = resolve_account_or_active(store, account)
+    token = get_active_token(store, client, parsed_account)
+    emit_json(client.list_shared_with_me(token).model_dump(mode="json"))
+
+
+@shares.command(name="shared-with-me-matches")
+@click.option("--account", default=None, help="Account email (defaults to the active account)")
+@click.option("--connector-url", default=None, help="Override connector URL")
+@handle_imbue_cloud_errors
+def list_shared_with_me_matches(account: str | None, connector_url: str | None) -> None:
+    """Print the shared-with-me match set alone (each share's key, listing version, and this account's standing), for polling for change without fetching the listing."""
+    client = make_connector_client(connector_url)
+    store = make_session_store()
+    parsed_account = resolve_account_or_active(store, account)
+    token = get_active_token(store, client, parsed_account)
+    emit_json({"matches": [match.model_dump(mode="json") for match in client.list_shared_with_me_matches(token)]})
+
+
+@shares.command(name="respond")
+@click.argument("host_id")
+@click.option(
+    "--response",
+    "response_kind",
+    required=True,
+    type=click.Choice([kind.value for kind in ShareResponseKind if kind is not ShareResponseKind.UNKNOWN]),
+    help="accepted, declined, or reported (a report is a strike against the owner and cannot be withdrawn)",
+)
+@click.option("--account", default=None, help="Account email (defaults to the active account)")
+@click.option("--connector-url", default=None, help="Override connector URL")
+@handle_imbue_cloud_errors
+def respond_to_share(host_id: str, response_kind: str, account: str | None, connector_url: str | None) -> None:
+    """Record this account's response to a share that names it.
+
+    Fails with code ``already_reported`` once reported, and ``share_not_found`` when the share names no identity of this account.
+    """
+    client = make_connector_client(connector_url)
+    store = make_session_store()
+    parsed_account = resolve_account_or_active(store, account)
+    token = get_active_token(store, client, parsed_account)
+    result = client.set_share_response(token, host_id, ShareResponseKind(response_kind))
+    emit_json(result.model_dump(mode="json"))
+
+
+@shares.command(name="clear-response")
+@click.argument("host_id")
+@click.option("--account", default=None, help="Account email (defaults to the active account)")
+@click.option("--connector-url", default=None, help="Override connector URL")
+@handle_imbue_cloud_errors
+def clear_share_response(host_id: str, account: str | None, connector_url: str | None) -> None:
+    """Remove this account's response to a share (a declined one reads invited again, or accepted once visited); never a report."""
+    client = make_connector_client(connector_url)
+    store = make_session_store()
+    parsed_account = resolve_account_or_active(store, account)
+    token = get_active_token(store, client, parsed_account)
+    emit_json(client.clear_share_response(token, host_id).model_dump(mode="json"))

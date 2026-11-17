@@ -781,7 +781,7 @@ def test_backup_update_gate_blocks_on_live_chat_and_stop_chats_clears_it(
         )
         blocked_payload = extract_marker_json(blocked.stdout, UPDATE_RESULT_MARKER)
         assert blocked_payload is not None, (blocked.stdout, blocked.stderr)
-        assert blocked_payload["status"] == "blocked", blocked_payload
+        assert blocked_payload["status"] == "blocked", json.dumps(blocked_payload, indent=2)
         blocked_chats = blocked_payload["running_chats"]
         assert isinstance(blocked_chats, list) and blocker_name in blocked_chats, blocked_payload
 
@@ -797,7 +797,7 @@ def test_backup_update_gate_blocks_on_live_chat_and_stop_chats_clears_it(
         )
         retried_payload = extract_marker_json(retried.stdout, UPDATE_RESULT_MARKER)
         assert retried_payload is not None, (retried.stdout, retried.stderr)
-        assert retried_payload["status"] != "blocked", retried_payload
+        assert retried_payload["status"] != "blocked", json.dumps(retried_payload, indent=2)
         assert _wait_for_agent_state(container_name, blocker_id, "STOPPED"), (
             "The blocker agent was not stopped by the --stop-chats gate."
         )

@@ -131,6 +131,7 @@ function harness(
         service_labels: {},
         whole_service: "",
         public_email_domains: [],
+        grantable_email_domain: "",
         ssh_command: sshCommandByAgent[agentId] ?? "",
         ...data,
       };

@@ -1628,6 +1628,49 @@ describe("SharePanelModel validation before the row", () => {
     expect(grantValues(model)).toEqual(["münchen.de", "friend@example.com"]);
   });
 
+  it("refuses a domain other than the granter's own when the options name one", async () => {
+    const { model } = makeSharePanel(
+      () =>
+        okResult(
+          sharingResponse({
+            grants: grantsDocument({ emails: ["friend@example.com"] }),
+          }),
+        ),
+      { grantableEmailDomain: "example.com" },
+    );
+    await model.load();
+
+    model.addGrant(WHOLE, "email_domain", "partner.org");
+    expect(model.addRow(WHOLE).refusalMessage).toBe(
+      "partner.org is not your domain; you can only share with everyone at example.com.",
+    );
+    expect(grantValues(model)).toEqual(["friend@example.com"]);
+
+    model.addGrant(WHOLE, "email_domain", " Example.COM ");
+    expect(model.addRow(WHOLE).refusalMessage).toBeNull();
+    expect(grantValues(model)).toEqual(["example.com", "friend@example.com"]);
+  });
+
+  it("refuses every domain grant for a granter at a public provider, as the save does", async () => {
+    const { model } = makeSharePanel(
+      () =>
+        okResult(
+          sharingResponse({
+            grants: grantsDocument({ emails: ["friend@example.com"] }),
+          }),
+        ),
+      { grantableEmailDomain: "" },
+    );
+    await model.load();
+
+    model.addGrant(WHOLE, "email_domain", "partner.org");
+
+    expect(model.addRow(WHOLE).refusalMessage).toBe(
+      "partner.org cannot be granted: domain grants need an account at a non-public email domain, and yours is at a public provider.",
+    );
+    expect(grantValues(model)).toEqual(["friend@example.com"]);
+  });
+
   it("refuses a public provider however it was typed", async () => {
     const model = await loadedPanel();
 

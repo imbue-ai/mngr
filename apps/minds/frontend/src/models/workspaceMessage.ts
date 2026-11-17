@@ -1,13 +1,15 @@
 // A message for a workspace's page, posted into its frame over the embed
 // contract once the page is listening: the chat app's focus ask (an agent
 // message's click), or an app message the workspace shell routes to the app
-// whose manifest registers its type (a notification's destination).
+// whose manifest registers its type (a notification's destination), or a
+// link to open where the workspace opens it (an own app's icon on the home page).
 
 import type { NotificationDestination } from "../channel/messages";
 
 export type WorkspaceMessage =
   | { kind: "focus-chat"; chatAgentId: string }
-  | { kind: "app-message"; type: string; fields: Record<string, string> };
+  | { kind: "app-message"; type: string; fields: Record<string, string> }
+  | { kind: "open-link"; url: string };
 
 /** The app message a notification's destination delivers: the wire's `type`
  * beside its remaining fields, as the frame receives it. Null for a

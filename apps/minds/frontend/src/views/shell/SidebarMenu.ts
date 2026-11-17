@@ -11,6 +11,7 @@ import { Icon16 } from "../components/Icon";
 import type { UiWorkspaceEntry } from "../../channel/messages";
 import { electronBridge } from "../../electron-bridge";
 import { MIND_LIVENESS_LABELS } from "../../models/create";
+import { ownedWorkspaceEntries } from "../../models/sharedWithMe";
 import type { ShellState } from "./shell-state";
 
 // Lines a row's workspace-name text up under the breadcrumb name: the row
@@ -178,7 +179,8 @@ export function SidebarMenu(): m.Component<SidebarMenuAttrs> {
       const left = anchor.x + MENU_OFFSET_X;
       const top = anchor.y + anchor.height + MENU_OFFSET_Y;
 
-      const workspaces = shell.stores.workspaces.workspaces;
+      // Someone else's workspaces are opened from the home page's own section, never switched to here.
+      const workspaces = ownedWorkspaceEntries(shell.stores.workspaces.workspaces);
       const currentAnyId = shell.displayedWorkspaceAnyId;
       const currentAgentId =
         currentAnyId === null ? null : shell.stores.workspaces.toAgentScopedId(currentAnyId);

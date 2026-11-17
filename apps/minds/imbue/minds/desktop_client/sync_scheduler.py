@@ -20,6 +20,8 @@ import tomllib
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
+from datetime import datetime
+from datetime import timezone
 from enum import auto
 from typing import Final
 from typing import assert_never
@@ -49,7 +51,9 @@ from imbue.minds.desktop_client.imbue_cloud_cli import AuthRefreshOutcome
 from imbue.minds.desktop_client.imbue_cloud_cli import IMBUE_CLOUD_AUTH_ERROR_CLASS
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import SharedWithMeMatchCliInfo
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.shared_with_me_store import SharedWithMeStore
 from imbue.minds.desktop_client.workspace_profile_writer import WorkspaceProfileWriter
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
@@ -211,15 +215,31 @@ class WorkspaceSyncScheduler(MutableModel):
             "signout, so the user hears of it; wired post-construction, once the notification feed exists"
         ),
     )
+    shared_with_me_store: SharedWithMeStore | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "What is shared with each account (specs/shared-with-me, 4.7): its documents are pulled and pushed "
+            "every pass, and its listing refetched when the records pull's match set moved, the cache is absent "
+            "or stale, or the pass was kicked; None disables"
+        ),
+    )
     _last_session_refresh_at_by_user_id: dict[str, float] = PrivateAttr(default_factory=dict)
     _kick_event: threading.Event = PrivateAttr(default_factory=threading.Event)
+    # Set by every kick and cleared by the pass that serves it: a kicked pass
+    # refetches the shared-with-me listing whether or not its match set moved.
+    _shared_refresh_forced_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _exited_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _initial_sync_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _initial_sync_by_user_id: dict[str, InitialSyncStatus] = PrivateAttr(default_factory=dict)
 
     def kick(self) -> None:
-        """Request an immediate sync pass (sign-in/out, password change, association)."""
+        """Request an immediate sync pass (sign-in/out, password change, association, a sharing change).
+
+        The pass it wakes also refetches every account's shared-with-me listing, whether or not its match set moved.
+        """
+        self._shared_refresh_forced_event.set()
         self._kick_event.set()
 
     def stop(self, wait_timeout_seconds: float = _STOP_WAIT_TIMEOUT_SECONDS) -> None:
@@ -275,9 +295,15 @@ class WorkspaceSyncScheduler(MutableModel):
         for user_id in self._retire_accounts_with_dead_sessions(accounts):
             accounts.pop(user_id, None)
         convert_legacy_password_files(self.record_store.paths, list(accounts.keys()))
+        is_shared_refresh_forced = self._shared_refresh_forced_event.is_set()
+        # Cleared only once seen: a kick landing after a False read keeps its
+        # force for the next pass instead of being wiped here.
+        if is_shared_refresh_forced:
+            self._shared_refresh_forced_event.clear()
         outcome = self.record_store.reconcile(accounts, self.resolver)
         self._sync_connections(accounts)
         self._sync_account_settings(accounts)
+        self._sync_shared_with_me(accounts, outcome.shared_with_me_matches_by_user_id, is_shared_refresh_forced)
         self._resolve_initial_syncs(tracked_user_ids, accounts, outcome.is_pull_ok_by_user_id)
         if self.forward_identity is not None:
             no_longer_shared = self.forward_identity.apply_sync_results(outcome.shared_agent_ids_by_user_id)
@@ -319,6 +345,40 @@ class WorkspaceSyncScheduler(MutableModel):
                 self.connection_store.push_dirty(user_id, account_email)
         if self.provider_materializer is not None:
             self.provider_materializer.materialize()
+
+    def _sync_shared_with_me(
+        self,
+        accounts: Mapping[str, str],
+        matches_by_user_id: Mapping[str, tuple[SharedWithMeMatchCliInfo, ...] | None],
+        is_forced: bool,
+    ) -> None:
+        """Pull and push every account's shared-with-me documents, then refetch the listings that need it.
+
+        The documents (verdicts and pasted links) sync like the settings
+        document; the listing is refetched only when its match set moved, the
+        cache is absent or stale, or the pass was kicked, so a quiet tick costs
+        the records pull alone (specs/shared-with-me, 4.7). A fetch or pull the
+        CLI refuses or cannot reach is logged and keeps the cache; it never
+        fails the pass.
+        """
+        if self.shared_with_me_store is None:
+            return
+        # An empty listing that the identity read failed to produce means
+        # "unknown", not "nobody is signed in": the caches are kept.
+        if not accounts and self.session_store.is_last_identity_read_failed:
+            logger.warning("Leaving the shared-with-me caches alone: the signed-in accounts could not be listed")
+            return
+        # A signed-out account (interactive or retired) has no listing here.
+        for user_id in self.shared_with_me_store.list_cached_user_ids():
+            if user_id not in accounts:
+                self.shared_with_me_store.forget_account(user_id)
+        for user_id, account_email in accounts.items():
+            self.shared_with_me_store.sync_documents(user_id, account_email)
+            # Stamped right before the fetch: the stamp is also the store's
+            # ordering guard against a fetch a route landed meanwhile.
+            self.shared_with_me_store.refresh_if_needed(
+                user_id, account_email, matches_by_user_id.get(user_id), is_forced, datetime.now(timezone.utc)
+            )
 
     def _sync_account_settings(self, accounts: Mapping[str, str]) -> None:
         """Pull every account's settings record and push the dirty ones (spec section 7.2).

@@ -1,6 +1,7 @@
+from imbue.imbue_common.public_email_domains import PUBLIC_EMAIL_DOMAINS
 from imbue.minds.desktop_client.api_models import SharingGrantList
 from imbue.minds.desktop_client.api_models import SharingGrantsDocument
-from imbue.minds.desktop_client.share_grant_validation import PUBLIC_EMAIL_DOMAINS
+from imbue.minds.desktop_client.share_grant_validation import grantable_email_domain
 from imbue.minds.desktop_client.share_grant_validation import normalized_grants_document
 from imbue.minds.desktop_client.share_grant_validation import validate_grants_document
 
@@ -24,6 +25,7 @@ def test_validate_grants_document_refuses_each_bad_entry_exactly_once() -> None:
         ("owner@example.com", "owner@example.com is your own address."),
         ("not a domain", "not a domain is not a domain."),
         ("gmail.com", "gmail.com cannot be granted permissions because it is a public email provider."),
+        ("partner.org", "partner.org is not your domain; you can only share with everyone at example.com."),
     ]
 
 
@@ -51,7 +53,7 @@ def test_validate_grants_document_compares_case_insensitively_after_trimming() -
     document = SharingGrantsDocument(
         workspace=SharingGrantList(
             emails=("friend@example.com", " Friend@Example.com ", "  OWNER@example.com"),
-            email_domains=("partner.org", "PARTNER.ORG", " GMail.com "),
+            email_domains=("example.com", "EXAMPLE.COM", " GMail.com "),
         )
     )
 
@@ -60,7 +62,7 @@ def test_validate_grants_document_compares_case_insensitively_after_trimming() -
     assert [(refusal.value, refusal.message) for refusal in refusals] == [
         (" Friend@Example.com ", "friend@example.com is already granted here."),
         ("  OWNER@example.com", "owner@example.com is your own address."),
-        ("PARTNER.ORG", "partner.org is already granted here."),
+        ("EXAMPLE.COM", "example.com is already granted here."),
         (" GMail.com ", "gmail.com cannot be granted permissions because it is a public email provider."),
     ]
 
@@ -121,11 +123,11 @@ def test_validate_grants_document_accepts_ordinary_addresses_and_domains() -> No
     document = SharingGrantsDocument(
         workspace=SharingGrantList(
             emails=("first.last+tag@sub.example.co.uk", "a@b.io"),
-            email_domains=("sub.example.co.uk", "my-company.dev"),
+            email_domains=("sub.example.co.uk",),
         )
     )
 
-    assert validate_grants_document(document, "owner@example.com", _NOTHING_STORED) == ()
+    assert validate_grants_document(document, "owner@sub.example.co.uk", _NOTHING_STORED) == ()
 
 
 def test_public_email_domains_covers_the_providers_a_domain_grant_must_never_admit() -> None:
@@ -139,12 +141,14 @@ def test_validate_grants_document_grandfathers_every_entry_the_document_already_
     # save must never refuse the save, or the owner row the create form seeds
     # (and anything an older panel wrote) would block every later edit.
     stored = SharingGrantsDocument(
-        workspace=SharingGrantList(emails=("owner@example.com", "not-an-address"), email_domains=("gmail.com",))
+        workspace=SharingGrantList(
+            emails=("owner@example.com", "not-an-address"), email_domains=("gmail.com", "partner.org")
+        )
     )
     document = SharingGrantsDocument(
         workspace=SharingGrantList(
             emails=("Owner@Example.com ", "not-an-address", "friend@example.com"),
-            email_domains=("gmail.com", "partner.org"),
+            email_domains=("gmail.com", "partner.org", "example.com"),
         )
     )
 
@@ -181,13 +185,13 @@ def test_validate_grants_document_reads_a_domain_written_with_a_leading_at_sign(
     # grant as "example.com", so a copy of one is a duplicate of the other and
     # a public provider is refused either way.
     document = SharingGrantsDocument(
-        workspace=SharingGrantList(email_domains=("@partner.org", "partner.org", "@gmail.com"))
+        workspace=SharingGrantList(email_domains=("@example.com", "example.com", "@gmail.com"))
     )
 
     refusals = validate_grants_document(document, "owner@example.com", _NOTHING_STORED)
 
     assert [(refusal.value, refusal.message) for refusal in refusals] == [
-        ("partner.org", "partner.org is already granted here."),
+        ("example.com", "example.com is already granted here."),
         ("@gmail.com", "gmail.com cannot be granted permissions because it is a public email provider."),
     ]
 
@@ -197,7 +201,55 @@ def test_validate_grants_document_accepts_internationalized_labels() -> None:
         workspace=SharingGrantList(emails=("私@例え.テスト",), email_domains=("Müller-KG.example",))
     )
 
-    assert validate_grants_document(document, "owner@example.com", _NOTHING_STORED) == ()
+    assert validate_grants_document(document, "owner@müller-kg.example", _NOTHING_STORED) == ()
+
+
+def test_validate_grants_document_refuses_a_domain_other_than_the_granters_own() -> None:
+    # A domain grant admits everyone at that domain, so a granter may only
+    # grant the domain of the account they are sharing from.
+    document = SharingGrantsDocument(
+        workspace=SharingGrantList(email_domains=("partner.org",)),
+        services={"notes": SharingGrantList(email_domains=("example.com", "sub.example.com"))},
+    )
+
+    refusals = validate_grants_document(document, "owner@example.com", _NOTHING_STORED)
+
+    assert [(refusal.scope, refusal.value, refusal.message) for refusal in refusals] == [
+        (
+            "workspace",
+            "partner.org",
+            "partner.org is not your domain; you can only share with everyone at example.com.",
+        ),
+        (
+            "notes",
+            "sub.example.com",
+            "sub.example.com is not your domain; you can only share with everyone at example.com.",
+        ),
+    ]
+
+
+def test_validate_grants_document_tells_a_public_provider_granter_no_domain_is_grantable() -> None:
+    # The granter's own domain is a public provider, which the public-provider
+    # rule refuses, so no domain at all can be granted; the message must not
+    # send them to "everyone at gmail.com".
+    document = SharingGrantsDocument(workspace=SharingGrantList(email_domains=("partner.org", "gmail.com")))
+
+    refusals = validate_grants_document(document, "owner@gmail.com", _NOTHING_STORED)
+
+    assert [(refusal.value, refusal.message) for refusal in refusals] == [
+        (
+            "partner.org",
+            "partner.org cannot be granted: domain grants need an account at a non-public email domain, "
+            "and yours is at a public provider.",
+        ),
+        ("gmail.com", "gmail.com cannot be granted permissions because it is a public email provider."),
+    ]
+
+
+def test_grantable_email_domain_is_the_lowercased_domain_of_the_granters_address() -> None:
+    assert grantable_email_domain("Owner@Example.COM") == "example.com"
+    # A public provider's domain is never grantable, so such a granter has none.
+    assert grantable_email_domain("owner@gmail.com") == ""
 
 
 def test_normalized_grants_document_stores_what_was_checked() -> None:

@@ -66,7 +66,77 @@ from imbue.mngr_latchkey.file_sharing import FileSharingAccess
 # while a window stayed open across a reconnect -- it cannot catch assets
 # built for another version being served with a matching bootstrap, since
 # both values come from the same live server.
-UI_SCHEMA_VERSION: int = 28
+UI_SCHEMA_VERSION: int = 29
+
+
+class UiSharedWorkspaceOwner(FrozenModel):
+    """The owner of a workspace shared with the window's account (email only when the connector reports it verified)."""
+
+    user_id: str = Field(description="The owner's account id")
+    email: str | None = Field(default=None, description="The owner's verified email, when any")
+    display_name: str | None = Field(default=None, description="The owner's display name, when any")
+    profile_picture_url: str | None = Field(default=None, description="The owner's profile picture, when any")
+
+
+class UiSharedWorkspaceTarget(FrozenModel):
+    """One target of a shared workspace the window's account may open: the shell, or one app."""
+
+    app: str = Field(description="The target's service name; system_interface for the whole workspace")
+    display_name: str | None = Field(default=None, description="What a person reads for it; None when never pushed")
+    link: str | None = Field(
+        default=None, description="The target's share URL; None until the workspace has an address"
+    )
+    granted_via: str = Field(default="unknown", description="user / email / domain: the strongest admitting grant")
+    is_granted_as_app: bool = Field(
+        default=False,
+        description=(
+            "Whether a grant names this app itself, beside any whole-workspace grant; the home page then lists it "
+            "as an icon of its own as well as part of the workspace's card"
+        ),
+    )
+
+
+class UiSharedWorkspace(FrozenModel):
+    """What a row listed under 'Shared with me' carries beyond a plain workspace row (specs/shared-with-me, 4.7).
+
+    Discovery only: the row says the workspace might admit the account. Whether
+    it does is learned when the frame loads it, and recorded as ``verdict``.
+    """
+
+    share_key: str = Field(description="The share's durable key: the workspace id, else the host id")
+    host_id: str = Field(description="The share's host id (what the response routes name)")
+    workspace_domain: str = Field(description="The share's bare workspace domain (every target is a label under it)")
+    owner: UiSharedWorkspaceOwner = Field(description="Who shared it")
+    status: str = Field(description="invited / accepted / declined (unknown from a newer connector)")
+    granted_via: str = Field(description="user / email / domain: the strongest grant admitting the account anywhere")
+    last_seen_at: str | None = Field(default=None, description="When the share's tunnel was last seen alive")
+    latest_grant_at: str = Field(default="", description="When the newest grant naming the account was observed")
+    targets: tuple[UiSharedWorkspaceTarget, ...] = Field(description="What may be opened, the shell first")
+    verdict: str | None = Field(
+        default=None,
+        description=(
+            "What the last open learned: admitted / refused / misconfigured / offline / sign_in_failed; "
+            "None until the first open"
+        ),
+    )
+    verdict_at: str | None = Field(default=None, description="When the verdict was recorded (UTC ISO 8601)")
+    is_manual: bool = Field(
+        default=False,
+        description="A link the user pasted rather than a listed share: no owner, name, or status is known for it",
+    )
+
+
+class UiWorkspaceApp(FrozenModel):
+    """One app of an owned workspace, as the home page's "Your apps" lists it (specs/home-screen-redesign, 4.10)."""
+
+    name: str = Field(description="The service name: the registry key, and the key of its grants")
+    display_name: str = Field(description="What a person reads for it; the service name when the manifest gave none")
+    label: str = Field(
+        default="", description="The app's origin label; empty until its registration reaches this client"
+    )
+    icon_version: str = Field(
+        default="", description="A short digest of the app's accepted icon markup; empty when it has no usable icon"
+    )
 
 
 class UiWorkspaceEntry(FrozenModel):
@@ -160,6 +230,28 @@ class UiWorkspaceEntry(FrozenModel):
             "For a live cloud row this device holds no SSH key for (so it cannot open the machine): 'locked' "
             "when the synced key needs the master password here, 'syncing' when the account is unlocked and "
             "the key has not arrived yet, 'unavailable' when no key can reach this device; empty otherwise"
+        ),
+    )
+    is_owned: bool = Field(
+        default=True,
+        description=(
+            "Whether the row is the window's account's own workspace. False for a row listed under 'Shared with "
+            "me': someone else's workspace, which this device must treat as untrusted and may only open, "
+            "decline, report, retry, or remove (specs/shared-with-me, S12)"
+        ),
+    )
+    share: UiSharedWorkspace | None = Field(
+        default=None, description="For a row shared with the account: the share, its owner, status, and targets"
+    )
+    apps: tuple[UiWorkspaceApp, ...] = Field(
+        default=(),
+        description="The apps a live owned workspace has registered (system and internal services excepted)",
+    )
+    wallpaper_version: str = Field(
+        default="",
+        description=(
+            "A short digest of the workspace's cached wallpaper image, which the home page's card is painted "
+            "with; empty when none is cached (never loaded here, or the workspace wears its theme's default)"
         ),
     )
 

@@ -1138,3 +1138,38 @@ html.typing-hides-cursor,
 html.typing-hides-cursor * {
   cursor: none !important;
 }
+
+/*
+ * The home page's workspace cards (specs/home-screen-redesign, 4.7 and
+ * 4.15). A card wears ``titlebar-surface`` with ``--titlebar-bg`` set to the
+ * colour its text sits on (the wallpaper's sampled tone, else the accent), so
+ * its text and fills re-base on that colour; ``card-ground`` re-bases the
+ * subtle fill too, for the chips' resting fill on an accent-coloured card.
+ */
+.card-ground {
+  --c-fill-subtle: rgb(from var(--_contrast) r g b / 0.1);
+}
+/* A card's status chip: white at 75% with a 2px blur, its text re-based on
+ * white (titlebar-surface), so it reads on any card or wallpaper. Orange text
+ * follows the chip's contrast (#b45300 on white). */
+.status-chip {
+  --titlebar-bg: #ffffff;
+  background-color: rgb(from var(--titlebar-bg) r g b / 0.75);
+  backdrop-filter: blur(2px);
+  --c-warning: rgb(from var(--_contrast) calc(180 + r * 0.29) calc(83 + g * 0.21) calc(b * 0.1));
+}
+/* A card or an invitation arriving on the page rises into place. */
+@keyframes card-arrive {
+  from {
+    transform: translateY(6px) scale(0.97);
+    opacity: 0;
+  }
+}
+.card-arrive {
+  animation: card-arrive 320ms cubic-bezier(0.2, 0, 0, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  .card-arrive {
+    animation: none;
+  }
+}

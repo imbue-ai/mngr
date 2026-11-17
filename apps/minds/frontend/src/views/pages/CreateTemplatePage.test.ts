@@ -1,6 +1,6 @@
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { clearAppContextForTests, registerAppContext } from "../../app-context";
+import { clearAppContextForTests, getAppContext, registerAppContext } from "../../app-context";
 import { createEmptyStores } from "../../models/boot";
 import { ShellState } from "../shell/shell-state";
 import type { AnyVnode } from "../../testing";
@@ -12,7 +12,10 @@ import {
   createFormDefaults,
   jsonResponse,
   secondAccountEntry,
+  required,
   settle,
+  sharedWorkspaceEntry,
+  workspacesMessage,
 } from "../../testing";
 import type {
   CloudAccountOption,
@@ -41,9 +44,10 @@ const TEAM_AWS_CONNECTION: CloudAccountOption = {
   is_region_pinned: true,
 };
 
-/** The full page, already on "Where should it run?", rendered afresh as vnodes on each call. */
+/** The full page, already on "Where should it run?" (or on the `start` the route names), rendered afresh as vnodes on each call. */
 async function pageOnWhereToRun(
   defaults: CreateFormDefaults,
+  route: Record<string, string> = ROUTE,
 ): Promise<() => AnyVnode[]> {
   // The page reads the window's account off the shell for the defaults it fetches.
   const stores = createEmptyStores();
@@ -52,7 +56,7 @@ async function pageOnWhereToRun(
   registerAppContext({ stores, shell });
   vi.spyOn(m, "redraw").mockImplementation(() => undefined);
   vi.spyOn(m.route, "param").mockImplementation(((key?: string) =>
-    key === undefined ? undefined : ROUTE[key]) as typeof m.route.param);
+    key === undefined ? undefined : route[key]) as typeof m.route.param);
   vi.stubGlobal("fetch", () => Promise.resolve(jsonResponse(defaults)));
   // Opening the advanced panel pins the page's centered column, which is not mounted here.
   vi.stubGlobal("document", { getElementById: () => null });
@@ -83,6 +87,30 @@ describe("CreateTemplatePage", () => {
     expect(attrsOf(select).value).toBe("CONNECTION:aws_acct");
     expect(allText(select)).toContain("team aws (AWS)");
     expect(allText(nodes)).toContain("Your own cloud");
+  });
+
+  it("offers only the account's own workspaces to add the template to, never one shared with it", async () => {
+    const message = workspacesMessage();
+    const view = await pageOnWhereToRun(createFormDefaults(), { ...ROUTE, start: "add" });
+    getAppContext().stores.workspaces.applyWorkspacesMessage({
+      ...message,
+      workspaces: [...message.workspaces, sharedWorkspaceEntry()],
+    });
+    // Copying the message is what advances to the workspace picker, a second later.
+    vi.useFakeTimers();
+    try {
+      const copy = view().find((node) => allText(node) === "Copy" && typeof attrsOf(node).onclick === "function");
+      (attrsOf(required(copy)).onclick as () => void)();
+      vi.advanceTimersByTime(1000);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const text = allText(view());
+
+    expect(text).toContain("Select a workspace");
+    expect(text).toContain("alpha");
+    expect(text).not.toContain("Beta");
   });
 
   it("offers only the device's compute when the window has no account", async () => {

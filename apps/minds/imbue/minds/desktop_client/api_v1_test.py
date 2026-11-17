@@ -72,6 +72,8 @@ from imbue.minds.desktop_client.backup_update import BLOCKED_BY_RUNNING_CHATS_PR
 from imbue.minds.desktop_client.backup_verification_store import is_backup_verification_enabled
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
+from imbue.minds.desktop_client.conftest import SHARED_TEST_HOST_ID
+from imbue.minds.desktop_client.conftest import SHARED_TEST_WORKSPACE_ID
 from imbue.minds.desktop_client.conftest import TEST_RELAY_ENDPOINTS
 from imbue.minds.desktop_client.conftest import add_modal_connection_for_test
 from imbue.minds.desktop_client.conftest import make_agents_json
@@ -82,6 +84,9 @@ from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_service_log
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.conftest import make_share_probe_result
+from imbue.minds.desktop_client.conftest import make_shared_share
+from imbue.minds.desktop_client.conftest import make_shared_with_me_store_for_test
+from imbue.minds.desktop_client.conftest import seed_shared_with_me_listing
 from imbue.minds.desktop_client.conftest import session_store_account_source
 from imbue.minds.desktop_client.conftest import unlock_account_with_master_password_for_test
 from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
@@ -117,6 +122,7 @@ from imbue.minds.desktop_client.mock_agent_creator_test import InFlightCreateAtt
 from imbue.minds.desktop_client.mock_agent_creator_test import make_in_flight_agent_creator
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
+from imbue.minds.desktop_client.shared_with_me_store import SharedWithMeStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
@@ -617,6 +623,45 @@ def test_list_workspaces_reports_every_listed_workspace_as_the_users_own(tmp_pat
     workspaces = json.loads(response.data)["workspaces"]
     assert workspaces
     assert all(workspace["is_owned"] is True for workspace in workspaces)
+
+
+def test_list_workspaces_includes_the_rows_shared_with_a_signed_in_account(tmp_path: Path) -> None:
+    # A shared workspace is listed under the recipient's account as not owned,
+    # with the link it opens by; it has no local host or git state to report.
+    agent_id = AgentId()
+    user_id = "33333333-3333-3333-3333-333333333333"
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=user_id, email="viewer@example.com")
+    seed_shared_with_me_listing(
+        cli, "viewer@example.com", make_shared_share(SHARED_TEST_HOST_ID, SHARED_TEST_WORKSPACE_ID)
+    )
+    shared_store = make_shared_with_me_store_for_test(tmp_path / "shared", cli)
+    shared_store.refresh(user_id, "viewer@example.com", datetime.now(timezone.utc))
+    # A pasted link is the user's own note, not a share an agent can act on.
+    shared_store.add_manual_link(user_id, "https://shell-9.other.us1.shares.example/", "Elsewhere")
+    client = _build_client(
+        tmp_path,
+        make_resolver_with_data(make_agents_json(agent_id)),
+        imbue_cloud_cli=cli,
+        session_store=make_session_store_for_test(tmp_path / "sessions", cli=cli),
+        shared_with_me_store=shared_store,
+    )
+
+    response = client.get("/api/v1/workspaces", headers=_auth_header())
+
+    assert response.status_code == 200
+    by_id = {workspace["agent_id"]: workspace for workspace in json.loads(response.data)["workspaces"]}
+    assert set(by_id) == {str(agent_id), SHARED_TEST_WORKSPACE_ID}
+    assert by_id[str(agent_id)]["is_owned"] is True
+    assert by_id[str(agent_id)]["share_link"] is None
+    shared = by_id[SHARED_TEST_WORKSPACE_ID]
+    assert shared["is_owned"] is False
+    assert shared["name"] == "Alpha"
+    assert shared["host_id"] == SHARED_TEST_HOST_ID
+    assert shared["account_id"] == user_id
+    assert (
+        shared["share_link"] == f"https://system-interface-k3j9.{SHARED_TEST_HOST_ID}.ownerlabel.us1.shares.example/"
+    )
 
 
 def test_list_workspaces_requires_bearer(tmp_path: Path) -> None:
@@ -2372,6 +2417,7 @@ def _build_client(
     agent_creator: AgentCreator | None = None,
     account_settings_store: AccountSettingsStore | None = None,
     workspace_profile_writer: WorkspaceProfileWriter | None = None,
+    shared_with_me_store: SharedWithMeStore | None = None,
 ) -> FlaskClient:
     """Build a desktop-client test client with the /api/v1 surface and the given deps."""
     app = create_desktop_client(
@@ -2394,6 +2440,7 @@ def _build_client(
         client_env_config=client_env_config,
         account_settings_store=account_settings_store,
         workspace_profile_writer=workspace_profile_writer,
+        shared_with_me_store=shared_with_me_store,
     )
     return app.test_client()
 
@@ -2970,8 +3017,11 @@ class _GatewayStatusCaller(RecordingMngrCaller):
         timeout: float | None = None,
         env_overrides: Mapping[str, str] | None = None,
         cwd: Path | None = None,
+        on_process_claimed: Callable[[], None] | None = None,
     ) -> MngrCallResult:
-        result = super().call(argv, timeout=timeout, env_overrides=env_overrides, cwd=cwd)
+        result = super().call(
+            argv, timeout=timeout, env_overrides=env_overrides, cwd=cwd, on_process_claimed=on_process_claimed
+        )
         if any("share_gateway/status.json" in part for part in argv):
             envelope = {"results": [{"agent": argv[1], "stdout": self.status_json, "stderr": "", "success": True}]}
             return MngrCallResult(returncode=0, stdout=json.dumps(envelope))
@@ -3163,8 +3213,11 @@ class _ShareProbeCaller(RecordingMngrCaller):
         timeout: float | None = None,
         env_overrides: Mapping[str, str] | None = None,
         cwd: Path | None = None,
+        on_process_claimed: Callable[[], None] | None = None,
     ) -> MngrCallResult:
-        result = super().call(argv, timeout=timeout, env_overrides=env_overrides, cwd=cwd)
+        result = super().call(
+            argv, timeout=timeout, env_overrides=env_overrides, cwd=cwd, on_process_claimed=on_process_claimed
+        )
         if any("MNGR_SHARE_GATEWAY" in part for part in argv):
             return make_share_probe_result(
                 is_gateway_present=self.is_gateway_present,
@@ -3243,7 +3296,7 @@ def test_machine_sharing_put_enables_and_injects_materials(tmp_path: Path) -> No
     response = client.put(
         f"/api/v1/machines/{_TEST_HOST_ID}/sharing",
         headers=_auth_header(),
-        json={"workspace": {"emails": ["viewer@example.com"], "email_domains": ["partner.org"]}},
+        json={"workspace": {"emails": ["viewer@example.com"], "email_domains": ["example.com"]}},
     )
 
     assert response.status_code == 200
@@ -3479,14 +3532,14 @@ def test_workspace_sharing_grants_put_saves_while_unpublished_and_publishes_noth
     response = client.put(
         f"/api/v1/workspace-sharing/{agent_id}/grants",
         headers=_auth_header(),
-        json={"grants": {"workspace": {"emails": ["viewer@example.com"], "email_domains": ["partner.org"]}}},
+        json={"grants": {"workspace": {"emails": ["viewer@example.com"], "email_domains": ["example.com"]}}},
     )
 
     assert response.status_code == 200
     body = json.loads(response.data)
     assert body["enabled"] is False
     assert body["grants"]["workspace"]["emails"] == ["viewer@example.com"]
-    assert body["grants"]["workspace"]["email_domains"] == ["partner.org"]
+    assert body["grants"]["workspace"]["email_domains"] == ["example.com"]
     assert cli.created_shares == []
     recorded = _recorded_mngr_calls(cli)
     # Exactly one write, under the lock every in-container grants writer takes,
@@ -3672,16 +3725,16 @@ def test_workspace_sharing_grants_put_stores_the_normalized_entries(tmp_path: Pa
     response = client.put(
         f"/api/v1/workspace-sharing/{agent_id}/grants",
         headers=_auth_header(),
-        json={"grants": {"workspace": {"emails": [" Viewer@Example.COM "], "email_domains": ["@Partner.ORG"]}}},
+        json={"grants": {"workspace": {"emails": [" Viewer@Example.COM "], "email_domains": ["@Example.COM"]}}},
     )
 
     assert response.status_code == 200, response.data
     grants = json.loads(response.data)["grants"]["workspace"]
     assert grants["emails"] == ["viewer@example.com"]
-    assert grants["email_domains"] == ["partner.org"]
+    assert grants["email_domains"] == ["example.com"]
     # The file carries the normalized entries, not what was typed.
     normalized_toml = render_grants_toml(
-        {"users": [], "emails": ["viewer@example.com"], "email_domains": ["partner.org"]}, {}
+        {"users": [], "emails": ["viewer@example.com"], "email_domains": ["example.com"]}, {}
     )
     write_command = next(command for command in _recorded_exec_commands(cli) if "printf" in command)
     assert base64.b64encode(normalized_toml.encode()).decode("ascii") in write_command
@@ -7506,9 +7559,12 @@ class _VisitingAgentsCaller(_ShareProbeCaller):
         timeout: float | None = None,
         env_overrides: Mapping[str, str] | None = None,
         cwd: Path | None = None,
+        on_process_claimed: Callable[[], None] | None = None,
     ) -> MngrCallResult:
         if len(argv) > 2 and "agent-access" in argv[2]:
-            super().call(argv, timeout=timeout, env_overrides=env_overrides, cwd=cwd)
+            super().call(
+                argv, timeout=timeout, env_overrides=env_overrides, cwd=cwd, on_process_claimed=on_process_claimed
+            )
             envelope = {
                 "results": [
                     {
@@ -7522,7 +7578,9 @@ class _VisitingAgentsCaller(_ShareProbeCaller):
             return MngrCallResult(
                 returncode=self.agent_access_returncode, stdout=json.dumps(envelope), stderr=self.agent_access_stderr
             )
-        return super().call(argv, timeout=timeout, env_overrides=env_overrides, cwd=cwd)
+        return super().call(
+            argv, timeout=timeout, env_overrides=env_overrides, cwd=cwd, on_process_claimed=on_process_claimed
+        )
 
 
 def _visiting_agents_client(

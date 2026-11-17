@@ -9,10 +9,12 @@ forwarding logic lives in the ``mngr_forward`` plugin now; this command:
 2. Builds the slimmed Imbue Studio bare-origin Flask app and runs it on
    ``--port`` (default 8420).
 3. Emits a ``mngr_forward_started`` JSONL event on stdout carrying the
-   preauth cookie value and the path of the proxy's local CA certificate,
-   so the Electron shell can pre-set ``mngr_forward_session=<value>`` on
-   ``localhost:<mngr-forward-port>`` and pin the proxy's TLS to that CA
-   before the first agent-subdomain navigation.
+   preauth cookie value, the path of the proxy's local CA certificate, and
+   the tier's accounts origin, so the Electron shell can pre-set
+   ``mngr_forward_session=<value>`` on ``localhost:<mngr-forward-port>``,
+   pin the proxy's TLS to that CA before the first agent-subdomain
+   navigation, and recognize the accounts origin a shared workspace's frame
+   signs in on (specs/shared-with-me, 4.7).
 
 Agents reach the Imbue Studio API via the latchkey gateway's bundled
 ``minds-api-proxy`` extension rather than over a per-agent reverse SSH
@@ -132,6 +134,8 @@ from imbue.minds.desktop_client.server import desktop_client_runtime
 from imbue.minds.desktop_client.server import serve_desktop_client
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.settings.migration import migrate_account_keyed_settings
+from imbue.minds.desktop_client.shared_with_me_store import SharedWithMeDocumentStore
+from imbue.minds.desktop_client.shared_with_me_store import SharedWithMeStore
 from imbue.minds.desktop_client.shared_workspaces import clear_materials_of_shares_retired_elsewhere
 from imbue.minds.desktop_client.startup_reconcile import PendingCreateAttemptDiscoverySweep
 from imbue.minds.desktop_client.startup_reconcile import StartupHostReconciler
@@ -615,6 +619,14 @@ def run(
     # died inside would otherwise be materialized and offered, never synced.
     connection_store.discard_unregistered_connections()
     account_settings_store = AccountSettingsStore(data_dir=paths.data_dir, cli=imbue_cloud_cli)
+    # What is shared with each account (specs/shared-with-me): the listing cache
+    # the sync pass refreshes, and the account documents holding verdicts and
+    # pasted links. Its change callback is bound once the channel publisher exists.
+    shared_with_me_store = SharedWithMeStore(
+        data_dir=paths.data_dir,
+        cli=imbue_cloud_cli,
+        documents=SharedWithMeDocumentStore(data_dir=paths.data_dir, cli=imbue_cloud_cli),
+    )
     # CLEANUP: remove this call (with settings/migration.py and its MindsConfig
     # helpers) once every supported install has started a phase-3A build.
     # Before anything resolves a setting: the moved config.toml values become
@@ -959,6 +971,7 @@ def run(
         backup_reaper=backup_reaper,
         connection_store=connection_store,
         settings_store=account_settings_store,
+        shared_with_me_store=shared_with_me_store,
         workspace_profile_writer=workspace_profile_writer,
         flush_workspace_fact_writes=lambda: flush_pending_backup_verification_writes(
             workspace_facts_cache, mngr_caller=mngr_caller, backend_resolver=backend_resolver
@@ -1035,6 +1048,7 @@ def run(
             "preauth_cookie": preauth_cookie,
             "mngr_forward_port": mngr_forward_port,
             "ca_cert_path": str(forward_ca_cert_path),
+            "accounts_origin": client_env_config.accounts_origin_url(),
         },
         output_format,
     )
@@ -1103,6 +1117,7 @@ def run(
         account_settings_store=account_settings_store,
         workspace_facts_cache=workspace_facts_cache,
         workspace_profile_writer=workspace_profile_writer,
+        shared_with_me_store=shared_with_me_store,
     )
 
     # A settings pull that landed another device's change applies it like a

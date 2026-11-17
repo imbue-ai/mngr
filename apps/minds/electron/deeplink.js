@@ -14,6 +14,10 @@
 //     Branch input accepts and stays blank when absent (create then resolves
 //     the repo's latest version). Without a git_url the plain create page is
 //     the target.
+//   imbue-studio://shared/<host-id>  -> a workspace shared with the user (the
+//     invitation email's "Open it in the app" link, specs/shared-with-me
+//     4.11): main.js navigates to the SPA's /shared/<host-id> route, which
+//     refreshes every signed-in account's listing and lands on the tile.
 //   imbue-studio:// (or any unrecognized/malformed URL) -> just focus the app.
 
 // The schemes the app registers with the OS and accepts here, primary first.
@@ -55,6 +59,11 @@ function parseDeeplink(rawUrl) {
   // Non-special schemes preserve host case (imbue-studio://CREATE keeps host
   // "CREATE"), so lowercase explicitly. hostname (not host) ignores a port.
   const action = parsed.hostname.toLowerCase();
+  if (action === 'shared') {
+    // The one path segment is the share's host id; anything else is a focus.
+    const match = parsed.pathname.match(/^\/(host-[a-f0-9]{32})\/?$/i);
+    return match ? { action: 'shared', hostId: match[1].toLowerCase() } : FOCUS;
+  }
   if (action !== 'create') return FOCUS;
   // Exactly these two params; extra params and path segments are ignored.
   const gitUrl = (parsed.searchParams.get('git_url') || '').trim();
@@ -73,6 +82,10 @@ function parseDeeplink(rawUrl) {
  */
 function deeplinkTargetPath(rawUrl) {
   const parsed = parseDeeplink(rawUrl);
+  // A shared-workspace link targets the SPA's /shared/<host-id> route; the id
+  // was matched against the host-id shape, so only a fixed literal plus
+  // 32 hex characters ever reaches loadURL.
+  if (parsed.action === 'shared') return `/shared/${parsed.hostId}`;
   if (parsed.action !== 'create') return null;
   const params = new URLSearchParams();
   if (parsed.gitUrl) params.set('git_url', parsed.gitUrl);

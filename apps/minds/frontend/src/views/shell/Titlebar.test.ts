@@ -9,12 +9,18 @@ import { Titlebar } from "./Titlebar";
 import { TrafficLights } from "./TrafficLights";
 import type { AnyVnode } from "../../testing";
 import {
+  allText,
   attrsOf,
   classTokensOf,
   collectVnodes,
   notificationEntry,
+  required,
+  sharedWorkspaceEntry,
 } from "../../testing";
-import type { UiNotificationEntry } from "../../channel/messages";
+import type {
+  UiNotificationEntry,
+  UiWorkspaceEntry,
+} from "../../channel/messages";
 
 const WORKSPACE_ID = "agent-ab12";
 const OPTIONS_PATH = `/workspace/${WORKSPACE_ID}/options`;
@@ -54,6 +60,10 @@ interface RenderTitlebarOptions {
   isTrafficLightsDrawn?: boolean;
   /** The chrome control a workspace's tour asked to have ringed. */
   highlightedChromeAnchor?: string | null;
+  /** The route's workspace id; `agent-ab12` by default. */
+  workspaceId?: string;
+  /** The entry the workspaces store answers for any id; an owned "alpha" by default. */
+  workspaceEntry?: UiWorkspaceEntry | null;
 }
 
 /** Render the titlebar without a DOM. `window` is stubbed because the Electron
@@ -64,9 +74,11 @@ function renderTitlebar(
   options: RenderTitlebarOptions = {},
 ): AnyVnode {
   vi.stubGlobal("window", {});
+  const workspaceId = options.workspaceId ?? WORKSPACE_ID;
   vi.spyOn(m.route, "get").mockReturnValue(
-    `/workspace/${WORKSPACE_ID}${routeSearch ? `?${routeSearch}` : ""}`,
+    `/workspace/${workspaceId}${routeSearch ? `?${routeSearch}` : ""}`,
   );
+  const isEntryGiven = options.workspaceEntry !== undefined;
   const shell = {
     isMac: options.isMac ?? true,
     isTrafficLightsDrawn: options.isTrafficLightsDrawn ?? false,
@@ -74,8 +86,9 @@ function renderTitlebar(
     stores: {
       ...createEmptyStores(),
       workspaces: {
-        accentEntry: () => ({ name: "alpha" }),
-        entryByAnyId: () => null,
+        // The accent entry is the device's own row; a shared row has none.
+        accentEntry: () => (isEntryGiven ? null : { name: "alpha" }),
+        entryByAnyId: () => (isEntryGiven ? options.workspaceEntry : null),
         toAgentScopedId: (anyId: string) => anyId,
       },
       // Real stores keep the request badge independent from the reminder feed.
@@ -100,7 +113,7 @@ function renderTitlebar(
       })(),
     },
     openSidebar: () => undefined,
-    displayedWorkspaceAnyId: WORKSPACE_ID,
+    displayedWorkspaceAnyId: workspaceId,
     isNotificationsOpen: options.isNotificationsOpen ?? false,
     switchToNotifications: options.switchToNotifications ?? (() => undefined),
     highlightedChromeAnchor: options.highlightedChromeAnchor ?? null,
@@ -109,8 +122,8 @@ function renderTitlebar(
   const routePath =
     options.routePath ??
     (routeSearch === ""
-      ? `/workspace/${WORKSPACE_ID}`
-      : `/workspace/${WORKSPACE_ID}/options`);
+      ? `/workspace/${workspaceId}`
+      : `/workspace/${workspaceId}/options`);
   const render = (path: string): AnyVnode =>
     (instance.view as unknown as (v: m.Vnode) => m.Vnode).call(
       instance,
@@ -408,6 +421,25 @@ describe("Titlebar workspace tab strip", () => {
       .mockImplementation(() => undefined);
     (attrsOf(tabButton(root, "ws-tab-permissions")).onclick as () => void)();
     expect(routeSet).toHaveBeenCalledWith(`/workspace/${WORKSPACE_ID}`);
+  });
+});
+
+describe("Titlebar over a shared workspace", () => {
+  it("hides the owner-only tab strip and names the workspace from its shared row", () => {
+    const entry = sharedWorkspaceEntry();
+    const root = renderTitlebar("", {
+      workspaceId: entry.id,
+      workspaceEntry: entry,
+    });
+
+    const strip = collectVnodes(root).find(
+      (vnode) => attrsOf(vnode).id === "ws-tab-strip",
+    );
+    expect(attrsOf(required(strip)).hidden).toBe(true);
+    expect(allText(root)).toContain("Beta");
+    expect(attrsOf(required(collectVnodes(renderTitlebar("")).find(
+      (vnode) => attrsOf(vnode).id === "ws-tab-strip",
+    ))).hidden).toBe(false);
   });
 });
 

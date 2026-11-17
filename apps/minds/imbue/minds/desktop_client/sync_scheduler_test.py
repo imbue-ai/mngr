@@ -6,23 +6,35 @@ into the shared in-memory fake connector; device B signs in fresh and pulls.
 
 import json
 import threading
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from uuid import uuid4
 
+from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.account_settings_store import AccountSettingsStore
 from imbue.minds.desktop_client.account_settings_store import SETTINGS_DOCUMENT_KIND
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
+from imbue.minds.desktop_client.conftest import SHARED_TEST_HOST_ID
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_fresh_device_scheduler
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
+from imbue.minds.desktop_client.conftest import make_shared_share
+from imbue.minds.desktop_client.conftest import make_shared_with_me_store_for_test
 from imbue.minds.desktop_client.conftest import make_sync_test_device
 from imbue.minds.desktop_client.conftest import push_remote_workspace_record
+from imbue.minds.desktop_client.conftest import seed_shared_with_me_listing
 from imbue.minds.desktop_client.forward_identity import ForwardHeadersFile
 from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
 from imbue.minds.desktop_client.forward_identity import IDENTITY_HEADER
+from imbue.minds.desktop_client.shared_with_me_store import SHARED_WITH_ME_DOCUMENT_KIND
+from imbue.minds.desktop_client.shared_with_me_store import SharedAccessVerdict
+from imbue.minds.desktop_client.shared_with_me_store import SharedWithMeStore
 from imbue.minds.desktop_client.sync_scheduler import InitialSyncState
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.testing import decode_written_profile_snapshot
@@ -350,3 +362,134 @@ def test_pass_syncs_workspace_profiles_and_flushes_queued_fact_writes(tmp_path: 
 
     assert sync_calls == [True]
     assert flush_calls == [True]
+
+
+class _SharedWithMeTestDevice(FrozenModel):
+    """One device whose signed-in account has a single share listed at the fake connector."""
+
+    cli: FakeImbueCloudCli = Field(description="The shared fake connector")
+    user_id: str = Field(description="The signed-in account's user id")
+    email: str = Field(description="The signed-in account's email")
+    shared_store: SharedWithMeStore = Field(description="The device's shared-with-me store")
+    scheduler: WorkspaceSyncScheduler = Field(description="The device's scheduler, wired to the store")
+
+
+def _make_shared_with_me_device(base_dir: Path) -> _SharedWithMeTestDevice:
+    """A fresh device with one account signed in and one invited share (listing version 1) listed for it."""
+    user_id = uuid4().hex
+    email = f"user-{uuid4().hex}@example.com"
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=user_id, email=email)
+    seed_shared_with_me_listing(cli, email, make_shared_share(SHARED_TEST_HOST_ID))
+    record_store, session_store = make_sync_test_device(base_dir, f"fresh-{uuid4().hex}", cli)
+    shared_store = make_shared_with_me_store_for_test(base_dir / "shared", cli)
+    scheduler = WorkspaceSyncScheduler(
+        record_store=record_store,
+        session_store=session_store,
+        resolver=make_resolver_with_data(agents_json=json.dumps({"agents": []})),
+        shared_with_me_store=shared_store,
+    )
+    return _SharedWithMeTestDevice(
+        cli=cli, user_id=user_id, email=email, shared_store=shared_store, scheduler=scheduler
+    )
+
+
+def test_pass_fetches_the_shared_with_me_listing_only_when_its_match_set_moved_or_the_pass_was_kicked(
+    tmp_path: Path,
+) -> None:
+    device = _make_shared_with_me_device(tmp_path)
+    change_signals: list[bool] = []
+    device.shared_store.on_change = lambda: change_signals.append(True)
+
+    # No cache yet: the first pass fetches and the home page is told.
+    device.scheduler.run_one_pass()
+    assert device.cli.shared_with_me_fetch_count == 1
+    assert [row.share_key for row in device.shared_store.list_rows(device.user_id)] == [SHARED_TEST_HOST_ID]
+    assert change_signals == [True]
+
+    # A quiet tick: the records pull carries the same match set, so nothing is fetched.
+    device.scheduler.run_one_pass()
+    assert device.cli.shared_with_me_fetch_count == 1
+
+    # The listing changed at the connector: the match set moved, so the pass refetches.
+    seed_shared_with_me_listing(device.cli, device.email, version=2)
+    device.scheduler.run_one_pass()
+    assert device.cli.shared_with_me_fetch_count == 2
+    assert device.shared_store.list_rows(device.user_id) == []
+
+    # A kicked pass refetches regardless of the match set, once.
+    device.scheduler.kick()
+    device.scheduler.run_one_pass()
+    device.scheduler.run_one_pass()
+    assert device.cli.shared_with_me_fetch_count == 3
+
+
+def test_a_failed_listing_fetch_keeps_the_cache_and_does_not_fail_the_pass(tmp_path: Path) -> None:
+    device = _make_shared_with_me_device(tmp_path)
+    device.scheduler.run_one_pass()
+
+    device.cli.is_shared_with_me_failing = True
+    seed_shared_with_me_listing(device.cli, device.email, version=2)
+    device.scheduler.run_one_pass()
+
+    # The fetch was attempted (the match set moved) and its failure kept the last listing.
+    assert device.cli.shared_with_me_fetch_count == 2
+    assert [row.share_key for row in device.shared_store.list_rows(device.user_id)] == [SHARED_TEST_HOST_ID]
+
+
+def test_pass_pushes_a_recorded_verdict_and_pulls_one_another_device_recorded(tmp_path: Path) -> None:
+    device = _make_shared_with_me_device(tmp_path)
+    device.scheduler.run_one_pass()
+    change_signals: list[bool] = []
+    device.shared_store.on_change = lambda: change_signals.append(True)
+    # Another device opened the share and recorded what it learned.
+    pusher_store = make_shared_with_me_store_for_test(tmp_path / "pusher", device.cli)
+    pusher_store.refresh(device.user_id, device.email, datetime.now(timezone.utc))
+    pusher_store.record_verdict(
+        device.user_id, SHARED_TEST_HOST_ID, SharedAccessVerdict.REFUSED, datetime.now(timezone.utc)
+    )
+    pusher_store.documents.push_dirty(device.user_id, device.email)
+
+    device.scheduler.run_one_pass()
+    row = device.shared_store.find_row(device.user_id, SHARED_TEST_HOST_ID)
+    assert row is not None and row.verdict is SharedAccessVerdict.REFUSED
+    # The pulled verdict reaches the home page like a local write would; the
+    # listing itself was not refetched (a quiet tick), so that is the one signal.
+    assert change_signals == [True]
+
+    # This device's retry clears it; the next pass pushes the cleared entry.
+    device.shared_store.clear_verdict(device.user_id, SHARED_TEST_HOST_ID)
+    device.scheduler.run_one_pass()
+    pushed = device.cli.sync_documents_by_email[device.email][SHARED_WITH_ME_DOCUMENT_KIND][SHARED_TEST_HOST_ID][
+        "metadata"
+    ]
+    assert isinstance(pushed, dict)
+    assert pushed["last_verdict"] is None
+
+
+def test_signed_out_account_loses_its_shared_with_me_cache(tmp_path: Path) -> None:
+    device = _make_shared_with_me_device(tmp_path)
+    device.scheduler.run_one_pass()
+    assert device.shared_store.list_cached_user_ids() == [device.user_id]
+
+    device.cli.remove_account(device.user_id)
+    device.scheduler.session_store.invalidate_identity_cache()
+    device.scheduler.run_one_pass()
+
+    assert device.shared_store.list_cached_user_ids() == []
+
+
+def test_a_failed_account_listing_keeps_every_shared_with_me_cache(tmp_path: Path) -> None:
+    # An empty account listing the identity read could not produce is not a
+    # sign-out: the caches (and the home page's section) stay as they were.
+    device = _make_shared_with_me_device(tmp_path)
+    device.scheduler.run_one_pass()
+    change_signals: list[bool] = []
+    device.shared_store.on_change = lambda: change_signals.append(True)
+
+    device.cli.is_auth_list_failing = True
+    device.scheduler.session_store.invalidate_identity_cache()
+    device.scheduler.run_one_pass()
+
+    assert device.shared_store.list_cached_user_ids() == [device.user_id]
+    assert change_signals == []

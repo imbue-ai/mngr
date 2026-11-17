@@ -33,6 +33,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudQuotaExceededError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudRateLimitedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudShareRefusedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudUserNotFoundError
+from imbue.mngr_imbue_cloud.errors import RATE_LIMITED_CODE
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 
 _DEFAULT_HOST_DIR_ENV_VAR = "MNGR_HOST_DIR"
@@ -205,12 +206,15 @@ def handle_imbue_cloud_errors(func):
             # account yet), so callers key off the code rather than the text.
             fail_with_json(str(exc), error_class=type(exc).__name__, code="user_not_found")
         except ImbueCloudRateLimitedError as exc:
-            fail_with_json(str(exc), error_class=type(exc).__name__, code="rate_limited")
+            fail_with_json(str(exc), error_class=type(exc).__name__, code=RATE_LIMITED_CODE)
         except ImbueCloudPlanRefusedError as exc:
             # The message is the connector's own reason, which no retry changes.
             fail_with_json(str(exc), error_class=type(exc).__name__, code="plan_refused")
         except ImbueCloudShareRefusedError as exc:
-            # The desktop keys off the code: grants_out_of_date means push, then retry once.
+            # The desktop keys off the code: grants_out_of_date means push, then
+            # retry once; grants_refused carries the refused entries.
+            if exc.refusals:
+                fail_with_json(str(exc), error_class=type(exc).__name__, code=exc.code, refusals=list(exc.refusals))
             fail_with_json(str(exc), error_class=type(exc).__name__, code=exc.code)
         except ImbueCloudError as exc:
             fail_with_json(str(exc), error_class=type(exc).__name__)

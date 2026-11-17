@@ -2,7 +2,11 @@ from imbue.minds.desktop_client.backend_resolver import ServiceShareKind
 from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_service_log
+from imbue.minds.desktop_client.share_targets import ShareTargets
 from imbue.minds.desktop_client.share_targets import WHOLE_MACHINE_SERVICE
+from imbue.minds.desktop_client.share_targets import build_share_push_targets
+from imbue.minds.desktop_client.share_targets import complete_share_target_labels
+from imbue.minds.desktop_client.share_targets import resolve_share_push_targets
 from imbue.minds.desktop_client.share_targets import resolve_share_target_display_names
 from imbue.minds.desktop_client.share_targets import resolve_share_target_labels
 from imbue.minds.desktop_client.share_targets import share_target_display_names
@@ -47,8 +51,9 @@ def test_split_share_targets_follows_the_announced_share_kind_over_the_name() ->
         },
     )
 
-    assert targets.app_services == ("chat", "notes", "files")
-    assert targets.system_services == ("metrics",)
+    # ``files`` announced nothing, so it alone is sorted by its name.
+    assert targets.app_services == ("chat", "notes")
+    assert targets.system_services == ("metrics", "files")
 
 
 def test_split_share_targets_never_offers_the_whole_machine_or_a_coordinate_on_its_own() -> None:
@@ -128,3 +133,91 @@ def test_resolve_share_target_labels_is_empty_before_any_registration_arrives() 
     resolver = make_resolver_with_data(make_agents_json(_AGENT_ID))
 
     assert resolve_share_target_labels(resolver, _AGENT_ID) == {}
+
+
+def test_build_share_push_targets_names_the_shell_after_the_workspace_and_skips_unlabeled_targets() -> None:
+    # A recipient's listing renders a link per target, so only a target with a
+    # label rides the push; the shell's display name is the workspace's own.
+    push_targets = build_share_push_targets(
+        {"system_interface": "shell-r4nd", "web": "web-r4nd"},
+        {"web": "Web App", "notes": "Notes"},
+        "alpha",
+    )
+
+    assert push_targets.as_push_fields() == {
+        "targets": {
+            "system_interface": {"label": "shell-r4nd", "display_name": "alpha"},
+            "web": {"label": "web-r4nd", "display_name": "Web App"},
+        },
+        "workspace_name": "alpha",
+    }
+
+
+def test_build_share_push_targets_falls_back_to_the_service_name_without_a_workspace_name() -> None:
+    push_targets = build_share_push_targets({"system_interface": "shell-r4nd", "web": "web-r4nd"}, {}, None)
+
+    assert push_targets.as_push_fields() == {
+        "targets": {
+            "system_interface": {"label": "shell-r4nd", "display_name": "system_interface"},
+            "web": {"label": "web-r4nd", "display_name": "web"},
+        }
+    }
+
+
+def test_build_share_push_targets_omits_targets_while_no_label_is_known() -> None:
+    # Before any registration has reached this client the label map is empty;
+    # the push must not tell the connector the share has no targets, which
+    # would delete every recorded link, so only the workspace name rides along.
+    assert build_share_push_targets({}, {"web": "Web App"}, "alpha").as_push_fields() == {"workspace_name": "alpha"}
+    assert build_share_push_targets({}, {}, None).as_push_fields() == {}
+
+
+def test_resolve_share_push_targets_reads_the_registered_labels_and_the_workspace_name() -> None:
+    resolver = make_resolver_with_data(
+        make_agents_json(_AGENT_ID, labels={"is_primary": "true", "workspace_display_name": "Alpha"}),
+        service_logs={
+            str(_AGENT_ID): make_service_log("system_interface", "http://127.0.0.1:9001", "system_interface-shl1")
+            + make_service_log("web", "http://127.0.0.1:9002", "web-w1")
+        },
+    )
+
+    push_targets = resolve_share_push_targets(resolver, _AGENT_ID)
+
+    assert set(push_targets.targets) == {"system_interface", "web"}
+    assert push_targets.targets["web"].label == "web-w1"
+    assert push_targets.workspace_name == "Alpha"
+    # The shell target is named after the workspace itself.
+    assert push_targets.targets["system_interface"].display_name == "Alpha"
+
+
+def test_complete_share_target_labels_answers_the_full_map_or_nothing() -> None:
+    # The connector replaces its rows with whatever targets a push carries, so
+    # a map missing any grantable target's label (or the shell's) carries none.
+    targets = ShareTargets(app_services=("web",), system_services=("chat",), whole_service=WHOLE_MACHINE_SERVICE)
+    complete = {"system_interface": "shell-r4nd", "web": "web-r4nd", "chat": "chat-r4nd", "owner-exec": "oe-r4nd"}
+
+    assert complete_share_target_labels(targets, complete) == {
+        "system_interface": "shell-r4nd",
+        "web": "web-r4nd",
+        "chat": "chat-r4nd",
+    }
+    assert complete_share_target_labels(targets, {"system_interface": "shell-r4nd", "web": "web-r4nd"}) == {}
+    assert complete_share_target_labels(targets, {"web": "web-r4nd", "chat": "chat-r4nd"}) == {}
+    assert complete_share_target_labels(targets, {}) == {}
+
+
+def test_resolve_share_push_targets_omits_targets_while_a_grantable_target_has_no_label() -> None:
+    # One app registered without a label (its registration predates labels):
+    # the push keeps the connector's rows rather than erasing that app's link.
+    resolver = make_resolver_with_data(
+        make_agents_json(_AGENT_ID, labels={"is_primary": "true", "workspace_display_name": "Alpha"}),
+        service_logs={
+            str(_AGENT_ID): make_service_log("system_interface", "http://127.0.0.1:9001", "system_interface-shl1")
+            + make_service_log("web", "http://127.0.0.1:9002", "")
+        },
+    )
+
+    push_targets = resolve_share_push_targets(resolver, _AGENT_ID)
+
+    assert push_targets.targets == {}
+    assert push_targets.as_push_fields() == {"workspace_name": "Alpha"}

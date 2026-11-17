@@ -99,8 +99,11 @@ def test_schema_version_tracks_breaking_wire_changes() -> None:
     signed-out accounts, the bootstrap seed gained a required ``account_id``,
     and the requests frame gained each request's workspace -- an older window
     labels its launcher from a field that is gone and never learns which
-    account it shows."""
-    assert UI_SCHEMA_VERSION == 28
+    account it shows, and to 29 when workspace entries gained ``is_owned``
+    and the ``share`` object of a workspace shared with the account -- an
+    older window would render someone else's workspace as the account's own
+    and offer the owner-only controls on it."""
+    assert UI_SCHEMA_VERSION == 29
 
 
 def test_hello_message_serializes_with_type_discriminator() -> None:
@@ -109,7 +112,7 @@ def test_hello_message_serializes_with_type_discriminator() -> None:
     # fail, whatever the constant becomes.
     frame = UiHelloMessage(schema_version=UI_SCHEMA_VERSION).model_dump_json()
     parsed = json.loads(frame)
-    assert parsed == {"type": "hello", "schema_version": 28}
+    assert parsed == {"type": "hello", "schema_version": 29}
 
 
 def test_workspaces_message_round_trips_through_json() -> None:
@@ -238,11 +241,15 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "UiSharedPath",
             "UiSharedPathRemoveRequest",
             "UiSharedPathRequest",
+            "UiSharedWorkspace",
+            "UiSharedWorkspaceOwner",
+            "UiSharedWorkspaceTarget",
             "UiSnapshot",
             "UiSwitchAccountRequest",
             "UiSwitchAccountResponse",
             "UiWaitingPermissionRequest",
             "UiWindowKind",
+            "UiWorkspaceApp",
             "UiWorkspaceAutoUpdateOverride",
             "UiWorkspaceDesktop",
             "UiWorkspaceEntry",

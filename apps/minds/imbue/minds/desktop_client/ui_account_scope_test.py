@@ -2,6 +2,7 @@
 
 import pytest
 
+from imbue.imbue_common.model_update import to_update
 from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.environment_signals import EnvironmentCondition
@@ -178,6 +179,45 @@ def test_project_snapshot_for_the_device_lists_the_unassociated_rows_and_the_dev
     assert projected.requests.workspace_agent_id_by_request_id == {}
     assert [entry.id for entry in projected.notifications.entries] == ["n-unclaimed", "n-install-wide"]
     assert projected.health == ()
+
+
+def test_a_row_shared_with_another_account_keeps_the_owners_windows_hearing_about_the_workspace() -> None:
+    # One device holds both ends of a share: Alice hosts agent-a1 here and Bob,
+    # also signed in here, is its recipient. Bob's shared row is listed under
+    # Bob but claims nothing about who hosts the workspace.
+    snapshot = _install_snapshot()
+    shared_row = _entry("agent-a1", BOB).model_copy_update(to_update(_entry("agent-a1").field_ref().is_owned, False))
+    snapshot = snapshot.model_copy_update(
+        to_update(
+            snapshot.field_ref().workspaces,
+            snapshot.workspaces.model_copy_update(
+                to_update(snapshot.workspaces.field_ref().workspaces, (*snapshot.workspaces.workspaces, shared_row))
+            ),
+        )
+    )
+
+    alice = project_snapshot(snapshot, ALICE, (2, 5), False)
+    bob = project_snapshot(snapshot, BOB, (2, 5), False)
+
+    assert [message.agent_id for message in alice.health] == ["agent-a1"]
+    assert alice.requests.workspace_agent_ids == ("agent-a1",)
+    assert [entry.id for entry in alice.notifications.entries] == [
+        "n-a",
+        "n-alice-level",
+        "n-unclaimed",
+        "n-install-wide",
+    ]
+    assert list(alice.workspace_updates.updates) == ["agent-a1"]
+    # Bob lists the shared row, but the frames about the workspace Alice hosts are hers alone.
+    assert [(entry.id, entry.is_owned) for entry in bob.workspaces.workspaces] == [
+        ("agent-b1", True),
+        ("agent-a1", False),
+    ]
+    assert [message.agent_id for message in bob.health] == ["agent-b1"]
+    assert list(bob.workspace_updates.updates) == ["agent-b1"]
+    # Someone else's workspace is not one of Bob's: the per-account counts, which offer a window with no rows the
+    # accounts that have workspaces, leave the shared row out.
+    assert bob.workspaces.workspace_count_by_account_id == {ALICE: 1, BOB: 1, LOCAL_PROFILE_USER_ID: 1}
 
 
 def test_project_snapshot_puts_the_accounts_own_update_settings_on_the_updates_frame() -> None:

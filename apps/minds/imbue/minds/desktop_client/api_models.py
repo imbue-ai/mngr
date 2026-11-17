@@ -957,7 +957,12 @@ class CloudAccountOperationStatusResponse(FrozenModel):
 class WorkspaceSummary(FrozenModel):
     """Summary of one workspace from discovery + its labels."""
 
-    agent_id: str = Field(description="Workspace (primary) agent id")
+    agent_id: str = Field(
+        description=(
+            "Workspace (primary) agent id; for a workspace shared with the user (is_owned false), the share's "
+            "durable key: its workspace id, else its host id"
+        )
+    )
     name: str | None = Field(default=None, description="Workspace display name")
     host_id: str | None = Field(default=None, description="Host id, when known")
     host_state: str | None = Field(default=None, description="Host lifecycle state, when known")
@@ -984,14 +989,16 @@ class WorkspaceSummary(FrozenModel):
         default=None,
         description=(
             "The compute provider the workspace was created with, stamped at create or read off the provider "
-            "instance it runs on; null for a provider the app does not create on"
+            "instance it runs on; null for a provider the app does not create on and for a workspace shared "
+            "with the user"
         ),
     )
     instance_type: str | None = Field(
         default=None,
         description=(
             "The cloud instance type the workspace was created with (AWS / GCP / AZURE); null for the other modes, "
-            "for a create that took the connection's default, and for a workspace created before it was stamped"
+            "for a create that took the connection's default, for a workspace created before it was stamped, "
+            "and for a workspace shared with the user"
         ),
     )
     cpu_count: int | None = Field(
@@ -1014,10 +1021,14 @@ class WorkspaceSummary(FrozenModel):
     color: str | None = Field(default=None, description="Workspace tile color")
     is_owned: bool = Field(
         description=(
-            "Whether the workspace is the signed-in user's own. The listing holds only the user's own "
-            "workspaces today, so this is always true; a workspace shared with the user by someone else "
-            "will report false once such workspaces are listed, and an agent must treat it as untrusted"
+            "Whether the workspace is the signed-in user's own. False for a workspace someone else shared "
+            "with a signed-in account (listed under 'Shared with me'), which an agent must treat as "
+            "untrusted: it is opened through its share link only, and every owner action refuses it"
         )
+    )
+    share_link: str | None = Field(
+        default=None,
+        description="For a workspace shared with the user: the share URL of its shell, the one way in; else null",
     )
 
 

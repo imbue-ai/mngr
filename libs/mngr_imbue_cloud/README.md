@@ -307,3 +307,20 @@ mngr imbue_cloud sync documents delete connection conn-<hex>
 ```
 
 A document whose `document_format` is newer than this client's `SUPPORTED_DOCUMENT_FORMAT` should be treated as read-only by consumers; the connector refuses pushes below the stored format (`ImbueCloudRecordFormatTooNewError`) and inserts past the per-kind cap (`ImbueCloudDocumentLimitError`).
+
+## Shared with me (the recipient's side of sharing)
+
+`mngr imbue_cloud shares shared-with-me` lists every active share whose grants name the account: by account id, by verified email, or by the domain of that email (a domain grant surfaces only when it is the owner's own domain and not a public mail provider's). Each entry carries the owner's identity, the workspace's name, each target's share link (for a whole-workspace grant the shell first and then every app the owner's client registered; for a per-app grant that app alone), the account's status (`invited`, `accepted`, or `declined`), and the share's liveness stamp; `matches` is the match set the listing was built from (each share's key, listing version, and this account's response and visit), which a client compares to detect a changed listing (`shares shared-with-me-matches` answers it alone, and `sync records pull` carries it as `shared_with_me_matches`). Discovery only: the workspace's own grants file decides whether a visit is admitted. See [`specs/shared-with-me/spec.md`](../../specs/shared-with-me/spec.md).
+
+```bash
+mngr imbue_cloud shares shared-with-me
+mngr imbue_cloud shares shared-with-me-matches
+mngr imbue_cloud shares respond host-<hex> --response accepted   # or declined, or reported
+mngr imbue_cloud shares clear-response host-<hex>                 # a declined share is invited again, or accepted once visited
+
+# The reverse device handoff: a single-use code the desktop's embedded browser
+# redeems at GET /accounts/session?code=... for a session on the accounts origin.
+mngr imbue_cloud auth browser-session-code
+```
+
+A report is a strike against the owner, hides every share of that owner, and cannot be withdrawn (`already_reported`); reports are rate limited per day (`rate_limited`); a response to a share that names no identity of the account fails with `share_not_found`; against a connector that does not serve the listing yet, all four shared-with-me commands fail with `shared_with_me_unavailable`, which a client treats as nothing shared. An owner's `shares push-grants` document may carry `targets` (`{"<app>": {"label", "display_name"}}`) and `workspace_name`, which is where the listing's links and names come from; a document that adds a domain grant on a public mail provider, or on any domain but the owner's own, fails with `grants_refused` and a `refusals` list naming each entry.

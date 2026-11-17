@@ -79,6 +79,9 @@ from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyInfo
 from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyMaterial
 from imbue.mngr_imbue_cloud.wire_types import PublishedPortInfo
 from imbue.mngr_imbue_cloud.wire_types import PublishedPortProtocol
+from imbue.mngr_imbue_cloud.wire_types import ShareGrantedVia
+from imbue.mngr_imbue_cloud.wire_types import ShareResponseKind
+from imbue.mngr_imbue_cloud.wire_types import ShareStatus
 from imbue.mngr_imbue_cloud.wire_types import SyncDocument
 from imbue.mngr_imbue_cloud.wire_types import SyncKeyBundle
 from imbue.mngr_imbue_cloud.wire_types import SyncWorkspaceRecord
@@ -1385,8 +1388,9 @@ def test_list_sync_records_with_shares_parses_the_shared_marker(monkeypatch: pyt
     assert listing.shared_agent_ids == ("agent-2",)
     # The exact JSON object `mngr imbue_cloud sync records pull` prints.
     dumped = listing.model_dump(mode="json")
-    assert set(dumped) == {"records", "shared_agent_ids"}
+    assert set(dumped) == {"records", "shared_agent_ids", "shared_with_me_matches"}
     assert dumped["shared_agent_ids"] == ["agent-2"]
+    assert dumped["shared_with_me_matches"] is None
     assert [record["agent_id"] for record in dumped["records"]] == ["agent-1", "agent-2"]
 
 
@@ -3757,3 +3761,293 @@ def test_freeze_bucket_posts_to_the_compat_route() -> None:
 
     _make_backup_client(handler).freeze_bucket(SecretStr("tok"), "u--agent-abc")
     assert seen == [("POST", "/buckets/u--agent-abc/freeze")]
+
+
+# The recipient's side of sharing (specs/shared-with-me/spec.md)
+
+
+def test_list_shared_with_me_parses_the_match_set_and_each_share(monkeypatch: pytest.MonkeyPatch) -> None:
+    share = {
+        "host_id": "host-abc",
+        "workspace_id": "agent-abc",
+        "share_key": "agent-abc",
+        "workspace_domain": "k3j9.a1b2.us1.shares.example",
+        "workspace_name": "alpha",
+        "owner": {"user_id": "11111111-1111-4111-8111-111111111111", "email": "o@example.com"},
+        "status": "invited",
+        "granted_via": "domain",
+        "latest_grant_at": "2026-11-04T09:00:00+00:00",
+        "targets": [
+            {
+                "app": "system_interface",
+                "link": "https://shell-1.k3j9.a1b2.us1.shares.example/",
+                "granted_via": "domain",
+            },
+            {"app": "notes", "link": None, "granted_via": "user", "is_granted_as_app": True},
+        ],
+        "a_field_from_a_newer_connector": 1,
+    }
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/shares/shared-with-me"
+        return httpx2.Response(
+            200,
+            json={
+                "matches": [{"share_key": "agent-abc", "version": 3, "response": "accepted", "is_visited": True}],
+                "shares": [share],
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    listing = client.list_shared_with_me(SecretStr("tok"))
+
+    assert [(match.share_key, match.version, match.response, match.is_visited) for match in listing.matches] == [
+        ("agent-abc", 3, ShareResponseKind.ACCEPTED, True)
+    ]
+    assert len(listing.shares) == 1
+    assert listing.shares[0].status is ShareStatus.INVITED
+    assert listing.shares[0].granted_via is ShareGrantedVia.DOMAIN
+    assert listing.shares[0].owner.email == "o@example.com"
+    assert listing.shares[0].targets[0].link == "https://shell-1.k3j9.a1b2.us1.shares.example/"
+    assert [(target.app, target.is_granted_as_app) for target in listing.shares[0].targets] == [
+        ("system_interface", False),
+        ("notes", True),
+    ]
+
+
+def test_list_shared_with_me_coerces_unknown_enum_values_defaults_absent_fields_and_reads_the_matches_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/shares/shared-with-me/matches":
+            return httpx2.Response(200, json={"matches": [{"share_key": "host-abc", "version": 2}]})
+        share = {
+            "host_id": "host-abc",
+            "share_key": "host-abc",
+            "workspace_domain": "d.example",
+            "owner": {"user_id": "11111111-1111-4111-8111-111111111111"},
+            "status": "something-new",
+            "granted_via": "telepathy",
+            "latest_grant_at": "2026-11-04T09:00:00+00:00",
+        }
+        return httpx2.Response(200, json={"matches": [], "shares": [share]})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    listing = client.list_shared_with_me(SecretStr("tok"))
+    assert listing.shares[0].status is ShareStatus.UNKNOWN
+    assert listing.shares[0].granted_via is ShareGrantedVia.UNKNOWN
+    share_parsed = listing.shares[0]
+    assert (share_parsed.workspace_id, share_parsed.workspace_name, share_parsed.targets) == (None, None, ())
+    assert (share_parsed.last_seen_at, share_parsed.first_visited_at, share_parsed.last_visited_at) == (
+        None,
+        None,
+        None,
+    )
+    (polled,) = client.list_shared_with_me_matches(SecretStr("tok"))
+    assert (polled.share_key, polled.version, polled.response, polled.is_visited) == ("host-abc", 2, None, False)
+
+
+def test_the_listing_and_its_matches_report_an_old_connector_as_unavailable_but_not_a_specific_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def old_connector(request: httpx2.Request) -> httpx2.Response:
+        # The listing path matches the old DELETE /shares/{host_id} route with
+        # the wrong method, so FastAPI answers 405 there and 404 elsewhere.
+        if request.url.path == "/shares/shared-with-me":
+            return httpx2.Response(405, json={"detail": "Method Not Allowed"})
+        return httpx2.Response(404, json={"detail": "Not Found"})
+
+    client = _install_mock_httpx(monkeypatch, old_connector)
+    with pytest.raises(ImbueCloudShareRefusedError) as listing_refusal:
+        client.list_shared_with_me(SecretStr("tok"))
+    with pytest.raises(ImbueCloudShareRefusedError) as matches_refusal:
+        client.list_shared_with_me_matches(SecretStr("tok"))
+
+    def specific_404(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(404, json={"detail": "No such thing"})
+
+    client = _install_mock_httpx(monkeypatch, specific_404)
+    with pytest.raises(ImbueCloudShareError) as specific:
+        client.list_shared_with_me(SecretStr("tok"))
+
+    assert listing_refusal.value.code == "shared_with_me_unavailable"
+    assert matches_refusal.value.code == "shared_with_me_unavailable"
+    assert not isinstance(specific.value, ImbueCloudShareRefusedError)
+
+
+def test_set_and_clear_share_response_send_the_right_requests_and_map_refusals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[tuple[str, str, bytes]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append((request.method, request.url.path, request.content))
+        if request.method == "PUT" and b"reported" in request.content:
+            return httpx2.Response(429, json={"detail": {"code": "rate_limited", "message": "too many"}})
+        if request.method == "DELETE" and request.url.path.endswith("/host-frozen/response"):
+            return httpx2.Response(409, json={"detail": {"code": "already_reported", "message": "frozen"}})
+        if request.method == "DELETE":
+            return httpx2.Response(200, json={"host_id": "host-abc", "share_key": "agent-abc", "response": None})
+        return httpx2.Response(200, json={"host_id": "host-abc", "share_key": "agent-abc", "response": "accepted"})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    accepted = client.set_share_response(SecretStr("tok"), "host-abc", ShareResponseKind.ACCEPTED)
+    assert accepted.response is ShareResponseKind.ACCEPTED
+    assert seen[0][:2] == ("PUT", "/shares/shared-with-me/host-abc/response")
+    assert _json.loads(seen[0][2]) == {"response": "accepted"}
+    cleared = client.clear_share_response(SecretStr("tok"), "host-abc")
+    assert cleared.response is None and cleared.share_key == "agent-abc"
+    assert seen[1][:2] == ("DELETE", "/shares/shared-with-me/host-abc/response")
+    with pytest.raises(ImbueCloudRateLimitedError):
+        client.set_share_response(SecretStr("tok"), "host-abc", ShareResponseKind.REPORTED)
+    with pytest.raises(ImbueCloudShareRefusedError) as excinfo:
+        client.clear_share_response(SecretStr("tok"), "host-frozen")
+    assert excinfo.value.code == "already_reported"
+
+
+def test_a_response_on_a_share_that_does_not_name_the_caller_is_refused_as_share_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(404, json={"detail": "No share found for host 'host-abc'"})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    with pytest.raises(ImbueCloudShareRefusedError, match="No share found") as set_excinfo:
+        client.set_share_response(SecretStr("tok"), "host-abc", ShareResponseKind.DECLINED)
+    with pytest.raises(ImbueCloudShareRefusedError) as clear_excinfo:
+        client.clear_share_response(SecretStr("tok"), "host-abc")
+    assert (set_excinfo.value.code, clear_excinfo.value.code) == ("share_not_found", "share_not_found")
+
+
+def test_the_wire_enums_coercion_member_is_never_sent_as_a_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.append(request.url.path)
+        return httpx2.Response(200, json={"host_id": "host-abc", "share_key": "agent-abc", "response": "accepted"})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    with pytest.raises(ImbueCloudShareError, match="accepted, declined, or reported"):
+        client.set_share_response(SecretStr("tok"), "host-abc", ShareResponseKind.UNKNOWN)
+    assert sent == []
+
+
+def test_a_response_against_a_connector_without_the_routes_is_refused_as_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(404, json={"detail": "Not Found"})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    with pytest.raises(ImbueCloudShareRefusedError) as set_excinfo:
+        client.set_share_response(SecretStr("tok"), "host-abc", ShareResponseKind.DECLINED)
+    with pytest.raises(ImbueCloudShareRefusedError) as clear_excinfo:
+        client.clear_share_response(SecretStr("tok"), "host-abc")
+    assert (set_excinfo.value.code, clear_excinfo.value.code) == (
+        "shared_with_me_unavailable",
+        "shared_with_me_unavailable",
+    )
+
+
+def test_mint_browser_session_code_relays_the_per_minute_limit_with_its_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(429, json={"detail": {"code": "rate_limited", "message": "Too many codes minted"}})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    with pytest.raises(ImbueCloudRateLimitedError, match="Too many codes minted"):
+        client.mint_browser_session_code(SecretStr("tok"))
+
+
+def test_mint_browser_session_code_parses_the_code_and_the_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/auth/browser-session-code"
+        return httpx2.Response(200, json={"code": "c0de", "expires_in_seconds": 60})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    minted = client.mint_browser_session_code(SecretStr("tok"))
+
+    assert minted.code.get_secret_value() == "c0de"
+    assert minted.expires_in_seconds == 60
+
+
+def test_list_sync_records_with_shares_carries_the_shared_with_me_matches_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            json={
+                "records": [],
+                "shared_agent_ids": [],
+                "shared_with_me_matches": [
+                    {"share_key": "agent-9", "version": 4, "response": None, "is_visited": False}
+                ],
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    matches = client.list_sync_records_with_shares(SecretStr("tok")).shared_with_me_matches
+    assert matches is not None
+    (match,) = matches
+    assert (match.share_key, match.version, match.response, match.is_visited) == ("agent-9", 4, None, False)
+
+
+def test_list_sync_records_with_shares_reads_null_matches_as_none_and_refuses_a_wrong_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def null_matches(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json={"records": [], "shared_agent_ids": [], "shared_with_me_matches": None})
+
+    assert (
+        _install_mock_httpx(monkeypatch, null_matches)
+        .list_sync_records_with_shares(SecretStr("tok"))
+        .shared_with_me_matches
+        is None
+    )
+
+    def scalar_matches(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json={"records": [], "shared_agent_ids": [], "shared_with_me_matches": 7})
+
+    with pytest.raises(ImbueCloudSyncError, match="shared-with-me matches"):
+        _install_mock_httpx(monkeypatch, scalar_matches).list_sync_records_with_shares(SecretStr("tok"))
+
+
+def test_push_share_grants_carries_the_refused_entries_of_a_grants_refused_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            409,
+            json={
+                "detail": {
+                    "code": "grants_refused",
+                    "message": "acme.example is not your domain",
+                    "refusals": [
+                        {"scope": "workspace", "kind": "email_domain", "value": "acme.example", "message": "no"}
+                    ],
+                }
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    with pytest.raises(ImbueCloudShareRefusedError) as excinfo:
+        client.push_share_grants(SecretStr("tok"), "host-abc", {"workspace": {"email_domains": ["acme.example"]}})
+
+    assert excinfo.value.code == "grants_refused"
+    assert excinfo.value.refusals == (
+        {"scope": "workspace", "kind": "email_domain", "value": "acme.example", "message": "no"},
+    )

@@ -50,6 +50,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import setup_logging
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.public_email_domains import PUBLIC_EMAIL_DOMAINS
 from imbue.minds.desktop_client.api_models import IdentityRecordResponse
 from imbue.minds.desktop_client.api_models import InvitationOutcomesResponse
 from imbue.minds.desktop_client.api_models import MachineSharingResponse
@@ -57,7 +58,6 @@ from imbue.minds.desktop_client.api_models import SharingGrantList
 from imbue.minds.desktop_client.api_models import SharingGrantsDocument
 from imbue.minds.desktop_client.api_models import SharingReadinessResponse
 from imbue.minds.desktop_client.api_models import VisitingAgentsResponse
-from imbue.minds.desktop_client.share_grant_validation import PUBLIC_EMAIL_DOMAINS
 from imbue.minds.desktop_client.ui_api_options import WorkspaceOptionsAccount
 from imbue.minds.desktop_client.ui_api_options import WorkspaceOptionsData
 from imbue.minds.errors import MindError

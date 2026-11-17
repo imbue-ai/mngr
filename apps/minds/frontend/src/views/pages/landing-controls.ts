@@ -10,6 +10,7 @@
 // is worse than no action offered.
 
 import type { UiWorkspaceEntry } from "../../channel/messages";
+import type { BadgeTone } from "../components/HomeBadge";
 import type { RemoteTileState } from "../../generated/ui";
 import type { RefusalNotice, RequestOutcome, UserFacingError } from "../../models/errors";
 import {
@@ -78,7 +79,7 @@ export function livenessBadgeFor(liveness: string, stopKind: string): LivenessBa
       label: "Retired",
       tooltip:
         "This workspace has been retired, so it can't be started again. " +
-        "Its backups are still available from the Backups button.",
+        "Its backups are still available from Backups in the card's menu.",
     };
   }
   if (isSuspensionHold(liveness, stopKind))
@@ -479,7 +480,7 @@ const BACKUPS_HIDDEN: BackupsControl = {
 };
 
 /**
- * Whether a row offers its Backups button, and whether it is usable.
+ * Whether a row offers Backups in its card's menu, and whether it is usable.
  *
  * The backups page runs restic from this device, so it needs no live
  * workspace: a remote row offers it whenever this device can read the
@@ -538,4 +539,56 @@ export function remoteTileEntries<Entry extends Pick<UiWorkspaceEntry, "id" | "i
       !orphanedFailedDestroyAgentIds.includes(entry.id) &&
       !isDestroying(entry.id),
   );
+}
+
+// The tone a card badge wears, by one rule (specs/home-screen-redesign,
+// 4.13): red for what is broken and unusable now, orange for what needs the
+// user, the white chip for information and progress. The labels are the ones
+// this module's producers and the shared-row helpers emit.
+const ALARM_LABELS: ReadonlySet<string> = new Set([
+  "Can't connect from this device",
+  "Not responding",
+  "Restart failed",
+  "Couldn't reconnect",
+  "Create failed",
+  "Removal failed",
+  "No access from this device",
+  "Access refused from this device",
+  "No longer shared with you",
+  "The owner's sharing is misconfigured",
+  "Could not reach the workspace",
+  "Could not sign in to open it",
+  "Unreachable",
+  "Can't connect from here",
+  "Connection removed",
+  "No credentials here",
+]);
+
+const WARN_LABELS: ReadonlySet<string> = new Set([
+  "Interrupted",
+  "Enter your master password to open",
+  "Needs a newer app",
+]);
+
+export function badgeToneFor(label: string): BadgeTone {
+  if (ALARM_LABELS.has(label)) return "alarm";
+  if (WARN_LABELS.has(label)) return "warn";
+  return "neutral";
+}
+
+/** The labels whose state is still moving, so their badge keeps a spinner. */
+const SPINNING_LABELS: ReadonlySet<string> = new Set([
+  "Starting…",
+  "Stopping…",
+  "Creating…",
+  "Confirming removal…",
+  "Destroying…",
+  "Restarting...",
+  "Reconnecting...",
+  "Connecting…",
+  "Syncing access…",
+]);
+
+export function isSpinningBadgeLabel(label: string): boolean {
+  return SPINNING_LABELS.has(label);
 }

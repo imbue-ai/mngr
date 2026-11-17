@@ -31,6 +31,7 @@ import pytest
 from click.testing import CliRunner
 from click.testing import Result
 from pydantic import AnyUrl
+from pydantic import SecretStr
 
 from imbue.mngr.config.loader import get_or_create_profile_dir
 from imbue.mngr.utils.polling import poll_for_value
@@ -47,6 +48,7 @@ from imbue.mngr_imbue_cloud.cli.auth import _persist_auth_response
 from imbue.mngr_imbue_cloud.cli.auth import _revoke_server_sessions
 from imbue.mngr_imbue_cloud.cli.auth import _write_login_url_file
 from imbue.mngr_imbue_cloud.cli.auth import auth
+from imbue.mngr_imbue_cloud.cli.auth import browser_session_code_payload
 from imbue.mngr_imbue_cloud.cli.auth import build_login_url
 from imbue.mngr_imbue_cloud.cli.auth import compute_pkce_challenge
 from imbue.mngr_imbue_cloud.cli.auth import make_pkce_verifier
@@ -58,6 +60,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
 from imbue.mngr_imbue_cloud.wire_types import AuthRawResponse
+from imbue.mngr_imbue_cloud.wire_types import BrowserSessionCode
 
 
 def _get(port: int, path: str) -> int:
@@ -68,6 +71,21 @@ def _get(port: int, path: str) -> int:
 def _get_page_text(url: str) -> str:
     with urllib.request.urlopen(url, timeout=60.0) as resp:
         return resp.read().decode("utf-8")
+
+
+def test_auth_group_lists_the_browser_session_code_command() -> None:
+    result = CliRunner().invoke(auth, ["--help"])
+    assert result.exit_code == 0
+    assert "browser-session-code" in result.output
+    documented = CliRunner().invoke(auth, ["browser-session-code", "--help"])
+    assert documented.exit_code == 0
+    assert "--account" in documented.output
+
+
+def test_browser_session_code_prints_the_code_revealed() -> None:
+    # The desktop builds the redeem URL from the printed code; the wire model masks it.
+    minted = BrowserSessionCode(code=SecretStr("c0de"), expires_in_seconds=60)
+    assert browser_session_code_payload(minted) == {"code": "c0de", "expires_in_seconds": 60}
 
 
 def test_callback_handler_captures_login_query_params(

@@ -1,9 +1,11 @@
-// The Machines home screen: workspace rows, create-attempt rows, remote
-// records, the sync-unlock banner, the collapsed providers panel, and the
-// bottom-left app launchers. Live state comes from the channel stores; the
-// facts that do not ride the channel (destroy statuses, the window's
-// account's locked state) are fetched from /ui/api/create/landing-extras and
-// refetched whenever the workspace list or the window's account changes.
+// The home screen (specs/home-screen-redesign): a tab strip over three tabs.
+// Workspaces holds the account's own workspaces as wallpaper cards, then the
+// workspaces shared with it; Apps holds the apps of those workspaces and the
+// apps shared with it, as desktop icons; Invitations holds the shares still
+// waiting for an answer. Live state comes from the channel stores; the facts
+// that do not ride the channel (destroy statuses, the window's account's
+// locked state) are fetched from /ui/api/create/landing-extras and refetched
+// whenever the workspace list or the window's account changes.
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
@@ -21,6 +23,27 @@ import {
   recoveryRoute,
 } from "../../models/create";
 import { onboardingProgress } from "../../models/onboarding";
+import {
+  REPORT_CONFIRMATION,
+  type SharedApp,
+  byNewestGrant,
+  homeSharedRows,
+  isDeclinedInvitation,
+  isInvitation,
+  isRetryOffered,
+  isShareLive,
+  isSharedEntry,
+  isWorkspaceShare,
+  ownedWorkspaceEntries,
+  openTargetApp,
+  ownerLabel,
+  primaryTarget,
+  relativeTimeLabel,
+  sharedActionErrorMessage,
+  sharedAppsOf,
+  sharedWithMeApi,
+  verdictLabel,
+} from "../../models/sharedWithMe";
 import { showErrorDialog, titledError } from "../../models/errorDialog";
 import { errorFromException, errorFromResponse, fallbackErrorSentence } from "../../models/errors";
 import type { RequestOutcome } from "../../models/errors";
@@ -31,6 +54,7 @@ import type {
   UiAccountProvidersEntry,
   UiConnectionEntry,
   UiProviderEntry,
+  UiSharedWorkspace,
 } from "../../generated/ui";
 import type {
   ConnectionOwnerOption,
@@ -54,20 +78,31 @@ import {
   fetchLocalProfiles,
   redrawingLocalProfilesLoader,
 } from "./create/CloudAccountsModal";
-import { Button, ButtonLink } from "../components/Button";
+import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import { ErrorNotice, restartAppActions, updateAppActions } from "../components/ErrorDisplay";
 import { Icon16 } from "../components/Icon";
+import type { IconName } from "../components/icons";
 import { PageContainer } from "../components/Layout";
 import { Notice } from "../components/Notice";
 import { variantBesideErrors } from "../components/variantBesideErrors";
 import { alertWithDetailsInLog } from "../../models/errors";
 import type { ErrorAction, UserFacingError } from "../../models/errors";
 import { routeLinkAttrs } from "../components/route-link";
+import { Avatar } from "../components/Avatar";
+import { CARD_ICON_BUTTON_CLASS, CardMenu, type CardMenuFact, type CardMenuItem } from "../components/CardMenu";
+import { Disclosure } from "../components/Disclosure";
+import { HomeAppIcon } from "../components/HomeAppIcon";
+import { HomeBadge, homeBadgeClass } from "../components/HomeBadge";
+import { MonogramTile } from "../components/MonogramTile";
+import { TabStrip, type TabStripTab } from "../components/TabStrip";
+import { TitlebarButton } from "../components/TitlebarButton";
 import {
   backupsControlFor,
+  badgeToneFor,
   healthBadgeLabelFor,
   isMachineStateKnown,
+  isSpinningBadgeLabel,
   isOutageExplainedByDevice,
   keyStateChipFor,
   lifecycleConfirmation,
@@ -75,6 +110,7 @@ import {
   livenessBadgeFor,
   mindControlsFor,
   remoteLocationBadgeFor,
+  type RemoteStateChip,
   remoteStateChipFor,
   remoteTileEntries,
   removeRecordFailureFor,
@@ -82,8 +118,7 @@ import {
 } from "./landing-controls";
 import { Spinner } from "../components/Spinner";
 import { accountSwitcherRows } from "../shell/AccountSwitcher";
-import { StatusBadge } from "../components/StatusBadge";
-import type { UpdateBadge, UpdateBadgeTone } from "../../models/updates";
+import type { UpdateBadge } from "../../models/updates";
 import {
   bulkUpdateRefusal,
   displayVersion,
@@ -91,23 +126,30 @@ import {
   updateBadgeFor,
   updateChatAgentIdFor,
 } from "../../models/updates";
+import { type HomeTab, readRememberedHomeTab, rememberHomeTab } from "../../models/homeTab";
+import { appIconUrl, wallpaperUrl } from "../../models/workspaceAssets";
+import { wallpaperToneFor } from "../../models/wallpaperTone";
 
 const BADGE_CLASS =
   "inline-flex items-center px-1.5 py-0.5 rounded-md type-helper font-semibold";
 
-// The update badge is the only pill in a row that does something, so it is a
-// real <button> with a border, hover fill, press scale, focus ring and chevron.
-// The transparent border on the tinted tones keeps every badge the same height.
+// The update badge is the only badge on a card that does something, so it is a
+// real <button> with a press scale, focus ring and chevron.
 const UPDATE_BADGE_CLASS =
-  "inline-flex items-center gap-1 py-0.5 pl-2 pr-1 rounded-md type-label border cursor-pointer " +
-  "transition-transform duration-100 ease-in-out active:scale-[0.98] " +
+  "cursor-pointer transition-transform duration-100 ease-in-out active:scale-[0.98] " +
   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent";
 
-const UPDATE_BADGE_TONES: Record<UpdateBadgeTone, string> = {
-  neutral: "bg-fill-subtle text-secondary border-strong hover:bg-fill-hover",
-  warn: "bg-[var(--c-warning-surface)] text-warning border-warning/50 hover:bg-warning/25",
-  error: "bg-important text-white border-transparent hover:opacity-90",
-};
+/** A card's height, which the Add workspace card matches. */
+const CARD_MIN_HEIGHT_CLASS = "min-h-24";
+
+/** The two-column grid every card section lays out in. */
+const CARD_GRID_CLASS = "grid gap-3 grid-cols-2";
+
+const NO_ADDRESS_MESSAGE = "The workspace has not registered its address yet";
+// What a shared row shows from its open's click until the frame takes over (specs/shared-with-me, 4.7).
+const CONNECTING_LABEL = "Connecting…";
+/** An own app's tooltip when its workspace cannot be opened from here; the workspace's card says why. */
+const BLOCKED_WORKSPACE_MESSAGE = "The workspace cannot be opened from this device right now; its card says why";
 
 interface LandingState {
   extras: LandingExtras | null;
@@ -139,6 +181,21 @@ interface LandingState {
   /** The add-connection modal, and the create-form defaults it reads its region tables from (fetched on first open). */
   connectionModal: CloudAccountsModalState;
   formDefaults: CreateFormDefaults | null;
+  /** The shared rows' state: the pasted-link input, which rows have an action
+   * in flight, and the last refusal to show (specs/shared-with-me, 4.7). */
+  sharedLinkDraft: string;
+  sharedBusyKeys: Set<string>;
+  sharedError: string;
+  /** The share key the deep link's `?shared=` named and the page already scrolled to, so a redraw never scrolls again. */
+  scrolledSharedKey: string | null;
+  /** The share key the deep link named and the page already picked a tab for. */
+  deepLinkTabKey: string | null;
+  /** The tab up (specs/home-screen-redesign, 4.3). */
+  tab: HomeTab;
+  /** Invitations declined while the Invitations tab was up: their cards stay
+   * in place, reading Declined with Undo, until the tab is left. */
+  pendingDeclinedKeys: Set<string>;
+  isDeclinedOpen: boolean;
 }
 
 /**
@@ -196,7 +253,7 @@ function otherAccountsNotice(others: readonly OtherAccountWithWorkspaces[]): m.C
   const { shell } = getAppContext();
   return m(
     Notice,
-    { id: "landing-other-accounts", extra: "mt-4" },
+    { id: "landing-other-accounts", extra: "mb-4" },
     m("div", { class: "flex flex-col gap-2" }, [
       m(
         "span",
@@ -235,6 +292,22 @@ export function isUnlockBannerDue(
 ): boolean {
   if (extras === null || extrasAccountId !== windowAccountId) return false;
   return extras.locked_account_emails.length > 0;
+}
+
+/** Which tab a share's card or icon is on (specs/home-screen-redesign, 4.3). */
+export function homeTabOfShare(share: UiSharedWorkspace): HomeTab {
+  if (isInvitation(share) || isDeclinedInvitation(share)) return "invitations";
+  return isWorkspaceShare(share) ? "workspaces" : "apps";
+}
+
+/** The tabs the strip shows: Invitations only while any invitation waits or was declined. */
+export function homeTabsFor(invitationCount: number, hasDeclined: boolean): TabStripTab[] {
+  const tabs: TabStripTab[] = [
+    { id: "workspaces", label: "Workspaces" },
+    { id: "apps", label: "Apps" },
+  ];
+  if (invitationCount > 0 || hasDeclined) tabs.push({ id: "invitations", label: "Invitations", count: invitationCount });
+  return tabs;
 }
 
 function loadExtras(state: LandingState): void {
@@ -280,6 +353,14 @@ export const LandingPage: m.ClosureComponent = () => {
     bulkError: null,
     connectionModal: new CloudAccountsModalState(),
     formDefaults: null,
+    sharedLinkDraft: "",
+    sharedBusyKeys: new Set(),
+    sharedError: "",
+    scrolledSharedKey: null,
+    deepLinkTabKey: null,
+    tab: readRememberedHomeTab(),
+    pendingDeclinedKeys: new Set(),
+    isDeclinedOpen: false,
   };
 
   /** Run `open` with the create-form defaults the connection modal reads its backend and region tables from (fetched on first use). */
@@ -476,13 +557,20 @@ export const LandingPage: m.ClosureComponent = () => {
     });
   }
 
+  function displayedLivenessOf(entry: UiWorkspaceEntry): MindLiveness {
+    return state.tracker.displayedLiveness(entry.id, entry.liveness ?? "");
+  }
+
   function rowClick(entry: UiWorkspaceEntry): void {
-    const { shell } = getAppContext();
-    const liveness = state.tracker.displayedLiveness(
-      entry.id,
-      entry.liveness ?? "",
-    );
-    shell.enterWorkspaceOrRecover(entry, liveness);
+    getAppContext().shell.enterWorkspaceOrRecover(entry, displayedLivenessOf(entry));
+  }
+
+  /** Whether a click on the workspace goes anywhere (`rowClickActionFor`): a
+   * cloud machine this device holds no key for, or a stop an operator holds,
+   * is not clickable, and its chip or badge says why. */
+  function isEntryOpenable(entry: UiWorkspaceEntry): boolean {
+    const isHealthy = getAppContext().stores.health.statusFor(entry.id) === "healthy";
+    return rowClickActionFor(entry, displayedLivenessOf(entry), isHealthy) !== "blocked";
   }
 
   function startMind(entry: UiWorkspaceEntry): void {
@@ -520,48 +608,46 @@ export const LandingPage: m.ClosureComponent = () => {
     });
   }
 
-  function livenessBadge(liveness: MindLiveness, stopKind: string): m.Children {
-    if (liveness === "RUNNING") return null;
-    const badge = livenessBadgeFor(liveness, stopKind);
-    const tone =
-      liveness === "STOPPING" || liveness === "STARTING"
-        ? "bg-warning/15 text-warning"
-        : "bg-fill-subtle text-primary";
+  function restartMind(entry: UiWorkspaceEntry): void {
+    const question = lifecycleConfirmation(
+      "restart",
+      entry.name,
+      getAppContext().stores.updates.isApplying(entry.id),
+    );
+    if (question !== null && !window.confirm(question)) return;
+    m.route.set(recoveryRoute(entry.id, `/goto/${entry.id}/`, "restart"));
+  }
+
+  function openInNewWindow(entry: UiWorkspaceEntry): void {
+    if (electronBridge.isDesktop) {
+      electronBridge.openWorkspaceInNewWindow(entry.id);
+    } else {
+      const forwardOrigin = getAppContext().shell.mngrForwardOrigin;
+      window.open(`${forwardOrigin}/goto/${entry.id}/`, "_blank", "noopener");
+    }
+  }
+
+  function openSettings(entry: UiWorkspaceEntry): void {
+    getAppContext().shell.routeTo(`/workspace/${entry.id}/options?tab=settings`);
+  }
+
+  /** One status badge, toned by the label's rule (specs/home-screen-redesign, 4.13). */
+  function badge(label: string, attrs: m.Attributes = {}): m.Children {
     return m(
-      "span",
-      {
-        class: `${BADGE_CLASS} ${tone} landing-mind-state-badge`,
-        "data-tooltip": badge.tooltip || undefined,
-      },
-      badge.label,
+      HomeBadge,
+      { tone: badgeToneFor(label), isSpinning: isSpinningBadgeLabel(label), ...attrs },
+      label,
     );
   }
 
-  // The backups page runs restic from this device, so it is reachable for a
-  // stopped or remote machine whose own settings pane is not. Kept subtle
-  // (muted ghost icon): it is a fallback route in, not the primary action.
-  function backupsButton(
-    entry: UiWorkspaceEntry,
-    liveness: string,
-  ): m.Children {
-    const control = backupsControlFor(entry, liveness);
-    if (!control.isShown) return null;
-    return m(
-      Button,
-      {
-        variant: "ghost",
-        size: "icon",
-        extra: "opacity-60",
-        "aria-label": "Backups",
-        "data-tooltip": control.tooltip,
-        disabled: !control.isEnabled,
-        onclick: (event: MouseEvent) => {
-          event.stopPropagation();
-          m.route.set(`/workspace/${entry.id}/backups`);
-        },
-      },
-      m(Icon16, { name: "box" }),
-    );
+  function livenessBadge(liveness: MindLiveness, stopKind: string): m.Children {
+    if (liveness === "RUNNING") return null;
+    const held = livenessBadgeFor(liveness, stopKind);
+    return badge(held.label, {
+      "data-badge": "liveness",
+      extra: "landing-mind-state-badge",
+      "data-tooltip": held.tooltip || undefined,
+    });
   }
 
   function healthBadge(
@@ -596,13 +682,7 @@ export const LandingPage: m.ClosureComponent = () => {
       healthStore.recoveryFailureCauseFor(entry.id),
     );
     if (label === null) return null;
-    return m(
-      "span",
-      {
-        class: `${BADGE_CLASS} bg-warning/15 text-warning landing-health-badge`,
-      },
-      label,
-    );
+    return badge(label, { "data-badge": "health", extra: "landing-health-badge" });
   }
 
   function rowUpdateBadge(agentId: string): UpdateBadge | null {
@@ -614,22 +694,24 @@ export const LandingPage: m.ClosureComponent = () => {
     );
   }
 
-  /** The row's one update control, or null when the machine has nothing to
+  /** The card's one update control, or null when the machine has nothing to
    * say: the Updates tab it opens, or a running update's chat, holds the actions. */
   function updateBadge(entry: UiWorkspaceEntry): m.Children {
     const updates = getAppContext().stores.updates;
     const published = updates.publishedFor(entry.id);
-    const badge = rowUpdateBadge(entry.id);
-    if (badge === null) return null;
+    const badgeInfo = rowUpdateBadge(entry.id);
+    if (badgeInfo === null) return null;
     const isOpeningRunChat = isBadgeOpeningRunChat(published, updates.isUpdating(entry.id));
+    const tone = badgeInfo.tone === "error" ? "alarm" : badgeInfo.tone;
     return m(
       "button",
       {
         type: "button",
-        class: `${UPDATE_BADGE_CLASS} ${UPDATE_BADGE_TONES[badge.tone]} landing-update-badge`,
-        "data-update-state": badge.state,
-        "data-tooltip": badge.tooltip,
-        // The row behind is clickable, so the press stops here.
+        class: `${homeBadgeClass(tone, "border-0 landing-update-badge")} ${UPDATE_BADGE_CLASS}`,
+        "data-update-state": badgeInfo.state,
+        "data-badge-tone": tone,
+        "data-tooltip": badgeInfo.tooltip,
+        // The card behind is clickable, so the press stops here.
         onclick: (event: MouseEvent) => {
           event.stopPropagation();
           if (isOpeningRunChat)
@@ -641,8 +723,8 @@ export const LandingPage: m.ClosureComponent = () => {
         },
       },
       [
-        badge.isSpinnerShown ? m(Spinner, { size: "sm" }) : null,
-        m("span", badge.label),
+        badgeInfo.isSpinnerShown ? m(Spinner, { size: "sm" }) : null,
+        m("span", badgeInfo.label),
         m(Icon16, { name: "chevron-right", size: "sm", extra: "opacity-70" }),
       ],
     );
@@ -665,11 +747,11 @@ export const LandingPage: m.ClosureComponent = () => {
     );
   }
 
-  /** The dismissible "Updated to X" note, whether or not the run was watched.
-   * Under the row rather than in it: it is news, not state. */
+  /** The dismissible "Updated to X" note, whether or not the run was watched:
+   * the card's last row, since it is news, not state. */
   function updatedNote(entry: UiWorkspaceEntry): m.Children {
     const updates = getAppContext().stores.updates;
-    // A row says one thing about its updates: while it has a badge, the badge.
+    // A card says one thing about its updates: while it has a badge, the badge.
     if (rowUpdateBadge(entry.id) !== null) return null;
     const update = updates.forAgent(entry.id);
     const version = update.success_note_version ?? "";
@@ -679,7 +761,10 @@ export const LandingPage: m.ClosureComponent = () => {
     const chatAgentId = update.verdict === "UPDATED" ? (update.chat_agent_id ?? "") : "";
     return m(
       "div",
-      { class: "flex items-center gap-2 pl-3 type-helper text-secondary" },
+      {
+        class: "flex items-center gap-2 type-helper text-secondary",
+        onclick: (event: MouseEvent) => event.stopPropagation(),
+      },
       [
         m("span", `Updated to ${displayVersion(version)}.`),
         chatAgentId ? openRunChatButton(entry.id, chatAgentId) : null,
@@ -746,7 +831,7 @@ export const LandingPage: m.ClosureComponent = () => {
   }
 
   /** The bulk strip, only when more than one machine auto-update will not
-   * handle has an update available: one machine has its own row action, and
+   * handle has an update available: one machine has its own card action, and
    * auto-update arms the rest itself. */
   function bulkUpdateActions(): m.Children {
     const updates = getAppContext().stores.updates;
@@ -833,314 +918,811 @@ export const LandingPage: m.ClosureComponent = () => {
     ]);
   }
 
-  function destroyRow(
+  /** A card's icon action: the card's text colour at 20% on hover, labelled by the tooltip chip. */
+  function cardIconButton(
+    label: string,
+    icon: IconName,
+    onclick: () => void,
+    options: { isDisabled?: boolean; attrs?: m.Attributes } = {},
+  ): m.Children {
+    const isDisabled = options.isDisabled ?? false;
+    return m(
+      "button",
+      {
+        type: "button",
+        "aria-label": label,
+        "aria-disabled": isDisabled ? "true" : undefined,
+        "data-tooltip": label,
+        class: CARD_ICON_BUTTON_CLASS + (isDisabled ? " opacity-40 cursor-default hover:bg-transparent" : ""),
+        onclick: (event: MouseEvent) => {
+          event.stopPropagation();
+          if (!isDisabled) onclick();
+        },
+        ...(options.attrs ?? {}),
+      },
+      m(Icon16, { name: icon }),
+    );
+  }
+
+  /** The menu's Backups entry for a row, or null when its backups page is not offered. */
+  function backupsMenuItem(entry: UiWorkspaceEntry, liveness: MindLiveness | ""): CardMenuItem | null {
+    const backups = backupsControlFor(entry, liveness);
+    if (!backups.isShown) return null;
+    return {
+      icon: "box",
+      label: "Backups",
+      isDisabled: !backups.isEnabled,
+      title: backups.isEnabled ? undefined : backups.tooltip,
+      onSelect: () => m.route.set(`/workspace/${entry.id}/backups`),
+    };
+  }
+
+  /** The colour a card's text sits on: the cached wallpaper's sampled tone, else the accent. */
+  function cardTone(entry: UiWorkspaceEntry): { tone: string; wallpaper: string | null } {
+    const wallpaper = wallpaperUrl(entry.id, entry.wallpaper_version ?? "");
+    const sampled = wallpaper === null ? null : wallpaperToneFor(wallpaper, () => m.redraw());
+    return { tone: sampled ?? entry.accent, wallpaper };
+  }
+
+  /**
+   * A card's frame (specs/home-screen-redesign, 4.7): the wallpaper or the
+   * accent as its ground, its text re-based on that colour, a padded column
+   * over it. Not a <button>, since it holds buttons.
+   */
+  function cardFrame(
+    entry: UiWorkspaceEntry,
+    options: { onOpen: (() => void) | null; attrs?: m.Attributes; extra?: string },
+    children: m.Children,
+  ): m.Children {
+    const { tone, wallpaper } = cardTone(entry);
+    const isInteractive = options.onOpen !== null;
+    return m(
+      Card,
+      {
+        layout: "block",
+        padding: "none",
+        interactive: false,
+        extra:
+          `relative flex flex-col border-0 ${CARD_MIN_HEIGHT_CLASS} text-left titlebar-surface card-ground px-3 pt-1.5 pb-2 pr-1.5 ` +
+          (isInteractive ? "cursor-pointer transition-shadow hover:shadow-raised " : "cursor-default ") +
+          (options.extra ?? ""),
+        role: isInteractive ? "button" : undefined,
+        tabindex: isInteractive ? 0 : undefined,
+        style: `--titlebar-bg: ${tone}; --workspace-accent: ${entry.accent}; background-color: ${tone};`,
+        "data-agent-id": entry.id,
+        onclick: isInteractive ? options.onOpen : undefined,
+        onkeydown: isInteractive
+          ? (event: KeyboardEvent) => {
+              // Only the card's own key, not one bubbling up from a button it holds.
+              if (event.target !== event.currentTarget) return;
+              if (event.key !== "Enter" && event.key !== " ") return;
+              event.preventDefault();
+              options.onOpen?.();
+            }
+          : undefined,
+        ...(options.attrs ?? {}),
+      },
+      [
+        m("div", { "aria-hidden": "true", class: "absolute inset-0 overflow-hidden rounded-[inherit]" }, [
+          wallpaper === null
+            ? null
+            : m("div", {
+                class: "absolute inset-0",
+                "data-wallpaper": wallpaper,
+                style: `background-image: url("${wallpaper}"); background-size: cover; background-position: center;`,
+              }),
+          wallpaper === null
+            ? null
+            : m("div", {
+                class: "absolute inset-0",
+                style: `background: linear-gradient(to bottom, color-mix(in srgb, ${tone} 70%, transparent) 0%, color-mix(in srgb, ${tone} 35%, transparent) 30%, transparent 55%);`,
+              }),
+        ]),
+        m("div", { class: "relative flex flex-1 flex-col gap-2" }, children),
+      ],
+    );
+  }
+
+  function cardName(name: string, extra = "text-primary"): m.Children {
+    return m("span", { class: `text-base leading-[1.333] font-semibold truncate flex-1 ${extra}` }, name);
+  }
+
+  function cardTop(name: string, actions: m.Children, nameExtra?: string): m.Children {
+    return m("div", { class: "flex items-center gap-2.5" }, [
+      cardName(name, nameExtra),
+      m("div", { class: "flex shrink-0 items-center" }, actions),
+    ]);
+  }
+
+  function cardBadges(children: m.Children): m.Children {
+    return m("div", { class: "mt-auto flex flex-wrap items-center gap-1.5" }, children);
+  }
+
+  /** A live owned workspace: its name on its wallpaper, one run control, Open in new window, the menu, every status. */
+  function workspaceCard(entry: UiWorkspaceEntry): m.Children {
+    const { stores } = getAppContext();
+    const discoveryHealth = stores.health.discoveryHealth;
+    // Nothing is arriving to correct a frozen reading, so the card reports
+    // "Status unknown" rather than showing the last one as if it were current.
+    const liveness =
+      (entry.supports_shutdown ?? false) && isMachineStateKnown(discoveryHealth)
+        ? displayedLivenessOf(entry)
+        : ("UNKNOWN" as MindLiveness);
+    const controls = mindControlsFor(entry, liveness, discoveryHealth);
+    const keyChip = keyStateChipFor(entry.key_state ?? "");
+    const isOpenable = isEntryOpenable(entry);
+    const isMoving = liveness === "STARTING" || liveness === "STOPPING";
+    const supportsShutdown = entry.supports_shutdown ?? false;
+    // One run control (specs/home-screen-redesign, 4.7): Start, Stop, or Restart.
+    const runControl: { label: string; icon: IconName; run: () => void; isDisabled: boolean } | null = !supportsShutdown
+      ? { label: "Restart workspace", icon: "restart", run: () => restartMind(entry), isDisabled: false }
+      : controls.isStopShown
+        ? { label: "Stop workspace", icon: "pause", run: () => stopMind(entry), isDisabled: false }
+        : controls.isStartShown || isMoving
+          ? {
+              label: liveness === "STOPPING" ? "Stopping…" : liveness === "STARTING" ? "Starting…" : "Start workspace",
+              icon: "play",
+              run: () => startMind(entry),
+              isDisabled: isMoving,
+            }
+          : null;
+    const backups = backupsMenuItem(entry, liveness);
+    const facts: CardMenuFact[] = entry.provider_label ? [{ label: "Host:", value: entry.provider_label }] : [];
+    const menuItems: CardMenuItem[] = [];
+    if (isOpenable)
+      menuItems.push({ icon: "arrow-up-right", label: "Open in new window", onSelect: () => openInNewWindow(entry) });
+    if (runControl !== null)
+      menuItems.push({
+        icon: runControl.icon,
+        label: runControl.label,
+        onSelect: runControl.run,
+        isDisabled: runControl.isDisabled,
+      });
+    if (backups !== null) menuItems.push(backups);
+    menuItems.push({ icon: "settings", label: "Workspace settings", onSelect: () => openSettings(entry) });
+    const note = updatedNote(entry);
+    return cardFrame(
+      entry,
+      { onOpen: isOpenable ? () => rowClick(entry) : null, attrs: { "data-row-kind": "live" } },
+      [
+        cardTop(entry.name, [
+          runControl === null
+            ? null
+            : cardIconButton(runControl.label, runControl.icon, runControl.run, {
+                isDisabled: runControl.isDisabled,
+                attrs: { "data-run-control": runControl.icon },
+              }),
+          isOpenable
+            ? cardIconButton("Open in new window", "arrow-up-right", () => openInNewWindow(entry), {
+                attrs: { "data-card-action": "new-window" },
+              })
+            : null,
+          m(CardMenu, { facts, items: menuItems }),
+        ]),
+        cardBadges([
+          keyChip === null
+            ? null
+            : badge(keyChip.label, { "data-tooltip": keyChip.tooltip, extra: "landing-key-state-chip" }),
+          supportsShutdown ? livenessBadge(liveness, entry.stop_kind ?? "") : null,
+          healthBadge(entry, liveness),
+          updateBadge(entry),
+        ]),
+        note,
+      ],
+    );
+  }
+
+  function destroyCard(
     agentId: string,
     name: string,
     accent: string,
     destroyStatus: string,
   ): m.Children {
+    const entry: UiWorkspaceEntry = { id: agentId, name, accent };
+    return cardFrame(
+      entry,
+      { onOpen: () => m.route.set(`/destroying/${agentId}`), attrs: { "data-row-kind": "destroying" } },
+      [
+        cardTop(name, [], "text-secondary"),
+        cardBadges([
+          destroyStatus === "failed"
+            ? badge("Removal failed")
+            : badge(destroyStatus === "confirming" ? "Confirming removal…" : "Destroying…"),
+        ]),
+      ],
+    );
+  }
+
+  function createAttemptCard(entry: UiWorkspaceEntry): m.Children {
+    const label =
+      entry.create_attempt_state === "creating"
+        ? "Creating…"
+        : entry.create_attempt_state === "interrupted"
+          ? "Interrupted"
+          : "Create failed";
+    return cardFrame(
+      entry,
+      { onOpen: () => m.route.set(`/creating/${entry.id}`), attrs: { "data-row-kind": "create-attempt" } },
+      [cardTop(entry.name, [], "text-secondary"), cardBadges([badge(label)])],
+    );
+  }
+
+  /** The chip of a remote row whose access setup failed: a button, since the
+   * failure's detail is more than a tooltip holds, opening its own dialog. */
+  function remoteErrorChip(
+    entry: UiWorkspaceEntry,
+    chip: RemoteStateChip,
+    error: UserFacingError,
+    remoteState: string,
+  ): m.Children {
     return m(
-      Card,
+      "button",
       {
-        layout: "row",
-        interactive: true,
-        extra: "accent-spine relative overflow-hidden cursor-pointer",
-        style: `--workspace-accent: ${accent};`,
-        onclick: () => m.route.set(`/destroying/${agentId}`),
+        type: "button",
+        class: homeBadgeClass("alarm", "cursor-pointer border-0"),
+        "data-badge-tone": "alarm",
+        "data-tooltip": chip.tooltip,
+        "data-remote-state": remoteState,
+        onclick: () => {
+          showErrorDialog({
+            title: `Can't reach "${entry.name}" from here`,
+            error,
+            workspaceAgentId: entry.id,
+          });
+        },
       },
-      [
-        m(
-          "span",
-          {
-            class: "flex-1 min-w-0 truncate font-semibold text-secondary pl-1",
-          },
-          name,
-        ),
-        destroyStatus === "failed"
-          ? m(StatusBadge, { variant: "error" }, "Removal failed")
-          : m(StatusBadge, { extra: "gap-2" }, [
-              m(Spinner, { size: "sm" }),
-              destroyStatus === "confirming" ? "Confirming removal..." : "Destroying...",
-            ]),
-      ],
+      chip.label,
     );
   }
 
-  function liveRow(entry: UiWorkspaceEntry): m.Children {
-    const { stores } = getAppContext();
-    const extras = state.extras;
-    const destroyStatus = extras?.destroying_status_by_agent_id[entry.id];
-    if (destroyStatus !== undefined) {
-      return destroyRow(entry.id, entry.name, entry.accent, destroyStatus);
-    }
-    const discoveryHealth = stores.health.discoveryHealth;
-    // Nothing is arriving to correct a frozen reading, so the row reports
-    // "Status unknown" rather than showing the last one as if it were current.
-    const liveness =
-      (entry.supports_shutdown ?? false) && isMachineStateKnown(discoveryHealth)
-        ? state.tracker.displayedLiveness(entry.id, entry.liveness ?? "")
-        : ("UNKNOWN" as MindLiveness);
-    const controls = mindControlsFor(entry, liveness, discoveryHealth);
-    const providerLabel = entry.provider_label ?? "";
-    // A row whose click would go nowhere (a cloud machine this device holds no
-    // key for, a stop an operator holds) is not clickable; the chip or the
-    // badge says why in place of an open that would hang. Decided by the same
-    // rule the click runs, so the two cannot disagree.
-    const keyChip = keyStateChipFor(entry.key_state ?? "");
-    const isHealthy = stores.health.statusFor(entry.id) === "healthy";
-    const isOpenable =
-      rowClickActionFor(
-        entry,
-        state.tracker.displayedLiveness(entry.id, entry.liveness ?? ""),
-        isHealthy,
-      ) !== "blocked";
-    const row = m(
-      Card,
-      {
-        layout: "row",
-        interactive: isOpenable,
-        extra: `accent-spine relative overflow-hidden ${isOpenable ? "cursor-pointer" : "cursor-default"}`,
-        style: `--workspace-accent: ${entry.accent};`,
-        "data-agent-id": entry.id,
-        onclick: isOpenable ? () => rowClick(entry) : undefined,
-      },
-      [
-        m(
-          "span",
-          { class: "flex-1 min-w-0 truncate font-semibold text-primary pl-1" },
-          entry.name,
-        ),
-        providerLabel
-          ? m(
-              "span",
-              { class: `${BADGE_CLASS} bg-fill-subtle text-secondary` },
-              providerLabel,
-            )
-          : null,
-        keyChip === null
-          ? null
-          : m(
-              "span",
-              {
-                class: `${BADGE_CLASS} bg-fill-subtle text-important landing-key-state-chip`,
-                "data-tooltip": keyChip.tooltip,
-              },
-              keyChip.label,
-            ),
-        // Slot for the backup badge (T4 wires the backup-status data source).
-        m("span", { class: "landing-backup-badge hidden" }),
-        (entry.supports_shutdown ?? false)
-          ? livenessBadge(liveness, entry.stop_kind ?? "")
-          : null,
-        healthBadge(entry, liveness),
-        updateBadge(entry),
-        backupsButton(entry, liveness),
-        controls.isStartShown
-          ? m(
-              Button,
-              {
-                variant: "ghost",
-                size: "icon",
-                "aria-label": "Start workspace",
-                "data-tooltip": "Start workspace",
-                onclick: (event: MouseEvent) => {
-                  event.stopPropagation();
-                  startMind(entry);
-                },
-              },
-              m(Icon16, { name: "play" }),
-            )
-          : null,
-        controls.isStopShown
-          ? m(
-              Button,
-              {
-                variant: "ghost",
-                size: "icon",
-                "aria-label": "Stop workspace",
-                "data-tooltip": "Stop workspace",
-                onclick: (event: MouseEvent) => {
-                  event.stopPropagation();
-                  stopMind(entry);
-                },
-              },
-              m(Icon16, { name: "pause" }),
-            )
-          : null,
-        !(entry.supports_shutdown ?? false)
-          ? m(
-              Button,
-              {
-                variant: "ghost",
-                size: "icon",
-                "aria-label": "Restart workspace",
-                "data-tooltip": "Restart workspace",
-                onclick: (event: MouseEvent) => {
-                  event.stopPropagation();
-                  const question = lifecycleConfirmation(
-                    "restart",
-                    entry.name,
-                    stores.updates.isApplying(entry.id),
-                  );
-                  if (question !== null && !window.confirm(question)) return;
-                  const returnTo = `/goto/${entry.id}/`;
-                  m.route.set(recoveryRoute(entry.id, returnTo, "restart"));
-                },
-              },
-              m(Icon16, { name: "restart" }),
-            )
-          : null,
-        !isOpenable
-          ? null
-          : m(
-              Button,
-              {
-                variant: "ghost",
-                size: "icon",
-                "aria-label": "Open workspace in new window",
-                "data-tooltip": "Open in new window",
-                onclick: (event: MouseEvent) => {
-                  event.stopPropagation();
-                  if (electronBridge.isDesktop) {
-                    electronBridge.openWorkspaceInNewWindow(entry.id);
-                  } else {
-                    const forwardOrigin =
-                      getAppContext().shell.mngrForwardOrigin;
-                    window.open(
-                      `${forwardOrigin}/goto/${entry.id}/`,
-                      "_blank",
-                      "noopener",
-                    );
-                  }
-                },
-              },
-              m(Icon16, { name: "arrow-up-right" }),
-            ),
-        m(
-          Button,
-          {
-            variant: "ghost",
-            size: "icon",
-            "aria-label": "Workspace settings",
-            "data-tooltip": "Settings",
-            onclick: (event: MouseEvent) => {
-              event.stopPropagation();
-              getAppContext().shell.routeTo(
-                `/workspace/${entry.id}/options?tab=settings`,
-              );
-            },
-          },
-          m(Icon16, { name: "settings" }),
-        ),
-      ],
-    );
-    const note = updatedNote(entry);
-    return note === null
-      ? row
-      : m("div", { class: "flex flex-col gap-1" }, [row, note]);
-  }
-
-  function createAttemptRow(entry: UiWorkspaceEntry): m.Children {
-    return m(
-      Card,
-      {
-        layout: "row",
-        interactive: true,
-        extra: "accent-spine relative overflow-hidden cursor-pointer",
-        style: `--workspace-accent: ${entry.accent};`,
-        onclick: () => m.route.set(`/creating/${entry.id}`),
-      },
-      [
-        m(
-          "span",
-          {
-            class: "flex-1 min-w-0 truncate font-semibold text-secondary pl-1",
-          },
-          entry.name,
-        ),
-        entry.create_attempt_state === "creating"
-          ? m(StatusBadge, { extra: "gap-2" }, [
-              m(Spinner, { size: "sm" }),
-              "Creating…",
-            ])
-          : entry.create_attempt_state === "interrupted"
-            ? m(StatusBadge, { variant: "warn" }, "Interrupted")
-            : m(StatusBadge, { variant: "error" }, "Create failed"),
-      ],
-    );
-  }
-
-  function remoteRow(entry: UiWorkspaceEntry): m.Children {
+  /** A workspace known only from a synced record: where it lives, its access state, and a way to drop it. */
+  function remoteCard(entry: UiWorkspaceEntry): m.Children {
     if (state.removedHostIds.has(entry.host_id ?? "")) return null;
-    const tile = getAppContext().stores.workspaces.remoteWorkspaceStates[
-      entry.id
-    ] ?? { state: "" };
+    const tile = getAppContext().stores.workspaces.remoteWorkspaceStates[entry.id] ?? { state: "" };
     const chip = remoteStateChipFor(tile);
-    return m(
-      Card,
-      {
-        layout: "row",
-        extra: "accent-spine relative overflow-hidden opacity-60",
-        style: `--workspace-accent: ${entry.accent};`,
-        "data-agent-id": entry.id,
-      },
+    const backups = backupsMenuItem(entry, "");
+    const items: CardMenuItem[] = [];
+    if (backups !== null) items.push(backups);
+    items.push({
+      icon: "close",
+      label: "Remove from this list",
+      id: "remove",
+      onSelect: () => removeRemoteRecord(entry),
+    });
+    return cardFrame(
+      entry,
+      { onOpen: null, attrs: { "data-row-kind": "remote" }, extra: "opacity-60" },
       [
-        m(
-          "span",
-          {
-            class: "flex-1 min-w-0 truncate font-semibold text-secondary pl-1",
-          },
-          entry.name,
-        ),
-        m(
-          "span",
-          { class: `${BADGE_CLASS} bg-fill-subtle text-secondary` },
-          remoteLocationBadgeFor(entry),
-        ),
-        chip === null
-          ? null
-          : chip.error !== null
-            ? m(
-                "button",
-                {
-                  type: "button",
-                  class: `${BADGE_CLASS} bg-fill-subtle text-important cursor-pointer border-0`,
-                  "data-tooltip": chip.tooltip,
-                  "data-remote-state": tile.state,
-                  onclick: () => {
-                    if (chip.error !== null)
-                      showErrorDialog({
-                        title: `Can't reach "${entry.name}" from here`,
-                        error: chip.error,
-                        workspaceAgentId: entry.id,
-                      });
-                  },
-                },
-                chip.label,
-              )
-            : m(
-                "span",
-                {
-                  class: `${BADGE_CLASS} bg-fill-subtle ${chip.isImportant ? "text-important" : "text-secondary"}`,
-                  "data-tooltip": chip.tooltip,
-                  "data-remote-state": tile.state,
-                },
-                chip.label,
-              ),
-        backupsButton(entry, ""),
-        m(
-          Button,
-          {
-            variant: "ghost",
-            size: "icon",
-            "aria-label": "Remove from this list",
-            "data-tooltip": "Remove from this list",
-            onclick: () => removeRemoteRecord(entry),
-          },
-          m(Icon16, { name: "close" }),
-        ),
+        cardTop(entry.name, [
+          cardIconButton("Remove from this list", "close", () => removeRemoteRecord(entry)),
+          m(CardMenu, { items }),
+        ]),
+        cardBadges([
+          badge(remoteLocationBadgeFor(entry)),
+          chip === null
+            ? null
+            : chip.error !== null
+              ? remoteErrorChip(entry, chip, chip.error, tile.state)
+              : badge(chip.label, { "data-tooltip": chip.tooltip, "data-remote-state": tile.state }),
+        ]),
       ],
     );
+  }
+
+  /** Run one shared-row action, holding the row's buttons while it is in flight and showing a refusal in place. */
+  function runSharedAction(shareKey: string, action: () => Promise<unknown>): void {
+    if (state.sharedBusyKeys.has(shareKey)) return;
+    state.sharedBusyKeys.add(shareKey);
+    state.sharedError = "";
+    action()
+      .catch((error: unknown) => {
+        state.sharedError = sharedActionErrorMessage(error);
+      })
+      .finally(() => {
+        state.sharedBusyKeys.delete(shareKey);
+        m.redraw();
+      });
+  }
+
+  /** Open a shared target through the shell; its refusal surfaces through sharedActionErrorMessage. */
+  function openThroughShell(shareKey: string, app: string | null): Promise<void> {
+    return getAppContext().shell.openSharedWorkspace(shareKey, app);
+  }
+
+  function openShared(entry: UiWorkspaceEntry, app: string | null): void {
+    if (!isSharedEntry(entry)) return;
+    runSharedAction(entry.share.share_key, () => openThroughShell(entry.share.share_key, app));
+  }
+
+  /** Retry after a verdict (specs/shared-with-me, 4.7): forget it, then open the shell target again. */
+  function retryShared(entry: UiWorkspaceEntry): void {
+    if (!isSharedEntry(entry)) return;
+    const { shell } = getAppContext();
+    const key = entry.share.share_key;
+    runSharedAction(key, async () => {
+      await sharedWithMeApi.retry(shell.accountId, key);
+      await openThroughShell(key, null);
+    });
+  }
+
+  function reportShared(entry: UiWorkspaceEntry): void {
+    if (!isSharedEntry(entry)) return;
+    if (!window.confirm(REPORT_CONFIRMATION)) return;
+    const { shell } = getAppContext();
+    runSharedAction(entry.share.share_key, () => sharedWithMeApi.report(shell.accountId, entry.share.share_key));
+  }
+
+  /** Decline the share; an invite card (`isHeldInPlace`) keeps its place, reading Declined with Undo, until the tab is left. */
+  function declineShared(entry: UiWorkspaceEntry, isHeldInPlace: boolean): void {
+    if (!isSharedEntry(entry)) return;
+    const { shell } = getAppContext();
+    const key = entry.share.share_key;
+    if (isHeldInPlace) state.pendingDeclinedKeys.add(key);
+    runSharedAction(key, () => sharedWithMeApi.decline(shell.accountId, key));
+  }
+
+  function undoDeclineShared(entry: UiWorkspaceEntry): void {
+    if (!isSharedEntry(entry)) return;
+    const { shell } = getAppContext();
+    const key = entry.share.share_key;
+    runSharedAction(key, () => sharedWithMeApi.undoDecline(shell.accountId, key));
+  }
+
+  function removeShared(entry: UiWorkspaceEntry): void {
+    if (!isSharedEntry(entry)) return;
+    const { shell } = getAppContext();
+    runSharedAction(entry.share.share_key, () => sharedWithMeApi.remove(shell.accountId, entry.share.share_key));
+  }
+
+  function addSharedLink(): void {
+    const link = state.sharedLinkDraft.trim();
+    if (link === "") return;
+    const { shell } = getAppContext();
+    runSharedAction("add-link", async () => {
+      await sharedWithMeApi.addLink(shell.accountId, link, "");
+      state.sharedLinkDraft = "";
+    });
+  }
+
+  /** The share key the deep link named (`?shared=`, specs/shared-with-me 4.11): its card is marked and scrolled into view once. */
+  function selectedSharedKey(): string | null {
+    return m.route.param("shared") || null;
+  }
+
+  function sharedRowElementId(shareKey: string): string {
+    return `shared-with-me-row-${shareKey}`;
+  }
+
+  /** Bring the deep link's card into view the first time it renders; a later redraw leaves the scroll alone. */
+  function scrollSelectedSharedRowIntoView(): void {
+    const selected = selectedSharedKey();
+    if (selected === null || selected === state.scrolledSharedKey) return;
+    if (typeof document === "undefined") return;
+    const row = document.getElementById(sharedRowElementId(selected));
+    if (row === null) return;
+    state.scrolledSharedKey = selected;
+    row.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  /** The deep link's share decides the tab once (specs/home-screen-redesign, 4.3). */
+  function pickTabForDeepLink(): void {
+    const selected = selectedSharedKey();
+    if (selected === null || selected === state.deepLinkTabKey) return;
+    const entry = getAppContext().stores.workspaces.sharedEntryByShareKey(selected);
+    if (entry === null || !isSharedEntry(entry)) return;
+    state.deepLinkTabKey = selected;
+    state.tab = homeTabOfShare(entry.share);
+    // A declined invitation files under the collapsed disclosure, whose cards
+    // are not drawn while it is closed: open it so the card is there to land on.
+    if (isDeclinedInvitation(entry.share)) state.isDeclinedOpen = true;
+  }
+
+  /** The shared-row attrs every card and icon of a share carries: its key, the deep link's mark, and its scroll id. */
+  function sharedAttrs(share: UiSharedWorkspace): m.Attributes {
+    return {
+      id: sharedRowElementId(share.share_key),
+      "data-share-key": share.share_key,
+      "data-share-selected": selectedSharedKey() === share.share_key ? "true" : undefined,
+    };
+  }
+
+  /** The owner's chip on a guest card: their face and "<owner>'s workspace", or "Pasted link". */
+  function ownerChip(share: UiSharedWorkspace): m.Children {
+    if (share.is_manual) return badge("Pasted link", { "data-badge": "status" });
+    return m(
+      HomeBadge,
+      { tone: "neutral", "data-badge": "owner", extra: "min-w-0 pl-0.5" },
+      [
+        m(Avatar, { src: share.owner.profile_picture_url ?? null, label: ownerLabel(share), size: 14 }),
+        m("span", { class: "truncate" }, `${ownerLabel(share)}'s workspace`),
+      ],
+    );
+  }
+
+  /** The menu items a share offers besides opening: retry, decline or undo, report, remove. An invite card's
+   * (`isInviteCard`) decline holds the card in place. */
+  function sharedMenuItems(
+    entry: UiWorkspaceEntry,
+    share: UiSharedWorkspace,
+    isRetryShown: boolean,
+    isInviteCard = false,
+  ): CardMenuItem[] {
+    const isBusy = state.sharedBusyKeys.has(share.share_key);
+    const items: CardMenuItem[] = [];
+    if (isRetryShown)
+      items.push({
+        icon: "restart",
+        label: "Retry",
+        id: "retry",
+        isDisabled: isBusy || share.status === "declined",
+        onSelect: () => retryShared(entry),
+      });
+    if (!share.is_manual) {
+      if (share.status === "declined")
+        items.push({ icon: "undo", label: "Undo decline", id: "undo-decline", isDisabled: isBusy, onSelect: () => undoDeclineShared(entry) });
+      else
+        items.push({
+          icon: "close",
+          label: "Decline",
+          id: "decline",
+          isDisabled: isBusy,
+          onSelect: () => declineShared(entry, isInviteCard),
+        });
+      items.push({ icon: "bug", label: "Report as unwanted", id: "report", isDisabled: isBusy, onSelect: () => reportShared(entry) });
+    }
+    items.push({ icon: "close", label: "Remove from this list", id: "remove", isDisabled: isBusy, onSelect: () => removeShared(entry) });
+    return items;
+  }
+
+  /** Someone else's workspace, as a guest sees it: whose it is and a way in, with its liveness and last verdict. */
+  function guestCard(entry: UiWorkspaceEntry): m.Children {
+    if (!isSharedEntry(entry)) return null;
+    const share = entry.share;
+    const isBusy = state.sharedBusyKeys.has(share.share_key);
+    const liveness = isShareLive(share, Date.now());
+    const verdict = verdictLabel(share);
+    const openableTargets = share.targets.filter((target) => target.link);
+    // A share whose tunnel reads as down is not opened on a click (specs/shared-with-me, 4.7): Retry is the override.
+    const isOffline = liveness === false;
+    const canOpen = openableTargets.length > 0 && !isBusy && !isOffline;
+    const menuItems: CardMenuItem[] = openableTargets.map((target) => ({
+      icon: "arrow-up-right" as const,
+      label: target.app === "system_interface" ? "Open" : `Open ${target.display_name ?? target.app}`,
+      id: `open:${target.app}`,
+      isDisabled: isBusy || isOffline,
+      onSelect: () => openShared(entry, openTargetApp(target)),
+    }));
+    return cardFrame(
+      entry,
+      {
+        onOpen: canOpen ? () => openShared(entry, null) : null,
+        attrs: { ...sharedAttrs(share), "data-row-kind": "shared" },
+      },
+      [
+        cardTop(entry.name, [m(CardMenu, { items: [...menuItems, ...sharedMenuItems(entry, share, isRetryOffered(share, isOffline))] })]),
+        cardBadges([
+          ownerChip(share),
+          isBusy ? badge(CONNECTING_LABEL, { "data-badge": "connecting" }) : null,
+          liveness === null ? null : badge(liveness ? "Online" : "Offline", { "data-badge": "liveness" }),
+          verdict === null ? null : badge(verdict, { "data-share-verdict": share.verdict }),
+          openableTargets.length === 0
+            ? m("span", { class: "type-helper text-secondary", "data-share-no-address": "true" }, NO_ADDRESS_MESSAGE)
+            : null,
+        ]),
+      ],
+    );
+  }
+
+  /** The 40px tile an invite card leads with: the workspace's ground, or the app's monogram, with the owner's face. */
+  function inviteThumb(entry: UiWorkspaceEntry, share: UiSharedWorkspace, app: SharedApp | null): m.Children {
+    const tile =
+      app === null
+        ? m("span", {
+            "aria-hidden": "true",
+            class: "block size-10 rounded-[25%] shadow-[0_1px_4px_0_rgb(0_0_0/0.2)]",
+            style: `background-color: ${entry.accent};`,
+          })
+        : m(MonogramTile, { name: app.name, extra: "size-10 rounded-[32%] text-sm shadow-[0_1px_4px_0_rgb(0_0_0/0.2)]" });
+    return m("span", { class: "relative block shrink-0 size-10" }, [
+      tile,
+      m(
+        "span",
+        { class: "absolute -right-1 -bottom-1 rounded-full bg-surface-primary p-px" },
+        m(Avatar, { src: share.owner.profile_picture_url ?? null, label: ownerLabel(share), size: 16 }),
+      ),
+    ]);
+  }
+
+  /**
+   * One invitation (specs/home-screen-redesign, 4.6): what it is, who from,
+   * and its answer. Declined, it stays put reading Declined with Undo until the
+   * tab is left.
+   */
+  function inviteCard(entry: UiWorkspaceEntry): m.Children {
+    if (!isSharedEntry(entry)) return null;
+    const share = entry.share;
+    // A workspace invitation stays a workspace even when one of its apps is granted in its own right.
+    const firstApp = isWorkspaceShare(share) ? null : (sharedAppsOf(entry)[0] ?? null);
+    const isDeclined = share.status === "declined";
+    const isBusy = state.sharedBusyKeys.has(share.share_key);
+    const target = primaryTarget(share);
+    const canJoin = target !== null && !!target.link && !isBusy;
+    const name = firstApp === null ? entry.name : firstApp.name;
+    const what = firstApp === null ? "a workspace" : "an app";
+    const when = relativeTimeLabel(share.latest_grant_at ?? "", Date.now());
+    const slot = "w-[72px]";
+    return m(
+      "div",
+      {
+        ...sharedAttrs(share),
+        "data-invite-answer": isDeclined ? "declined" : undefined,
+        class:
+          "flex min-h-16 items-center gap-3 py-3 px-3 text-left rounded-lg border border-subtle bg-surface-primary card-arrive",
+      },
+      [
+        m("span", { class: "shrink-0 " + (isDeclined ? "opacity-40" : "") }, inviteThumb(entry, share, firstApp)),
+        m("div", { class: "min-w-0 flex-1" }, [
+          m("div", { class: "truncate type-label " + (isDeclined ? "text-tertiary" : "text-primary") }, name),
+          m(
+            "div",
+            { class: "truncate type-helper text-secondary" },
+            isDeclined ? "Declined" : `${ownerLabel(share)} invited you to ${what}${when ? ` · ${when}` : ""}`,
+          ),
+        ]),
+        m("div", { class: "flex shrink-0 items-center gap-1.5" }, [
+          m("div", { class: slot }, [
+            isDeclined
+              ? null
+              : m(
+                  Button,
+                  {
+                    variant: "secondary",
+                    block: true,
+                    disabled: isBusy,
+                    "data-invite-action": "decline",
+                    onclick: () => declineShared(entry, true),
+                  },
+                  "Decline",
+                ),
+          ]),
+          m("div", { class: slot }, [
+            isDeclined
+              ? m(
+                  Button,
+                  { variant: "ghost", block: true, disabled: isBusy, "data-invite-action": "undo", onclick: () => undoDeclineShared(entry) },
+                  "Undo",
+                )
+              : m(
+                  Button,
+                  {
+                    variant: "primary",
+                    block: true,
+                    disabled: !canJoin,
+                    title: canJoin || isBusy ? undefined : NO_ADDRESS_MESSAGE,
+                    "data-invite-action": "join",
+                    onclick: () =>
+                      openShared(entry, target === null ? null : openTargetApp(target)),
+                  },
+                  isBusy ? CONNECTING_LABEL : "Join",
+                ),
+          ]),
+          m(CardMenu, { items: sharedMenuItems(entry, share, false, true), buttonExtra: "text-secondary" }),
+        ]),
+      ],
+    );
+  }
+
+  /** Studio settings, in the first section head of the active tab (specs/home-screen-redesign, D9). */
+  function studioSettingsButton(): m.Children {
+    const { shell } = getAppContext();
+    return m(
+      TitlebarButton,
+      {
+        id: "landing-minds-settings",
+        variant: "crumb",
+        tone: "muted",
+        extra: "gap-1.5",
+        "aria-label": "Studio settings",
+        onclick: () => m.route.set("/settings", shell.overlayQuery()),
+      },
+      [m(Icon16, { name: "settings", extra: "shrink-0" }), m("span", { class: "type-label" }, "Studio settings")],
+    );
+  }
+
+  function sectionHead(title: string, options: { isFirst: boolean; actions?: m.Children } = { isFirst: false }): m.Children {
+    return m("div", { class: "flex items-center justify-between mb-4 min-h-8 gap-2" }, [
+      m("h2", { class: "type-heading text-primary" }, title),
+      m("div", { class: "flex items-center gap-2" }, [options.actions ?? null, options.isFirst ? studioSettingsButton() : null]),
+    ]);
+  }
+
+  function emptyBox(text: string, attrs: m.Attributes = {}): m.Children {
+    return m(
+      "div",
+      { class: "rounded-lg border border-dashed border-subtle py-10 text-center type-body text-tertiary", ...attrs },
+      text,
+    );
+  }
+
+  /**
+   * The grid's last card: Add workspace, a dashed card the size of the
+   * others, or Sign in on a signed-out account's hub, where nothing new can be
+   * made until it signs in again.
+   */
+  function createCard(): m.Children {
+    const { shell } = getAppContext();
+    const cardClass =
+      `${CARD_MIN_HEIGHT_CLASS} flex cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-dashed ` +
+      "border-[var(--c-text-secondary)] type-label text-tertiary no-underline transition-[color,border-color,box-shadow] " +
+      "hover:border-[var(--c-text-primary)] hover:text-primary hover:shadow-raised bg-transparent";
+    if (shell.isAccountSignedOut()) {
+      return m(
+        "button",
+        {
+          type: "button",
+          id: "landing-sign-in",
+          class: cardClass,
+          disabled: webLogin.isOpen,
+          onclick: () =>
+            void webLogin.start(
+              "Sign in again to create workspaces under this account.",
+            ),
+        },
+        [m(Icon16, { name: "user" }), "Sign in"],
+      );
+    }
+    return m(
+      "a",
+      { id: "landing-create", class: cardClass, ...routeLinkAttrs(shell.hubRoute("/create")) },
+      [m(Icon16, { name: "plus" }), "Add workspace"],
+    );
+  }
+
+  /** The input a link given out of band goes into; the Workspaces and Apps tabs each carry one, with their own ids.
+   * Both add the same way: a pasted link is sorted onto its tab by its origin label (specs/home-screen-redesign, D7). */
+  function pastedLinkInput(kind: "workspace" | "app"): m.Children {
+    const isAddBusy = state.sharedBusyKeys.has("add-link");
+    return m("div", { class: "flex items-center gap-2 mt-3" }, [
+      m("input", {
+        type: "url",
+        id: kind === "workspace" ? "shared-with-me-link" : "shared-with-me-app-link",
+        placeholder: kind === "workspace" ? "Paste a workspace link you were given" : "Paste an app link you were given",
+        class: "h-[34px] px-3 rounded-full type-body bg-fill-subtle text-primary flex-1 min-w-0",
+        value: state.sharedLinkDraft,
+        oninput: (event: InputEvent) => {
+          state.sharedLinkDraft = (event.target as HTMLInputElement).value;
+        },
+        onkeydown: (event: KeyboardEvent) => {
+          if (event.key === "Enter") addSharedLink();
+        },
+      }),
+      m(
+        Button,
+        {
+          variant: "secondary",
+          id: kind === "workspace" ? "shared-with-me-add-link" : "shared-with-me-add-app-link",
+          disabled: isAddBusy || state.sharedLinkDraft.trim() === "",
+          onclick: addSharedLink,
+        },
+        "Add link",
+      ),
+    ]);
+  }
+
+  function sharedErrorLine(): m.Children {
+    return state.sharedError
+      ? m("p", { class: "type-helper text-important mt-2", role: "alert", id: "shared-with-me-error" }, state.sharedError)
+      : null;
+  }
+
+  /** "Workspaces shared with you": the workspace shares that are neither invitations nor declined, and the pasted-link input. */
+  function sharedWorkspacesSection(workspaceShares: readonly UiWorkspaceEntry[]): m.Children {
+    return m("section", { id: "landing-shared-with-me", "data-home-section": "shared-workspaces" }, [
+      sectionHead("Workspaces shared with you"),
+      workspaceShares.length > 0
+        ? m("div", { class: CARD_GRID_CLASS }, workspaceShares.map((entry) => guestCard(entry)))
+        : emptyBox("Nothing has been shared with you yet."),
+      sharedErrorLine(),
+      pastedLinkInput("workspace"),
+    ]);
+  }
+
+  function ownAppsSection(liveEntries: readonly UiWorkspaceEntry[]): m.Children {
+    const { shell } = getAppContext();
+    const icons: m.Children[] = [];
+    for (const entry of liveEntries) {
+      // The icon follows the card: a workspace whose card is not clickable has no app to open either.
+      const isOpenable = isEntryOpenable(entry);
+      for (const app of entry.apps ?? []) {
+        icons.push(
+          m(HomeAppIcon, {
+            key: `${entry.id}:${app.name}`,
+            name: app.display_name,
+            subtitle: entry.name,
+            iconUrl: appIconUrl(entry.id, app),
+            isDisabled: !isOpenable,
+            title: isOpenable ? undefined : BLOCKED_WORKSPACE_MESSAGE,
+            onOpen: () => shell.openWorkspaceApp(entry, app, displayedLivenessOf(entry)),
+            "data-agent-id": entry.id,
+            "data-app-name": app.name,
+          }),
+        );
+      }
+    }
+    return m("section", { "data-home-section": "own-apps" }, [
+      sectionHead("Your apps", { isFirst: true }),
+      icons.length > 0
+        ? m("div", { class: "flex flex-wrap gap-x-4 gap-y-6" }, icons)
+        : emptyBox("No apps yet. Describe an app in a workspace's chat and it appears here.", { id: "landing-no-own-apps" }),
+    ]);
+  }
+
+  function sharedAppIcon(app: SharedApp): m.Children {
+    const { entry, share, target } = app;
+    const hasLink = !!target.link;
+    const liveness = isShareLive(share, Date.now());
+    const isOffline = liveness === false;
+    const isBusy = state.sharedBusyKeys.has(share.share_key);
+    // A share with several targets is several icons; the row id the deep link scrolls to names its first.
+    const attrs = sharedAttrs(share);
+    return m(HomeAppIcon, {
+      key: `${share.share_key}:${target.app}`,
+      name: app.name,
+      iconUrl: null,
+      owner: share.is_manual ? undefined : { label: ownerLabel(share), pictureUrl: share.owner.profile_picture_url ?? null },
+      isDisabled: !hasLink || isOffline || isBusy,
+      title: isBusy ? CONNECTING_LABEL : !hasLink ? NO_ADDRESS_MESSAGE : isOffline ? "Could not reach the workspace" : undefined,
+      onOpen: () => openShared(entry, openTargetApp(target)),
+      corner: m(CardMenu, { items: sharedMenuItems(entry, share, isRetryOffered(share, isOffline)), buttonExtra: "size-6 text-secondary" }),
+      ...attrs,
+      id: share.targets[0] === target ? attrs.id : undefined,
+      "data-app-name": target.app,
+    });
+  }
+
+  /** "Apps shared with you": the apps of shares that are neither invitations nor declined (every target of an app
+   * share, and the directly granted apps of a workspace share), and the pasted-link input, which stands in for an
+   * empty state (an app link someone gave you is added here). */
+  function sharedAppsSection(sharedApps: readonly SharedApp[]): m.Children {
+    return m("section", { "data-home-section": "shared-apps" }, [
+      sectionHead("Apps shared with you"),
+      sharedApps.length > 0
+        ? m("div", { class: "flex flex-wrap gap-x-4 gap-y-6" }, sharedApps.map((app) => sharedAppIcon(app)))
+        : null,
+      sharedErrorLine(),
+      pastedLinkInput("app"),
+    ]);
+  }
+
+  function invitationsSection(open: readonly UiWorkspaceEntry[], settledDeclined: readonly UiWorkspaceEntry[]): m.Children {
+    return m("section", { id: "landing-invitations", "data-home-section": "invitations" }, [
+      sectionHead("Invitations", { isFirst: true }),
+      open.length > 0
+        ? m("div", { class: "flex flex-col gap-2" }, open.map((entry) => inviteCard(entry)))
+        : emptyBox("No invitations waiting.", { id: "landing-no-invitations" }),
+      sharedErrorLine(),
+      settledDeclined.length > 0
+        ? m(
+            "div",
+            { class: "mt-6" },
+            m(Disclosure, {
+              id: "landing-declined-invitations",
+              isOpen: state.isDeclinedOpen,
+              onToggle: () => {
+                state.isDeclinedOpen = !state.isDeclinedOpen;
+              },
+              summary: `Declined invitations (${settledDeclined.length})`,
+            }, m("div", { class: "flex flex-col gap-2" }, settledDeclined.map((entry) => inviteCard(entry)))),
+          )
+        : null,
+    ]);
+  }
+
+  function pickTab(next: HomeTab): void {
+    // Answered invitations hold their place until the tab is left, then go.
+    if (state.tab === "invitations" && next !== "invitations") state.pendingDeclinedKeys.clear();
+    state.tab = next;
+    rememberHomeTab(next);
   }
 
   function badgeClassForTone(tone: StatusChip["tone"]): string {
@@ -1329,36 +1911,44 @@ export const LandingPage: m.ClosureComponent = () => {
     ]);
   }
 
-  /**
-   * The Create button for this window's account, or the sign-in prompt that
-   * stands in for it on a signed-out account's hub: the account's workspaces
-   * are listed, and nothing new can be made under it until it signs in again.
-   */
-  function createControl(): m.Children {
-    const { shell } = getAppContext();
-    if (shell.isAccountSignedOut()) {
-      return m(
-        Button,
-        {
-          variant: "primary",
-          id: "landing-sign-in",
-          disabled: webLogin.isOpen,
-          onclick: () =>
-            void webLogin.start(
-              "Sign in again to create workspaces under this account.",
-            ),
-        },
-        "Sign in",
-      );
-    }
+  function providersPanel(): m.Children {
+    const providersStore = getAppContext().stores.providers;
     return m(
-      ButtonLink,
+      "section",
       {
-        variant: "primary",
-        id: "landing-create",
-        ...routeLinkAttrs(shell.hubRoute("/create")),
+        class: "mt-8 pt-6 border-t border-default",
+        id: "landing-providers",
       },
-      "Create",
+      [
+        m(
+          "button",
+          {
+            type: "button",
+            class:
+              "w-full flex items-center justify-between text-left type-body text-primary bg-transparent border-0 cursor-pointer p-0",
+            onclick: () => {
+              state.isProvidersOpen = !state.isProvidersOpen;
+            },
+          },
+          [
+            m(
+              "span",
+              providersSummaryFor(providersStore.rowCount(), providersStore.attentionCount()),
+            ),
+            m(
+              "span",
+              { class: "text-tertiary ml-2" },
+              state.isProvidersOpen ? "▾" : "▸",
+            ),
+          ],
+        ),
+        state.isProvidersOpen
+          ? m("div", [
+              providersStore.accounts.map((entry) => accountSection(entry)),
+              deviceSection(providersStore.deviceProviders),
+            ])
+          : null,
+      ],
     );
   }
 
@@ -1367,9 +1957,11 @@ export const LandingPage: m.ClosureComponent = () => {
   // navigation.
   function redirectToStartFlowIfDue(): void {
     const workspaces = getAppContext().stores.workspaces;
-    // Rows under any account, or a workspace discovery has not re-listed yet.
+    // Rows of the account's own under any account, or a workspace discovery
+    // has not re-listed yet; someone else's shares are no workspace of this
+    // install's.
     const hasWorkspacesOnInstall =
-      workspaces.workspaces.length > 0 ||
+      ownedWorkspaceEntries(workspaces.workspaces).length > 0 ||
       Object.values(workspaces.workspaceCountByAccountId).some((count) => count > 0) ||
       workspaces.restorableWorkspaceIds.length > 0;
     if (
@@ -1389,6 +1981,10 @@ export const LandingPage: m.ClosureComponent = () => {
       state.unsubscribe = getAppContext().stores.workspaces.onChanged(() =>
         loadExtras(state),
       );
+      pickTabForDeepLink();
+    },
+    oncreate() {
+      scrollSelectedSharedRowIntoView();
     },
     onupdate() {
       // The component instance survives a hub-to-hub navigation (same route
@@ -1397,13 +1993,18 @@ export const LandingPage: m.ClosureComponent = () => {
         loadExtras(state);
       }
       redirectToStartFlowIfDue();
+      scrollSelectedSharedRowIntoView();
     },
     onremove() {
       state.unsubscribe?.();
     },
     view() {
       const { stores, shell } = getAppContext();
-      const entries = stores.workspaces.workspaces;
+      pickTabForDeepLink();
+      const allEntries = stores.workspaces.workspaces;
+      // Someone else's workspaces are listed in their own sections, never as
+      // this account's rows (specs/shared-with-me, S12).
+      const entries = ownedWorkspaceEntries(allEntries);
       const liveEntries = entries.filter(
         (entry) =>
           !(entry.is_remote ?? false) &&
@@ -1440,7 +2041,68 @@ export const LandingPage: m.ClosureComponent = () => {
         (windowExtras === null ||
           !windowExtras.is_discovery_complete ||
           windowExtras.has_restorable_workspaces);
-      const providersStore = stores.providers;
+      const isSignedIn = stores.accounts.isSignedIn(shell.accountId);
+
+      const sharedRows = homeSharedRows(allEntries, state.pendingDeclinedKeys);
+      const hasDeclined = sharedRows.pendingDeclined.length + sharedRows.settledDeclined.length > 0;
+      const tabs = homeTabsFor(sharedRows.invitations.length, hasDeclined);
+      const tab: HomeTab = tabs.some((candidate) => candidate.id === state.tab) ? state.tab : "workspaces";
+
+      // A destroy in flight replaces its live card's content and takes the
+      // workspace's apps off the Apps tab: the live row's status is what the
+      // extras name it.
+      const destroyingStatus = extras?.destroying_status_by_agent_id ?? {};
+      // Only the tab up is built: a card's wallpaper is fetched and sampled
+      // as it is drawn, so a hidden tab's cards would load images for nothing.
+      function workspacesTabSections(): m.Children[] {
+        const liveCards = liveEntries.map((entry) => {
+          const status = destroyingStatus[entry.id];
+          return status === undefined ? workspaceCard(entry) : destroyCard(entry.id, entry.name, entry.accent, status);
+        });
+        const workspaceCards: m.Children[] = [
+          liveCards,
+          orphanedFailedDestroys.map((orphan) =>
+            destroyCard(orphan.agent_id, orphan.name, orphan.accent, "failed"),
+          ),
+          createEntries.map((entry) => createAttemptCard(entry)),
+          remoteEntries.map((entry) => remoteCard(entry)),
+        ];
+        const yourWorkspaces = m("section", { "data-home-section": "own-workspaces" }, [
+          sectionHead("Your workspaces", { isFirst: true }),
+          isDiscovering
+            ? m("p", { class: "text-tertiary text-center py-6", id: "landing-discovering" }, "Discovering workspaces...")
+            : null,
+          m("div", { class: CARD_GRID_CLASS }, [workspaceCards, createCard()]),
+          m(
+            "div",
+            { class: "mt-3" },
+            m(
+              "a",
+              {
+                id: "landing-destroyed",
+                class:
+                  "inline-flex items-center gap-2 type-helper text-tertiary hover:text-primary no-underline",
+                ...routeLinkAttrs(shell.hubRoute("/workspaces/destroyed")),
+              },
+              m("span", "Recently destroyed workspaces"),
+            ),
+          ),
+        ]);
+        return [
+          yourWorkspaces,
+          isSignedIn ? sharedWorkspacesSection(sharedRows.workspaceShares) : null,
+          providersPanel(),
+        ];
+      }
+      function appsTabSections(): m.Children[] {
+        const ownAppEntries = liveEntries.filter((entry) => destroyingStatus[entry.id] === undefined);
+        return [ownAppsSection(ownAppEntries), isSignedIn ? sharedAppsSection(sharedRows.sharedApps) : null];
+      }
+      function invitationsTabSections(): m.Children[] {
+        // A declined card keeps the place its grant time gave it until the tab is left.
+        const openInvitations = [...sharedRows.invitations, ...sharedRows.pendingDeclined].sort(byNewestGrant);
+        return [invitationsSection(openInvitations, sharedRows.settledDeclined)];
+      }
 
       return m(PageContainer, [
         state.isExtrasFailed
@@ -1459,203 +2121,72 @@ export const LandingPage: m.ClosureComponent = () => {
               ],
             })
           : null,
-        hasRows
-          ? m("div", [
-              m("div", { class: "flex items-center justify-between mb-4" }, [
-                m("h1", { class: "type-heading text-primary" }, "Workspaces"),
-                createControl(),
-              ]),
-              bulkUpdateActions(),
-              extras !== null &&
-              isUnlockBannerDue(extras, state.extrasAccountId, shell.accountId)
-                ? m(Notice, { extra: "mb-4", id: "sync-unlock-banner" }, [
-                    m("div", { class: "flex flex-col gap-2" }, [
-                      m(
-                        "span",
-                        { class: "type-body text-primary" },
-                        `Enter your master password to unlock synced workspaces for ${extras.locked_account_emails.join(", ")}.`,
-                      ),
-                      m("div", { class: "flex items-center gap-2" }, [
-                        m("input", {
-                          type: "password",
-                          id: "sync-unlock-password",
-                          autocomplete: "current-password",
-                          placeholder: "master password",
-                          class:
-                            "h-[34px] px-3 rounded-full type-body bg-fill-subtle text-primary",
-                          value: state.unlockPassword,
-                          oninput: (event: InputEvent) => {
-                            state.unlockPassword = (
-                              event.target as HTMLInputElement
-                            ).value;
-                          },
-                        }),
-                        m(
-                          Button,
-                          {
-                            variant: "secondary",
-                            id: "sync-unlock-btn",
-                            disabled: state.isUnlockPending,
-                            onclick: submitSyncUnlock,
-                          },
-                          "Unlock",
-                        ),
-                      ]),
-                      state.unlockError
-                        ? m(
-                            "p",
-                            {
-                              class: "type-helper text-important",
-                              role: "alert",
-                            },
-                            state.unlockError,
-                          )
-                        : null,
-                    ]),
-                  ])
-                : null,
-              m("div", { class: "flex flex-col gap-1.5" }, [
-                liveEntries.map((entry) => liveRow(entry)),
-                orphanedFailedDestroys.map((orphan) =>
-                  destroyRow(
-                    orphan.agent_id,
-                    orphan.name,
-                    orphan.accent,
-                    "failed",
-                  ),
+        bulkUpdateActions(),
+        extras !== null &&
+        isUnlockBannerDue(extras, state.extrasAccountId, shell.accountId)
+          ? m(Notice, { extra: "mb-4", id: "sync-unlock-banner" }, [
+              m("div", { class: "flex flex-col gap-2" }, [
+                m(
+                  "span",
+                  { class: "type-body text-primary" },
+                  `Enter your master password to unlock synced workspaces for ${extras.locked_account_emails.join(", ")}.`,
                 ),
-                createEntries.map((entry) => createAttemptRow(entry)),
-                remoteEntries.map((entry) => remoteRow(entry)),
+                m("div", { class: "flex items-center gap-2" }, [
+                  m("input", {
+                    type: "password",
+                    id: "sync-unlock-password",
+                    autocomplete: "current-password",
+                    placeholder: "master password",
+                    class:
+                      "h-[34px] px-3 rounded-full type-body bg-fill-subtle text-primary",
+                    value: state.unlockPassword,
+                    oninput: (event: InputEvent) => {
+                      state.unlockPassword = (
+                        event.target as HTMLInputElement
+                      ).value;
+                    },
+                  }),
+                  m(
+                    Button,
+                    {
+                      variant: "secondary",
+                      id: "sync-unlock-btn",
+                      disabled: state.isUnlockPending,
+                      onclick: submitSyncUnlock,
+                    },
+                    "Unlock",
+                  ),
+                ]),
+                state.unlockError
+                  ? m(
+                      "p",
+                      {
+                        class: "type-helper text-important",
+                        role: "alert",
+                      },
+                      state.unlockError,
+                    )
+                  : null,
               ]),
             ])
-          : isDiscovering
-            ? m(
-                "div",
-                {
-                  class:
-                    "flex flex-col items-center justify-center min-h-[80vh] gap-6",
-                },
-                [
-                  m(
-                    "p",
-                    { class: "text-tertiary text-center" },
-                    "Discovering workspaces...",
-                  ),
-                  createControl(),
-                ],
-              )
-            : [
-                otherAccountsNotice(otherAccountsOfWindow()),
-                m("div", { class: "text-center py-12" }, [
-                  m("p", { class: "text-tertiary mb-6" }, "No workspaces yet"),
-                  createControl(),
-                ]),
-              ],
+          : null,
+        hasRows || isDiscovering ? null : otherAccountsNotice(otherAccountsOfWindow()),
+        m("div", { class: "mb-8" }, m(TabStrip, { tabs, selected: tab, onSelect: (id) => pickTab(id as HomeTab), label: "Home" })),
         m(
           "div",
-          { class: "mt-6" },
-          m(
-            "a",
-            {
-              id: "landing-destroyed",
-              class:
-                "inline-flex items-center gap-2 type-helper text-tertiary hover:text-primary no-underline",
-              ...routeLinkAttrs(shell.hubRoute("/workspaces/destroyed")),
-            },
-            m("span", "Recently destroyed workspaces"),
-          ),
-        ),
-        m(
-          "section",
-          {
-            class: "mt-8 pt-6 border-t border-default",
-            id: "landing-providers",
-          },
-          [
-            m(
-              "button",
-              {
-                type: "button",
-                class:
-                  "w-full flex items-center justify-between text-left type-body text-primary bg-transparent border-0 cursor-pointer p-0",
-                onclick: () => {
-                  state.isProvidersOpen = !state.isProvidersOpen;
-                },
-              },
-              [
-                m(
-                  "span",
-                  providersSummaryFor(providersStore.rowCount(), providersStore.attentionCount()),
-                ),
-                m(
-                  "span",
-                  { class: "text-tertiary ml-2" },
-                  state.isProvidersOpen ? "▾" : "▸",
-                ),
-              ],
-            ),
-            state.isProvidersOpen
-              ? m("div", [
-                  providersStore.accounts.map((entry) => accountSection(entry)),
-                  deviceSection(providersStore.deviceProviders),
-                ])
-              : null,
-          ],
+          { class: "flex flex-col gap-12", "data-home-tab-panel": tab },
+          tab === "workspaces" ? workspacesTabSections() : tab === "apps" ? appsTabSections() : invitationsTabSections(),
         ),
         m(CloudAccountsModal, {
           state: state.connectionModal,
           regionOptionsByBackend:
             state.formDefaults?.region_options_by_launch_mode ?? {},
           backends: state.formDefaults?.connection_backends ?? [],
-          ownerOptions: providersStore.connectionOwnerOptions(),
+          ownerOptions: getAppContext().stores.providers.connectionOwnerOptions(),
           // The panel re-renders from the next providers frame (the materializer bounces discovery).
           onAccountAdded: () => m.redraw(),
         }),
         m("div", { class: "h-20", "aria-hidden": "true" }),
-        m(
-          "div",
-          { class: "fixed bottom-3 left-3 flex flex-col items-start gap-0.5" },
-          [
-            m(
-              "button",
-              {
-                type: "button",
-                id: "landing-minds-settings",
-                class:
-                  "flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0 text-left",
-                onclick: () => m.route.set("/settings", shell.overlayQuery()),
-              },
-              [
-                m(Icon16, { name: "settings", extra: "shrink-0" }),
-                m("span", "Imbue Studio Settings"),
-              ],
-            ),
-            m(
-              "button",
-              {
-                type: "button",
-                id: "landing-account",
-                "data-signed-in": stores.accounts.isSignedIn(shell.accountId)
-                  ? "true"
-                  : "false",
-                class:
-                  "flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0 text-left",
-                onclick: () => m.route.set("/accounts", shell.overlayQuery()),
-              },
-              [
-                m(Icon16, { name: "user", extra: "shrink-0" }),
-                // The window's account: its name when it is signed in; the
-                // device and a signed-out account offer the sign-in instead.
-                m(
-                  "span",
-                  stores.accounts.isSignedIn(shell.accountId)
-                    ? stores.accounts.labelFor(shell.accountId)
-                    : "Log in",
-                ),
-              ],
-            ),
-          ],
-        ),
       ]);
     },
   };

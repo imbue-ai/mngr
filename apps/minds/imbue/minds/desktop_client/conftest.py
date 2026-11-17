@@ -6,10 +6,12 @@ from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from typing import Final
 from uuid import uuid4
 
 import pytest
@@ -29,6 +31,8 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import ServiceLogRecord
+from imbue.minds.desktop_client.backend_resolver import ServiceShareKind
+from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.backend_resolver import parse_agents_from_json
 from imbue.minds.desktop_client.backend_resolver import parse_service_log_records
 from imbue.minds.desktop_client.connections.account_lifecycle import list_signed_in_accounts_from_session_store
@@ -48,6 +52,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import AuthRefreshOutcome
 from imbue.minds.desktop_client.imbue_cloud_cli import BackupRepositoryCredentials
 from imbue.minds.desktop_client.imbue_cloud_cli import BackupRepositoryInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import BackupStorageUsage
+from imbue.minds.desktop_client.imbue_cloud_cli import BrowserSessionCodeCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthAccount
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthSession
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -65,6 +70,12 @@ from imbue.minds.desktop_client.imbue_cloud_cli import R2BucketInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliRelayEndpoint
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareGrantsPushCliResult
+from imbue.minds.desktop_client.imbue_cloud_cli import ShareResponseCliResult
+from imbue.minds.desktop_client.imbue_cloud_cli import SharedWithMeListingCliInfo
+from imbue.minds.desktop_client.imbue_cloud_cli import SharedWithMeMatchCliInfo
+from imbue.minds.desktop_client.imbue_cloud_cli import SharedWithMeOwnerCliInfo
+from imbue.minds.desktop_client.imbue_cloud_cli import SharedWithMeShareCliInfo
+from imbue.minds.desktop_client.imbue_cloud_cli import SharedWithMeTargetCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import SyncRecordsPullResult
 from imbue.minds.desktop_client.imbue_cloud_cli import UserIdentityCliInfo
 from imbue.minds.desktop_client.latchkey.permission_overview import clear_service_sign_in_options_cache
@@ -73,6 +84,9 @@ from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.mock_local_prerequisites_test import FakeHostProbe
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.share_targets import WHOLE_MACHINE_SERVICE
+from imbue.minds.desktop_client.shared_with_me_store import SharedWithMeDocumentStore
+from imbue.minds.desktop_client.shared_with_me_store import SharedWithMeStore
 from imbue.minds.desktop_client.supertokens_routes import _WebLoginFlowStatus
 from imbue.minds.desktop_client.supertokens_routes import _record_web_login_status
 from imbue.minds.desktop_client.supertokens_routes import _web_login_flows
@@ -93,6 +107,8 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_imbue_cloud.errors import GRANTS_REFUSED_CODE
+from imbue.mngr_imbue_cloud.errors import SHARED_WITH_ME_UNAVAILABLE_CODE
 
 DEFAULT_SERVICE_NAME: ServiceName = ServiceName("web")
 
@@ -354,6 +370,10 @@ class FakeImbueCloudCli(ImbueCloudCli):
     is_grants_push_failing: bool = Field(
         default=False, description="When True, push_share_grants raises ImbueCloudCliError (connector down)"
     )
+    grants_push_refusals: list[dict[str, str]] = Field(
+        default_factory=list,
+        description="When set, push_share_grants refuses with grants_refused naming these entries",
+    )
     invite_calls: list[dict[str, Any]] = Field(
         default_factory=list, description="Every invite_grantee call's arguments"
     )
@@ -386,6 +406,11 @@ class FakeImbueCloudCli(ImbueCloudCli):
         """Answer as the connector does: refuse an unpublished share, else carry its status beside the count."""
         if self.is_grants_push_failing:
             raise ImbueCloudCliError("fake grants push failure")
+        if self.grants_push_refusals:
+            refused = ImbueCloudShareRefusedCliError("shares push-grants: the connector refused the grants")
+            refused.code = GRANTS_REFUSED_CODE
+            refused.refusals = tuple(dict(entry) for entry in self.grants_push_refusals)
+            raise refused
         share = self.share_as_the_connector_holds_it(account=account, host_id=host_id)
         if share is None or share.state != "active":
             refused = ImbueCloudShareRefusedCliError("shares push-grants: the workspace is unpublished")
@@ -479,6 +504,91 @@ class FakeImbueCloudCli(ImbueCloudCli):
         info = NotificationPreferencesCliInfo(email_enabled=email_enabled, in_app_enabled=in_app_enabled)
         self.notification_preferences_by_email[account] = info
         return info
+
+    # The recipient's side of sharing (specs/shared-with-me/spec.md)
+
+    shared_with_me_by_email: dict[str, SharedWithMeListingCliInfo] = Field(
+        default_factory=dict,
+        description="account email -> the listing shares shared-with-me answers (absent means an empty listing)",
+    )
+    shared_with_me_fetch_count: int = Field(default=0, description="How many times list_shared_with_me ran")
+    is_shared_with_me_failing: bool = Field(
+        default=False, description="When True, list_shared_with_me raises ImbueCloudCliError (connector down)"
+    )
+    is_shared_with_me_unavailable: bool = Field(
+        default=False,
+        description="When True, list_shared_with_me refuses with shared_with_me_unavailable (an old connector)",
+    )
+    share_responses: list[tuple[str, str, str | None]] = Field(
+        default_factory=list,
+        description="(account email, host id, response) for every respond_to_share / clear_share_response call",
+    )
+    share_response_error_to_raise: ImbueCloudCliError | None = Field(
+        default=None, description="When set, respond_to_share and clear_share_response raise it"
+    )
+    browser_session_codes_minted: list[str] = Field(
+        default_factory=list, description="Every account a browser session code was minted for, in order"
+    )
+    is_browser_session_code_failing: bool = Field(
+        default=False, description="When True, mint_browser_session_code raises ImbueCloudCliError"
+    )
+    shared_with_me_call_order: list[str] = Field(
+        default_factory=list,
+        description="'mint' and 'respond' in the order the recipient-side calls began, for the open route's ordering",
+    )
+
+    def list_shared_with_me(self, *, account: str) -> SharedWithMeListingCliInfo:
+        self.shared_with_me_fetch_count += 1
+        if self.is_shared_with_me_failing:
+            raise ImbueCloudCliError("fake shared-with-me listing failure")
+        if self.is_shared_with_me_unavailable:
+            refused = ImbueCloudShareRefusedCliError("shares shared-with-me: the connector predates the listing")
+            refused.code = SHARED_WITH_ME_UNAVAILABLE_CODE
+            raise refused
+        return self.shared_with_me_by_email.get(account, SharedWithMeListingCliInfo(matches=(), shares=()))
+
+    def _record_share_response(self, account: str, host_id: str, response: str | None) -> ShareResponseCliResult:
+        self.shared_with_me_call_order.append("respond")
+        if self.share_response_error_to_raise is not None:
+            raise self.share_response_error_to_raise
+        self.share_responses.append((account, host_id, response))
+        listing = self.shared_with_me_by_email.get(account)
+        share_key = host_id
+        if listing is not None:
+            updated_shares = []
+            for share in listing.shares:
+                if share.host_id != host_id:
+                    updated_shares.append(share)
+                    continue
+                share_key = share.share_key
+                if response == "reported":
+                    continue
+                status = response if response is not None else "invited"
+                updated_shares.append(share.model_copy_update(to_update(share.field_ref().status, status)))
+            self.shared_with_me_by_email[account] = SharedWithMeListingCliInfo(
+                matches=matches_of_shares(
+                    updated_shares, version=max((m.version for m in listing.matches), default=1)
+                ),
+                shares=tuple(updated_shares),
+            )
+        return ShareResponseCliResult(host_id=host_id, share_key=share_key, response=response)
+
+    def respond_to_share(self, *, account: str, host_id: str, response: str) -> ShareResponseCliResult:
+        return self._record_share_response(account, host_id, response)
+
+    def clear_share_response(self, *, account: str, host_id: str) -> ShareResponseCliResult:
+        return self._record_share_response(account, host_id, None)
+
+    def mint_browser_session_code(
+        self, *, account: str, on_process_claimed: Callable[[], None] | None = None
+    ) -> BrowserSessionCodeCliInfo:
+        self.shared_with_me_call_order.append("mint")
+        if on_process_claimed is not None:
+            on_process_claimed()
+        if self.is_browser_session_code_failing:
+            raise ImbueCloudCliError("fake browser session code failure")
+        self.browser_session_codes_minted.append(account)
+        return BrowserSessionCodeCliInfo(code=f"code-{len(self.browser_session_codes_minted)}", expires_in_seconds=60)
 
     # In-memory backup store (drives the provisioning, trim, reaper, and migration tests)
 
@@ -673,9 +783,11 @@ class FakeImbueCloudCli(ImbueCloudCli):
 
     def sync_records_pull(self, account: str) -> SyncRecordsPullResult:
         self._check_sync_online("sync records pull")
+        listing = self.shared_with_me_by_email.get(account)
         return SyncRecordsPullResult(
             records=tuple(dict(record) for record in self.sync_records_by_email.get(account, {}).values()),
             shared_agent_ids=tuple(sorted(self.shared_agent_ids_by_email.get(account, set()))),
+            shared_with_me_matches=listing.matches if listing is not None else None,
         )
 
     def sync_record_push(self, account: str, record: Mapping[str, object]) -> dict[str, object]:
@@ -960,6 +1072,91 @@ def make_fake_imbue_cloud_cli() -> FakeImbueCloudCli:
     )
 
 
+def make_shared_with_me_store_for_test(data_dir: Path, cli: ImbueCloudCli | None) -> SharedWithMeStore:
+    """A :class:`SharedWithMeStore` (with its document store) over ``data_dir``, fetching through ``cli``."""
+    return SharedWithMeStore(
+        data_dir=data_dir, cli=cli, documents=SharedWithMeDocumentStore(data_dir=data_dir, cli=cli)
+    )
+
+
+# The share every shared-with-me test lists unless it says otherwise.
+SHARED_TEST_HOST_ID: Final[str] = "host-" + "a" * 32
+SHARED_TEST_WORKSPACE_ID: Final[str] = "agent-" + "b" * 32
+
+
+def matches_of_shares(
+    shares: Sequence[SharedWithMeShareCliInfo], version: int = 1
+) -> tuple[SharedWithMeMatchCliInfo, ...]:
+    """The match set the fake connector derives for ``shares``: one entry per share at ``version``, standing from its status."""
+    return tuple(
+        SharedWithMeMatchCliInfo(
+            share_key=share.share_key,
+            version=version,
+            response=share.status if share.status in ("accepted", "declined") else None,
+            is_visited=False,
+        )
+        for share in shares
+    )
+
+
+def seed_shared_with_me_listing(
+    cli: FakeImbueCloudCli, email: str, *shares: SharedWithMeShareCliInfo, version: int = 1
+) -> None:
+    """Make the fake connector answer ``shares`` (each at listing ``version``) to the account's next listing fetch."""
+    cli.shared_with_me_by_email[email] = SharedWithMeListingCliInfo(
+        matches=matches_of_shares(shares, version=version), shares=shares
+    )
+
+
+def make_shared_share(
+    host_id: str,
+    workspace_id: str | None = None,
+    owner_email: str | None = "owner@acme.example",
+    workspace_name: str | None = "Alpha",
+    status: str = "invited",
+    shell_label: str = "system-interface-k3j9",
+    app_labels: Mapping[str, str] | None = None,
+    granted_apps: AbstractSet[str] = frozenset(),
+) -> SharedWithMeShareCliInfo:
+    """One listing row as the connector answers it, with a shell link and optional per-app links.
+
+    ``granted_apps`` names the apps of ``app_labels`` a grant names in their own right.
+    """
+    domain = f"{host_id}.ownerlabel.us1.shares.example"
+    targets = [
+        SharedWithMeTargetCliInfo(
+            app=WHOLE_MACHINE_SERVICE,
+            display_name=workspace_name,
+            link=f"https://{shell_label}.{domain}/",
+            granted_via="user",
+        )
+    ]
+    for app, label in (app_labels or {}).items():
+        targets.append(
+            SharedWithMeTargetCliInfo(
+                app=app,
+                display_name=app.title(),
+                link=f"https://{label}.{domain}/",
+                is_granted_as_app=app in granted_apps,
+            )
+        )
+    return SharedWithMeShareCliInfo(
+        host_id=host_id,
+        workspace_id=workspace_id,
+        share_key=workspace_id or host_id,
+        workspace_domain=domain,
+        workspace_name=workspace_name,
+        owner=SharedWithMeOwnerCliInfo(
+            user_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", email=owner_email, display_name="Owner"
+        ),
+        status=status,
+        granted_via="user",
+        last_seen_at="2026-11-04T09:00:00+00:00",
+        latest_grant_at="2026-11-03T18:12:41+00:00",
+        targets=tuple(targets),
+    )
+
+
 def make_session_store_for_test(
     data_dir: Path,
     cli: ImbueCloudCli | None = None,
@@ -1174,19 +1371,20 @@ def build_desktop_client_for_test(
     """Build a desktop-client Flask app over a fresh ``FileAuthStore`` and return its test client.
 
     ``backend_resolver`` defaults to a bare ``MngrCliBackendResolver``; any extra
-    keyword arguments are forwarded to ``create_desktop_client``. When
-    ``is_authenticated`` is True the returned client already carries a valid
-    session cookie signed with the auth store's key.
+    keyword arguments are forwarded to ``create_desktop_client`` (the app has
+    no HTTP client unless ``http_client`` is given). When ``is_authenticated``
+    is True the returned client already carries a valid session cookie signed
+    with the auth store's key.
     """
     auth_store = FileAuthStore(data_directory=tmp_path / "auth")
     effective_resolver = backend_resolver if backend_resolver is not None else MngrCliBackendResolver()
     # A described machine rather than the real one: the create form's defaults
     # probe the local backends, and a real probe would run docker in a test.
     create_kwargs.setdefault("host_probe", FakeHostProbe())
+    create_kwargs.setdefault("http_client", None)
     app = create_desktop_client(
         auth_store=auth_store,
         backend_resolver=effective_resolver,
-        http_client=None,
         **create_kwargs,
     )
     client = app.test_client()
@@ -1282,6 +1480,58 @@ def short_tmp_path() -> Iterator[Path]:
 
 
 _FIXED_TEST_HOST_ID: str = "host-00000000000000000000000000000000"
+
+# An app icon that passes the serving gate (``accepted_service_icon``) as a workspace would register it.
+GOOD_APP_ICON: str = '<svg viewBox="0 0 24 24"><path d="M2 2h20"/></svg>'
+
+
+class AppsSeededResolver(StaticBackendResolver):
+    """Static resolver carrying the labels, icons, display names, and share kinds the home page's app list reads."""
+
+    labels_by_agent_id: dict[str, dict[str, str]] = Field(default_factory=dict, frozen=True)
+    icons_by_agent_id: dict[str, dict[str, str]] = Field(default_factory=dict, frozen=True)
+    display_names_by_agent_id: dict[str, dict[str, str]] = Field(default_factory=dict, frozen=True)
+    share_kinds_by_agent_id: dict[str, dict[str, ServiceShareKind]] = Field(default_factory=dict, frozen=True)
+
+    def list_service_labels_for_agent(self, agent_id: AgentId) -> dict[ServiceName, str]:
+        return {ServiceName(name): label for name, label in self.labels_by_agent_id.get(str(agent_id), {}).items()}
+
+    def list_service_icons_for_agent(self, agent_id: AgentId) -> dict[ServiceName, str]:
+        return {ServiceName(name): icon for name, icon in self.icons_by_agent_id.get(str(agent_id), {}).items()}
+
+    def list_service_display_names_for_agent(self, agent_id: AgentId) -> dict[ServiceName, str]:
+        return {
+            ServiceName(name): value for name, value in self.display_names_by_agent_id.get(str(agent_id), {}).items()
+        }
+
+    def list_service_share_kinds_for_agent(self, agent_id: AgentId) -> dict[ServiceName, ServiceShareKind]:
+        return {ServiceName(name): kind for name, kind in self.share_kinds_by_agent_id.get(str(agent_id), {}).items()}
+
+
+def make_apps_seeded_resolver(agent_id: str) -> AppsSeededResolver:
+    """A workspace with one app with a good icon, one with an unusable icon, a system app, and an internal service."""
+    return AppsSeededResolver(
+        url_by_agent_and_service={
+            agent_id: {
+                "system_interface": "http://127.0.0.1:9001",
+                "reading-list": "http://127.0.0.1:9002",
+                "terminal": "http://127.0.0.1:9003",
+                "owner-exec": "http://127.0.0.1:9004",
+                "zenbox": "http://127.0.0.1:9005",
+            }
+        },
+        labels_by_agent_id={agent_id: {"reading-list": "reading-list-k3j9x2ab", "terminal": "terminal-aa"}},
+        icons_by_agent_id={agent_id: {"reading-list": GOOD_APP_ICON, "zenbox": '<svg onload="x()"></svg>'}},
+        display_names_by_agent_id={agent_id: {"reading-list": "Reading List"}},
+        share_kinds_by_agent_id={
+            agent_id: {
+                "reading-list": ServiceShareKind.APP,
+                "terminal": ServiceShareKind.SYSTEM,
+                "owner-exec": ServiceShareKind.INTERNAL,
+                "zenbox": ServiceShareKind.APP,
+            }
+        },
+    )
 
 
 def make_agents_json(

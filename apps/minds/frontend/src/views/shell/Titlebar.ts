@@ -19,6 +19,7 @@ import { Modal } from "../components/Modal";
 import { TitlebarButton } from "../components/TitlebarButton";
 import { TrafficLights } from "./TrafficLights";
 import { electronBridge } from "../../electron-bridge";
+import { isSharedEntry } from "../../models/sharedWithMe";
 import type { OptionsTab } from "../../models/workspaceOptions";
 import type { ChromeAnchor, ShellState } from "./shell-state";
 import type { TitlebarContext } from "./classify";
@@ -148,8 +149,14 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
       // entering the workspace, the home button) takes it down with the page.
       if (!isCreating) notYetTab = null;
       const isWorkspace = context.kind === "workspace" || isCreating;
+      // Someone else's workspace (specs/shared-with-me, S12): its owner-only
+      // surfaces (settings, share, permissions, backups) are not offered.
+      const workspaceEntry = isWorkspace && !isCreating ? workspaces.entryByAnyId(context.workspaceAnyId ?? "") : null;
+      const isShared = workspaceEntry !== null && isSharedEntry(workspaceEntry);
       const workspaceName = isWorkspace
-        ? (workspaces.accentEntry(context.workspaceAnyId ?? "")?.name ?? "…")
+        ? (workspaces.accentEntry(context.workspaceAnyId ?? "")?.name ??
+          workspaces.entryByAnyId(context.workspaceAnyId ?? "")?.name ??
+          "…")
         : "";
       // The permission badge tracks pending requests, not dismissible reminders.
       const currentWorkspaceAgentId = isWorkspace
@@ -268,7 +275,7 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                   ),
                   m(
                     "div#ws-tab-strip",
-                    { class: "flex items-center gap-1 ml-1" },
+                    { class: "flex items-center gap-1 ml-1", hidden: isShared },
                     [
                       m(
                         TitlebarButton,

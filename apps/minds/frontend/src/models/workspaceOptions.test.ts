@@ -197,6 +197,7 @@ describe("WorkspaceOptionsModel", () => {
             service_labels: {},
             whole_service: "system_interface",
             public_email_domains: ["gmail.com"],
+            grantable_email_domain: "example.com",
           },
         };
       }

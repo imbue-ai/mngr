@@ -48,8 +48,18 @@ import {
 import { WebLoginModel, webLogin } from "../../models/webLogin";
 import { ErrorDialogQueue, errorDialogs } from "../../models/errorDialog";
 import type { UiWorkspaceEntry } from "../../channel/messages";
+import type { UiWorkspaceApp } from "../../generated/ui";
 import type { WorkspaceMessage } from "../../models/workspaceMessage";
 import { rowClickActionFor } from "../pages/landing-controls";
+import type { SharedEntry, SharedOpenPlan, SharedVerdict } from "../../models/sharedWithMe";
+import {
+  SharedWithMeError,
+  isSharedEntry,
+  sharedActionErrorMessage,
+  sharedEntryForHost,
+  sharedRouteId,
+  sharedWithMeApi,
+} from "../../models/sharedWithMe";
 
 /** Posts one permission-resolution message into the mounted workspace frame
  * over the embed contract. Registered by WorkspaceFrame, which owns the
@@ -100,6 +110,53 @@ export interface DetachedWindowEntry {
 // popout to main's own timer (the ghost's "Bring back" remains if the shell
 // never took it).
 const REATTACH_SETTLE_TIMEOUT_MS = 1000;
+// How long after a share was opened a landing of its frame on the accounts
+// login page is taken as that open's own failure rather than a session that
+// went away later (specs/shared-with-me, 4.7): the open's redeem carries the
+// frame onto the share, so right after it the login page means the redeem
+// did not; later, it means the partition's session is gone and a fresh open
+// signs it in again.
+const SHARED_REOPEN_INTERVAL_MS = 30_000;
+
+/** How openSharedWorkspace behaves beyond the plain open from a row. */
+interface SharedOpenOptions {
+  /** This open follows the redeem's refusal of the partition's other session (now signed out): a second refusal is
+   * not retried again. */
+  isRetry?: boolean;
+  /** Route onto the share only while the window still shows what it did when the open started (a reopen the shell
+   * started on its own, which must not yank the window back once the user left). */
+  isRoutedOnlyWhileDisplayed?: boolean;
+}
+
+/** What the window's shared frame is doing since its last open (specs/shared-with-me, 4.7): the frame draws it
+ * over itself until the workspace's page is up, so the redirects of the sign-in never show as a blank frame or a
+ * sign-in form. */
+export interface SharedFrameProgress {
+  shareKey: string;
+  phase: "connecting" | "failed";
+  /** Why the open failed in the frame, as the verdict the row records; null while connecting, and for an open the
+   * desktop refused before the frame loaded anything. */
+  verdict: SharedVerdict | null;
+  /** The desktop's refusal of the open in its own words (the open route answered no plan, so no sign-in ran and no
+   * verdict is recorded); null otherwise. */
+  refusalMessage: string | null;
+  /** When this open's frame load began (epoch ms), for the overlay's "still connecting" state. */
+  startedAtMs: number;
+  /** Whether this open already opened once more after the redeem refused the partition's other session. */
+  isSignInRetried: boolean;
+}
+
+/** What a reopen the shell started on its own came to (reopenDisplayedSharedWorkspace). */
+export type SharedReopenOutcome = "reopened" | "not_due" | "refused";
+
+/** Whether `link` is served by `hostname` (case-insensitively; a link that does not parse is nowhere). */
+function isLinkOnHost(link: string, hostname: string): boolean {
+  try {
+    return new URL(link).hostname.toLowerCase() === hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+}
 
 interface ReattachWaiter {
   windowId: string;
@@ -128,6 +185,20 @@ export interface UpdatesTabArrival {
   serial: number;
   /** A press made elsewhere that failed, which the tab opened to explain. */
   failure: UpdateActionResult | null;
+}
+
+/** The local address of an app as the forward serves it: its label under the
+ * workspace's own origin (`https://<label>.<workspace id>.localhost:<port>/`),
+ * or null when the app has no label yet or the forward's origin is unknown. */
+export function workspaceAppUrl(forwardOrigin: string, agentId: string, label: string): string | null {
+  if (label === "" || forwardOrigin === "") return null;
+  try {
+    const origin = new URL(forwardOrigin);
+    const port = origin.port === "" ? "" : `:${origin.port}`;
+    return `${origin.protocol}//${label}.${agentId}.localhost${port}/`;
+  } catch {
+    return null;
+  }
 }
 
 export class ShellState {
@@ -235,6 +306,10 @@ export class ShellState {
    * whose it is. Consumed by the navigation it was made for, and dropped by
    * any other. */
   private routeAccountInHand: { path: string; accountId: string } | null = null;
+  /** share key -> when the shell last re-opened the share after a login bounce. */
+  private sharedReopenAtMsByShareKey = new Map<string, number>();
+  /** The open in progress on the window's shared frame, or its failure, until the workspace's page is up. */
+  sharedFrameProgress: SharedFrameProgress | null = null;
   /** The ``?review=`` deep link already consumed, keyed by route+id.
    * `handleRouteChanged` runs on EVERY redraw and its stripping route-set
    * lands a tick later, so without this every interim redraw would re-consume
@@ -611,6 +686,18 @@ export class ShellState {
     this.enterWorkspace(agentScoped, { chat: chatAgentId });
   }
 
+  /** Open one of an owned workspace's apps from the home page
+   * (specs/home-screen-redesign, 4.11): enter the workspace the way its card
+   * does, then ask it to open the app's address, held until its page is
+   * listening. An app with no address yet opens the workspace alone. */
+  openWorkspaceApp(entry: UiWorkspaceEntry, app: UiWorkspaceApp, liveness: string): void {
+    const url = workspaceAppUrl(this.mngrForwardOrigin, entry.id, app.label ?? "");
+    // A blocked workspace goes nowhere, so no message is held for it: one
+    // would fire whenever the workspace is next entered, for any reason.
+    if (!this.enterWorkspaceOrRecover(entry, liveness)) return;
+    if (url !== null) this.requestWorkspaceMessage(entry.id, { kind: "open-link", url });
+  }
+
   /** Answer an update refused for want of a signed-in AI account: enter the
    * workspace, then ask it for a new chat with the provider chooser up. The
    * entry comes first because the chat opens only in a connected frame. */
@@ -623,23 +710,257 @@ export class ShellState {
   /** Enter a workspace the way its machines-list row does: onto its surface
    * when healthy and running, otherwise onto Recovery (with a start for a
    * stopped container), which returns to the surface. `liveness` is the entry's
-   * raw field or the tracker's displayed reading. */
-  enterWorkspaceOrRecover(entry: UiWorkspaceEntry, liveness: string): void {
+   * raw field or the tracker's displayed reading. Answers whether it went
+   * anywhere: false for a blocked row. */
+  enterWorkspaceOrRecover(entry: UiWorkspaceEntry, liveness: string): boolean {
     const isHealthy = this.stores.health.statusFor(entry.id) === "healthy";
     const returnTo = `/goto/${entry.id}/`;
     switch (rowClickActionFor(entry, liveness, isHealthy)) {
       case "recover":
         m.route.set(recoveryRoute(entry.id, returnTo, null));
-        return;
+        return true;
       case "recover-start":
         m.route.set(recoveryRoute(entry.id, returnTo, "start"));
-        return;
+        return true;
       case "enter":
         this.enterWorkspace(entry.id);
-        return;
+        return true;
       case "blocked":
         // The row is not rendered clickable; there is nowhere useful to go.
-        return;
+        return false;
+    }
+  }
+
+  /**
+   * Open a workspace shared with this window's account (specs/shared-with-me,
+   * 4.7): the desktop records the acceptance and answers the target's link
+   * and the redeem URL; the window routes onto the workspace surface, whose
+   * frame loads the redeem URL, which signs this window's partition in on
+   * the accounts origin and sends the frame on to the link. Throws the
+   * desktop's refusal as a SharedWithMeError (its message and code, as the
+   * row shows them).
+   */
+  async openSharedWorkspace(shareKey: string, app: string | null, options: SharedOpenOptions = {}): Promise<void> {
+    // Stamped before anything is awaited: a landing of the frame on the
+    // accounts login page during this open's round trips is this open's to
+    // answer, not a reason to start another.
+    this.sharedReopenAtMsByShareKey.set(shareKey, Date.now());
+    await this.runSharedOpen(shareKey, app, options, this.displayedWorkspaceAnyId);
+  }
+
+  /** The round trips of openSharedWorkspace; `displayedAtStart` is what the window showed when the open began, kept
+   * across the retry a refused sign-in starts. */
+  private async runSharedOpen(
+    shareKey: string,
+    app: string | null,
+    { isRetry = false, isRoutedOnlyWhileDisplayed = false }: SharedOpenOptions,
+    displayedAtStart: string | null,
+  ): Promise<void> {
+    let plan: SharedOpenPlan;
+    try {
+      plan = await sharedWithMeApi.open(this.accountId, shareKey, app);
+    } catch (error) {
+      console.warn(`[shared-with-me] could not open ${shareKey}: ${String(error)}`);
+      if (error instanceof SharedWithMeError) throw error;
+      throw new SharedWithMeError(error instanceof Error ? error.message : String(error), null, 0);
+    }
+    // A reopen the shell started on its own must not pull the window back onto
+    // the share when the user went elsewhere during the round trips; the open
+    // it was retrying is abandoned with it, so nothing is in progress there.
+    if (isRoutedOnlyWhileDisplayed && this.displayedWorkspaceAnyId !== displayedAtStart) {
+      if (this.sharedFrameProgress?.shareKey === shareKey) this.sharedFrameProgress = null;
+      return;
+    }
+    // Stamped again now that the frame is about to load: the half minute a
+    // login-page landing is read as this open's runs from here.
+    this.sharedReopenAtMsByShareKey.set(shareKey, Date.now());
+    this.sharedFrameProgress = {
+      shareKey: plan.share_key,
+      phase: "connecting",
+      verdict: null,
+      refusalMessage: null,
+      startedAtMs: Date.now(),
+      isSignInRetried: isRetry,
+    };
+    const routeId = sharedRouteId(plan.share_key);
+    const isFrameOnShare = this.isWorkspaceFrameOn(this.stores.workspaces.toAgentScopedId(routeId));
+    const loadUrlBefore = this.stores.workspaces.workspaceFrameUrl(routeId);
+    // The store's change re-arms a mounted frame whose URL moved (onto the
+    // redeem, or another target's link); a frame already on the chosen link
+    // with no redeem to go through is reloaded outright.
+    this.stores.workspaces.chooseSharedLink(plan.share_key, plan.link, plan.redeem_url);
+    if (!isFrameOnShare) this.routeTo(`/workspace/${routeId}`);
+    else if (this.stores.workspaces.workspaceFrameUrl(routeId) === loadUrlBefore) this.workspaceFrame?.reload();
+    m.redraw();
+  }
+
+  /** The shared workspace's own page is up in the frame: its open is done. */
+  sharedFrameReady(shareKey: string): void {
+    if (this.sharedFrameProgress?.shareKey === shareKey) this.sharedFrameProgress = null;
+  }
+
+  /** The open of the displayed shared workspace failed in the frame: the overlay says so, and the row records it. */
+  private failDisplayedSharedOpen(verdict: SharedVerdict): void {
+    const entry = this.displayedSharedEntry();
+    if (entry === null) return;
+    this.showDisplayedSharedOpenFailed(entry, verdict, null);
+    void sharedWithMeApi.recordVerdict(this.accountId, entry.share.share_key, verdict).catch((error: unknown) => {
+      console.warn(`[shared-with-me] could not record the verdict for ${entry.share.share_key}: ${String(error)}`);
+    });
+  }
+
+  /** The desktop refused to open the displayed shared workspace (no plan, so the frame loaded nothing): the overlay
+   * says so in the refusal's words, as the row's own Open would, and no verdict is recorded. */
+  private refuseDisplayedSharedOpen(error: unknown): void {
+    const entry = this.displayedSharedEntry();
+    if (entry === null) return;
+    this.showDisplayedSharedOpenFailed(entry, null, sharedActionErrorMessage(error));
+  }
+
+  private showDisplayedSharedOpenFailed(
+    entry: SharedEntry,
+    verdict: SharedVerdict | null,
+    refusalMessage: string | null,
+  ): void {
+    const progress = this.sharedFrameProgress;
+    const isSameOpen = progress?.shareKey === entry.share.share_key;
+    this.sharedFrameProgress = {
+      shareKey: entry.share.share_key,
+      phase: "failed",
+      verdict,
+      refusalMessage,
+      startedAtMs: isSameOpen ? progress.startedAtMs : Date.now(),
+      isSignInRetried: isSameOpen ? progress.isSignInRetried : false,
+    };
+    m.redraw();
+  }
+
+  /** The shared row the window displays, or null when it shows something else. */
+  private displayedSharedEntry(): SharedEntry | null {
+    const displayed = this.displayedWorkspaceAnyId;
+    const entry = displayed === null ? null : this.stores.workspaces.entryByAnyId(displayed);
+    return entry !== null && isSharedEntry(entry) ? entry : null;
+  }
+
+  /** The app of the target the share's frame is on, as openSharedWorkspace takes it (null for the shell): an open
+   * the shell starts on its own goes back to that target, not to the shell. */
+  private sharedFrameTargetApp(entry: SharedEntry): string | null {
+    const frameLink = this.stores.workspaces.sharedFrameLink(entry.share.share_key);
+    const app = entry.share.targets.find((target) => target.link === frameLink)?.app ?? null;
+    return app === "system_interface" ? null : app;
+  }
+
+  /**
+   * Record what a shared workspace's frame document answered, for the row
+   * whose link the frame loaded. Main relays the window's own frame's
+   * document responses under the share's domain (never a frame the workspace
+   * nests); the frame may since have moved to another host under the domain,
+   * and only a response from the host of the link it was opened on speaks
+   * for the share.
+   */
+  async recordSharedFrameVerdict(hostname: string, verdict: SharedVerdict): Promise<void> {
+    const entry = sharedEntryForHost(this.stores.workspaces.workspaces, hostname);
+    if (entry === null || !isSharedEntry(entry)) return;
+    const frameLink = this.stores.workspaces.sharedFrameLink(entry.share.share_key);
+    if (frameLink === null || !isLinkOnHost(frameLink, hostname)) return;
+    if (this.sharedFrameProgress?.shareKey === entry.share.share_key) {
+      this.sharedFrameProgress =
+        verdict === "admitted"
+          ? null
+          : { ...this.sharedFrameProgress, phase: "failed", verdict, refusalMessage: null };
+      m.redraw();
+    }
+    try {
+      await sharedWithMeApi.recordVerdict(this.accountId, entry.share.share_key, verdict);
+    } catch (error) {
+      console.warn(`[shared-with-me] could not record the verdict for ${hostname}: ${String(error)}`);
+    }
+  }
+
+  /**
+   * The redeem page refused the displayed shared workspace's frame
+   * (specs/shared-with-me, 4.8). A partition that held another account's
+   * session has been signed out by main, and the spent code is replaced by
+   * opening once more; a second such refusal, or any other, is the open
+   * failing.
+   */
+  async handleSharedFrameRedeemRefused(refusal: "session_mismatch" | "refused"): Promise<void> {
+    const entry = this.displayedSharedEntry();
+    if (entry === null) return;
+    const progress = this.sharedFrameProgress;
+    const isRetryDue =
+      refusal === "session_mismatch" && progress?.shareKey === entry.share.share_key && !progress.isSignInRetried;
+    if (!isRetryDue) {
+      this.failDisplayedSharedOpen("sign_in_failed");
+      return;
+    }
+    try {
+      await this.runSharedOpen(
+        entry.share.share_key,
+        this.sharedFrameTargetApp(entry),
+        { isRetry: true, isRoutedOnlyWhileDisplayed: true },
+        this.displayedWorkspaceAnyId,
+      );
+    } catch (error) {
+      console.warn(`[shared-with-me] could not open ${entry.share.share_key} again after a session mismatch: ${String(error)}`);
+      this.refuseDisplayedSharedOpen(error);
+    }
+  }
+
+  /**
+   * The displayed shared workspace's frame landed on the accounts login page
+   * instead of the share. Right after an open, that is the open's own redeem
+   * failing (a spent code, or a confirmation the broker did not see), and the
+   * open has failed; later, it means the partition's session is gone, so the
+   * workspace is opened again, which redeems a fresh sign-in (a refusal of
+   * that open is shown as the desktop's own). The frame never shows the
+   * sign-in form itself: Google sign-in cannot work there.
+   */
+  async handleSharedFrameLoginLanding(isSignInFailed: boolean): Promise<void> {
+    if (isSignInFailed) {
+      this.failDisplayedSharedOpen("sign_in_failed");
+      return;
+    }
+    const outcome = await this.reopenDisplayedSharedWorkspace();
+    if (outcome === "not_due") this.failDisplayedSharedOpen("sign_in_failed");
+  }
+
+  /**
+   * Open the displayed shared workspace again when its last open is more than
+   * half a minute old, which signs the partition in afresh. A refused open is
+   * logged and shown as the desktop's refusal (the bridge handler that calls
+   * this cannot catch it); with nothing displayed, nothing is due.
+   */
+  async reopenDisplayedSharedWorkspace(): Promise<SharedReopenOutcome> {
+    const entry = this.displayedSharedEntry();
+    if (entry === null) return "not_due";
+    const shareKey = entry.share.share_key;
+    const lastMs = this.sharedReopenAtMsByShareKey.get(shareKey) ?? 0;
+    if (Date.now() - lastMs < SHARED_REOPEN_INTERVAL_MS) return "not_due";
+    try {
+      await this.openSharedWorkspace(shareKey, this.sharedFrameTargetApp(entry), {
+        isRoutedOnlyWhileDisplayed: true,
+      });
+      return "reopened";
+    } catch (error) {
+      console.warn(`[shared-with-me] could not sign ${shareKey} in again: ${String(error)}`);
+      this.refuseDisplayedSharedOpen(error);
+      return "refused";
+    }
+  }
+
+  /** Retry the displayed shared workspace's open from its overlay: forget the last verdict, then open the target
+   * the frame was on. */
+  async retryDisplayedSharedOpen(): Promise<void> {
+    const entry = this.displayedSharedEntry();
+    if (entry === null) return;
+    const shareKey = entry.share.share_key;
+    try {
+      await sharedWithMeApi.retry(this.accountId, shareKey);
+      await this.openSharedWorkspace(shareKey, this.sharedFrameTargetApp(entry));
+    } catch (error) {
+      console.warn(`[shared-with-me] could not retry ${shareKey}: ${String(error)}`);
+      this.refuseDisplayedSharedOpen(error);
     }
   }
 
@@ -1670,16 +1991,20 @@ export class ShellState {
   }
 
   /** The /help query naming a workspace: assist is offered only while its
-   * interface is healthy. */
+   * interface is healthy, and never for a shared workspace, which is still
+   * named (it keeps its frame mounted behind the modal) but has no agent of
+   * the account's to ask. */
   private scopedHelpQuery(workspaceAgentId: string): {
     workspace: string;
     assist: "1" | "0";
   } {
+    const entry = this.stores.workspaces.entryByAnyId(workspaceAgentId);
+    const isAssistOffered =
+      (entry === null || !isSharedEntry(entry)) &&
+      this.stores.health.isContentAssumedReady(workspaceAgentId);
     return {
       workspace: workspaceAgentId,
-      assist: this.stores.health.isContentAssumedReady(workspaceAgentId)
-        ? "1"
-        : "0",
+      assist: isAssistOffered ? "1" : "0",
     };
   }
 

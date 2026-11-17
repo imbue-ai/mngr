@@ -19,7 +19,9 @@ import json
 import threading
 from abc import ABC
 from abc import abstractmethod
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Final
 from typing import Generic
 
 from loguru import logger
@@ -28,6 +30,7 @@ from pydantic import PrivateAttr
 
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.desktop_client.account_documents.data_types import DOCUMENT_STATE_ACTIVE
 from imbue.minds.desktop_client.account_documents.data_types import DOCUMENT_STATE_DELETED
 from imbue.minds.desktop_client.account_documents.data_types import DocumentPullOutcome
 from imbue.minds.desktop_client.account_documents.data_types import RecordT
@@ -40,6 +43,9 @@ from imbue.minds.errors import AccountDocumentTooNewError
 from imbue.minds.errors import WorkspaceSyncError
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr_imbue_cloud.wire_types import SUPPORTED_DOCUMENT_FORMAT
+
+# The directory under the data dir holding every kind's replicas, one subdirectory per kind.
+ACCOUNT_DOCUMENTS_DIRNAME: Final[str] = "account_documents"
 
 
 class AccountDocumentStore(MutableModel, ABC, Generic[RecordT]):
@@ -150,6 +156,25 @@ class AccountDocumentStore(MutableModel, ABC, Generic[RecordT]):
         self._records_by_user_id.setdefault(user_id, {})[record.doc_id] = record
         self._save_unlocked(user_id)
 
+    def _write_metadata_unlocked(self, user_id: str, doc_id: str, metadata: Mapping[str, object]) -> None:
+        """Replace the document's metadata (creating it when absent), make it active, and mark it for the next push.
+
+        Raises the kind's too-new error for a document a newer app wrote, which this app must not rewrite.
+        """
+        self._load_unlocked()
+        existing = self._records_by_user_id.get(user_id, {}).get(doc_id)
+        if existing is not None and self._is_record_too_new(existing):
+            raise self._too_new_error()
+        if existing is not None:
+            record = existing.model_copy_update(
+                to_update(existing.field_ref().metadata, dict(metadata)),
+                to_update(existing.field_ref().state, DOCUMENT_STATE_ACTIVE),
+                to_update(existing.field_ref().is_dirty, True),
+            )
+        else:
+            record = self._record_type()(doc_id=doc_id, metadata=dict(metadata), is_dirty=True)
+        self._set_record_unlocked(user_id, record)
+
     def _drop_record_unlocked(self, user_id: str, doc_id: str) -> None:
         self._load_unlocked()
         by_doc_id = self._records_by_user_id.get(user_id, {})
@@ -167,6 +192,12 @@ class AccountDocumentStore(MutableModel, ABC, Generic[RecordT]):
         with self._lock:
             self._load_unlocked()
             return self._records_by_user_id.get(user_id, {}).get(doc_id)
+
+    def list_user_ids(self) -> list[str]:
+        """Every account a replica holds records for, signed in here or not."""
+        with self._lock:
+            self._load_unlocked()
+            return sorted(self._records_by_user_id)
 
     # Push / pull
     def _push_document(self, user_id: str, account_email: str, record: RecordT) -> RecordT:

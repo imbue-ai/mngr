@@ -1150,8 +1150,9 @@ class _OneMachineOfflineMngrCaller(RecordingMngrCaller):
         timeout: float | None = None,
         env_overrides: Mapping[str, str] | None = None,
         cwd: Path | None = None,
+        on_process_claimed: Callable[[], None] | None = None,
     ) -> MngrCallResult:
-        super().call(argv, timeout, env_overrides, cwd)
+        super().call(argv, timeout, env_overrides, cwd, on_process_claimed)
         return _HOST_OFFLINE if argv[2] == self.offline_agent else self.result
 
 
@@ -1234,8 +1235,9 @@ class _RaisingMngrCaller(RecordingMngrCaller):
         timeout: float | None = None,
         env_overrides: Mapping[str, str] | None = None,
         cwd: Path | None = None,
+        on_process_claimed: Callable[[], None] | None = None,
     ) -> MngrCallResult:
-        super().call(argv, timeout, env_overrides, cwd)
+        super().call(argv, timeout, env_overrides, cwd, on_process_claimed)
         raise self.raised_type("the command did not come back")
 
 

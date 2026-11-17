@@ -653,6 +653,26 @@ def test_push_share_grants_leaves_what_an_older_connector_did_not_say_unset() ->
     assert result.identities is None
 
 
+def test_push_share_grants_relays_the_refused_entries_of_a_grants_refused_body() -> None:
+    refused_entry = {"scope": "system_interface", "kind": "domain", "value": "gmail.com", "message": "public provider"}
+    body = json.dumps(
+        {
+            "error": "refused: grants_refused",
+            "error_class": "ImbueCloudShareRefusedError",
+            "code": "grants_refused",
+            "refusals": [refused_entry, "not an entry"],
+        }
+    )
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stdout="", stderr=body))
+    cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
+
+    with pytest.raises(ImbueCloudShareRefusedCliError) as exc_info:
+        cli.push_share_grants(account="owner@example.com", host_id="host-1", document={})
+
+    assert exc_info.value.code == "grants_refused"
+    assert exc_info.value.refusals == (refused_entry,)
+
+
 def test_push_share_grants_and_invite_raise_the_typed_refusal_with_its_code() -> None:
     caller = RecordingMngrCaller(result=_refusal_result("grants_out_of_date"))
     cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
@@ -673,6 +693,7 @@ def test_push_share_grants_and_invite_raise_the_typed_refusal_with_its_code() ->
 
     assert invite_exc.value.code == "grants_out_of_date"
     assert push_exc.value.code == "grants_out_of_date"
+    assert push_exc.value.refusals == ()
     invite_argv = caller.calls[0]
     assert invite_argv[:4] == ["imbue_cloud", "shares", "invite", "host-1"]
     assert (
@@ -881,6 +902,122 @@ def test_resize_machine_raises_the_typed_quota_error_on_the_connectors_structure
         cli.resize_machine("owner@example.com", "host-" + "a" * 32, target_memory_units=32, target_disk_gb=None)
 
     assert "active machine units limit is 16" in str(exc_info.value)
+
+
+def test_list_shared_with_me_parses_the_listing_and_runs_under_the_account() -> None:
+    payload = {
+        "matches": [{"share_key": "agent-1", "version": 7, "response": None, "is_visited": False}],
+        "shares": [
+            {
+                "host_id": "host-1",
+                "workspace_id": "agent-1",
+                "share_key": "agent-1",
+                "workspace_domain": "host-1.owner.us1.shares.example",
+                "workspace_name": "alpha",
+                "owner": {"user_id": "u-1", "email": "owner@example.com", "display_name": "Owner"},
+                "status": "invited",
+                "granted_via": "domain",
+                "last_seen_at": "2026-11-04T09:00:00+00:00",
+                "latest_grant_at": "2026-11-03T18:12:41+00:00",
+                "targets": [
+                    {"app": "system_interface", "display_name": "alpha", "link": "https://s.example/"},
+                    {
+                        "app": "notes",
+                        "display_name": None,
+                        "link": None,
+                        "granted_via": "user",
+                        "is_granted_as_app": True,
+                    },
+                ],
+            }
+        ],
+    }
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps(payload)))
+    cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
+
+    listing = cli.list_shared_with_me(account="viewer@example.com")
+
+    assert [(match.share_key, match.version) for match in listing.matches] == [("agent-1", 7)]
+    (share,) = listing.shares
+    assert (share.share_key, share.status, share.granted_via, share.workspace_name) == (
+        "agent-1",
+        "invited",
+        "domain",
+        "alpha",
+    )
+    assert share.owner.email == "owner@example.com"
+    assert [(target.app, target.link, target.is_granted_as_app) for target in share.targets] == [
+        ("system_interface", "https://s.example/", False),
+        ("notes", None, True),
+    ]
+    assert caller.calls[0][:3] == ["imbue_cloud", "shares", "shared-with-me"]
+    assert caller.calls[0][caller.calls[0].index("--account") + 1] == "viewer@example.com"
+
+
+def test_list_shared_with_me_relays_an_old_connectors_refusal_as_unavailable() -> None:
+    caller = RecordingMngrCaller(result=_refusal_result("shared_with_me_unavailable"))
+    cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
+
+    with pytest.raises(ImbueCloudShareRefusedCliError) as exc_info:
+        cli.list_shared_with_me(account="viewer@example.com")
+
+    assert exc_info.value.code == "shared_with_me_unavailable"
+
+
+def test_respond_to_share_and_clear_share_response_pass_the_host_and_parse_the_result() -> None:
+    body = {"host_id": "host-1", "share_key": "agent-1", "response": "declined"}
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps(body)))
+    cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
+
+    responded = cli.respond_to_share(account="viewer@example.com", host_id="host-1", response="declined")
+    caller.result = MngrCallResult(returncode=0, stdout=json.dumps({**body, "response": None}))
+    cleared = cli.clear_share_response(account="viewer@example.com", host_id="host-1")
+
+    assert (responded.share_key, responded.response) == ("agent-1", "declined")
+    assert cleared.response is None
+    assert caller.calls[0][:5] == ["imbue_cloud", "shares", "respond", "host-1", "--response"]
+    assert caller.calls[0][5] == "declined"
+    assert caller.calls[1][:4] == ["imbue_cloud", "shares", "clear-response", "host-1"]
+
+
+@pytest.mark.parametrize("code", ["already_reported", "rate_limited"])
+def test_respond_to_share_raises_the_typed_refusal_for_the_recipient_codes(code: str) -> None:
+    caller = RecordingMngrCaller(result=_refusal_result(code))
+    cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
+
+    with pytest.raises(ImbueCloudShareRefusedCliError) as exc_info:
+        cli.respond_to_share(account="viewer@example.com", host_id="host-1", response="reported")
+
+    assert exc_info.value.code == code
+
+
+def test_mint_browser_session_code_reads_the_code() -> None:
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(returncode=0, stdout=json.dumps({"code": "abc", "expires_in_seconds": 60}))
+    )
+    cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
+
+    minted = cli.mint_browser_session_code(account="viewer@example.com")
+
+    assert (minted.code, minted.expires_in_seconds) == ("abc", 60)
+    assert caller.calls[0][:3] == ["imbue_cloud", "auth", "browser-session-code"]
+
+
+def test_sync_records_pull_reads_the_shared_with_me_matches_when_present() -> None:
+    with_matches = {
+        "records": [],
+        "shared_with_me_matches": [{"share_key": "agent-9", "version": 2, "response": "declined", "is_visited": True}],
+    }
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps(with_matches)))
+    cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
+
+    matches = cli.sync_records_pull("viewer@example.com").shared_with_me_matches
+    assert matches is not None
+    (match,) = matches
+    assert (match.share_key, match.version, match.response, match.is_visited) == ("agent-9", 2, "declined", True)
+
+    caller.result = MngrCallResult(returncode=0, stdout=json.dumps({"records": []}))
+    assert cli.sync_records_pull("viewer@example.com").shared_with_me_matches is None
 
 
 def test_run_records_a_span_named_by_the_cg_name_and_never_by_the_arguments(profile_collector: None) -> None:

@@ -320,3 +320,17 @@ test('a dev run on Windows with no app path to hand the binary registers nothing
     [],
   );
 });
+
+test('a shared-workspace link names its host id and targets the SPA shared route', () => {
+  const hostId = 'host-' + 'a'.repeat(32);
+  assert.deepEqual(parseDeeplink(`imbue-studio://shared/${hostId}`), { action: 'shared', hostId });
+  assert.deepEqual(parseDeeplink(`imbue-studio://shared/${hostId.toUpperCase()}/`), { action: 'shared', hostId });
+  assert.equal(deeplinkTargetPath(`imbue-studio://shared/${hostId}`), `/shared/${hostId}`);
+});
+
+test('a shared-workspace link with no host id, a malformed one, or extra segments only focuses the app', () => {
+  assert.deepEqual(parseDeeplink('imbue-studio://shared/'), { action: 'focus' });
+  assert.deepEqual(parseDeeplink('imbue-studio://shared/host-not-hex'), { action: 'focus' });
+  assert.deepEqual(parseDeeplink(`imbue-studio://shared/host-${'a'.repeat(32)}/extra`), { action: 'focus' });
+  assert.equal(deeplinkTargetPath('imbue-studio://shared/host-nope'), null);
+});

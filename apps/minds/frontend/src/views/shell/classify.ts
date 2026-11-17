@@ -45,7 +45,9 @@ function pageContext(label: string): TitlebarContext {
   };
 }
 
-const ID_SEGMENT = "((?:agent|host)-[a-f0-9]+)";
+// A workspace's agent or host coordinate, or the `shared-<hex>` route alias of
+// a pasted shared link (whose share key is a bare digest; see models/sharedWithMe).
+const ID_SEGMENT = "((?:agent|host|shared)-[a-f0-9]+)";
 // An account id as the hub routes carry it: a SuperTokens user id, or "local".
 const ACCOUNT_ID_SEGMENT = "([A-Za-z0-9][A-Za-z0-9_-]{0,63})";
 const HUB_PATH_RE = new RegExp(`^/account/${ACCOUNT_ID_SEGMENT}(/.*)?$`);

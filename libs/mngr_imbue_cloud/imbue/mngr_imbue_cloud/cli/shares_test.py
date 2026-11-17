@@ -23,6 +23,10 @@ def test_shares_group_lists_subcommands() -> None:
         "push-grants",
         "invite",
         "invitation-outcomes",
+        "shared-with-me",
+        "shared-with-me-matches",
+        "respond",
+        "clear-response",
     ):
         assert name in result.output
 
@@ -42,6 +46,21 @@ def test_create_rejects_a_malformed_workspace_id_before_any_network_call() -> No
     result = CliRunner().invoke(shares, ["create", "host-" + "a" * 32, "--workspace-id", "host-" + "b" * 32])
     assert result.exit_code == 2
     assert "invalid workspace id" in result.output
+
+
+def test_respond_rejects_an_unknown_response_before_any_network_call() -> None:
+    result = CliRunner().invoke(shares, ["respond", "host-" + "a" * 32, "--response", "maybe"])
+    assert result.exit_code == 2
+    assert "maybe" in result.output and "accepted" in result.output
+
+
+def test_respond_and_clear_response_help_document_arguments() -> None:
+    for command in ("respond", "clear-response"):
+        result = CliRunner().invoke(shares, [command, "--help"])
+        assert result.exit_code == 0, result.output
+        assert "HOST_ID" in result.output
+        assert "--account" in result.output
+    assert "--response" in CliRunner().invoke(shares, ["respond", "--help"]).output
 
 
 def test_status_help_documents_arguments() -> None:

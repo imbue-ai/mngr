@@ -258,6 +258,7 @@ from imbue.minds.desktop_client.settings.resolve import resolve_keybindings
 from imbue.minds.desktop_client.settings.storage import load_settings_context
 from imbue.minds.desktop_client.share_grant_validation import GrantRefusal
 from imbue.minds.desktop_client.share_targets import WHOLE_MACHINE_SERVICE
+from imbue.minds.desktop_client.shared_with_me_store import SharedWorkspaceRow
 from imbue.minds.desktop_client.shared_workspaces import SHARED_WORKSPACES_PAGE_PATH
 from imbue.minds.desktop_client.shared_workspaces import list_account_shared_workspaces
 from imbue.minds.desktop_client.shared_workspaces import remove_account_share
@@ -600,10 +601,48 @@ def _serialize_workspace(agent_id: AgentId) -> WorkspaceSummary:
         create_time=info.create_time.isoformat() if info is not None and info.create_time is not None else None,
         original_minds_version=backend_resolver.get_agent_label(agent_id, ORIGINAL_MINDS_VERSION_LABEL),
         color=backend_resolver.get_workspace_color(agent_id),
-        # Discovery lists only this user's own workspaces: the connector's records
-        # listing is the caller's, and the "shared with you" index has no read side yet.
+        # Discovery lists only workspaces this device hosts or holds a record of;
+        # the rows shared with an account here come from _shared_workspace_summaries.
         is_owned=True,
     )
+
+
+def _serialize_shared_workspace(row: SharedWorkspaceRow, account_id: str, account_email: str) -> WorkspaceSummary:
+    """The summary of a workspace someone shared with a signed-in account: not owned, reachable by its link alone."""
+    return WorkspaceSummary(
+        agent_id=row.share_key,
+        name=row.workspace_name or row.workspace_domain,
+        host_id=row.host_id or None,
+        host_state=None,
+        git_url=None,
+        branch=None,
+        account_id=account_id,
+        account_email=account_email,
+        provider_name=None,
+        create_time=None,
+        original_minds_version=None,
+        color=None,
+        is_owned=False,
+        share_link=row.shell_link,
+    )
+
+
+def _shared_workspace_summaries() -> list[WorkspaceSummary]:
+    """One summary per workspace the connector lists as shared with each signed-in account (specs/shared-with-me, 4.7).
+
+    A pasted link is not listed: it names no owner, host, or status an agent
+    could act on, only an origin the user typed.
+    """
+    state = get_state()
+    if state.shared_with_me_store is None or state.session_store is None:
+        return []
+    summaries: list[WorkspaceSummary] = []
+    for account in state.session_store.list_accounts():
+        for row in state.shared_with_me_store.list_rows(str(account.user_id)):
+            if row.is_manual:
+                continue
+            summaries.append(_serialize_shared_workspace(row, str(account.user_id), account.email))
+    return summaries
 
 
 def _workspace_launch_mode(
@@ -630,10 +669,10 @@ def _workspace_launch_mode(
 @require_api_or_cookie_auth
 @API_SPEC.validate(resp=json_response_model(WorkspaceListResponse))
 def _handle_list_workspaces() -> WorkspaceListResponse:
-    """List all workspaces, including destroyed-but-still-backed-up ones."""
+    """List all workspaces, including destroyed-but-still-backed-up ones and the ones shared with an account here."""
     backend_resolver = get_state().backend_resolver
     workspaces = tuple(_serialize_workspace(agent_id) for agent_id in backend_resolver.list_known_workspace_ids())
-    return WorkspaceListResponse(workspaces=workspaces)
+    return WorkspaceListResponse(workspaces=workspaces + tuple(_shared_workspace_summaries()))
 
 
 @require_api_or_cookie_auth

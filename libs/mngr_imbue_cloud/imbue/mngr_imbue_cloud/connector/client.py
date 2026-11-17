@@ -70,6 +70,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudDeviceCodeRefusedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudDocumentLimitError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudDocumentNotFoundError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudEmailNotVerifiedError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudKeyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudPaidListError
@@ -87,6 +88,8 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceActiveError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceHeldError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceRetiredError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspacesPresentError
+from imbue.mngr_imbue_cloud.errors import SHARED_WITH_ME_UNAVAILABLE_CODE
+from imbue.mngr_imbue_cloud.errors import SHARE_NOT_FOUND_CODE
 from imbue.mngr_imbue_cloud.errors import WorkspaceHasNoStopError
 from imbue.mngr_imbue_cloud.errors import WorkspaceStopKindRouteUnavailableError
 from imbue.mngr_imbue_cloud.errors import WorkspacesEndpointUnavailableError
@@ -99,6 +102,7 @@ from imbue.mngr_imbue_cloud.wire_types import AuthRawResponse
 from imbue.mngr_imbue_cloud.wire_types import BackupRepositoryCredentials
 from imbue.mngr_imbue_cloud.wire_types import BackupRepositoryInfo
 from imbue.mngr_imbue_cloud.wire_types import BackupStorageUsage
+from imbue.mngr_imbue_cloud.wire_types import BrowserSessionCode
 from imbue.mngr_imbue_cloud.wire_types import ContactEntry
 from imbue.mngr_imbue_cloud.wire_types import InvitationOutcomeEntry
 from imbue.mngr_imbue_cloud.wire_types import InvitationResult
@@ -120,6 +124,12 @@ from imbue.mngr_imbue_cloud.wire_types import ShareInfo
 from imbue.mngr_imbue_cloud.wire_types import ShareRelayEndpoint
 from imbue.mngr_imbue_cloud.wire_types import ShareRelayLogin
 from imbue.mngr_imbue_cloud.wire_types import ShareRelayMap
+from imbue.mngr_imbue_cloud.wire_types import ShareResponseKind
+from imbue.mngr_imbue_cloud.wire_types import ShareResponseResult
+from imbue.mngr_imbue_cloud.wire_types import SharedWithMeListing
+from imbue.mngr_imbue_cloud.wire_types import SharedWithMeMatch
+from imbue.mngr_imbue_cloud.wire_types import SharedWithMeMatches
+from imbue.mngr_imbue_cloud.wire_types import SharedWithMeShare
 from imbue.mngr_imbue_cloud.wire_types import SignupCodeCreated
 from imbue.mngr_imbue_cloud.wire_types import SignupCodeInfo
 from imbue.mngr_imbue_cloud.wire_types import StorageCleanupGrant
@@ -332,6 +342,14 @@ class ImbueCloudConnectorClient(MutableModel):
                 limit=float(detail.get("limit", 0)),
                 current=float(detail.get("current", 0)),
             )
+
+    def _raise_if_rate_limited(self, response: httpx2.Response) -> None:
+        """Raise the typed rate-limit error on a 429, with the connector's message when it carries one."""
+        if response.status_code != 429:
+            return
+        detail = _detail_dict_from_response(response)
+        message = str(detail.get("message", "rate limited")) if detail else "rate limited"
+        raise ImbueCloudRateLimitedError(message)
 
     def _raise_if_email_not_verified(self, response: httpx2.Response) -> None:
         """Raise the typed verification error when a 403 carries the connector's structured detail."""
@@ -1291,7 +1309,23 @@ class ImbueCloudConnectorClient(MutableModel):
         detail = _detail_dict_from_response(response)
         code = detail.get("code") if detail is not None else None
         if isinstance(code, str) and code:
-            raise ImbueCloudShareRefusedError(code, str(detail.get("message", code)) if detail else code)
+            raise ImbueCloudShareRefusedError(
+                code, str(detail.get("message", code)) if detail else code, _refusal_entries_of(detail)
+            )
+
+    def _raise_if_share_not_named(self, response: httpx2.Response) -> None:
+        """Map a response route's 404: the share names no identity of the caller (any more), so there is nothing to respond to.
+
+        A connector from before the routes answers the same status with
+        FastAPI's fixed detail; that is the absent feature, reported as the
+        listing reports it.
+        """
+        _raise_if_shared_with_me_unavailable(response)
+        if response.status_code != 404:
+            return
+        raise ImbueCloudShareRefusedError(
+            SHARE_NOT_FOUND_CODE, _detail_from_response(response) or "The share does not name this account"
+        )
 
     def push_share_grants(
         self, access_token: SecretStr, host_id: str, document: Mapping[str, Any]
@@ -1422,6 +1456,103 @@ class ImbueCloudConnectorClient(MutableModel):
             timeout=self.timeout_seconds,
         )
         return validate_wire(NotificationPreferencesInfo, self._check(response, ImbueCloudAccountError))
+
+    # The recipient's side of sharing (specs/shared-with-me/spec.md).
+
+    def list_shared_with_me(self, access_token: SecretStr) -> SharedWithMeListing:
+        """Every active share whose grants name the caller, with what they may open and where each stands.
+
+        Raises ImbueCloudShareRefusedError with code ``shared_with_me_unavailable``
+        against a connector that does not serve the listing yet (spec section 7).
+        """
+        response = self._send(
+            "GET",
+            self._url("/shares/shared-with-me"),
+            exc_cls=ImbueCloudShareError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        _raise_if_shared_with_me_unavailable(response)
+        body = self._check(response, ImbueCloudShareError)
+        matches = _parse_shared_with_me_matches(
+            body.get("matches"), "GET /shares/shared-with-me", ImbueCloudShareError
+        )
+        shares = parse_wire_entries(
+            SharedWithMeShare, body.get("shares", []), "GET /shares/shared-with-me", ImbueCloudShareError
+        )
+        return SharedWithMeListing(matches=matches, shares=tuple(shares))
+
+    def list_shared_with_me_matches(self, access_token: SecretStr) -> tuple[SharedWithMeMatch, ...]:
+        """The match set alone, for polling for change without fetching the listing.
+
+        Raises ImbueCloudShareRefusedError with code ``shared_with_me_unavailable``
+        against a connector that does not serve the listing yet, as the listing does.
+        """
+        response = self._send(
+            "GET",
+            self._url("/shares/shared-with-me/matches"),
+            exc_cls=ImbueCloudShareError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        _raise_if_shared_with_me_unavailable(response)
+        return validate_wire(SharedWithMeMatches, self._check(response, ImbueCloudShareError)).matches
+
+    def set_share_response(
+        self, access_token: SecretStr, host_id: str, response_kind: ShareResponseKind
+    ) -> ShareResponseResult:
+        """Record the caller's response to a share naming them.
+
+        Raises ImbueCloudShareRefusedError on a 404 (``share_not_found``, or
+        ``shared_with_me_unavailable`` from a connector without the route) or
+        a 409 (``already_reported``), and ImbueCloudRateLimitedError on the
+        429 of the daily report allowance. ``UNKNOWN`` is the wire enum's
+        coercion member, never a response, and is refused before any request.
+        """
+        if response_kind is ShareResponseKind.UNKNOWN:
+            raise ImbueCloudShareError("a share response must be accepted, declined, or reported")
+        response = self._send(
+            "PUT",
+            self._url(f"/shares/shared-with-me/{host_id}/response"),
+            exc_cls=ImbueCloudShareError,
+            headers=self._bearer(access_token),
+            json={"response": response_kind.value},
+            timeout=self.timeout_seconds,
+        )
+        self._raise_if_share_not_named(response)
+        self._raise_if_share_refused(response)
+        self._raise_if_rate_limited(response)
+        return validate_wire(ShareResponseResult, self._check(response, ImbueCloudShareError))
+
+    def clear_share_response(self, access_token: SecretStr, host_id: str) -> ShareResponseResult:
+        """Remove the caller's response to a share (a declined one reads invited again, or accepted once visited); never a report."""
+        response = self._send(
+            "DELETE",
+            self._url(f"/shares/shared-with-me/{host_id}/response"),
+            exc_cls=ImbueCloudShareError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        self._raise_if_share_not_named(response)
+        self._raise_if_share_refused(response)
+        return validate_wire(ShareResponseResult, self._check(response, ImbueCloudShareError))
+
+    def mint_browser_session_code(self, access_token: SecretStr) -> BrowserSessionCode:
+        """Mint the single-use code the desktop's embedded browser redeems for a session on the accounts origin.
+
+        Raises ImbueCloudRateLimitedError on the 429 of the per-minute mint allowance.
+        """
+        response = self._send(
+            "POST",
+            self._url("/auth/browser-session-code"),
+            exc_cls=ImbueCloudAuthError,
+            # A retried POST after a lost response would mint a second code against the per-minute allowance.
+            idempotent=False,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        self._raise_if_rate_limited(response)
+        return validate_wire(BrowserSessionCode, self._check(response, ImbueCloudAuthError))
 
     def _check_bucket(self, response: httpx2.Response) -> Any:
         """Validate a bucket-route response, mapping status codes to typed errors."""
@@ -1700,8 +1831,7 @@ class ImbueCloudConnectorClient(MutableModel):
         )
         if response.status_code == 404:
             raise ImbueCloudUserNotFoundError(f"No verified account matches {email}")
-        if response.status_code == 429:
-            raise ImbueCloudRateLimitedError(_detail_from_response(response) or "Too many lookups; try again later")
+        self._raise_if_rate_limited(response)
         return validate_wire(UserIdentity, self._check(response, ImbueCloudAccountError))
 
     def list_contacts(self, access_token: SecretStr) -> list[ContactEntry]:
@@ -2206,9 +2336,16 @@ class ImbueCloudConnectorClient(MutableModel):
             raise ImbueCloudSyncError(
                 f"GET /sync/records: expected shared_agent_ids to be a JSON list, got {type(raw_shared_agent_ids).__name__}"
             )
+        # Absent (an older connector) or null (the connector could not compute it) both mean no match set.
+        raw_matches = body.get("shared_with_me_matches") if isinstance(body, dict) else None
         return SyncRecordsListing(
             records=tuple(parse_wire_entries(SyncWorkspaceRecord, records, "GET /sync/records", ImbueCloudSyncError)),
             shared_agent_ids=tuple(str(agent_id) for agent_id in raw_shared_agent_ids),
+            shared_with_me_matches=(
+                _parse_shared_with_me_matches(raw_matches, "GET /sync/records", ImbueCloudSyncError)
+                if raw_matches is not None
+                else None
+            ),
         )
 
     def put_sync_record(self, access_token: SecretStr, record: SyncWorkspaceRecord) -> SyncWorkspaceRecord:
@@ -2541,6 +2678,14 @@ def create_litellm_key_rotating_on_exists(
     )
 
 
+def _raise_if_shared_with_me_unavailable(response: httpx2.Response) -> None:
+    """A connector from before the recipient's side of sharing: the feature is absent, not failing."""
+    if _is_route_not_served(response):
+        raise ImbueCloudShareRefusedError(
+            SHARED_WITH_ME_UNAVAILABLE_CODE, "The connector does not list what is shared with the account yet"
+        )
+
+
 def _is_route_not_served(response: httpx2.Response) -> bool:
     """Whether ``response`` is FastAPI's fixed answer for a route this connector does not have.
 
@@ -2578,6 +2723,23 @@ def _detail_from_response(response: httpx2.Response) -> str:
         if detail is not None:
             return str(detail)
     return response.text[:300]
+
+
+def _parse_shared_with_me_matches(
+    raw_matches: object, route: str, error_cls: type[ImbueCloudError]
+) -> tuple[SharedWithMeMatch, ...]:
+    """The match set a listing or the records pull carries; a schema break never reads as an empty set."""
+    if not isinstance(raw_matches, list):
+        raise error_cls(f"{route}: expected a JSON list of shared-with-me matches")
+    return tuple(parse_wire_entries(SharedWithMeMatch, raw_matches, route, error_cls))
+
+
+def _refusal_entries_of(detail: Mapping[str, Any] | None) -> list[dict[str, str]]:
+    """The ``refusals`` a ``grants_refused`` detail carries: one string-valued object per refused entry."""
+    raw = detail.get("refusals") if detail is not None else None
+    if not isinstance(raw, list):
+        return []
+    return [{str(key): str(value) for key, value in entry.items()} for entry in raw if isinstance(entry, dict)]
 
 
 def _detail_dict_from_response(response: httpx2.Response) -> dict[str, Any] | None:

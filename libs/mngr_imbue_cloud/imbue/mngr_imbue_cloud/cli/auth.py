@@ -45,6 +45,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
 from imbue.mngr_imbue_cloud.wire_types import AuthRawResponse
+from imbue.mngr_imbue_cloud.wire_types import BrowserSessionCode
 
 # The browser leg can legitimately take minutes, and the account is created
 # partway through it. Embedders that can wait longer pass --listen-timeout.
@@ -1044,3 +1045,27 @@ def is_verified(account: str | None, connector_url: str | None) -> None:
             "display_name": session.display_name,
         }
     )
+
+
+@auth.command(name="browser-session-code")
+@click.option("--account", default=None, help="Account email (defaults to the active account)")
+@click.option("--connector-url", default=None, help="Override connector URL")
+@handle_imbue_cloud_errors
+def browser_session_code(account: str | None, connector_url: str | None) -> None:
+    """Mint the single-use code the desktop's embedded browser redeems for a session on the accounts origin.
+
+    The reverse of the device handoff (specs/shared-with-me/spec.md, section
+    4.8): the code lives sixty seconds, is consumed by one redemption at
+    ``GET /accounts/session?code=...``, and signs that browser in as this account.
+    """
+    client = make_connector_client(connector_url)
+    store = make_session_store()
+    parsed_account = resolve_account_or_active(store, account)
+    token = get_active_token(store, client, parsed_account)
+    emit_json(browser_session_code_payload(client.mint_browser_session_code(token)))
+
+
+@pure
+def browser_session_code_payload(minted: BrowserSessionCode) -> dict[str, object]:
+    """What ``auth browser-session-code`` prints: the code revealed, since the caller builds the redeem URL from it."""
+    return {"code": minted.code.get_secret_value(), "expires_in_seconds": minted.expires_in_seconds}
