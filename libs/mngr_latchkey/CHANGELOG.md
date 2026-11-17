@@ -14,6 +14,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `set_registered_agents_for_host` and `list_registered_agent_ids_for_host` in `agent_setup`.
 - Added: `is_system_browser` option on `Latchkey.auth_browser` and `auth_browser_login` (`latchkey auth browser --system`), `LatchkeyServiceInfo.is_system_browser_login_supported` and `custom_services.is_system_browser_login_flow`; combining it with the ephemeral browser raises `LatchkeyError`.
 - Added: `is_chrome_profile_missing_failure` and `is_scopes_not_granted_failure` classify those sign-in failures.
+- Added: The `permission-requests` extension accepts `"proxy": true` on `custom-service` requests (booleans only, else HTTP 400) and stores it on the request's payload.
 
 ### Changed
 
@@ -22,6 +23,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: The services catalog marks protocol-handshake permissions `is_implicit`; `ServicePermissionInfo` lists them under `implicit_permission_schemas` and `with_implicit_permissions` adds them to any non-empty grant.
 - Changed: `Latchkey.auth_browser` pins Imbue Studio's redirect URI before every MCP OAuth sign-in that registers a client (builtin `*-mcp` and custom `mcp` flow, per new `is_mcp_oauth_service`); `MINDS_OAUTH_REDIRECT_URI` replaces `MINDS_OAUTH_REDIRECT_URI_BY_SERVICE`.
 - Changed: The `minds-workspaces-backups-manage` verb admits `/backup-service/setup/retry`.
+- Changed: A wiring-step failure that retrying cannot fix now names the step and when it last succeeded for the host.
 
 ### Fixed
 

@@ -4,6 +4,41 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-16
+
+The end-to-end runner that creates a workspace through the real app (`create_workspace_via_electron` and `drive_create_flow`) now counts a workspace as created only once the desktop client has answered its welcome chat's seed, and fails with the client's own words when that seed failed. A new workspace is entered while its welcome chat is still being seeded, so the runner used to return as soon as the desktop rendered; a caller that then closed the app -- the CI snapshot build does so at once -- killed the seed's `mngr` call and left a half-seeded chat in the workspace. Snapshots built that way made the backup-update gate test fail in about one CI run in twenty, on every attempt in the run, until the snapshot was rebuilt.
+
+An agent asking for a new connection (a `custom-service` request) can also ask for it to be proxied through your desktop with `"proxy": true`, which until now only requests for catalog services could. The approval dialog shows the same **Proxy through my desktop** switch, turned on, and approving creates the connection, grants it and puts this computer first on its route in a single change to the workspace's machine. The agent is told where the connection's requests now leave from, or why the proxy was not set up.
+
+Restated the create progress seeds from the latest measurements.
+
+| scope | step | shipped (s) | measured (s) |
+| --- | --- | ---: | ---: |
+| `create:DOCKER` | `docker.build.context` | 2.9 | 1 |
+| `create:DOCKER` | `docker.build.copy_home_user_c89f87` | 1 | 10.5 |
+| `create:DOCKER` | `docker.build.copy_system_apps_6c3ea0` | new | 1 |
+| `create:DOCKER` | `docker.build.copy_system_apps_6e4b21` | new | 1 |
+| `create:DOCKER` | `docker.build.copy_system_apps_f7d943` | new | 1 |
+| `create:DOCKER` | `docker.build.copy_system_apps_fc0a45` | new | 1 |
+| `create:DOCKER` | `docker.build.copy_system_libs_d203dd` | new | 1 |
+| `create:DOCKER` | `docker.build.copy_system_libs_e3a3e2` | new | 1 |
+| `create:DOCKER` | `docker.build.copy_system_scripts_0eae1f` | new | 1 |
+| `create:DOCKER` | `docker.build.copy_system_scripts_140396` | new | 1 |
+| `create:DOCKER` | `docker.build.copy_system_scripts_589b78` | 1 | 2.6 |
+| `create:DOCKER` | `docker.build.copy_system_scripts_cca0fe` | new | 1 |
+| `create:DOCKER` | `docker.build.export` | 171 | 252.2 |
+| `create:DOCKER` | `docker.build.from_docker_io_5d959b` | new | 2.2 |
+| `create:DOCKER` | `docker.build.run_chmod_x_4a7443` | 19.6 | 30.6 |
+| `create:DOCKER` | `docker.build.run_chmod_x_ab3bf8` | new | 1 |
+| `create:DOCKER` | `docker.build.run_mv_home_0ebcb6` | 4.8 | 15.2 |
+| `create:DOCKER` | `setting_up_host` | 4 | 9.5 |
+| `create:DOCKER` | `setting_up_host.inner.command_0` | 3.9 | 9.4 |
+| `create:DOCKER` | `transferring_project` | 1 | 1.5 |
+| `create:DOCKER` | `docker.build.copy_system_scripts_e15d67` | 1 | gone |
+| `create:DOCKER` | `docker.build.from_docker_io_56f06d` | 1 | gone |
+
+39 measured seed(s) stayed within the drift threshold.
+
 ## 2026-11-15
 
 Twenty-two tests in the desktop client's agent-creator and workspace-template-cache suites no longer carry a hand-written 30-second `pytest-timeout`. Each one clones a repo, runs `git`, or runs `mngr`, so each now inherits the 60 seconds that imbue-common gives any test running a real child program -- more headroom than the marker gave them, in one place instead of twenty-two. The template-cache tests that exercise clone and prefetch timeouts keep asserting their own bounds, all well under that budget.

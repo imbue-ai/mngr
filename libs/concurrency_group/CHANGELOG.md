@@ -6,9 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
-### Added
+### Changed
 
-- Added: `is_own_process_group` option on `run_local_command_modern_version`, `run_background` and `ConcurrencyGroup.run_process_in_background` makes the child its own process-group leader, so shutdown or timeout signals also kill what it forked.
+- Changed: Stopping a process now stops everything it spawned: a new `is_own_process_group` option, on by default for `ConcurrencyGroup.run_process_in_background`, `ConcurrencyGroup.run_process_to_completion`, `run_background` and `run_local_command_modern_version`, spawns the child as its own process-group leader and signals the whole group on shutdown or timeout, and SIGKILLs whatever is left in the group once the stopped child has exited. Pass `is_own_process_group=False` for a command that must prompt on the terminal (e.g. `sudo`).
+- Changed: The default SIGTERM grace before SIGKILL (`shutdown_timeout_sec`) is 3 s (was 30 s).
+
+### Fixed
+
+- Fixed: `ConcurrencyGroup` now escalates SIGTERM to SIGKILL and waits for terminated processes to die before leaving its context; previously its 10 s cleanup budget ran out before the 30 s escalation, abandoning processes that ignored SIGTERM.
 
 ## [v0.1.22] - 2026-10-28
 

@@ -1,1 +1,0 @@
-A wiring-step failure that retrying cannot fix (logged at error right away, e.g. an imbue_cloud 401 while announcing this computer to a host's machine) now also names the step and when that step last succeeded for the host. This tells a one-off refusal between successes apart from a step that keeps failing.

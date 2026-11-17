@@ -4,6 +4,16 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-16
+
+`mngr check-deps` keeps the `sudo apt-get` commands it runs to install missing dependencies in its own process group, so sudo's password prompt still reaches the terminal now that `ConcurrencyGroup` runs every other child in a session of its own.
+
+Two per-PR tests no longer reach GitHub (MIND-745):
+
+- `issue_reporting_test.py`'s test of the issue search's double failure sent a real request to `api.github.com` and passed only because GitHub answered quickly with an error; a stalled GitHub made it take 10.3 s against the unit lane's 10 s budget. Failing `curl` and `gh` now stand first on PATH, and the test checks that both were tried in order. It no longer patches the module's `GITHUB_REPO` either, so the `monkeypatch.setattr` ratchet drops from 31 to 30.
+
+- `test_cli_create_from_git_url` cloned `github.com/imbue-ai/mngr` over https, and flaked when the clone dropped (MIND-253, MIND-537). It now clones a local repo through a `file://` URL, which takes the same `is_git_url` clone path. It no longer needs the network, so it moves from the acceptance lane to the integration lane, under the tmux class budget instead of a 300 s timeout.
+
 ## 2026-11-15
 
 Fourteen tests no longer carry a hand-written 30-second `pytest-timeout`: the seven `install.sh` tests, the dependency-check flow test, the issue-search test, the two `mngr create` CLI tests (dirty-tree rejection and JSONL progress streaming), and the three remote-flock acceptance tests. Every one of them runs a real child program -- bash, git, curl, `gh`, `uv run mngr`, ssh -- so each now inherits the 60 seconds imbue-common gives that class, which is more headroom than the marker gave them.

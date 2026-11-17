@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-16
+
+A `custom-service` permission request may carry `"proxy": true`, as a `predefined` one may: the agent asks that the service being connected also send its requests out through the computer that approves the request. The `permission-requests` extension accepts only a boolean (anything else is an HTTP 400), stores `true` on the request's payload and never acts on it.
+
+A wiring-step failure that retrying cannot fix (logged at error right away, e.g. an imbue_cloud 401 while announcing this computer to a host's machine) now also names the step and when that step last succeeded for the host. This tells a one-off refusal between successes apart from a step that keeps failing.
+
 ## 2026-11-13
 
 Add `is_chrome_profile_missing_failure`, which tells a failed `latchkey auth import-chrome` that found no Google Chrome profile to import from, and `is_scopes_not_granted_failure`, which tells a strict browser sign-in whose consent screen was left with some access unticked, so callers can word those failures for the user.

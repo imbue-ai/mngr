@@ -15,6 +15,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: With profiling enabled, connector requests carry a W3C `traceparent` header and record `connector.request` / `connector.token_refresh` spans.
 - Added: Gen-2 slice VMs run `mngr-btrfs-reclaim.service` on every boot, enabling btrfs `dynamic_reclaim` and `periodic_reclaim` on kernels with the transaction-abort fix, so data block groups no longer fill the disk and cause ENOSPC while `df` shows free space.
 - Added: `ImbueCloudQuotaExceededError` reports its entitlement, limit and use in the JSONL `error` event's `details`; a plan switch refused with a reason raises `ImbueCloudPlanRefusedError` (`code: plan_refused`), so a waitlisted account no longer reads as "Unauthenticated (403)".
+- Added: Info-level diagnostics for connector requests refused with 401 (route, attempt, the token's remaining validity at the first and refused attempts, and whether the computer was suspended in between) and for each refreshed token's lifetime; a refused refresh logs at warning.
 
 ### Changed
 
@@ -23,6 +24,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `ShareGrantsPushResult` gains `share`, `outcomes` and `identities`, printed by `shares push-grants`.
 - Changed: `auth login` JSON output includes `is_email_verified`.
 - Changed: The batched listing collects work leases, so agents can report `RUNNING_BACKGROUND`.
+- Changed: `connector/session_store.py`'s `_decode_jwt_exp` is now public as `decode_jwt_exp` and returns None instead of raising for an unreadable payload or `exp`.
 
 ### Removed
 
