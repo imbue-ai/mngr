@@ -30,10 +30,13 @@ user_cmd_file="$MNGR_AGENT_STATE_DIR/commands/user_statusline_cmd"
 payload=$(cat)
 
 # Writer is best-effort: a failure here (jq missing, malformed payload, etc.) must not
-# break the user's pre-existing statusline.
-if [ -x "$writer" ]; then
-  printf '%s' "$payload" | "$writer" || true
-fi
+# break the user's pre-existing statusline -- hence `|| true`. We do NOT guard on
+# `[ -x "$writer" ]`: the writer is installed alongside this shim in the same
+# provisioning pass and settings.local.json only points here after both land, so a
+# missing/non-executable writer is a broken install, not a normal state. Letting the
+# invocation run surfaces that on stderr (still swallowed by `|| true`) instead of
+# silently emitting no events forever.
+printf '%s' "$payload" | "$writer" || true
 
 # Pass the user's command's exit status through unchanged: if their statusline was
 # already misbehaving (or their command path is broken), Claude Code should see the
