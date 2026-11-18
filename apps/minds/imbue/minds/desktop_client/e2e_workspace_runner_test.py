@@ -1,6 +1,7 @@
 import io
 import re
 from collections.abc import Callable
+from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
@@ -13,19 +14,29 @@ from playwright.sync_api import Frame
 from playwright.sync_api import Page
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
+from imbue.minds.desktop_client.e2e_workspace_runner import DESKTOP_BACKDROP_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import E2E_HARNESS_MARKER_ENV_VAR
+from imbue.minds.desktop_client.e2e_workspace_runner import HomeRowState
 from imbue.minds.desktop_client.e2e_workspace_runner import MAIN_CHAT_ROW_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import TERMINAL_IFRAME_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import WorkspaceCreateAttemptFailedError
 from imbue.minds.desktop_client.e2e_workspace_runner import WorkspaceFlowError
 from imbue.minds.desktop_client.e2e_workspace_runner import _LAUNCHER_INPUT_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _LAUNCHER_OVERLAY_SELECTOR
+from imbue.minds.desktop_client.e2e_workspace_runner import _START_WORKSPACE_CONTROL_SELECTOR
+from imbue.minds.desktop_client.e2e_workspace_runner import _STOP_WORKSPACE_CONTROL_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _build_electron_env
 from imbue.minds.desktop_client.e2e_workspace_runner import _drain_byte_stream_to_loguru
 from imbue.minds.desktop_client.e2e_workspace_runner import _read_failure_message
 from imbue.minds.desktop_client.e2e_workspace_runner import chat_frame
+from imbue.minds.desktop_client.e2e_workspace_runner import enter_workspace_from_home_page
 from imbue.minds.desktop_client.e2e_workspace_runner import find_chat_frame
+from imbue.minds.desktop_client.e2e_workspace_runner import is_home_row_running
+from imbue.minds.desktop_client.e2e_workspace_runner import is_home_row_stopped
+from imbue.minds.desktop_client.e2e_workspace_runner import open_account_home_page
 from imbue.minds.desktop_client.e2e_workspace_runner import send_to_main_chat_from_launcher
+from imbue.minds.desktop_client.e2e_workspace_runner import start_workspace_from_home_page
+from imbue.minds.desktop_client.e2e_workspace_runner import stop_workspace_from_home_page
 from imbue.minds.desktop_client.e2e_workspace_runner import wait_for_workspace_ready_or_failure
 
 # A workspace-ready URL (matches the agent-subdomain pattern) and a still-pending
@@ -418,3 +429,299 @@ def test_the_electron_env_prefills_the_template_only_when_one_is_given(monkeypat
     assert "MINDS_WORKSPACE_GIT_URL" not in without_template
     assert "MINDS_USE_LOCAL_WORKSPACE_DEFAULTS" not in without_template
     assert without_template["MNGR_ROOT_NAME"] == "mngr"
+
+
+# What a workspace's row on the home page shows in each state, in the shape the page reports it.
+_RUNNING_ROW: Mapping[str, object] = {"badge_label": None, "is_stop_offered": True, "is_start_offered": False}
+_STOPPING_ROW: Mapping[str, object] = {
+    "badge_label": "Stopping\u2026",
+    "is_stop_offered": False,
+    "is_start_offered": False,
+}
+_STOPPED_ROW: Mapping[str, object] = {"badge_label": "Stopped", "is_stop_offered": False, "is_start_offered": True}
+_STARTING_ROW: Mapping[str, object] = {
+    "badge_label": "Starting\u2026",
+    "is_stop_offered": False,
+    "is_start_offered": False,
+}
+_HOME_ROW_SELECTOR = f'[data-agent-id="{_WORKSPACE_AGENT_ID}"]'
+_STOP_QUESTION = 'Stop "smoke"? Its agents will stop and its services become inaccessible.'
+
+
+class _FakeDialog:
+    def __init__(self, dialog_type: str, message: str) -> None:
+        self.type = dialog_type
+        self.message = message
+        self.is_accepted = False
+
+    def accept(self) -> None:
+        self.is_accepted = True
+
+
+class _FakeHomePage:
+    """The account's home page with one workspace row, as the Stop and Start helpers drive it.
+
+    A press on Stop asks its question through a ``confirm`` dialog, raised at whatever dialog listeners
+    are on; with none on the question goes unanswered and the press changes nothing, which is what
+    Playwright's default dismissal does to it. ``row_states`` is what the row shows on each read after a
+    control took effect (the final entry repeats; an exception is raised, as a read that lands while the
+    page is being replaced does); before that it shows ``initial_row_state``.
+    ``alert_on_wait_number`` raises ``alert_message`` at the listeners during that wait, the way a build
+    that reports a refused Stop or Start through a native alert does once its request comes back;
+    ``error_dialog_on_wait_number`` puts ``error_dialog_text`` up in the page's own error dialog instead.
+    """
+
+    def __init__(
+        self,
+        *,
+        initial_row_state: Mapping[str, object] | None,
+        row_states: Sequence[Mapping[str, object] | BaseException | None],
+        alert_on_wait_number: int | None = None,
+        alert_message: str = "",
+        error_dialog_on_wait_number: int | None = None,
+        error_dialog_text: str = "",
+    ) -> None:
+        self._current_states: list[Mapping[str, object] | BaseException | None] = [initial_row_state]
+        self._states_after_press = list(row_states)
+        self._alert_on_wait_number = alert_on_wait_number
+        self._alert_message = alert_message
+        self._error_dialog_on_wait_number = error_dialog_on_wait_number
+        self._error_dialog_text = error_dialog_text
+        self._shown_error_dialog_text: str | None = None
+        self.dialog_listeners: list[Callable[[_FakeDialog], None]] = []
+        self.dialogs: list[_FakeDialog] = []
+        self.clicks: list[tuple[str, object]] = []
+        self.visited_urls: list[str] = []
+        self.wait_for_timeout_calls = 0
+
+    def on(self, event: str, listener: Callable[[_FakeDialog], None]) -> None:
+        assert event == "dialog"
+        self.dialog_listeners.append(listener)
+
+    def remove_listener(self, event: str, listener: Callable[[_FakeDialog], None]) -> None:
+        assert event == "dialog"
+        self.dialog_listeners.remove(listener)
+
+    def goto(self, url: str, wait_until: str) -> None:
+        self.visited_urls.append(url)
+
+    def _raise_dialog(self, dialog_type: str, message: str) -> _FakeDialog:
+        dialog = _FakeDialog(dialog_type, message)
+        self.dialogs.append(dialog)
+        for listener in list(self.dialog_listeners):
+            listener(dialog)
+        return dialog
+
+    def click(self, selector: str, timeout: float, position: object = None) -> None:
+        self.clicks.append((selector, position))
+        if selector.endswith(_STOP_WORKSPACE_CONTROL_SELECTOR):
+            is_confirmed = self._raise_dialog("confirm", _STOP_QUESTION).is_accepted
+        else:
+            is_confirmed = True
+        if is_confirmed:
+            self._current_states = list(self._states_after_press)
+
+    def evaluate(self, expression: str, arg: object) -> Mapping[str, object]:
+        state = self._current_states.pop(0) if len(self._current_states) > 1 else self._current_states[0]
+        if isinstance(state, BaseException):
+            raise state
+        return {"row": state, "error_dialog_text": self._shown_error_dialog_text}
+
+    def wait_for_timeout(self, timeout_ms: float) -> None:
+        self.wait_for_timeout_calls += 1
+        if self.wait_for_timeout_calls == self._alert_on_wait_number:
+            self._raise_dialog("alert", self._alert_message)
+        if self.wait_for_timeout_calls == self._error_dialog_on_wait_number:
+            self._shown_error_dialog_text = self._error_dialog_text
+
+
+def test_a_row_reads_as_running_only_with_no_badge_and_stop_on_offer() -> None:
+    assert is_home_row_running(HomeRowState.model_validate(_RUNNING_ROW)) is True
+    assert is_home_row_running(HomeRowState.model_validate(_STARTING_ROW)) is False
+    assert is_home_row_running(HomeRowState.model_validate(_STOPPED_ROW)) is False
+    # A row that shows neither a badge nor a control is one whose machine state the app does not know.
+    unknown = HomeRowState(badge_label=None, is_stop_offered=False, is_start_offered=False)
+    assert is_home_row_running(unknown) is False
+
+
+def test_a_row_reads_as_stopped_only_with_the_stopped_badge_and_start_on_offer() -> None:
+    assert is_home_row_stopped(HomeRowState.model_validate(_STOPPED_ROW)) is True
+    assert is_home_row_stopped(HomeRowState.model_validate(_STOPPING_ROW)) is False
+    assert is_home_row_stopped(HomeRowState.model_validate(_RUNNING_ROW)) is False
+    # A stop an operator holds reads "Maintenance" and offers no Start.
+    held = HomeRowState(badge_label="Maintenance", is_stop_offered=False, is_start_offered=False)
+    assert is_home_row_stopped(held) is False
+
+
+def test_the_home_page_of_an_account_is_its_hub_route() -> None:
+    page = _FakeHomePage(initial_row_state=_RUNNING_ROW, row_states=[_RUNNING_ROW])
+    open_account_home_page(cast(Page, page), "http://localhost:8420", "local")
+    assert page.visited_urls == ["http://localhost:8420/account/local/"]
+
+
+def test_stopping_from_the_home_page_answers_the_question_and_returns_once_the_row_reads_stopped() -> None:
+    page = _FakeHomePage(initial_row_state=_RUNNING_ROW, row_states=[_STOPPING_ROW, _STOPPING_ROW, _STOPPED_ROW])
+
+    stop_workspace_from_home_page(cast(Page, page), _WORKSPACE_AGENT_ID, timeout_seconds=5)
+
+    assert page.clicks == [(f"{_HOME_ROW_SELECTOR} {_STOP_WORKSPACE_CONTROL_SELECTOR}", None)]
+    assert [(dialog.type, dialog.is_accepted) for dialog in page.dialogs] == [("confirm", True)]
+    assert page.wait_for_timeout_calls == 2
+    # Left on, the listener would go on answering every later dialog of the page.
+    assert page.dialog_listeners == []
+
+
+def test_a_refused_stop_raises_with_what_the_home_page_reported() -> None:
+    page = _FakeHomePage(
+        initial_row_state=_RUNNING_ROW,
+        row_states=[_STOPPING_ROW, _RUNNING_ROW],
+        alert_on_wait_number=1,
+        alert_message='Could not stop "smoke". Check the workspace\'s provider and try again.',
+    )
+
+    with pytest.raises(WorkspaceFlowError, match='Could not stop "smoke"'):
+        stop_workspace_from_home_page(cast(Page, page), _WORKSPACE_AGENT_ID, timeout_seconds=5)
+
+    assert page.dialog_listeners == []
+
+
+def test_a_refused_stop_raises_with_what_the_app_s_own_error_dialog_says() -> None:
+    page = _FakeHomePage(
+        initial_row_state=_RUNNING_ROW,
+        row_states=[_STOPPING_ROW, _RUNNING_ROW],
+        error_dialog_on_wait_number=1,
+        error_dialog_text='Couldn\'t stop "smoke" The machine did not answer. Try again Report a bug',
+    )
+
+    with pytest.raises(WorkspaceFlowError, match='Couldn\'t stop "smoke" The machine did not answer'):
+        stop_workspace_from_home_page(cast(Page, page), _WORKSPACE_AGENT_ID, timeout_seconds=5)
+
+    assert page.dialog_listeners == []
+
+
+def test_a_stop_that_never_lands_raises_naming_what_the_row_last_showed() -> None:
+    page = _FakeHomePage(initial_row_state=_RUNNING_ROW, row_states=[_STOPPING_ROW])
+
+    with pytest.raises(WorkspaceFlowError, match="Stopping"):
+        stop_workspace_from_home_page(cast(Page, page), _WORKSPACE_AGENT_ID, timeout_seconds=0)
+
+    assert page.dialog_listeners == []
+
+
+def test_a_row_read_that_lands_while_the_page_is_replaced_is_taken_again() -> None:
+    # A stop has the app move its windows off the stopped workspace, which can replace the page under a read.
+    page = _FakeHomePage(
+        initial_row_state=_RUNNING_ROW,
+        row_states=[_STOPPING_ROW, PlaywrightError("Execution context was destroyed"), _STOPPED_ROW],
+    )
+
+    stop_workspace_from_home_page(cast(Page, page), _WORKSPACE_AGENT_ID, timeout_seconds=5)
+
+    assert page.wait_for_timeout_calls == 2
+
+
+def test_a_stop_whose_row_leaves_the_page_raises_saying_so() -> None:
+    page = _FakeHomePage(initial_row_state=_RUNNING_ROW, row_states=[None])
+
+    with pytest.raises(WorkspaceFlowError, match="no row"):
+        stop_workspace_from_home_page(cast(Page, page), _WORKSPACE_AGENT_ID, timeout_seconds=0)
+
+
+def test_stop_is_not_pressed_while_the_row_does_not_read_running() -> None:
+    page = _FakeHomePage(initial_row_state=_STARTING_ROW, row_states=[_STOPPED_ROW])
+
+    with pytest.raises(WorkspaceFlowError, match="was not running .*Starting"):
+        stop_workspace_from_home_page(cast(Page, page), _WORKSPACE_AGENT_ID, timeout_seconds=0)
+
+    assert page.clicks == []
+    assert page.dialog_listeners == []
+
+
+def test_start_is_not_pressed_while_the_row_does_not_read_stopped() -> None:
+    page = _FakeHomePage(initial_row_state=_STOPPING_ROW, row_states=[_RUNNING_ROW])
+
+    with pytest.raises(WorkspaceFlowError, match="was not stopped .*Stopping"):
+        start_workspace_from_home_page(cast(Page, page), _WORKSPACE_AGENT_ID, timeout_seconds=0)
+
+    assert page.clicks == []
+    assert page.dialog_listeners == []
+
+
+def test_starting_from_the_home_page_returns_once_the_row_shows_no_badge_and_offers_stop() -> None:
+    page = _FakeHomePage(initial_row_state=_STOPPED_ROW, row_states=[_STARTING_ROW, _RUNNING_ROW])
+
+    start_workspace_from_home_page(cast(Page, page), _WORKSPACE_AGENT_ID, timeout_seconds=5)
+
+    assert page.clicks == [(f"{_HOME_ROW_SELECTOR} {_START_WORKSPACE_CONTROL_SELECTOR}", None)]
+    assert page.dialogs == []
+    assert page.wait_for_timeout_calls == 1
+    assert page.dialog_listeners == []
+
+
+def test_a_refused_start_raises_with_what_the_home_page_reported() -> None:
+    page = _FakeHomePage(
+        initial_row_state=_STOPPED_ROW,
+        row_states=[_STARTING_ROW, _STOPPED_ROW],
+        alert_on_wait_number=1,
+        alert_message='Could not start "smoke". Check the workspace\'s provider and try again.',
+    )
+
+    with pytest.raises(WorkspaceFlowError, match='Could not start "smoke"'):
+        start_workspace_from_home_page(cast(Page, page), _WORKSPACE_AGENT_ID, timeout_seconds=5)
+
+    assert page.dialog_listeners == []
+
+
+class _FakeDesktopFrame(_FakeFrame):
+    """A workspace's frame whose desktop backdrop turns visible on a given read (the final entry repeats)."""
+
+    def __init__(self, url: str, is_backdrop_visible_results: Sequence[bool | BaseException]) -> None:
+        super().__init__([url])
+        self._is_backdrop_visible_results = list(is_backdrop_visible_results)
+
+    def is_visible(self, selector: str) -> bool:
+        assert selector == DESKTOP_BACKDROP_SELECTOR
+        results = self._is_backdrop_visible_results
+        result = results.pop(0) if len(results) > 1 else results[0]
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+
+class _FakeHomePageWithWorkspaceFrame(_FakeHomePage):
+    """The home page whose row, once pressed, has the chrome page frame the workspace after some waits."""
+
+    def __init__(self, *, workspace_frame: _FakeDesktopFrame, frame_attaches_after_wait_number: int) -> None:
+        super().__init__(initial_row_state=_RUNNING_ROW, row_states=[_RUNNING_ROW])
+        self._workspace_frame = workspace_frame
+        self._frame_attaches_after_wait_number = frame_attaches_after_wait_number
+        self.url = "http://localhost:8420/account/local/"
+
+    @property
+    def frames(self) -> list[_FakeFrame]:
+        if self.clicks and self.wait_for_timeout_calls >= self._frame_attaches_after_wait_number:
+            return [self._workspace_frame]
+        return []
+
+
+def test_entering_from_the_home_page_presses_the_row_and_returns_its_frame_once_the_desktop_renders() -> None:
+    # The frame is on the page one wait after the press, and its first read lands while its document is
+    # being replaced; the desktop is up on the read after that.
+    frame = _FakeDesktopFrame(_WORKSPACE_SHELL_URL, [PlaywrightError("Execution context was destroyed"), False, True])
+    page = _FakeHomePageWithWorkspaceFrame(workspace_frame=frame, frame_attaches_after_wait_number=1)
+
+    entered = enter_workspace_from_home_page(cast(Page, page), _WORKSPACE_AGENT_ID, timeout_seconds=5)
+
+    assert entered is cast(Frame, frame)
+    assert [selector for selector, _position in page.clicks] == [_HOME_ROW_SELECTOR]
+    # The press lands on the row itself rather than on one of the controls at its far end.
+    assert page.clicks[0][1] is not None
+    assert page.wait_for_timeout_calls == 3
+
+
+def test_entering_raises_when_the_desktop_never_renders() -> None:
+    frame = _FakeDesktopFrame(_WORKSPACE_SHELL_URL, [False])
+    page = _FakeHomePageWithWorkspaceFrame(workspace_frame=frame, frame_attaches_after_wait_number=0)
+
+    with pytest.raises(WorkspaceFlowError, match="did not render"):
+        enter_workspace_from_home_page(cast(Page, page), _WORKSPACE_AGENT_ID, timeout_seconds=0)

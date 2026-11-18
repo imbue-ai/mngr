@@ -18,6 +18,7 @@ roles and policies that grant them live in the imbue-ai/vault terraform repo.
 """
 
 import re
+from collections.abc import Mapping
 from typing import Final
 from typing import Self
 
@@ -61,6 +62,9 @@ SMOKE_PROFILE_FILE_ENV_VAR: Final[str] = "MINDS_SMOKE_PROFILE_FILE"
 # The default-workspace-template tag the journey's workspace must lease a pool row baked at, so a run that
 # is meant to exercise a release's template fails when it leased another tag's row; unset checks nothing.
 SMOKE_EXPECTED_TEMPLATE_REF_ENV_VAR: Final[str] = "MINDS_SMOKE_EXPECTED_TEMPLATE_REF"
+# ``1`` has the journey wait, with its workspace stopped, until the machine has left its server, so that the
+# start restores it from object storage; unset or ``0`` starts it at once, which restarts it in place.
+SMOKE_RESTORE_FROM_STORAGE_ENV_VAR: Final[str] = "MINDS_SMOKE_RESTORE_FROM_STORAGE"
 
 # The mail.tm mailbox the throwaway account verifies its email through. The
 # address and JWT keep the names the deployment tests already thread through
@@ -193,6 +197,17 @@ class SmokeRunId(NonEmptyStr):
                 "(lowercase letters, digits and '-'). Example: '20261014t101500z' or a GitHub run id."
             )
         return super().__new__(cls, stripped)
+
+
+@pure
+def is_smoke_switch_on(environ: Mapping[str, str], name: str, meaning_of_1: str, meaning_of_0: str) -> bool:
+    """Whether the switch ``name`` is set to ``1``; unset or ``0`` is off, and any other value is refused."""
+    value = environ.get(name, "")
+    if value == "1":
+        return True
+    if value in ("", "0"):
+        return False
+    raise SmokeConfigError(f"{name} takes 1 ({meaning_of_1}) or 0 ({meaning_of_0}), not {value!r}.")
 
 
 @pure

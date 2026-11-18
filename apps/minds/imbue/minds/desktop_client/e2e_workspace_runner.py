@@ -24,17 +24,21 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 from typing import Final
 from typing import IO
+from typing import Literal
 from urllib.parse import urlsplit
 
 import httpx2
 from loguru import logger
 from playwright.sync_api import Browser
+from playwright.sync_api import Dialog
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Frame
 from playwright.sync_api import Page
 from playwright.sync_api import Playwright
+from playwright.sync_api import Position
 from playwright.sync_api import Response
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
@@ -44,6 +48,7 @@ from pydantic import SecretStr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.minds.bootstrap import CI_SNAPSHOT_MINDS_ROOT_NAME
 from imbue.minds.bootstrap import STUDIO_ROOTS_OVERRIDE_ENV_VAR
 from imbue.minds.config.loader import repo_tier_client_config_path
@@ -735,11 +740,9 @@ def wait_for_workspace_ready_or_failure(browser: Browser, creating_page: Page, t
     """
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        for context in browser.contexts:
-            for candidate in context.pages:
-                for frame in candidate.frames:
-                    if _AGENT_SUBDOMAIN_PATTERN.search(frame.url):
-                        return frame
+        workspace_frame = _find_workspace_frame(browser)
+        if workspace_frame is not None:
+            return workspace_frame
         try:
             failure_is_visible = creating_page.is_visible(f"#{_FAILURE_VIEW_ID}")
         except PlaywrightError:
@@ -757,6 +760,24 @@ def wait_for_workspace_ready_or_failure(browser: Browser, creating_page: Page, t
         f"Workspace neither became ready nor reported failure within {timeout_seconds}s "
         f"(creating page last URL: {creating_page.url!r})"
     )
+
+
+def _find_workspace_frame_in_page(page: Page) -> Frame | None:
+    """The frame of ``page`` on a workspace's own origin, or None while the page frames none."""
+    for frame in page.frames:
+        if _AGENT_SUBDOMAIN_PATTERN.search(frame.url):
+            return frame
+    return None
+
+
+def _find_workspace_frame(browser: Browser) -> Frame | None:
+    """The frame on a workspace's own origin in any of the app's pages, or None while no page frames one."""
+    for context in browser.contexts:
+        for candidate in context.pages:
+            workspace_frame = _find_workspace_frame_in_page(candidate)
+            if workspace_frame is not None:
+                return workspace_frame
+    return None
 
 
 def _is_welcome_chat_seed_answer(response: Response) -> bool:
@@ -790,12 +811,27 @@ def _wait_for_welcome_chat_seed(page: Page, responses_so_far: Sequence[Response]
         )
 
 
-class _ResponseLog(MutableModel):
-    """The responses a page received while ``record`` was one of its ``response`` listeners.
+@contextmanager
+def _page_listener(
+    page: Page,
+    # Literals rather than an enum: Playwright types ``Page.on`` per literal event name, which an enum's value is not.
+    event: Literal["dialog", "response"],
+    listener: Callable[[Any], None],
+) -> Generator[None, None, None]:
+    """Have ``listener`` hear every ``event`` ``page`` raises inside the block, and none after it.
 
-    The listener is a method rather than ``list.append`` because Playwright tags each listener
-    with an attribute, which a builtin cannot take.
+    Playwright tags each listener with an attribute, so ``listener`` has to be able to take one:
+    a model's method can, a builtin's (``list.append``) cannot.
     """
+    page.on(event, listener)
+    try:
+        yield
+    finally:
+        page.remove_listener(event, listener)
+
+
+class _ResponseLog(MutableModel):
+    """The responses a page received while ``record`` listened for them."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -867,8 +903,7 @@ def drive_create_flow(
         page.select_option("#region", region)
 
     response_log = _ResponseLog()
-    page.on("response", response_log.record)
-    try:
+    with _page_listener(page, "response", response_log.record):
         logger.info("Submitting create form")
         page.click("#create-submit")
 
@@ -892,8 +927,6 @@ def drive_create_flow(
         )
         logger.info("system_interface desktop rendered; waiting for the welcome chat's seed")
         _wait_for_welcome_chat_seed(page, response_log.responses, _WELCOME_CHAT_SEED_TIMEOUT_SECONDS)
-    finally:
-        page.remove_listener("response", response_log.record)
     logger.info("Welcome chat seeded; machine create attempt complete")
     return workspace_page
 
@@ -1417,3 +1450,274 @@ def visible_launcher_row_selector(row_selector: str) -> str:
     """The row as it is found inside the showing launcher; rows render only inside the menu, so a wait
     scoped this way also confirms the launcher came up."""
     return f"{_LAUNCHER_OVERLAY_SELECTOR}:visible {row_selector}"
+
+
+# The account's home page (``LandingPage.ts``) lists its workspaces, one row each, with the row's Stop
+# or Start control. A refused Stop or Start reports itself in the app's own error dialog (``ErrorDialog.ts``).
+_ACCOUNT_HOME_PATH_TEMPLATE: Final[str] = "/account/{account_id}/"
+_HOME_ROW_SELECTOR_TEMPLATE: Final[str] = '[data-agent-id="{agent_id}"]'
+_STOP_WORKSPACE_CONTROL_SELECTOR: Final[str] = '[aria-label="Stop workspace"]'
+_START_WORKSPACE_CONTROL_SELECTOR: Final[str] = '[aria-label="Start workspace"]'
+_WORKSPACE_STATE_BADGE_SELECTOR: Final[str] = ".landing-mind-state-badge"
+_ERROR_DIALOG_SELECTOR: Final[str] = '[role="alertdialog"]'
+_STOPPED_BADGE_LABEL: Final[str] = "Stopped"
+_CONFIRM_DIALOG_TYPE: Final[str] = "confirm"
+_HOME_ROW_POLL_INTERVAL_MS: Final[int] = 1000
+# Inside the row's own padding, clear of the controls at its far end.
+_HOME_ROW_PRESS_POSITION: Final[Position] = {"x": 12.0, "y": 12.0}
+_HOME_PAGE_READING_JS: Final[
+    str
+] = """([rowSelector, badgeSelector, stopSelector, startSelector, errorDialogSelector]) => {
+    const row = document.querySelector(rowSelector);
+    const badge = row === null ? null : row.querySelector(badgeSelector);
+    const errorDialog = document.querySelector(errorDialogSelector);
+    return {
+        row: row === null ? null : {
+            badge_label: badge === null ? null : (badge.textContent ?? '').trim(),
+            is_stop_offered: row.querySelector(stopSelector) !== null,
+            is_start_offered: row.querySelector(startSelector) !== null,
+        },
+        error_dialog_text: errorDialog === null ? null : (errorDialog.textContent ?? '').replace(/\\s+/g, ' ').trim(),
+    };
+}"""
+
+
+class HomeRowState(FrozenModel):
+    """What one workspace's row on the home page shows."""
+
+    badge_label: str | None = Field(
+        description="The state badge's text, or None while the row shows no badge, as a running machine's does."
+    )
+    is_stop_offered: bool = Field(description="Whether the row offers its Stop control.")
+    is_start_offered: bool = Field(description="Whether the row offers its Start control.")
+
+
+class _HomePageReading(FrozenModel):
+    """What the home page shows of one workspace: its row, and the app's own error dialog while one is up."""
+
+    row: HomeRowState | None = Field(description="The workspace's row, or None while the page shows no such row.")
+    error_dialog_text: str | None = Field(description="What the app's error dialog says, or None while none is up.")
+
+
+@pure
+def is_home_row_running(state: HomeRowState) -> bool:
+    return state.badge_label is None and state.is_stop_offered
+
+
+@pure
+def is_home_row_stopped(state: HomeRowState) -> bool:
+    return state.badge_label == _STOPPED_BADGE_LABEL and state.is_start_offered
+
+
+class _DialogLog(MutableModel):
+    """The native dialogs a page raised while ``accept`` listened for them, each answered yes as it came."""
+
+    confirmed_questions: list[str] = Field(default_factory=list, description="What each confirm dialog asked.")
+    # CLEANUP: drop the alerts, and the check that reads them, once the stable and beta channels serve a
+    # build from 0.10.4 on: earlier builds report a refused Stop or Start through a native alert.
+    alerts: list[str] = Field(default_factory=list, description="What every other dialog said.")
+
+    def accept(self, dialog: Dialog) -> None:
+        if dialog.type == _CONFIRM_DIALOG_TYPE:
+            self.confirmed_questions.append(dialog.message)
+        else:
+            self.alerts.append(dialog.message)
+        dialog.accept()
+
+
+@contextmanager
+def _accepting_dialogs(page: Page) -> Generator[_DialogLog, None, None]:
+    """Answer yes to every dialog ``page`` raises inside the block, keeping what each one said.
+
+    Playwright dismisses a dialog nobody listens for, which answers no to a
+    question and discards a failure's text, and that is what a dialog raised
+    after the block gets again. Electron also shows each dialog as a native
+    message box, which stays on screen after the answer given here and takes
+    none of the page's input away from Playwright.
+    """
+    dialog_log = _DialogLog()
+    with _page_listener(page, "dialog", dialog_log.accept):
+        yield dialog_log
+
+
+@pure
+def _home_row_selector(agent_id: str) -> str:
+    return _HOME_ROW_SELECTOR_TEMPLATE.format(agent_id=agent_id)
+
+
+def _timeout_ms_until(deadline: float) -> float:
+    """The milliseconds left until ``deadline``, floored: Playwright reads a zero timeout as "wait forever"."""
+    return max(deadline - time.monotonic(), 1.0) * 1000
+
+
+def _read_home_page(page: Page, agent_id: str) -> _HomePageReading:
+    """What the home page shows of the workspace now.
+
+    A stop has the app move its windows off the stopped workspace, which can
+    replace the page under a read; such a read counts as showing nothing, and
+    the next one is taken from the page that replaced it.
+    """
+    try:
+        raw_reading = page.evaluate(
+            _HOME_PAGE_READING_JS,
+            [
+                _home_row_selector(agent_id),
+                _WORKSPACE_STATE_BADGE_SELECTOR,
+                _STOP_WORKSPACE_CONTROL_SELECTOR,
+                _START_WORKSPACE_CONTROL_SELECTOR,
+                _ERROR_DIALOG_SELECTOR,
+            ],
+        )
+    except PlaywrightError as exc:
+        logger.debug("Could not read the home page for {} while the page was changing: {}", agent_id, exc)
+        return _HomePageReading(row=None, error_dialog_text=None)
+    return _HomePageReading.model_validate(raw_reading)
+
+
+@pure
+def _describe_home_row(state: HomeRowState | None) -> str:
+    if state is None:
+        return "the home page showed no row for it"
+    return (
+        f"its row showed the badge {state.badge_label!r} with Stop "
+        f"{'on' if state.is_stop_offered else 'not on'} offer and Start "
+        f"{'on' if state.is_start_offered else 'not on'} offer"
+    )
+
+
+def _wait_for_home_row(
+    page: Page,
+    agent_id: str,
+    is_reached: Callable[[HomeRowState], bool],
+    dialog_log: _DialogLog,
+    description: str,
+    deadline: float,
+) -> None:
+    """Poll the workspace's row until ``is_reached`` holds for it.
+
+    Raises WorkspaceFlowError as soon as the page reports a failure, in its
+    error dialog or through a native one, and at ``deadline`` with what the
+    row last showed.
+    """
+    reading = _read_home_page(page, agent_id)
+    while reading.row is None or not is_reached(reading.row):
+        reported_failures = [
+            *dialog_log.alerts,
+            *([] if reading.error_dialog_text is None else [reading.error_dialog_text]),
+        ]
+        if reported_failures:
+            raise WorkspaceFlowError(
+                f"The home page reported a failure before workspace {agent_id} was {description}: "
+                f"{' / '.join(reported_failures)}"
+            )
+        if time.monotonic() >= deadline:
+            raise WorkspaceFlowError(
+                f"Workspace {agent_id} was not {description} on the home page in time; "
+                f"{_describe_home_row(reading.row)}."
+            )
+        page.wait_for_timeout(_HOME_ROW_POLL_INTERVAL_MS)
+        reading = _read_home_page(page, agent_id)
+
+
+def open_account_home_page(page: Page, backend_origin: str, account_id: str) -> None:
+    """Open the home page of ``account_id`` (``local`` is the device), which lists that account's workspaces."""
+    home_path = _ACCOUNT_HOME_PATH_TEMPLATE.format(account_id=account_id)
+    page.goto(f"{backend_origin}{home_path}", wait_until="domcontentloaded")
+
+
+def _press_home_row_control(
+    page: Page,
+    agent_id: str,
+    control_selector: str,
+    is_ready: Callable[[HomeRowState], bool],
+    ready_description: str,
+    is_done: Callable[[HomeRowState], bool],
+    done_description: str,
+    timeout_seconds: float,
+) -> None:
+    """Press one of the row's controls once the row reads ready for it, agree to what it asks, and wait for the row to read done."""
+    deadline = time.monotonic() + timeout_seconds
+    with _accepting_dialogs(page) as dialog_log:
+        _wait_for_home_row(page, agent_id, is_ready, dialog_log, ready_description, deadline)
+        page.click(f"{_home_row_selector(agent_id)} {control_selector}", timeout=_timeout_ms_until(deadline))
+        logger.info(
+            "Pressed {} for workspace {}; agreed to {}", control_selector, agent_id, dialog_log.confirmed_questions
+        )
+        _wait_for_home_row(page, agent_id, is_done, dialog_log, done_description, deadline)
+
+
+def stop_workspace_from_home_page(page: Page, agent_id: str, timeout_seconds: float) -> None:
+    """Press Stop on the workspace's row of the home page, agree to its question, and wait for the row to read stopped.
+
+    The row of a machine whose stop goes on after the app's own request returns
+    (an Imbue Cloud machine uploading its disks) can read stopped briefly and
+    then read "Stopping" again, so a caller that needs the stop finished asks
+    whatever holds the machine.
+    """
+    _press_home_row_control(
+        page,
+        agent_id,
+        _STOP_WORKSPACE_CONTROL_SELECTOR,
+        is_home_row_running,
+        "running",
+        is_home_row_stopped,
+        "stopped",
+        timeout_seconds,
+    )
+    logger.info("Stopped workspace {} from the home page", agent_id)
+
+
+def start_workspace_from_home_page(page: Page, agent_id: str, timeout_seconds: float) -> None:
+    """Press Start on the workspace's row of the home page and wait for the row to read running.
+
+    Start is pressed once the row reads stopped, which a machine still
+    finishing its stop takes a while to.
+    """
+    _press_home_row_control(
+        page,
+        agent_id,
+        _START_WORKSPACE_CONTROL_SELECTOR,
+        is_home_row_stopped,
+        "stopped",
+        is_home_row_running,
+        "running",
+        timeout_seconds,
+    )
+    logger.info("Started workspace {} from the home page", agent_id)
+
+
+def _find_rendered_workspace_frame(page: Page) -> Frame | None:
+    """The frame of the workspace ``page`` shows, once its desktop's backdrop is visible; None until then."""
+    workspace_frame = _find_workspace_frame_in_page(page)
+    if workspace_frame is None:
+        return None
+    try:
+        is_rendered = workspace_frame.is_visible(DESKTOP_BACKDROP_SELECTOR)
+    except PlaywrightError as exc:
+        logger.debug("Could not read the workspace's frame at {} while it was loading: {}", workspace_frame.url, exc)
+        return None
+    return workspace_frame if is_rendered else None
+
+
+def enter_workspace_from_home_page(page: Page, agent_id: str, timeout_seconds: float) -> Frame:
+    """Press the workspace's row on the home page and wait for its desktop to render; return the workspace's frame.
+
+    The press enters a workspace the app reads as healthy, and sends one it
+    still reads as unreachable through its recovery page, which returns to the
+    workspace once it answers. The frame is looked for in this page alone, the
+    one the row was pressed on, and again on every poll: the app can replace
+    it, or its document, while the workspace comes back.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    page.click(_home_row_selector(agent_id), position=_HOME_ROW_PRESS_POSITION, timeout=_timeout_ms_until(deadline))
+    workspace_frame = _find_rendered_workspace_frame(page)
+    while workspace_frame is None:
+        if time.monotonic() >= deadline:
+            raise WorkspaceFlowError(
+                f"The desktop of workspace {agent_id} did not render within {timeout_seconds:.0f}s of pressing "
+                f"its row on the home page; the page was last at {page.url}"
+            )
+        page.wait_for_timeout(_HOME_ROW_POLL_INTERVAL_MS)
+        workspace_frame = _find_rendered_workspace_frame(page)
+    logger.info("Entered workspace {} from the home page; its desktop rendered at {}", agent_id, workspace_frame.url)
+    return workspace_frame

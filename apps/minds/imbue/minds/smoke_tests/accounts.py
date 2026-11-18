@@ -3,13 +3,16 @@
 Every request carries the smoke User-Agent, so the connector's access log (and
 the download events it records) can tell a smoke run apart from a real user.
 
-The owner routes (sign in, list leases, release, unshare) are what a smoke
-test's own account can do; the admin routes (test signup, account lookup,
-operator release) and the pool-DB read are what only the setup and teardown
-jobs hold credentials for. Both live here because teardown drives them in one
-pass: release what the run leased, then delete the account that leased it.
+The owner routes (sign in, list leases and workspaces, release, unshare) are
+what a smoke test's own account can do; the admin routes (test signup, account
+lookup, operator release) and the pool-DB read are what only the setup and
+teardown jobs hold credentials for. Both live here because teardown drives them
+in one pass: release what the run leased, then delete the account that leased it.
 """
 
+import threading
+import time
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import Any
@@ -18,6 +21,7 @@ from urllib.parse import quote
 
 import httpx2
 import psycopg2
+from loguru import logger
 from pydantic import AnyUrl
 from pydantic import SecretStr
 
@@ -50,6 +54,11 @@ _ACTIVE_SHARE_STATE: Final[str] = "active"
 _WRONG_CREDENTIALS_STATUS: Final[str] = "WRONG_CREDENTIALS"
 # The pool-row attribute naming the default-workspace-template tag the row's slice was baked at.
 _TEMPLATE_REF_ATTRIBUTE: Final[str] = "repo_branch_or_tag"
+# The lifecycle ``status`` values ``GET /workspaces`` reports that the suite waits on.
+_RUNNING_WORKSPACE_STATUS: Final[str] = "running"
+_STOPPED_WORKSPACE_STATUS: Final[str] = "stopped"
+_WORKSPACE_POLL_SECONDS: Final[float] = 10.0
+_FIRST_SERVER_ERROR_STATUS: Final[int] = 500
 
 
 @pure
@@ -183,13 +192,41 @@ def sign_in(*, connector_url: AnyUrl, credentials: SmokeAccountCredentials) -> S
 
 
 @pure
-def leased_host_db_ids_of(listing: Sequence[Mapping[str, Any]]) -> list[str]:
-    """The pool-row ids in a ``GET /hosts`` listing.
+def workspace_host_db_ids_of(listing: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The pool-row ids in a ``GET /workspaces`` listing, whatever lifecycle state each row is in.
 
     ``host_db_id`` is the id the release routes take, which is why the listing
     is read for its ids rather than for the workspaces themselves.
     """
     return [str(entry["host_db_id"]) for entry in listing]
+
+
+@pure
+def is_workspace_running(workspace: Mapping[str, Any]) -> bool:
+    return workspace.get("status") == _RUNNING_WORKSPACE_STATUS
+
+
+@pure
+def is_workspace_stopped(workspace: Mapping[str, Any]) -> bool:
+    """Whether the connector reports the workspace stopped, which it does only once its disks are verified in storage."""
+    return workspace.get("status") == _STOPPED_WORKSPACE_STATUS
+
+
+@pure
+def is_workspace_held_only_in_storage(workspace: Mapping[str, Any]) -> bool:
+    """Whether a stopped workspace has given up its server, so that a start has to restore it from storage.
+
+    A just-stopped workspace keeps its halted machine on its server for the
+    tier's retention window, and a start inside the window restarts it in
+    place. The connector clears the row's address when the window closes.
+    """
+    return is_workspace_stopped(workspace) and workspace.get("vps_address") is None
+
+
+@pure
+def is_connector_unavailable(status_code: int) -> bool:
+    """Whether a status says the connector could not answer this time, rather than that it refused the request."""
+    return status_code >= _FIRST_SERVER_ERROR_STATUS
 
 
 @pure
@@ -231,9 +268,77 @@ def list_leased_hosts(*, connector_url: AnyUrl, bearer: SecretStr) -> list[dict[
     return [entry for entry in response.json() if isinstance(entry, dict)]
 
 
-def list_leased_host_db_ids(*, connector_url: AnyUrl, bearer: SecretStr) -> list[str]:
-    """The pool-row ids of every workspace the signed-in account currently leases."""
-    return leased_host_db_ids_of(list_leased_hosts(connector_url=connector_url, bearer=bearer))
+def list_workspace_host_db_ids(*, connector_url: AnyUrl, bearer: SecretStr) -> list[str]:
+    """The pool-row ids of every workspace the signed-in account holds, running or not.
+
+    Read from ``GET /workspaces`` rather than ``GET /hosts``, which lists only
+    running machines: a run that died with its workspace stopped still holds
+    the row, and its disks in storage, until the row is released.
+    """
+    with httpx2.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
+        response = client.get(f"{origin_of(connector_url)}/workspaces", headers=smoke_headers(bearer))
+    if response.status_code != 200:
+        raise SmokeAccountError(f"GET /workspaces answered {response.status_code}: {response.text[:300]!r}")
+    return workspace_host_db_ids_of([entry for entry in response.json() if isinstance(entry, dict)])
+
+
+def _read_workspace_or_none(*, connector_url: AnyUrl, bearer: SecretStr, host_db_id: str) -> dict[str, Any] | None:
+    """One workspace's lifecycle view, as the connector reports it to its owner; None when it could not answer.
+
+    A dropped connection or a 5xx is the connector having a bad moment rather
+    than anything about the workspace, so a poll goes on past it. Any other
+    refusal is an error.
+    """
+    try:
+        with httpx2.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
+            response = client.get(f"{origin_of(connector_url)}/workspaces/{host_db_id}", headers=smoke_headers(bearer))
+    except httpx2.TransportError as exc:
+        logger.warning("Could not reach the connector for workspace {}: {!r}", host_db_id, exc)
+        return None
+    if is_connector_unavailable(response.status_code):
+        logger.warning(
+            "The connector answered {} for workspace {}: {!r}", response.status_code, host_db_id, response.text[:300]
+        )
+        return None
+    if response.status_code != 200:
+        raise SmokeAccountError(
+            f"GET /workspaces/{host_db_id} answered {response.status_code}: {response.text[:300]!r}"
+        )
+    return dict(response.json())
+
+
+def wait_for_workspace(
+    *,
+    connector_url: AnyUrl,
+    credentials: SmokeAccountCredentials,
+    host_db_id: str,
+    is_reached: Callable[[Mapping[str, Any]], bool],
+    description: str,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    """Poll the owner's view of one workspace until ``is_reached`` holds for it; return that view.
+
+    Signs in for itself, so a wait that follows a long step never polls on a
+    token that step outlived.
+    """
+    bearer = sign_in(connector_url=connector_url, credentials=credentials)
+    deadline = time.monotonic() + timeout_seconds
+    last_reported = "nothing"
+    workspace = _read_workspace_or_none(connector_url=connector_url, bearer=bearer, host_db_id=host_db_id)
+    while workspace is None or not is_reached(workspace):
+        if workspace is not None:
+            last_reported = (
+                f"status {workspace.get('status')!r}, address {workspace.get('vps_address')!r} and "
+                f"transition error {workspace.get('transition_error')!r}"
+            )
+        if time.monotonic() >= deadline:
+            raise SmokeAccountError(
+                f"Workspace {host_db_id} was not {description} within {timeout_seconds:.0f}s; "
+                f"the connector last reported {last_reported}."
+            )
+        threading.Event().wait(timeout=_WORKSPACE_POLL_SECONDS)
+        workspace = _read_workspace_or_none(connector_url=connector_url, bearer=bearer, host_db_id=host_db_id)
+    return workspace
 
 
 @pure

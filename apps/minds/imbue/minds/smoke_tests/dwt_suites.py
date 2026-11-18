@@ -68,6 +68,7 @@ from imbue.minds.smoke_tests.primitives import SMOKE_SKIP_DWT_TESTS_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SmokeConfigError
 from imbue.minds.smoke_tests.primitives import SmokeDwtReportError
 from imbue.minds.smoke_tests.primitives import SmokeWorkspaceExecError
+from imbue.minds.smoke_tests.primitives import is_smoke_switch_on
 
 # Every default-workspace-template test is reported as a subtest labelled with this prefix, which is how the
 # smoke run's verdict tells their failures from the journey's own.
@@ -394,12 +395,7 @@ def smoke_run_verdict(own_failure_count: int, failed_subtest_labels: Sequence[st
 @pure
 def is_dwt_tests_skip_requested(environ: Mapping[str, str]) -> bool:
     """Whether ``MINDS_SMOKE_SKIP_DWT_TESTS=1`` skips the template's CI tests; unset or ``0`` runs them."""
-    value = environ.get(SMOKE_SKIP_DWT_TESTS_ENV_VAR, "")
-    if value == "1":
-        return True
-    if value in ("", "0"):
-        return False
-    raise SmokeConfigError(f"{SMOKE_SKIP_DWT_TESTS_ENV_VAR} takes 1 (skip) or 0 (run), not {value!r}.")
+    return is_smoke_switch_on(environ, SMOKE_SKIP_DWT_TESTS_ENV_VAR, "skip", "run")
 
 
 @pure

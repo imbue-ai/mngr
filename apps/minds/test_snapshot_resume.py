@@ -63,17 +63,25 @@ from imbue.minds.desktop_client.backup_provisioning import disable_backups_for_h
 from imbue.minds.desktop_client.backup_provisioning import reinject_canonical_env
 from imbue.minds.desktop_client.backup_update import run_backup_restore_sequence
 from imbue.minds.desktop_client.backup_verification import MINIMUM_BACKUP_SERVICE_TAG
+from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
 from imbue.minds.desktop_client.e2e_workspace_runner import _E2E_DATA_HOME_DIR_NAME
 from imbue.minds.desktop_client.e2e_workspace_runner import _REPO_ROOT
 from imbue.minds.desktop_client.e2e_workspace_runner import await_chat_reply
+from imbue.minds.desktop_client.e2e_workspace_runner import backend_origin_from_page
+from imbue.minds.desktop_client.e2e_workspace_runner import chat_frame
 from imbue.minds.desktop_client.e2e_workspace_runner import configure_logging
 from imbue.minds.desktop_client.e2e_workspace_runner import create_workspace_via_electron
 from imbue.minds.desktop_client.e2e_workspace_runner import ensure_minds_env_defaults
+from imbue.minds.desktop_client.e2e_workspace_runner import enter_workspace_from_home_page
 from imbue.minds.desktop_client.e2e_workspace_runner import find_free_port
+from imbue.minds.desktop_client.e2e_workspace_runner import open_account_home_page
 from imbue.minds.desktop_client.e2e_workspace_runner import resolve_default_workspace_template_path
 from imbue.minds.desktop_client.e2e_workspace_runner import send_chat_message
 from imbue.minds.desktop_client.e2e_workspace_runner import sign_in_via_provider_chooser
+from imbue.minds.desktop_client.e2e_workspace_runner import start_workspace_from_home_page
+from imbue.minds.desktop_client.e2e_workspace_runner import stop_workspace_from_home_page
 from imbue.minds.desktop_client.e2e_workspace_runner import wait_for_chat_input
+from imbue.minds.desktop_client.e2e_workspace_runner import workspace_coordinate_from_subdomain
 from imbue.minds.desktop_client.restic_cli import ResticNotInstalledError
 from imbue.minds.desktop_client.workspace_diagnostics import STAGED_ZIP_FILENAME
 from imbue.minds.desktop_client.workspace_diagnostics import WORKSPACE_COLLECTOR_PATH
@@ -93,6 +101,7 @@ from imbue.minds.testing import exec_in_workspace_container
 from imbue.minds.testing import format_container_states
 from imbue.minds.testing import list_agents_in_workspace_container
 from imbue.minds.testing import run_workspace_program_in_container
+from imbue.minds.testing import running_workspace_container_names
 from imbue.minds.testing import snapshot_workspace_container_name
 from imbue.minds.testing import snapshot_workspace_container_prefix
 from imbue.minds.testing import start_snapshot_containers
@@ -680,6 +689,84 @@ def test_create_workspace_and_sign_in_via_modal_then_chat_via_electron(
         )
     finally:
         _remove_containers_named_with_prefix(mngr_prefix_for(root_name))
+
+
+# A stop ends the agents and then the container; a start boots the container and its services agent.
+_HOME_STOP_TIMEOUT_SECONDS: Final[float] = 120.0
+_HOME_START_TIMEOUT_SECONDS: Final[float] = 180.0
+_REENTER_AFTER_START_TIMEOUT_SECONDS: Final[float] = 180.0
+# The desktop renders before the apps behind it are back, so the chat's page gets a budget of its own.
+_CHAT_PAGE_TIMEOUT_SECONDS: Final[float] = 240.0
+
+
+def _stop_start_and_reenter_from_home_page(workspace: Frame, container_name_prefix: str) -> None:
+    """Stop the fresh workspace from the device's home page, start it again, and enter it, asking Docker at each turn."""
+    page = workspace.page
+    agent_id = workspace_coordinate_from_subdomain(workspace.url)
+    # The chat's page has to be up before the stop for its absence after the start to mean anything.
+    chat_frame(workspace, _CHAT_PAGE_TIMEOUT_SECONDS)
+    running_before = running_workspace_container_names(container_name_prefix)
+    assert len(running_before) == 1, f"Expected one running workspace container before the stop: {running_before}"
+
+    open_account_home_page(page, backend_origin_from_page(page), LOCAL_PROFILE_USER_ID)
+    stop_workspace_from_home_page(page, agent_id, _HOME_STOP_TIMEOUT_SECONDS)
+    running_while_stopped = running_workspace_container_names(container_name_prefix)
+    assert running_while_stopped == [], f"The home page reads stopped while Docker still runs {running_while_stopped}"
+
+    start_workspace_from_home_page(page, agent_id, _HOME_START_TIMEOUT_SECONDS)
+    running_after = running_workspace_container_names(container_name_prefix)
+    assert running_after == running_before, f"The home page reads running while Docker runs {running_after}"
+
+    reentered = enter_workspace_from_home_page(page, agent_id, _REENTER_AFTER_START_TIMEOUT_SECONDS)
+    chat_frame(reentered, _CHAT_PAGE_TIMEOUT_SECONDS)
+
+
+@pytest.mark.minds_snapshot_resume
+@pytest.mark.docker
+@pytest.mark.rsync
+@pytest.mark.timeout(1100)
+def test_workspace_stops_and_starts_from_the_home_page_via_electron(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    xvfb_display: str,
+) -> None:
+    """Stop a fresh Docker workspace from the home page, start it again, and find it usable.
+
+    The home page's Stop and Start controls run ``mngr stop --stop-host`` and
+    ``mngr start`` on the workspace's services agent. This presses Stop
+    (agreeing to the question it asks) and then Start, the way a user does, and
+    at each turn compares what the page shows with what Docker runs: nothing
+    while the row reads stopped, the same container again once it reads
+    running. The workspace then has to be usable: pressing its row brings the
+    desktop back through the desktop client's proxy, and a chat's page is
+    framed again, which takes the chat app serving. It signs nothing in and
+    sends no message, so it needs no AI key.
+
+    Runs in the snapshot offload sandbox on the warm Electron toolchain, and
+    creates a workspace of its own under a root of its own, so it never stops
+    the snapshot's workspace under the tests that share it.
+    """
+    root_name = f"minds-ci-e2e{get_short_random_string()}"
+    default_workspace_template_path, host_config_root = _prepare_electron_workspace_inputs(
+        tmp_path, monkeypatch, root_name
+    )
+    workspace_name = f"stopstart-{get_short_random_string()}"
+    container_name_prefix = mngr_prefix_for(root_name)
+    debug_port = find_free_port()
+    logger.info("Workspace name: {}; CDP debug port: {}; DISPLAY={}", workspace_name, debug_port, xvfb_display)
+
+    try:
+        create_workspace_via_electron(
+            default_workspace_template_path,
+            workspace_name,
+            debug_port,
+            host_config_dir=host_config_root,
+            on_workspace_ready=lambda workspace: _stop_start_and_reenter_from_home_page(
+                workspace, container_name_prefix
+            ),
+        )
+    finally:
+        _remove_containers_named_with_prefix(container_name_prefix)
 
 
 # Backup-update chat gate against a deterministically RUNNING agent

@@ -2,7 +2,8 @@
 
 Every control here is the one a user presses: the landing page and its
 consent screen, the Manage Accounts page's sign-in, the create form, the
-desktop's launcher field, the Share tab, and the Settings tab's destroy.
+desktop's launcher field, the home page's Stop and Start, the Share tab, and
+the Settings tab's destroy.
 What the UI did is then confirmed by reading the app's own routes,
 through a same-origin fetch on a page it already has open -- the chrome page
 for the desktop's routes, the chat's page for the workspace's -- so each
@@ -37,7 +38,9 @@ from imbue.minds.desktop_client.e2e_workspace_runner import DESKTOP_BACKDROP_SEL
 from imbue.minds.desktop_client.e2e_workspace_runner import USER_TURN_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import chat_frame
 from imbue.minds.desktop_client.e2e_workspace_runner import find_chat_frame
+from imbue.minds.desktop_client.e2e_workspace_runner import open_account_home_page
 from imbue.minds.desktop_client.e2e_workspace_runner import send_to_main_chat_from_launcher
+from imbue.minds.desktop_client.e2e_workspace_runner import stop_workspace_from_home_page
 from imbue.minds.desktop_client.e2e_workspace_runner import wait_for_workspace_ready_or_failure
 from imbue.minds.desktop_client.e2e_workspace_runner import workspace_coordinate_from_subdomain
 from imbue.minds.smoke_tests.data_types import StudioAppSession
@@ -288,6 +291,13 @@ def _signed_in_account_id(session: StudioAppSession, email: str) -> str | None:
     return None
 
 
+def _require_signed_in_account_id(session: StudioAppSession, email: str) -> str:
+    account_id = _signed_in_account_id(session, email)
+    if account_id is None:
+        raise SmokeAppError(f"The app does not list {email} as a signed-in account.")
+    return account_id
+
+
 def _account_create_path(account_id: str) -> str:
     return f"/account/{account_id}/create"
 
@@ -316,9 +326,7 @@ def wait_for_account_in_create_form(session: StudioAppSession, email: str, timeo
 def create_imbue_cloud_workspace(session: StudioAppSession, workspace_name: str, account_email: str) -> Frame:
     """Drive the account's create form to an Imbue Cloud workspace; return its rendered desktop's frame."""
     page = session.page
-    account_id = _signed_in_account_id(session, account_email)
-    if account_id is None:
-        raise SmokeAppError(f"The app does not list {account_email} as a signed-in account.")
+    account_id = _require_signed_in_account_id(session, account_email)
     page.goto(f"{session.backend_origin}{_account_create_path(account_id)}", wait_until="domcontentloaded")
     page.wait_for_selector(_CREATE_FORM, state="attached", timeout=_PAGE_TIMEOUT_MS)
     page.wait_for_function(_ACCOUNT_LABEL_SHOWN_JS, arg=account_email, timeout=_PAGE_TIMEOUT_MS)
@@ -428,12 +436,18 @@ def send_prompt_to_main_chat(workspace_frame: Frame, welcome_chat: Frame, prompt
     launches the chat's agent on the account signed in by then, so the credentials are adopted before this runs.
     """
     main_chat_id = _main_chat_id(welcome_chat, _MAIN_CHAT_TIMEOUT_SECONDS)
+    send_prompt_to_known_main_chat(workspace_frame, main_chat_id, prompt, marker)
+    return main_chat_id
+
+
+def send_prompt_to_known_main_chat(workspace_frame: Frame, main_chat_id: str, prompt: str, marker: str) -> None:
+    """Send ``prompt`` with the desktop launcher's Enter to the workspace's main chat, whose id the caller already has;
+    return once that chat's page shows the prompt (``marker`` is a string only this prompt carries)."""
     send_to_main_chat_from_launcher(workspace_frame, prompt)
     _wait_until_chat_shows(
         workspace_frame, main_chat_id, _PROMPT_SHOWN_JS, marker, _PROMPT_SHOWN_TIMEOUT_SECONDS, "the prompt"
     )
     logger.info("Confirmed that the main chat {} shows the prompt", main_chat_id)
-    return main_chat_id
 
 
 def _main_chat_id(chat: Frame, timeout_seconds: float) -> str:
@@ -480,6 +494,20 @@ def _wait_until_chat_shows(
                 last_outcome = f"its page at {chat.url} could not be read: {exc}"
         threading.Event().wait(timeout=_POLL_SECONDS)
     raise SmokeAppError(f"Chat {chat_id} did not show {what} within {timeout_seconds:.0f}s; {last_outcome}")
+
+
+def stop_workspace_from_account_home(
+    session: StudioAppSession, account_email: str, agent_id: str, timeout_seconds: float
+) -> None:
+    """Open the account's home page and stop the workspace from its row there: press Stop and agree to its question.
+
+    Returns once the row shows the Stopped badge. An Imbue Cloud machine can
+    show it while its disks are still uploading, which the connector's own
+    status tells apart.
+    """
+    account_id = _require_signed_in_account_id(session, account_email)
+    open_account_home_page(session.page, str(session.backend_origin), account_id)
+    stop_workspace_from_home_page(session.page, agent_id, timeout_seconds)
 
 
 def publish_share_from_panel(session: StudioAppSession, agent_id: str) -> None:

@@ -189,7 +189,7 @@ def test_prevent_returns_in_docstrings() -> None:
 
 
 def test_prevent_literal_with_multiple_options() -> None:
-    rc.check_literal_with_multiple_options(_DIR, snapshot(0))
+    rc.check_literal_with_multiple_options(_DIR, snapshot(1))
 
 
 def test_prevent_bare_generic_types() -> None:

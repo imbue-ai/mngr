@@ -99,6 +99,12 @@ class SmokeBackend(FrozenModel):
     is_waitlist_enabled: bool = Field(
         description="Whether the tier's deploy config waitlists accounts created without a signup code."
     )
+    stop_retention_seconds: NonNegativeInt | None = Field(
+        description=(
+            "How long a stopped workspace's machine keeps its place on its server, as the tier's deploy config "
+            "stamps it; None when the tier stamps no window of its own."
+        )
+    )
 
 
 class SmokeAccountCredentials(FrozenModel):

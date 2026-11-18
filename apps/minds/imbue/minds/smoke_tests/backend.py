@@ -14,12 +14,14 @@ from typing import Final
 from pydantic import AnyUrl
 
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.imbue_common.pure import pure
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.config.loader import load_deploy_config
 from imbue.minds.config.loader import repo_tier_client_config_path
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.smoke_tests.data_types import SmokeBackend
 from imbue.minds.smoke_tests.primitives import ACTIVATED_CLIENT_CONFIG_PATH_ENV_VAR
+from imbue.minds.smoke_tests.primitives import SMOKE_RESTORE_FROM_STORAGE_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_TIER_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SmokeConfigError
 from imbue.mngr_imbue_cloud.primitives import PRODUCTION_TIER
@@ -28,6 +30,8 @@ from imbue.mngr_imbue_cloud.primitives import tier_for_env_name
 
 # The tiers whose client.toml and deploy.toml are committed to this repo.
 COMMITTED_CONFIG_TIERS: Final[frozenset[str]] = frozenset({PRODUCTION_TIER, STAGING_TIER})
+# The connector frees a stopped machine's place on its server in a pass of its own once the window has closed.
+_RETENTION_FINALIZE_ALLOWANCE_SECONDS: Final[float] = 15 * 60
 
 
 def resolve_smoke_client_config_path(env_name: DevEnvName) -> Path:
@@ -60,6 +64,7 @@ def resolve_smoke_backend(env_name: DevEnvName, client_config_path: Path) -> Smo
     client_config = load_client_config(client_config_path)
     deploy_config = load_deploy_config(tier)
     origins = deploy_config.origins
+    storage = deploy_config.storage
     return SmokeBackend(
         env_name=env_name,
         tier=NonEmptyStr(tier),
@@ -72,4 +77,20 @@ def resolve_smoke_backend(env_name: DevEnvName, client_config_path: Path) -> Smo
         legacy_chrome_origins=origins.legacy_chrome_origins if origins is not None else (),
         update_feed_base_url=client_config.update_feed_base_url,
         is_waitlist_enabled=deploy_config.waitlist.is_enabled if deploy_config.waitlist is not None else False,
+        stop_retention_seconds=storage.stop_retention_seconds if storage is not None else None,
     )
+
+
+@pure
+def stop_retention_wait_seconds(stop_retention_seconds: int | None) -> float:
+    """How long a stopped workspace may take to leave its server: the tier's retention window and the pass after it.
+
+    Raises SmokeConfigError for a tier whose deploy config stamps no window:
+    the connector's own default applies there, which this suite does not know.
+    """
+    if stop_retention_seconds is None:
+        raise SmokeConfigError(
+            "The tier's deploy.toml stamps no [storage] stop_retention_seconds, so the journey cannot tell how "
+            f"long a stopped workspace keeps its server; {SMOKE_RESTORE_FROM_STORAGE_ENV_VAR}=1 needs one."
+        )
+    return stop_retention_seconds + _RETENTION_FINALIZE_ALLOWANCE_SECONDS

@@ -4,6 +4,7 @@ from imbue.minds.smoke_tests.primitives import PERSISTENT_ACCOUNT_EMAIL
 from imbue.minds.smoke_tests.primitives import SMOKE_EMAIL_PREFIX
 from imbue.minds.smoke_tests.primitives import SmokeConfigError
 from imbue.minds.smoke_tests.primitives import SmokeRunId
+from imbue.minds.smoke_tests.primitives import is_smoke_switch_on
 from imbue.minds.smoke_tests.primitives import persistent_account_vault_dir
 from imbue.minds.smoke_tests.primitives import run_handoff_vault_dir
 
@@ -44,3 +45,15 @@ def test_run_handoff_vault_dir_is_per_run_and_under_the_ci_tier() -> None:
 
 def test_the_persistent_account_is_itself_a_smoke_address() -> None:
     assert PERSISTENT_ACCOUNT_EMAIL.startswith(SMOKE_EMAIL_PREFIX)
+
+
+def test_a_smoke_switch_is_off_unless_the_environment_sets_it_to_1() -> None:
+    assert is_smoke_switch_on({"PATH": "/usr/bin"}, "MINDS_SMOKE_EXAMPLE", "do it", "leave it") is False
+    assert is_smoke_switch_on({"MINDS_SMOKE_EXAMPLE": ""}, "MINDS_SMOKE_EXAMPLE", "do it", "leave it") is False
+    assert is_smoke_switch_on({"MINDS_SMOKE_EXAMPLE": "0"}, "MINDS_SMOKE_EXAMPLE", "do it", "leave it") is False
+    assert is_smoke_switch_on({"MINDS_SMOKE_EXAMPLE": "1"}, "MINDS_SMOKE_EXAMPLE", "do it", "leave it") is True
+
+
+def test_a_smoke_switch_value_other_than_1_or_0_is_refused_naming_what_each_means() -> None:
+    with pytest.raises(SmokeConfigError, match=r"MINDS_SMOKE_EXAMPLE takes 1 \(do it\) or 0 \(leave it\), not 'yes'"):
+        is_smoke_switch_on({"MINDS_SMOKE_EXAMPLE": "yes"}, "MINDS_SMOKE_EXAMPLE", "do it", "leave it")

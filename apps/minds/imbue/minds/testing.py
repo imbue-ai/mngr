@@ -664,6 +664,22 @@ def snapshot_workspace_container_name(snapshot_container_states: Mapping[str, Do
     return workspace_names[0]
 
 
+def running_workspace_container_names(container_name_prefix: str) -> list[str]:
+    """The running workspace containers named with ``container_name_prefix``, their docker-state sidecars left out."""
+    listed = subprocess.run(
+        ["docker", "ps", "--filter", f"name={container_name_prefix}", "--format", "{{.Names}}"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    return sorted(
+        name
+        for name in listed.stdout.splitlines()
+        if name.startswith(container_name_prefix) and _DOCKER_STATE_CONTAINER_MARKER not in name
+    )
+
+
 def start_snapshot_containers(snapshot_container_states: Mapping[str, DockerContainerState]) -> None:
     """Start the snapshot's workspace and docker-state containers; already-running ones are left as they are."""
     subprocess.run(

@@ -4,10 +4,11 @@ Launch the app and reach its landing page; sign in to Imbue Cloud through the
 app's own web-login flow, completing the hosted page in the suite's browser;
 create an Imbue Cloud workspace; run default-workspace-template's CI test
 suites inside it; have its agent build and register a hello-world web app;
-share the workspace from the Share tab and open the app's route through the
-share as the owner; turn sharing off; destroy the workspace. Every resource
-created on the way is recorded in the run manifest, so the teardown job
-releases it however this test ends.
+stop the workspace from the home page, start it again, and have the agent
+bring the app back; share the workspace from the Share tab and open the app's
+route through the share as the owner; turn sharing off; destroy the workspace.
+Every resource created on the way is recorded in the run manifest, so the
+teardown job releases it however this test ends.
 
 The template's CI runs its suites in Modal sandboxes built from the workspace
 image; a real workspace runs them in a gVisor container on a pool host, which
@@ -27,13 +28,22 @@ import pytest
 from loguru import logger
 from playwright.sync_api import BrowserContext
 from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import Frame
 from playwright.sync_api import Page
 
+from imbue.minds.desktop_client.e2e_workspace_runner import enter_workspace_from_home_page
+from imbue.minds.desktop_client.e2e_workspace_runner import start_workspace_from_home_page
+from imbue.minds.desktop_client.workspace_lifecycle import HOST_START_TIMEOUT_SECONDS
+from imbue.minds.desktop_client.workspace_lifecycle import HOST_STOP_TIMEOUT_SECONDS
+from imbue.minds.smoke_tests.accounts import is_workspace_held_only_in_storage
+from imbue.minds.smoke_tests.accounts import is_workspace_running
+from imbue.minds.smoke_tests.accounts import is_workspace_stopped
 from imbue.minds.smoke_tests.accounts import leased_host_db_id_for_host_id
 from imbue.minds.smoke_tests.accounts import leased_template_ref_for_host_id
 from imbue.minds.smoke_tests.accounts import list_leased_hosts
 from imbue.minds.smoke_tests.accounts import origin_of
 from imbue.minds.smoke_tests.accounts import sign_in
+from imbue.minds.smoke_tests.accounts import wait_for_workspace
 from imbue.minds.smoke_tests.app_flows import adopt_imbue_credentials
 from imbue.minds.smoke_tests.app_flows import agent_id_of_workspace_frame
 from imbue.minds.smoke_tests.app_flows import create_imbue_cloud_workspace
@@ -45,8 +55,10 @@ from imbue.minds.smoke_tests.app_flows import open_welcome_chat
 from imbue.minds.smoke_tests.app_flows import publish_share_from_panel
 from imbue.minds.smoke_tests.app_flows import read_sharing_status
 from imbue.minds.smoke_tests.app_flows import screenshot_every_page
+from imbue.minds.smoke_tests.app_flows import send_prompt_to_known_main_chat
 from imbue.minds.smoke_tests.app_flows import send_prompt_to_main_chat
 from imbue.minds.smoke_tests.app_flows import start_web_login
+from imbue.minds.smoke_tests.app_flows import stop_workspace_from_account_home
 from imbue.minds.smoke_tests.app_flows import unpublish_share_from_panel
 from imbue.minds.smoke_tests.app_flows import wait_for_account_in_create_form
 from imbue.minds.smoke_tests.app_flows import wait_for_destroy_done
@@ -73,6 +85,7 @@ from imbue.minds.smoke_tests.primitives import SMOKE_EMAIL_PREFIX
 from imbue.minds.smoke_tests.primitives import SMOKE_EXPECTED_TEMPLATE_REF_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_SKIP_DWT_TESTS_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SmokeRunId
+from imbue.minds.smoke_tests.workspace_exec import AppMngrWorkspaceShell
 from imbue.minds.smoke_tests.workspace_exec import app_mngr_workspace_shell
 from imbue.minds.smoke_tests.workspace_exec import workspace_exec_address
 from imbue.mngr.utils.testing import get_short_random_string
@@ -90,8 +103,7 @@ _DWT_STEP_LABEL: Final[str] = "Step 3b: run default-workspace-template's CI suit
 _DWT_RESULTS_DIR_NAME: Final[str] = "dwt"
 # Beside the results; the smoke workflow adds it to its job's summary page.
 _DWT_SUMMARY_FILE_NAME: Final[str] = "summary.md"
-# The whole journey: a pool lease, the template's CI suites, an agent building a server, a share
-# certificate, and a destroy.
+# An hour for every step but the template's CI suites, whose own deadline and overhead come on top.
 _JOURNEY_TIMEOUT_SECONDS: Final[int] = 60 * 60 + int(_DWT_SUITES_DEADLINE_SECONDS) + _DWT_STEP_OVERHEAD_SECONDS
 _HOSTED_LOGIN_REDIRECT_TIMEOUT_MS: Final[float] = 90_000.0
 _ACCOUNT_LISTED_TIMEOUT_SECONDS: Final[float] = 120.0
@@ -102,6 +114,20 @@ _SHARE_VISIT_TIMEOUT_SECONDS: Final[float] = 300.0
 _SHARE_VISIT_POLL_SECONDS: Final[float] = 5.0
 _SHARE_PAGE_TIMEOUT_MS: Final[float] = 60_000.0
 _DESTROY_TIMEOUT_SECONDS: Final[float] = 600.0
+# Each press gets a minute past the app's own budget for the request it makes, so a request the app gives up
+# on is reported in the app's words rather than as a wait that ran out here.
+_STOPPED_BADGE_TIMEOUT_SECONDS: Final[float] = HOST_STOP_TIMEOUT_SECONDS + 60.0
+_STARTED_ROW_TIMEOUT_SECONDS: Final[float] = HOST_START_TIMEOUT_SECONDS + 60.0
+# The connector reports a machine stopped once its disks are uploaded and verified, which takes minutes;
+# the rest is room for a server under load.
+_STOP_UPLOAD_TIMEOUT_SECONDS: Final[float] = 20 * 60
+# The app has just been told the machine runs, so the connector only has to agree.
+_RUNNING_ON_CONNECTOR_TIMEOUT_SECONDS: Final[float] = 60.0
+# The app reaches a started machine again, moving its pinned host keys first when a restore changed the
+# machine's ports, and the workspace's services come back before its desktop renders.
+_REENTER_TIMEOUT_SECONDS: Final[float] = 300.0
+_HELLO_FILE_READ_TIMEOUT_SECONDS: Final[float] = 60.0
+_RUNNING_HOST_STATE: Final[str] = "RUNNING"
 
 # What the agent is asked to build: the cheapest server that proves the route
 # answers through the share, registered as a workspace app under this name.
@@ -115,6 +141,16 @@ _HELLO_PROMPT_TEMPLATE: Final[str] = (
 )
 _READY_REPLY_TEMPLATE: Final[str] = "READY {nonce}"
 _HELLO_BODY_TEMPLATE: Final[str] = "hello {nonce}"
+# The agent writes the file where it runs, which is the workspace's one work directory.
+_READ_HELLO_FILE_COMMAND: Final[str] = "cat hello.py"
+# A stop ends every process on the machine and keeps its disk, so the file survives and the server does not:
+# the agent is asked to start the same file again, which the share step then serves.
+_HELLO_RESTART_PROMPT_TEMPLATE: Final[str] = (
+    "This machine was stopped and started again, so the server from hello.py is no longer running. Without "
+    "changing hello.py, start it in the background again, curl http://localhost:{port}/ once, then reply "
+    "with only: BACK {nonce}"
+)
+_BACK_REPLY_TEMPLATE: Final[str] = "BACK {nonce}"
 # The web-login flow's loopback listener, where the hosted page lands once the sign-in is handed off.
 _LOGIN_CALLBACK_URL_PATTERN: Final[re.Pattern[str]] = re.compile(r"^http://127\.0\.0\.1:\d+/callback")
 _SHARE_URL_PATTERN: Final[re.Pattern[str]] = re.compile(r"^https://[a-z0-9-]+\.[a-z0-9.-]+/$")
@@ -188,6 +224,90 @@ def _workspace_row(studio_app: StudioAppSession, agent_id: str) -> Mapping[str, 
     return rows[0]
 
 
+def _workspace_shell(studio_app: StudioAppSession, workspace_row: Mapping[str, Any]) -> AppMngrWorkspaceShell:
+    return app_mngr_workspace_shell(
+        studio_app,
+        workspace_exec_address(
+            agent_id=str(workspace_row["agent_id"]),
+            host_id=workspace_row.get("host_id"),
+            provider_name=workspace_row.get("provider_name"),
+        ),
+    )
+
+
+def _assert_hello_file_holds_nonce(
+    studio_app: StudioAppSession, workspace_row: Mapping[str, Any], nonce: str, moment: str
+) -> None:
+    """Fail unless the file the agent wrote still carries the run's nonce, read through the app's own mngr."""
+    content = _workspace_shell(studio_app, workspace_row).run(
+        _READ_HELLO_FILE_COMMAND, DWT_WORKSPACE_REPO_ROOT, _HELLO_FILE_READ_TIMEOUT_SECONDS
+    )
+    assert nonce in content, f"hello.py does not hold the nonce {nonce} {moment}: {content[:300]!r}"
+
+
+def _stop_and_start_from_the_home_page(
+    studio_app: StudioAppSession,
+    backend: SmokeBackend,
+    account: SmokeAccountCredentials,
+    agent_id: str,
+    host_db_id: str,
+    # How long to wait for the stopped machine to leave its server before starting it; None starts it at once.
+    storage_restore_wait_seconds: float | None,
+    output_dir: Path,
+) -> Frame:
+    """Stop the workspace from the home page, start it again, and re-enter it; return its frame, desktop rendered.
+
+    Between the two presses the connector's own status is what says the stop
+    is finished, which is when the machine's disks are uploaded and verified.
+    A start that follows at once restarts the machine in place. Given a wait,
+    the journey first has the machine leave its server, after which a start
+    can only restore it from that upload.
+    """
+    stop_workspace_from_account_home(studio_app, str(account.email), agent_id, _STOPPED_BADGE_TIMEOUT_SECONDS)
+    stopped = wait_for_workspace(
+        connector_url=backend.connector_url,
+        credentials=account,
+        host_db_id=host_db_id,
+        is_reached=is_workspace_stopped,
+        description="stopped, with its disks uploaded",
+        timeout_seconds=_STOP_UPLOAD_TIMEOUT_SECONDS,
+    )
+    logger.info("The connector reports workspace {} stopped at {}", agent_id, stopped.get("stopped_at"))
+    screenshot_every_page(studio_app.browser, output_dir, "05b-stopped")
+    if storage_restore_wait_seconds is not None:
+        wait_for_workspace(
+            connector_url=backend.connector_url,
+            credentials=account,
+            host_db_id=host_db_id,
+            is_reached=is_workspace_held_only_in_storage,
+            description="off its server and held only in storage",
+            timeout_seconds=storage_restore_wait_seconds,
+        )
+        logger.info("Workspace {} has left its server; the start restores it from storage", agent_id)
+    start_workspace_from_home_page(studio_app.page, agent_id, _STARTED_ROW_TIMEOUT_SECONDS)
+    started = wait_for_workspace(
+        connector_url=backend.connector_url,
+        credentials=account,
+        host_db_id=host_db_id,
+        is_reached=is_workspace_running,
+        description="running",
+        timeout_seconds=_RUNNING_ON_CONNECTOR_TIMEOUT_SECONDS,
+    )
+    logger.info(
+        "The connector reports workspace {} running at {}:{} (it stopped at {}:{})",
+        agent_id,
+        started.get("vps_address"),
+        started.get("ssh_port"),
+        stopped.get("vps_address"),
+        stopped.get("ssh_port"),
+    )
+    listed_host_state = _workspace_row(studio_app, agent_id).get("host_state")
+    assert listed_host_state == _RUNNING_HOST_STATE, (
+        f"The app lists the started workspace {agent_id} as {listed_host_state!r}"
+    )
+    return enter_workspace_from_home_page(studio_app.page, agent_id, _REENTER_TIMEOUT_SECONDS)
+
+
 def _open_share_as_owner(visitor: BrowserContext, share_url: str, account: SmokeAccountCredentials, body: str) -> None:
     """Open the app's share link in the owner's browser until it answers 200 with ``body``.
 
@@ -253,16 +373,8 @@ def _run_dwt_ci_suites_reporting_each_test(
     suites could not be read, started or fetched -- is the step's subtest.
     """
     with subtests.test(msg=_DWT_STEP_LABEL):
-        workspace = app_mngr_workspace_shell(
-            studio_app,
-            workspace_exec_address(
-                agent_id=str(workspace_row["agent_id"]),
-                host_id=workspace_row.get("host_id"),
-                provider_name=workspace_row.get("provider_name"),
-            ),
-        )
         results = run_dwt_ci_suites_in_workspace(
-            workspace=workspace,
+            workspace=_workspace_shell(studio_app, workspace_row),
             repo_root=DWT_WORKSPACE_REPO_ROOT,
             workspace_results_dir=DWT_WORKSPACE_RESULTS_ROOT / str(run_id),
             local_results_dir=output_dir,
@@ -284,8 +396,9 @@ def _run_dwt_ci_suites_reporting_each_test(
 
 
 @pytest.mark.timeout(_JOURNEY_TIMEOUT_SECONDS)
-def test_the_build_signs_in_creates_builds_shares_and_destroys_a_workspace(
+def test_the_build_signs_in_creates_builds_stops_starts_shares_and_destroys_a_workspace(
     is_dwt_tests_skipped: bool,
+    storage_restore_wait_seconds: float | None,
     expected_template_ref: str | None,
     backend: SmokeBackend,
     studio_app: StudioAppSession,
@@ -352,6 +465,36 @@ def test_the_build_signs_in_creates_builds_shares_and_destroys_a_workspace(
         )
         logger.info("Step 4: the agent reported READY after {:.0f}s", reply_seconds)
         screenshot_every_page(studio_app.browser, smoke_output_dir, "05-agent-ready")
+
+        _assert_hello_file_holds_nonce(studio_app, row, nonce, "before the stop")
+        workspace_frame = _stop_and_start_from_the_home_page(
+            studio_app,
+            backend,
+            persistent_account,
+            agent_id,
+            host_db_id,
+            storage_restore_wait_seconds,
+            smoke_output_dir,
+        )
+        _assert_hello_file_holds_nonce(studio_app, row, nonce, "after the start")
+        # The desktop renders before the apps behind it are back, and the launcher hands a typed text to
+        # the chat app the moment Enter is pressed, so the chat's page has to be framed again first.
+        open_welcome_chat(workspace_frame)
+        restart_nonce = get_short_random_string()
+        restart_prompt = _HELLO_RESTART_PROMPT_TEMPLATE.format(port=_HELLO_PORT, nonce=restart_nonce)
+        send_prompt_to_known_main_chat(workspace_frame, main_chat_id, restart_prompt, restart_nonce)
+        restart_reply_seconds = wait_for_reply(
+            workspace_frame,
+            main_chat_id,
+            _BACK_REPLY_TEMPLATE.format(nonce=restart_nonce),
+            _AGENT_REPLY_TIMEOUT_SECONDS,
+        )
+        logger.info(
+            "Step 4b: the workspace stopped and started ({}), and the agent reported BACK after {:.0f}s",
+            "restored from storage" if storage_restore_wait_seconds is not None else "started at once",
+            restart_reply_seconds,
+        )
+        screenshot_every_page(studio_app.browser, smoke_output_dir, "05c-started-again")
 
         publish_share_from_panel(studio_app, agent_id)
         sharing = read_sharing_status(studio_app, agent_id)

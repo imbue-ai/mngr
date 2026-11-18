@@ -50,7 +50,7 @@ run. By area:
 | File / test | Marks | What it exercises |
 |---|---|---|
 | `test_aws_workspace_release.py::test_aws_workspace_runs_in_runsc_container_on_ec2` | `release`, `timeout(900)`, skip unless AWS creds + `MNGR_AWS_RELEASE_TESTS=1` | Provisions a real EC2 instance, asserts the agent runs in a runsc/gVisor container. Costs money. |
-| `test_snapshot_resume.py` (16 tests) | each `minds_snapshot_resume` + `docker` (+ `rsync` on the electron test) + per-test `timeout` | Most assert against a Modal-snapshot sandbox (pre-baked, stopped DEFAULT_WORKSPACE_TEMPLATE workspace container): resume sanity checks, the backup-update chat gate against a live LLM-backed chat, the backup-service check/update/force-update converge loop (real supervisord + `official`-remote tag fetch from GitHub), the backup enable / env-repair / destination-change flow (real minds-side restic provisioning + `mngr exec` injection; installs a pinned restic on the sandbox host when the image lacks the bundled one), and the in-place backup restore (the real restore worker + workspace script: pinned-restic install, safety snapshot, sync restore, services back). `test_create_workspace_and_sign_in_via_modal_then_chat_via_electron` reuses the snapshot image's warm Electron/Playwright/Xvfb toolchain to drive the real Electron app: it creates a fresh local Docker DEFAULT_WORKSPACE_TEMPLATE workspace (which boots with no AI credentials, open on the welcome chat the creation page seeded with the onboarding conversation, whose composer stays disabled, with the provider chooser open in the chat's own frame, until a provider is signed in), signs in through that chooser (the Anthropic API-key path) with a raw API key (needs `ANTHROPIC_API_KEY`), sends the chat a message, and asserts the agent answers it. It runs under a minds root of its own, so its containers never share the snapshot workspace's name prefix, and removes them in `finally`. Shares its driver with `desktop_client/e2e_workspace_runner.py`. Only via `just test-offload-minds-snapshot` (or `just minds-test-electron` locally). See 1.5. |
+| `test_snapshot_resume.py` (17 tests) | each `minds_snapshot_resume` + `docker` (+ `rsync` on the two Electron tests) + per-test `timeout` | Most assert against a Modal-snapshot sandbox (pre-baked, stopped DEFAULT_WORKSPACE_TEMPLATE workspace container): resume sanity checks, the backup-update chat gate against a live LLM-backed chat, the backup-service check/update/force-update converge loop (real supervisord + `official`-remote tag fetch from GitHub), the backup enable / env-repair / destination-change flow (real minds-side restic provisioning + `mngr exec` injection; installs a pinned restic on the sandbox host when the image lacks the bundled one), and the in-place backup restore (the real restore worker + workspace script: pinned-restic install, safety snapshot, sync restore, services back). `test_create_workspace_and_sign_in_via_modal_then_chat_via_electron` reuses the snapshot image's warm Electron/Playwright/Xvfb toolchain to drive the real Electron app: it creates a fresh local Docker DEFAULT_WORKSPACE_TEMPLATE workspace (which boots with no AI credentials, open on the welcome chat the creation page seeded with the onboarding conversation, whose composer stays disabled, with the provider chooser open in the chat's own frame, until a provider is signed in), signs in through that chooser (the Anthropic API-key path) with a raw API key (needs `ANTHROPIC_API_KEY`), sends the chat a message, and asserts the agent answers it. It runs under a minds root of its own, so its containers never share the snapshot workspace's name prefix, and removes them in `finally`. `test_workspace_stops_and_starts_from_the_home_page_via_electron` creates one more fresh local Docker workspace the same way, under a root of its own, and stops and starts it from the home page: it presses the row's Stop control (agreeing to the question it asks) and then its Start control, compares what the page shows with what Docker runs at each turn, and requires the desktop and a chat's page to come back when it presses the row again. It sends no message, so it needs no AI key. Both share their driver with `desktop_client/e2e_workspace_runner.py`. Only via `just test-offload-minds-snapshot`; locally, `just minds-test-electron` runs the create and chat test and `just minds-test-electron-stop-start` the stop and start one. See 1.5. |
 | `test_workspace_programs_e2e.py` | `minds_snapshot_resume` + `docker` + `timeout(600)` | Runs workspace programs inside the snapshot's real DEFAULT_WORKSPACE_TEMPLATE workspace container, through the same zip-application command the app ships them with: the backup gate probe answers without a `gate_error`, and the update program's refreshing `read` installs its own archive as `dispatcher.pyz` and the cron line, whose `tick` then runs from that archive. Only via `just test-offload-minds-snapshot`. |
 | `test_sse_redirect.py::test_sse_redirect_on_done` | `release` | Werkzeug server + Playwright; verifies the creating-page SSE stream delivers `done` and the JS redirects. No Docker/agent. |
 | `imbue/minds/test_claude_version_alignment.py::test_claude_code_version_matches_default_workspace_template_pin` | `release` | Checks the Claude Code CLI pin matches the DEFAULT_WORKSPACE_TEMPLATE pin. |
@@ -203,9 +203,9 @@ then cheap test sandboxes fan out from the baked image.
   `DISABLE_MINDS_SNAPSHOT_CI` repo variable and skipped on fork PRs.
 - **Currently runs:** every `minds_snapshot_resume` test in
   `test_snapshot_resume.py` (resume sanity checks, the Electron create+chat
-  round-trip, the backup-update chat gate, the backup-service
-  check/update and enable/repair/destination-change flows, and the in-place
-  backup restore) and `test_workspace_programs_e2e.py` (a workspace program
+  round-trip, the stop and start from the home page, the backup-update chat
+  gate, the backup-service check/update and enable/repair/destination-change
+  flows, and the in-place backup restore) and `test_workspace_programs_e2e.py` (a workspace program
   run in the real workspace). Run a single one locally with
   `just test-offload-minds-snapshot <image-id> '--filter <test_name>'`, or in
   CI via the `minds_snapshot_test_filter` workflow_dispatch input on ci.yml;
@@ -292,7 +292,9 @@ run default-workspace-template's CI test suites inside it (see "The template's
 CI suites in the workspace" below);
 send the chat a prompt that builds a hello-world scaffolding app (a web server
 with a route that answers 200, registered as a workspace app; the prompt is
-optimized to be minimally expensive while still building that server); share the
+optimized to be minimally expensive while still building that server); stop the
+workspace from the home page and start it again (see "Stopping and starting the
+workspace" below); share the
 workspace from within the app, open the app's route through the share, and assert
 the 200 (the visitor is the owner -- grants are a later scenario); turn sharing
 off from within the app as the original user; destroy the workspace.
@@ -343,8 +345,8 @@ never delete resources and the cleanup happens regardless of what the test did:
 - **`test`** holds only user credentials -- the persistent account and the
   throwaway account. It acts as a user, records every resource it creates in a
   run manifest, and never holds administrative or database credentials.
-- **`teardown`** runs regardless: it releases any workspaces the run leased,
-  turns off any shares left on, deletes the throwaway account (through
+- **`teardown`** runs regardless: it releases any workspaces the run's accounts
+  still hold, stopped ones included, turns off any shares left on, deletes the throwaway account (through
   the connector's own `DELETE /account`, as its holder), deletes the mail.tm inbox and the per-run Vault
   path, and sweeps stale smoke resources from earlier runs by their
   `studio-smoke-` prefix.
@@ -421,6 +423,47 @@ launches the chat's agent on the account signed in by then. The suite reads
 the main chat's id from the chat app's own `GET /api/chats` (`main_chat_id`)
 before pressing Enter, then waits for that chat's page to show the prompt and
 the reply.
+
+**Stopping and starting the workspace.** Step 4b, after the agent's first
+reply and before anything is shared (a stop takes a published workspace's link
+down with the machine). The journey opens the account's home page and presses
+the workspace's Stop control, agreeing to the question it asks through a native
+dialog, then its Start control, and then the row itself, which re-enters the
+workspace:
+
+- The app's own stop request returns once the connector has accepted the stop,
+  and the row can read "Stopped" before the machine's disks have finished
+  uploading. So the journey asks the connector, as the account, for the
+  workspace's own status (`GET /workspaces/{id}`) and presses Start only once
+  that reads `stopped`, which the connector reports when the upload is
+  verified. After the start it requires the connector to report `running` and
+  the app's listing to carry `host_state` `RUNNING`.
+
+- A start that follows the stop at once restarts the machine in place, which
+  is what a run does by default. The stop itself uploads the machine's disks,
+  about 13 GB in about two minutes
+  (`docs/deploy/reference/workspace-stop-start.md`).
+  `MINDS_SMOKE_RESTORE_FROM_STORAGE=1` (the workflow's `restore_from_storage`
+  input) has the journey wait until the machine has left its server, which the
+  connector shows by clearing the row's address when the tier's retention
+  window closes: ten minutes from the stop request on staging and production,
+  so that run waits out the rest of the window. The start can then only restore
+  the machine from object storage, onto any server in the region and at new
+  ports, which is the half that proves the upload is usable and that the app
+  moves its pinned host keys to the new endpoints. The journey reads the window
+  from the tier's `deploy.toml` (`[storage] stop_retention_seconds`) and allows
+  fifteen minutes past it. Any value but `1`, `0` or unset, or a tier that
+  stamps no window, errors the journey before the app launches.
+
+- The workspace has to be usable afterwards: its desktop renders again, a
+  chat's page is framed again, `hello.py` still holds the run's nonce (read
+  through the app's own mngr, before the stop and after the start), and the
+  main chat answers a second prompt. A stop ends every process on the machine,
+  so that prompt asks the agent to start the server from the unchanged file
+  again, which the share step then serves.
+
+The same controls are driven per PR against a local Docker workspace by
+`test_workspace_stops_and_starts_from_the_home_page_via_electron` (1.2).
 
 **The template's CI suites in the workspace.** default-workspace-template's CI
 runs its three pytest roots (the repo root, `system/apps/chat` and
@@ -555,7 +598,9 @@ the tier. The run then mints one LiteLLM key
 for the persistent account, runs default-workspace-template's CI suites in the
 workspace (up to 75 minutes; `MINDS_SMOKE_SKIP_DWT_TESTS=1` skips them, which
 every run except a new desktop release on staging should), and
-has a real agent build the hello-world app; a
+has a real agent build the hello-world app, and stops and starts the workspace
+(`MINDS_SMOKE_RESTORE_FROM_STORAGE=1` waits out the retention window first, so
+the start restores it from object storage); a
 passing journey destroys its workspace and turns its share off itself. After a
 failed run, `just minds-smoke-teardown` releases whatever the manifest and the
 two accounts still hold, turns off their shares, deletes the throwaway account
@@ -623,11 +668,13 @@ cross-component behavior.
    the `SSHTunnelManager` reverse tunnel actually carries a connection to the
    target's sshd. No imbue_cloud needed -- the highest-value cover for the new
    broker.
-3. **Workspace lifecycle stop/start** [snapshot] -- `POST
-   /workspaces/<id>/stop` then `/start`, asserting `host_state` transitions and
-   that `system_interface` serves again after start. Complements the existing
-   "recovery restores a dead system_interface" test. No suite stops and starts
-   a workspace through the app today; tracked as MIND-637.
+3. **Workspace lifecycle stop/start** [snapshot] -- already added, through the
+   home page's controls rather than the routes they call:
+   `test_workspace_stops_and_starts_from_the_home_page_via_electron` (1.2)
+   against a fresh local Docker workspace, and the smoke journey's step 4b
+   (1.10) against an Imbue Cloud one. Extend with `POST /workspaces/<id>/stop`
+   and `/start` called with a bearer token, the way an agent in another
+   workspace calls them, asserting the `host_state` each answers with.
 4. **Service discovery contract** [snapshot] -- assert the workspace writes
    `events/services/events.jsonl` with at least `system_interface` (and `web`,
    `terminal`), and that `mngr event <id> services/events.jsonl` returns them --

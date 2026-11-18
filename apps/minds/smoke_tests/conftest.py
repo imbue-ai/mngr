@@ -32,6 +32,7 @@ from imbue.minds.smoke_tests.accounts import read_persistent_account_credentials
 from imbue.minds.smoke_tests.app_flows import screenshot_every_page
 from imbue.minds.smoke_tests.backend import resolve_smoke_backend
 from imbue.minds.smoke_tests.backend import resolve_smoke_client_config_path
+from imbue.minds.smoke_tests.backend import stop_retention_wait_seconds
 from imbue.minds.smoke_tests.binary import BINARY_SELECTION_ENV_VARS
 from imbue.minds.smoke_tests.binary import is_studio_binary_selected
 from imbue.minds.smoke_tests.binary import launched_studio_app
@@ -54,10 +55,12 @@ from imbue.minds.smoke_tests.primitives import SMOKE_ACCOUNT_EMAIL_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_ACCOUNT_PASSWORD_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_EXPECTED_TEMPLATE_REF_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_HANDOFF_FILE_ENV_VAR
+from imbue.minds.smoke_tests.primitives import SMOKE_RESTORE_FROM_STORAGE_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_RUN_ID_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_TIER_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SmokeConfigError
 from imbue.minds.smoke_tests.primitives import SmokeRunId
+from imbue.minds.smoke_tests.primitives import is_smoke_switch_on
 
 # Captured from /etc/passwd at import, before the autouse HOME redirect, so the
 # browsers ``playwright install chromium`` put under the real home are found.
@@ -106,6 +109,15 @@ def studio_binary(backend: SmokeBackend) -> StudioBinary:
 def is_dwt_tests_skipped() -> bool:
     """Whether the journey skips default-workspace-template's CI tests, by ``MINDS_SMOKE_SKIP_DWT_TESTS``."""
     return is_dwt_tests_skip_requested(os.environ)
+
+
+@pytest.fixture(scope="session")
+def storage_restore_wait_seconds(backend: SmokeBackend) -> float | None:
+    """How long the journey waits for its stopped workspace to leave its server, so that its start restores it from
+    object storage (``MINDS_SMOKE_RESTORE_FROM_STORAGE=1``); None when the journey starts the workspace at once."""
+    if not is_smoke_switch_on(os.environ, SMOKE_RESTORE_FROM_STORAGE_ENV_VAR, "restore", "restart in place"):
+        return None
+    return stop_retention_wait_seconds(backend.stop_retention_seconds)
 
 
 @pytest.fixture(scope="session")

@@ -5,13 +5,17 @@ from pydantic import SecretStr
 from imbue.minds.smoke_tests.accounts import ACCOUNT_DELETION_TOKEN_HEADER
 from imbue.minds.smoke_tests.accounts import SMOKE_USER_AGENT
 from imbue.minds.smoke_tests.accounts import active_share_host_ids_of
+from imbue.minds.smoke_tests.accounts import is_connector_unavailable
+from imbue.minds.smoke_tests.accounts import is_workspace_held_only_in_storage
+from imbue.minds.smoke_tests.accounts import is_workspace_running
+from imbue.minds.smoke_tests.accounts import is_workspace_stopped
 from imbue.minds.smoke_tests.accounts import leased_host_db_id_for_host_id
-from imbue.minds.smoke_tests.accounts import leased_host_db_ids_of
 from imbue.minds.smoke_tests.accounts import leased_template_ref_for_host_id
 from imbue.minds.smoke_tests.accounts import origin_of
 from imbue.minds.smoke_tests.accounts import parse_finalize_answer
 from imbue.minds.smoke_tests.accounts import persistent_account_credentials_from_env_or_none
 from imbue.minds.smoke_tests.accounts import smoke_headers
+from imbue.minds.smoke_tests.accounts import workspace_host_db_ids_of
 from imbue.minds.smoke_tests.primitives import SMOKE_ACCOUNT_EMAIL_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_ACCOUNT_PASSWORD_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SmokeAccountError
@@ -29,12 +33,37 @@ def test_every_request_is_labelled_as_the_smoke_suite() -> None:
     assert with_bearer["Authorization"] == "Bearer token-value"
 
 
-def test_the_pool_row_ids_are_read_out_of_a_hosts_listing() -> None:
+def test_the_pool_row_ids_are_read_out_of_a_workspaces_listing_whatever_state_each_row_is_in() -> None:
     listing = [
-        {"host_db_id": "row-1", "host_id": "host-a", "host_name": "one"},
-        {"host_db_id": "row-2", "host_id": "host-b", "host_name": "two"},
+        {"host_db_id": "row-1", "host_id": "host-a", "status": "running"},
+        {"host_db_id": "row-2", "host_id": "host-b", "status": "stopped"},
+        {"host_db_id": "row-3", "host_id": "host-c", "status": "stopping"},
     ]
-    assert leased_host_db_ids_of(listing) == ["row-1", "row-2"]
+    assert workspace_host_db_ids_of(listing) == ["row-1", "row-2", "row-3"]
+    assert workspace_host_db_ids_of([]) == []
+
+
+def test_a_workspace_reads_as_stopped_only_once_its_upload_has_landed() -> None:
+    assert is_workspace_stopped({"status": "stopped", "vps_address": "203.0.113.7"}) is True
+    assert is_workspace_stopped({"status": "stopping", "vps_address": "203.0.113.7"}) is False
+    assert is_workspace_stopped({"status": "running", "vps_address": "203.0.113.7"}) is False
+    assert is_workspace_stopped({}) is False
+
+
+def test_a_workspace_reads_as_running_only_when_the_connector_says_so() -> None:
+    assert is_workspace_running({"status": "running"}) is True
+    assert is_workspace_running({"status": "starting"}) is False
+    assert is_workspace_running({"status": "stopped"}) is False
+    assert is_workspace_running({}) is False
+
+
+def test_a_stopped_workspace_is_held_only_in_storage_once_it_has_given_up_its_server() -> None:
+    # Stopped and still parked on its server: a start now would restart it in place.
+    assert is_workspace_held_only_in_storage({"status": "stopped", "vps_address": "203.0.113.7"}) is False
+    assert is_workspace_held_only_in_storage({"status": "stopped", "vps_address": None}) is True
+    # A row with no address that is not stopped is mid-restore, not parked in storage.
+    assert is_workspace_held_only_in_storage({"status": "starting", "vps_address": None}) is False
+    assert is_workspace_held_only_in_storage({"status": "stopping", "vps_address": "203.0.113.7"}) is False
 
 
 def test_only_shares_that_are_still_on_are_read_out_of_a_shares_payload() -> None:
@@ -89,6 +118,17 @@ def test_the_template_tag_a_leased_row_was_baked_at_is_read_from_its_attributes(
     assert leased_template_ref_for_host_id(listing, "host-bbbb") is None
     assert leased_template_ref_for_host_id(listing, "host-cccc") is None
     assert leased_template_ref_for_host_id(listing, "host-dddd") is None
+
+
+def test_a_poll_goes_on_past_a_connector_that_could_not_answer_but_not_past_a_refusal() -> None:
+    assert is_connector_unavailable(500) is True
+    assert is_connector_unavailable(502) is True
+    assert is_connector_unavailable(503) is True
+    # A refusal says something about the request or the workspace, so it is not waited out.
+    assert is_connector_unavailable(401) is False
+    assert is_connector_unavailable(403) is False
+    assert is_connector_unavailable(404) is False
+    assert is_connector_unavailable(200) is False
 
 
 def test_the_deletion_token_header_is_the_one_the_connector_names() -> None:
