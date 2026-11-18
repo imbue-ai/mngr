@@ -19,8 +19,10 @@ import errno
 import io
 import os
 import re
+import select
 import shlex
 import stat
+import subprocess
 import threading
 import time
 from collections.abc import Generator
@@ -40,8 +42,10 @@ from loguru import logger
 from paramiko import AuthenticationException
 from paramiko import Channel
 from paramiko import ChannelException
+from paramiko import ProxyCommand
 from paramiko import SFTPClient
 from paramiko import SFTPError
+from paramiko import SSHClient
 from paramiko import SSHException
 from paramiko import Transport
 from paramiko.common import cMSG_CHANNEL_REQUEST
@@ -76,6 +80,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import CommandStartError
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
+from imbue.mngr.errors import LocalFileDescriptorsExhaustedError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.common import LOCAL_CONNECTOR_NAME
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
@@ -488,7 +493,7 @@ def _connect_pyinfra_host_retrying_transient_handshake_failures(
         reraise=True,
     )
     try:
-        retrying(lambda: pyinfra_host.connect(raise_exceptions=True))
+        retrying(lambda: _connect_pyinfra_host_releasing_replaced_clients(pyinfra_host))
     except ConnectError as e:
         attempt_count = retrying.statistics["attempt_number"]
         if attempt_count > 1:
@@ -507,15 +512,156 @@ def _connect_pyinfra_host_retrying_transient_handshake_failures(
         raise
 
 
-def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:
-    """Extract the paramiko Transport from a pyinfra host, or None for non-SSH connectors."""
+def _get_paramiko_client(pyinfra_host: Any) -> SSHClient | None:
+    """The paramiko client a pyinfra host holds, or None for non-SSH connectors and not-yet-connected hosts."""
     try:
-        client = pyinfra_host.connector.client
+        return pyinfra_host.connector.client
     except AttributeError:
         return None
+
+
+def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:
+    """Extract the paramiko Transport from a pyinfra host, or None for non-SSH connectors."""
+    client = _get_paramiko_client(pyinfra_host)
     if client is not None:
         return client.get_transport()
     return None
+
+
+# How long a closed transport's thread gets to exit before its ProxyCommand child is freed.
+_TRANSPORT_THREAD_EXIT_TIMEOUT_SECONDS: Final[float] = 5.0
+# How long a ProxyCommand child gets to exit after it is told to terminate, and again after it is killed.
+_PROXY_COMMAND_EXIT_TIMEOUT_SECONDS: Final[float] = 5.0
+
+
+def _close_paramiko_client_logging_errors(client: SSHClient) -> None:
+    try:
+        client.close()
+    except (OSError, SSHException) as e:
+        logger.debug("Ignored error closing a paramiko client: {}", e)
+
+
+def close_paramiko_client_releasing_its_proxy_command(client: SSHClient) -> None:
+    """Close a paramiko client and free the pipes and child process of the ProxyCommand it connected through, if any.
+
+    paramiko's ``ProxyCommand.close()`` only signals the proxy child: its three pipes stay
+    open and the child stays unreaped until the transport is garbage-collected. A transport
+    holds bound methods of itself, so only a full collection frees it, and a long-running
+    process can run out of descriptors first (paramiko issues #1713 and #1715).
+    """
+    transport = client.get_transport()
+    _close_paramiko_client_logging_errors(client)
+    if transport is None:
+        return
+    proxy_command = transport.sock
+    if not isinstance(proxy_command, ProxyCommand):
+        return
+    # The transport's thread closes its proxy, which signals the child's pid, as it exits.
+    # Reaping the child before then would let that signal reach a reused pid.
+    if transport.is_alive():
+        transport.join(timeout=_TRANSPORT_THREAD_EXIT_TIMEOUT_SECONDS)
+    if transport.is_alive():
+        logger.warning(
+            "An SSH transport's thread did not exit within {}s of closing; leaving its ProxyCommand to the "
+            "garbage collector",
+            _TRANSPORT_THREAD_EXIT_TIMEOUT_SECONDS,
+        )
+        return
+    _close_pipes_and_reap_proxy_command_process(proxy_command.process)
+
+
+def _close_pipes_and_reap_proxy_command_process(process: subprocess.Popen[bytes]) -> None:
+    for pipe in (process.stdin, process.stdout, process.stderr):
+        if pipe is not None:
+            pipe.close()
+    process.terminate()
+    try:
+        process.wait(timeout=_PROXY_COMMAND_EXIT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "An SSH ProxyCommand did not exit within {}s of being told to terminate; killing it",
+            _PROXY_COMMAND_EXIT_TIMEOUT_SECONDS,
+        )
+        _kill_and_reap_proxy_command_process(process)
+
+
+def _kill_and_reap_proxy_command_process(process: subprocess.Popen[bytes]) -> None:
+    """Kill a ProxyCommand child and reap it, giving up after a bounded wait.
+
+    A killed process can still outlive the wait while it is stuck in an uninterruptible
+    kernel call. Giving up is safe: subprocess keeps an unreaped ``Popen`` it frees and
+    reaps it later, so its pid is never reused while this process still refers to it.
+    """
+    process.kill()
+    try:
+        process.wait(timeout=_PROXY_COMMAND_EXIT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "An SSH ProxyCommand did not exit within {}s of being killed; leaving it for subprocess to reap",
+            _PROXY_COMMAND_EXIT_TIMEOUT_SECONDS,
+        )
+
+
+def _close_pyinfra_host_paramiko_client(pyinfra_host: PyinfraHost) -> None:
+    """Close the paramiko client a pyinfra host holds, if any, releasing its ProxyCommand. A no-op for local connectors."""
+    client = _get_paramiko_client(pyinfra_host)
+    if client is not None:
+        close_paramiko_client_releasing_its_proxy_command(client)
+
+
+def _is_beyond_select_range(fd: int) -> bool:
+    try:
+        select.select([fd], [], [], 0)
+    except ValueError:
+        return True
+    return False
+
+
+def _is_proxy_command_pipe_beyond_select_range(pyinfra_host: PyinfraHost) -> bool:
+    """Whether the ProxyCommand a pyinfra host's client connected through has a pipe numbered too high for ``select()``.
+
+    paramiko reads a ProxyCommand through ``select()``, so a connect through such a pipe
+    can never succeed: the process has used up the descriptor numbers ``select()`` can
+    watch. paramiko reports that as a banner read failure or as "No existing session",
+    depending on which of its two threads notices first, so the pipe is checked instead
+    of the error.
+    """
+    transport = _get_ssh_transport(pyinfra_host)
+    if transport is None or not isinstance(transport.sock, ProxyCommand):
+        return False
+    proxy_stdout = transport.sock.process.stdout
+    return proxy_stdout is not None and _is_beyond_select_range(proxy_stdout.fileno())
+
+
+def _is_descriptor_limit_connect_error(error: ConnectError) -> bool:
+    """Whether pyinfra raised ``error`` for an ``OSError`` saying this process is at its descriptor limit (``EMFILE``).
+
+    That is what opening the connection's socket, or the pipes of its ProxyCommand,
+    raises once the process holds as many descriptors as ``RLIMIT_NOFILE`` allows.
+    """
+    underlying = error.__cause__ if error.__cause__ is not None else error.__context__
+    return isinstance(underlying, OSError) and underlying.errno == errno.EMFILE
+
+
+def _connect_pyinfra_host_releasing_replaced_clients(pyinfra_host: PyinfraHost) -> None:
+    """Connect a pyinfra host once, releasing the client of any connection it replaces and of a failed attempt.
+
+    A connection dropped for a retry is not closed, and connecting replaces its client,
+    so it is released first. Raises ``LocalFileDescriptorsExhaustedError`` when the
+    attempt failed because this process has run out of file descriptors.
+    """
+    _close_pyinfra_host_paramiko_client(pyinfra_host)
+    try:
+        pyinfra_host.connect(raise_exceptions=True)
+    except ConnectError as e:
+        if _is_proxy_command_pipe_beyond_select_range(pyinfra_host) or _is_descriptor_limit_connect_error(e):
+            raise LocalFileDescriptorsExhaustedError(
+                f"Failed to connect to host: this process has run out of file descriptors ({e})"
+            ) from e
+        raise
+    finally:
+        if not pyinfra_host.connected:
+            _close_pyinfra_host_paramiko_client(pyinfra_host)
 
 
 class ActiveRemoteLock(FrozenModel):
@@ -914,28 +1060,25 @@ class OuterHost(OuterHostInterface):
             raise
 
     def _close_paramiko_client(self) -> None:
-        """Close the paramiko SSH client if one exists.
+        """Close the paramiko SSH client if one exists, without blocking on its transport's thread or ProxyCommand child.
 
-        Safe to call on local connectors (no paramiko client) and on
-        already-closed clients.
+        Never blocking makes it safe to call from a finalizer. Safe to call on local
+        connectors (no paramiko client) and on already-closed clients.
         """
-        try:
-            client = self.connector.host.connector.client  # ty: ignore[unresolved-attribute]
-        except AttributeError:
-            return
+        client = _get_paramiko_client(self.connector.host)
         if client is not None:
-            try:
-                client.close()
-            except (OSError, SSHException):
-                pass
+            _close_paramiko_client_logging_errors(client)
 
     def connect(self) -> None:
         """Connect the pyinfra host if it is not connected already."""
         self._ensure_connected()
 
     def disconnect(self) -> None:
-        """Disconnect the pyinfra host if connected."""
-        self._close_paramiko_client()
+        """Close the SSH client, releasing its ProxyCommand's pipes and child, then disconnect the pyinfra host if connected.
+
+        Can block for several seconds while the transport's thread and the ProxyCommand child exit.
+        """
+        _close_pyinfra_host_paramiko_client(self.connector.host)
         if self.connector.host.connected:
             self.connector.host.disconnect()
             logger.trace("Disconnected pyinfra host {}", self.id)

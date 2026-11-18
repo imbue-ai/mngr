@@ -1,5 +1,6 @@
 import hashlib
 import json
+import shlex
 from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
@@ -11,6 +12,7 @@ from typing import cast
 import docker
 import docker.errors
 import docker.models.containers
+import paramiko
 import pytest
 import requests
 import requests.exceptions
@@ -1080,6 +1082,42 @@ def test_docker_client_raises_provider_unavailable_when_daemon_offline(temp_mngr
     provider = make_offline_docker_provider(temp_mngr_ctx)
     with pytest.raises(ProviderUnavailableError, match="not available"):
         _ = provider._docker_client
+
+
+@pytest.mark.parametrize(
+    ("proxy_command", "paramiko_error_class"),
+    [
+        pytest.param(
+            shlex.join(["sh", "-c", "printf 'SSH-1.0-incompatible\\r\\n'"]),
+            paramiko.SSHException,
+            id="handshake-rejected",
+        ),
+        pytest.param("/nonexistent/proxy-command-30562", OSError, id="proxy-command-missing"),
+    ],
+)
+def test_docker_client_raises_provider_unavailable_when_connecting_to_an_ssh_daemon_host_fails(
+    temp_mngr_ctx: MngrContext, proxy_command: str, paramiko_error_class: type[Exception]
+) -> None:
+    """A paramiko failure while docker-py connects to an ``ssh://`` daemon is a ProviderUnavailableError.
+
+    docker-py lets the error from its own SSH connect escape unwrapped, and callers only
+    handle ``MngrError``.
+    """
+    ssh_dir = Path.home() / ".ssh"
+    ssh_dir.mkdir(exist_ok=True)
+    (ssh_dir / "config").write_text(f"Host docker-daemon-host-30562\n  ProxyCommand {proxy_command}\n")
+    provider = DockerProviderInstance(
+        name=ProviderInstanceName("test-docker-ssh-connect-fails"),
+        host_dir=Path("/mngr"),
+        mngr_ctx=temp_mngr_ctx,
+        config=DockerProviderConfig(host="ssh://docker-daemon-host-30562", isolate_host_volumes=False),
+    )
+
+    with pytest.raises(ProviderUnavailableError, match="not available") as excinfo:
+        _ = provider._docker_client
+
+    assert isinstance(excinfo.value.__cause__, paramiko_error_class)
+    assert excinfo.value.short_remediation == "start Docker on ssh://docker-daemon-host-30562"
 
 
 @pytest.mark.docker_sdk

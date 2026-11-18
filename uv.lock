@@ -2215,6 +2215,7 @@ source = { editable = "libs/mngr_docker" }
 dependencies = [
     { name = "docker" },
     { name = "imbue-mngr" },
+    { name = "paramiko" },
     { name = "pydantic" },
     { name = "pyinfra" },
     { name = "requests" },
@@ -2225,6 +2226,7 @@ dependencies = [
 requires-dist = [
     { name = "docker", specifier = "==7.1.0" },
     { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "paramiko", specifier = ">=3.0" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pyinfra", specifier = ">=3.0" },
     { name = "requests", specifier = ">=2.26" },

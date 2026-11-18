@@ -67,6 +67,7 @@ from imbue.mngr.config.loader import load_config
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
+from imbue.mngr.errors import LocalFileDescriptorsExhaustedError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.outer_host import is_ssh_auth_timeout
 from imbue.mngr.hosts.outer_host import is_transient_ssh_error
@@ -268,10 +269,13 @@ def is_transient_remote_wiring_error(error: BaseException) -> bool:
     a ``HostAuthenticationError`` only when sshd never answered authentication
     in time (:func:`is_ssh_auth_timeout`), which is a slow host rather than a
     rejected key. Everything else -- trust material missing on this device, a
-    rejected key, a malformed file -- is a failure no amount of retrying fixes,
-    and is reported at once.
+    rejected key, a malformed file, this process running out of file
+    descriptors -- is a failure no amount of retrying fixes, and is reported at
+    once.
     """
     for link in _exception_chain(error):
+        if isinstance(link, LocalFileDescriptorsExhaustedError):
+            return False
         if isinstance(link, HostAuthenticationError):
             return is_ssh_auth_timeout(link)
         if isinstance(link, HostConnectionError):

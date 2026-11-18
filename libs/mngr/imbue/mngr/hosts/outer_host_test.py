@@ -32,6 +32,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import CommandStartError
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
+from imbue.mngr.errors import LocalFileDescriptorsExhaustedError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.outer_host import OuterHost
@@ -866,6 +867,23 @@ def test_ensure_connected_does_not_retry_non_transient_connect_failures(temp_mng
     assert fake.connect_call_count == 1
 
 
+def test_a_connect_that_hit_the_descriptor_limit_fails_as_descriptor_exhaustion(temp_mngr_ctx: MngrContext) -> None:
+    """A connect whose socket or ProxyCommand pipes could not be opened (``EMFILE``) names the cause and is not retried."""
+    fake = _FakePyinfraHostRecoveringOnConnect(
+        failure_count=5, message="", underlying=OSError(errno.EMFILE, os.strerror(errno.EMFILE))
+    )
+    outer = OuterHost(
+        id=HostId.generate(),
+        connector=PyinfraConnector(cast(PyinfraHost, fake)),
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    with pytest.raises(LocalFileDescriptorsExhaustedError, match="run out of file descriptors"):
+        outer.connect()
+
+    assert fake.connect_call_count == 1
+
+
 @pytest.mark.parametrize(
     ("exception", "expected"),
     [
@@ -1346,6 +1364,9 @@ class _FakeSshClientWithTransport:
     def get_transport(self) -> Any:
         return self._transport
 
+    def close(self) -> None:
+        pass
+
 
 class _FakeConnectorWithClient:
     """Pyinfra-connector stand-in exposing the paramiko client OuterHost reaches for."""
@@ -1359,6 +1380,7 @@ class _FakeTransportFailingSftpOpen:
 
     def __init__(self) -> None:
         self.open_call_count = 0
+        self.sock: object = object()
 
     def set_keepalive(self, interval: int) -> None:
         pass

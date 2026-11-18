@@ -132,6 +132,10 @@ class HostAuthenticationError(HostConnectionError):
     """Raised when unable to connect to a host because authentication failed."""
 
 
+class LocalFileDescriptorsExhaustedError(HostConnectionError):
+    """Raised when a host connection fails because this process has used up its file descriptors, which retrying does not fix."""
+
+
 class PyinfraConnectorUnavailableError(HostError, KeyError):
     """Raised when pyinfra cannot find the connector needed to build a host object.
 

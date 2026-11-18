@@ -1,9 +1,11 @@
+import gc
 import json
 import os
 import shutil
 import tempfile
 from collections.abc import Callable
 from collections.abc import Generator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
@@ -22,7 +24,9 @@ import docker.errors
 import docker.models.containers
 import docker.models.images
 import requests.exceptions
+from docker.transport import SSHHTTPAdapter
 from loguru import logger
+from paramiko import SSHException
 from pydantic import Field
 from pydantic import PrivateAttr
 from pyinfra.api import Host as PyinfraHost
@@ -44,6 +48,7 @@ from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.hosts.outer_host import OuterHost
+from imbue.mngr.hosts.outer_host import close_paramiko_client_releasing_its_proxy_command
 from imbue.mngr.hosts.outer_host import create_local_pyinfra_host
 from imbue.mngr.hosts.outer_host import create_ssh_pyinfra_host_using_user_config
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
@@ -354,6 +359,45 @@ def create_docker_client() -> docker.DockerClient:
     return docker.from_env()
 
 
+def _close_docker_client_releasing_its_ssh_proxy_command(client: docker.DockerClient) -> None:
+    """Close a Docker client, first freeing the pipes and child of the ProxyCommand its ``ssh://`` connection runs through.
+
+    docker-py's own close only signals that child, leaving it and its pipes to a full
+    garbage collection (see ``close_paramiko_client_releasing_its_proxy_command``).
+    """
+    adapter = client.api.get_adapter(client.api.base_url)
+    if isinstance(adapter, SSHHTTPAdapter) and adapter.ssh_client is not None:
+        close_paramiko_client_releasing_its_proxy_command(adapter.ssh_client)
+    client.close()
+
+
+def _every_exception_in_chain(error: BaseException) -> Iterator[BaseException]:
+    """Yield the error and every error behind it through ``__cause__`` or ``__context__``, suppressed or not."""
+    seen_error_ids: set[int] = set()
+    pending_errors = [error]
+    while pending_errors:
+        link = pending_errors.pop()
+        if id(link) in seen_error_ids:
+            continue
+        seen_error_ids.add(id(link))
+        yield link
+        pending_errors.extend(behind for behind in (link.__cause__, link.__context__) if behind is not None)
+
+
+def _release_ssh_connection_abandoned_by_failed_client_build(error: BaseException) -> None:
+    """Free the ProxyCommand child and pipes of the SSH connection a failed docker-py ``ssh://`` client build dropped.
+
+    docker-py connects while it builds the client and drops the connection when that
+    fails, so nothing is left to close it. Its paramiko transport is a reference cycle
+    only a full collection frees, and the error's tracebacks reach it through
+    paramiko's frames, so they are dropped first; the errors keep their types and
+    messages.
+    """
+    for link in _every_exception_in_chain(error):
+        link.__traceback__ = None
+    gc.collect()
+
+
 @pure
 def _is_gvisor_runtime_rootfs_ephemeral(
     runtime_name: str,
@@ -482,13 +526,19 @@ class DockerProviderInstance(BaseProviderInstance):
 
         Raises ProviderUnavailableError (a MngrError subclass) instead of
         DockerException when the daemon is unreachable, so callers that catch
-        MngrError handle the failure gracefully.
+        MngrError handle the failure gracefully. For an ``ssh://`` daemon,
+        docker-py connects over paramiko while it builds the client and lets
+        paramiko's ``SSHException`` or ``OSError`` through unwrapped, so those
+        are converted too, after the connection the failed build dropped is
+        released.
         """
         try:
             if self.config.host:
                 return docker.DockerClient(base_url=self.config.host)
             return create_docker_client()
-        except docker.errors.DockerException as e:
+        except (docker.errors.DockerException, SSHException, OSError) as e:
+            if any(isinstance(link, SSHException) for link in _every_exception_in_chain(e)):
+                _release_ssh_connection_abandoned_by_failed_client_build(e)
             raise self._daemon_unreachable_error(str(e)) from e
 
     @cached_property
@@ -2874,6 +2924,6 @@ kill -TERM 1
         """Clean up the Docker client connection."""
         if "_docker_client" in self.__dict__:
             try:
-                self._docker_client.close()
+                _close_docker_client_releasing_its_ssh_proxy_command(self._docker_client)
             except (OSError, docker.errors.DockerException) as e:
                 logger.warning("Ignored error closing Docker client: {}", e)

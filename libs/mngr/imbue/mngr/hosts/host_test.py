@@ -2152,6 +2152,7 @@ class _FakeTransport:
         self._open_session_results: list[object] = open_session_results if open_session_results is not None else []
         self.open_session_call_count = 0
         self.keepalive_interval: int | None = None
+        self.sock: object = object()
 
     def is_active(self) -> bool:
         return self._is_active

@@ -1,0 +1,1 @@
+Latchkey discovery now reports a remote wiring step that failed because the process ran out of file descriptors as an error at once. Before, it counted as a transient SSH failure and was only reported after 10 consecutive discovery cycles.

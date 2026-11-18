@@ -1,3 +1,4 @@
+import gc
 import importlib.resources
 import inspect
 import json
@@ -33,6 +34,7 @@ from uuid import uuid4
 
 import paramiko
 import pluggy
+import psutil
 import pytest
 from click.testing import CliRunner
 from loguru import logger
@@ -1868,6 +1870,81 @@ def in_process_paramiko_sshd(
         for transport in transports:
             transport.close()
         listener.close()
+
+
+# Relays stdin to 127.0.0.1:argv[1] and that connection back to stdout, like ``nc 127.0.0.1 <port>``.
+_LOCAL_TCP_RELAY_SCRIPT: Final[str] = (
+    "import os, socket, sys, threading\n"
+    "connection = socket.create_connection(('127.0.0.1', int(sys.argv[1])))\n"
+    "def forward_stdin():\n"
+    "    while data := os.read(0, 65536):\n"
+    "        connection.sendall(data)\n"
+    "    connection.shutdown(socket.SHUT_WR)\n"
+    "threading.Thread(target=forward_stdin, daemon=True).start()\n"
+    "while data := connection.recv(65536):\n"
+    "    os.write(1, data)\n"
+)
+
+
+def write_ssh_config_reaching_port_through_proxy_command(
+    config_dir: Path, host_alias: str, port: int, identity_file: Path
+) -> Path:
+    """Write an ssh_config in which ``host_alias`` reaches 127.0.0.1:``port`` as the current user through a ProxyCommand.
+
+    The ProxyCommand is a relay running in a child process, like the ``nc`` and
+    ``tailscale nc`` proxies users configure. Returns the config's path.
+    """
+    relay_script_path = config_dir / "local_tcp_relay.py"
+    relay_script_path.write_text(_LOCAL_TCP_RELAY_SCRIPT)
+    proxy_command = shlex.join([sys.executable, str(relay_script_path), str(port)])
+    ssh_config_path = config_dir / "ssh_config"
+    ssh_config_path.write_text(
+        f"Host {host_alias}\n"
+        f"  ProxyCommand {proxy_command}\n"
+        f"  User {os.environ.get('USER', 'root')}\n"
+        f"  IdentityFile {identity_file}\n"
+    )
+    return ssh_config_path
+
+
+_DESCRIPTOR_RELEASE_SETTLE_TIMEOUT_SECONDS: Final[float] = 10.0
+
+
+def _count_open_fds() -> int:
+    return len(os.listdir("/dev/fd"))
+
+
+def assert_runs_leave_no_descriptors_or_child_processes_behind(run_once: Callable[[], None], run_count: int) -> None:
+    """Run ``run_once`` ``run_count`` times and assert every descriptor and child process it opened is gone afterwards.
+
+    Garbage collection is off for the runs: a paramiko transport is only freed by
+    a full collection, which a long-running process may not run before it has
+    exhausted its descriptors, so only explicit cleanup can count here. Every
+    descriptor kind is counted, not just pipes. A first run happens before the
+    baseline is taken, since the first connection in a process opens a few
+    descriptors it keeps for good (e.g. macOS's network-policy handles).
+    """
+    this_process = psutil.Process()
+    gc.disable()
+    try:
+        run_once()
+        fd_count_before = _count_open_fds()
+        child_pids_before = {child.pid for child in this_process.children()}
+
+        for _ in range(run_count):
+            run_once()
+
+        # A server on the other end may close its socket from its own thread, so give it a moment.
+        is_back_to_baseline = poll_until(
+            lambda: _count_open_fds() <= fd_count_before, timeout=_DESCRIPTOR_RELEASE_SETTLE_TIMEOUT_SECONDS
+        )
+        fd_count_after = _count_open_fds()
+        leftover_child_pids = {child.pid for child in this_process.children()} - child_pids_before
+    finally:
+        gc.enable()
+
+    assert is_back_to_baseline, f"{fd_count_after - fd_count_before} descriptor(s) still open after the runs"
+    assert leftover_child_pids == set()
 
 
 # Discovery event test factories

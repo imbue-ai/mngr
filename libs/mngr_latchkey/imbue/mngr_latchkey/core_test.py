@@ -38,6 +38,7 @@ from imbue.mngr.config.loader import get_or_create_profile_dir
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
+from imbue.mngr.errors import LocalFileDescriptorsExhaustedError
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentId
@@ -2562,6 +2563,19 @@ def _outer_host_auth_error(paramiko_error: paramiko.AuthenticationException) -> 
             id="host-authentication-error-from-auth-timeout",
         ),
         pytest.param(HostAuthenticationError("Authentication failed"), False, id="host-authentication-error"),
+        pytest.param(
+            _raised_from(
+                LocalFileDescriptorsExhaustedError("Failed to connect to host: out of file descriptors"),
+                _raised_while_handling(
+                    ConnectError(
+                        "SSH error (Error reading SSH protocol bannerfiledescriptor out of range in select())"
+                    ),
+                    paramiko.SSHException("Error reading SSH protocol bannerfiledescriptor out of range in select()"),
+                ),
+            ),
+            False,
+            id="local-file-descriptors-exhausted",
+        ),
         pytest.param(
             _outer_host_auth_error(paramiko.AuthenticationException("Authentication failed.")),
             False,
