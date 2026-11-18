@@ -979,6 +979,7 @@ function buildBundleWindowOptions(kind, bounds, partition) {
     show: false,
     autoHideMenuBar: true,
     backgroundColor: '#ffffff',
+    acceptFirstMouse: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
