@@ -1570,7 +1570,7 @@ def tail_discovery_events_from_offset(
                         # doesn't get split across polls and silently lost.
                         new_lines, bytes_consumed = split_complete_lines_from_bytes(new_content)
                         current_offset += bytes_consumed
-                        logger.debug(
+                        logger.trace(
                             "Discovery tail: consumed {} new bytes, {} lines from events file",
                             bytes_consumed,
                             len(new_lines),
