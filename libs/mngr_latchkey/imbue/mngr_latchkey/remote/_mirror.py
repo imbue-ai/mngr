@@ -19,6 +19,7 @@ The machine store is the per-host directory this plugin already owns::
         machine_gateway_password      the machine's own password     (owned)
         config.json                   the desktop's settings, with the
                                       machine's own custom services (owned)
+        plugins/                   -> the desktop's latchkey plugins
         permissions.json           -> latchkey_permissions.json
         browser_state.json.enc     -> the desktop's browser state
         encryption_key             -> the desktop's encryption key
@@ -90,6 +91,8 @@ from imbue.mngr_latchkey.core import build_config_with_custom_services
 from imbue.mngr_latchkey.core import custom_service_registration_entries
 from imbue.mngr_latchkey.encryption_key import ENCRYPTION_KEY_FILENAME
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
+from imbue.mngr_latchkey.service_plugins import PLUGINS_DIR_NAME
+from imbue.mngr_latchkey.service_plugins import plugins_dir
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
@@ -100,11 +103,15 @@ from imbue.mngr_latchkey.store import permissions_path_for_host
 # offline read against each machine store would ping once a day per remote
 # host. Its link may dangle until the first ping -- upstream writes the stamp
 # through it, creating the desktop's copy -- so unlike the encryption key it
-# needs nothing created up front.
+# needs nothing created up front. The plugins are shared because every machine
+# has the same ones (see :mod:`imbue.mngr_latchkey.service_plugins`), and a
+# credential whose type a plugin defines can only be read with the plugin in
+# the directory it is read from.
 SHARED_WITH_DESKTOP_FILENAMES: Final[tuple[str, ...]] = (
     BROWSER_STATE_FILENAME,
     ENCRYPTION_KEY_FILENAME,
     DAILY_COUNT_STAMP_FILENAME,
+    PLUGINS_DIR_NAME,
 )
 
 # Owner-only, like every other directory holding credential material.
@@ -261,12 +268,14 @@ def materialize_machine_store(latchkey_directory: Path, data_dir: Path, host_id:
     The desktop's encryption key is created if it does not exist yet, so the
     link never dangles: a dangling key link would make the upstream CLI mint a
     *second* key inside the machine store and quietly encrypt its credentials
-    with a key nothing else uses.
+    with a key nothing else uses. The desktop's plugins directory is created
+    for the same reason, so latchkey finds a directory behind the link before
+    the first plugin is installed into it.
 
     Raises:
-        LatchkeyStoreError: when a shared name is occupied by a regular file
-            (which would mean an independent copy of state that is supposed to
-            be shared, so it is reported rather than deleted), or when the
+        LatchkeyStoreError: when a shared name is occupied by something other
+            than a link (which would mean an independent copy of state that is
+            supposed to be shared, so it is reported rather than deleted), or when the
             directory or a link cannot be created.
     """
     load_or_create_encryption_key(latchkey_directory)
@@ -276,6 +285,12 @@ def materialize_machine_store(latchkey_directory: Path, data_dir: Path, host_id:
         store_dir.chmod(_MACHINE_STORE_DIR_MODE)
     except OSError as e:
         raise LatchkeyStoreError(f"Failed to create the machine store at {store_dir}: {e}") from e
+    try:
+        plugins_dir(latchkey_directory).mkdir(parents=True, exist_ok=True, mode=0o700)
+    except OSError as e:
+        raise LatchkeyStoreError(
+            f"Failed to create the desktop's plugins directory at {plugins_dir(latchkey_directory)}: {e}"
+        ) from e
 
     for filename in SHARED_WITH_DESKTOP_FILENAMES:
         _link(store_dir / filename, latchkey_directory / filename)
@@ -425,7 +440,7 @@ def _link(link_path: Path, target_path: Path) -> None:
     is_existing_link = link_path.is_symlink()
     if not is_existing_link and link_path.exists():
         raise LatchkeyStoreError(
-            f"Refusing to share {link_path} with {target_path}: a regular file is already there. "
+            f"Refusing to share {link_path} with {target_path}: something other than a link is already there. "
             "It holds state that is meant to be shared with the desktop's latchkey directory; "
             "move it aside to adopt the shared copy."
         )

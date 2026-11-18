@@ -65,6 +65,7 @@ from imbue.mngr_latchkey.desktop_egress import build_desktop_egress_route
 from imbue.mngr_latchkey.desktop_egress import list_desktop_egress_grants
 from imbue.mngr_latchkey.desktop_egress import parse_desktop_egress_rules
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
+from imbue.mngr_latchkey.service_plugins import KNOWN_SERVICE_PLUGIN_SERVICE_NAMES
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
@@ -2005,3 +2006,27 @@ def test_build_workspace_permissions_view_gives_the_handshake_no_toggle_but_a_no
     toggle_states = {toggle.permission: toggle.is_granted for group in scope_panel.groups for toggle in group.toggles}
     assert toggle_states == {"any": False, "notion-mcp-read-all": False, "notion-mcp-search": True}
     assert scope_panel.implicit_note == "Granted along with anything below: Open and maintain an MCP session."
+
+
+def test_build_workspace_permissions_view_marks_the_services_of_the_pinned_plugins_experimental(
+    tmp_path: Path,
+) -> None:
+    """Add connection lists a plugin's service apart, under a warning, and a connected one carries the label."""
+    agent_id, host = AgentId(), HostId()
+    latchkey = FakeAccountsLatchkey(
+        latchkey_directory=tmp_path, latchkey_binary="/nonexistent", accounts_by_service={"strava": [_ACCOUNT]}
+    )
+    services_catalog = ServicesCatalog(latchkey_directory=tmp_path)
+    (strava_info,) = services_catalog.get("strava")
+    seed_connector_grant(latchkey.plugin_data_dir, host, "strava", _ACCOUNT, ("any",), strava_info.scope_schema)
+
+    view = _build_view(latchkey, agent_id, host, services_catalog=services_catalog)
+
+    available_by_name = {entry.service_name: entry for entry in view.available_connections}
+    assert {
+        name for name, entry in available_by_name.items() if entry.is_experimental
+    } == KNOWN_SERVICE_PLUGIN_SERVICE_NAMES - {"strava"}
+    assert available_by_name["slack"].is_experimental is False
+    (strava,) = view.connections
+    assert strava.service_name == "strava"
+    assert strava.is_experimental is True

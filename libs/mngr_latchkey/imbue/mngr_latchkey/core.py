@@ -72,6 +72,9 @@ from imbue.mngr_latchkey.encryption_key import LATCHKEY_ENCRYPTION_KEY_ENV_VAR
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
 from imbue.mngr_latchkey.encryption_key import inject_encryption_key_into_env
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
+from imbue.mngr_latchkey.service_plugins import KNOWN_SERVICE_PLUGINS
+from imbue.mngr_latchkey.service_plugins import plugins_dir
+from imbue.mngr_latchkey.service_plugins import service_plugin_catalog_payload
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_admin_permissions_file
@@ -227,8 +230,9 @@ _ENV_EXTENSION_PERMISSIONS_ROOT: Final[str] = "LATCHKEY_EXTENSION_PERMISSIONS_RO
 _GATEWAY_EXTENSIONS_SUBDIR: Final[str] = "extensions"
 
 # The catalog the gateway extensions validate against. Named because it is the
-# one bundled file that is not shipped verbatim: custom services are overlaid
-# onto it at materialization time (see ``overlaid_services_catalog_content``).
+# one bundled file that is not shipped verbatim: the pinned latchkey plugins'
+# services and the custom services are overlaid onto it at materialization time
+# (see ``overlaid_services_catalog_content``).
 SERVICES_CATALOG_FILENAME: Final[str] = "services.json"
 
 # Upstream latchkey's own JSON config file, directly under ``LATCHKEY_DIRECTORY``.
@@ -764,8 +768,13 @@ def _build_foreign_store_env(store_directory: Path, encryption_key: SecretStr) -
 
 
 @contextmanager
-def _foreign_store_directory(store: EncryptedCredentialStore) -> Generator[Path, None, None]:
-    """Lay ``store`` out as a private scratch latchkey directory, removed on exit."""
+def _foreign_store_directory(store: EncryptedCredentialStore, latchkey_directory: Path) -> Generator[Path, None, None]:
+    """Lay ``store`` out as a private scratch latchkey directory, removed on exit.
+
+    ``latchkey_directory``'s plugins, when it has any, are linked in as the
+    scratch directory's, so latchkey can read the credentials whose type one of
+    them defines.
+    """
     with tempfile.TemporaryDirectory(prefix="mngr-latchkey-foreign-") as scratch:
         store_directory = Path(scratch)
         for filename, content in (
@@ -775,6 +784,10 @@ def _foreign_store_directory(store: EncryptedCredentialStore) -> Generator[Path,
             path = store_directory / filename
             path.write_bytes(content)
             path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        desktop_plugins = plugins_dir(latchkey_directory)
+        if desktop_plugins.is_dir():
+            # Resolved, since a link's relative target is read against the scratch directory.
+            plugins_dir(store_directory).symlink_to(desktop_plugins.resolve(), target_is_directory=True)
         yield store_directory
 
 
@@ -968,7 +981,7 @@ def custom_service_registration_entries_of_every_machine(latchkey_directory: Pat
 
 
 def overlaid_services_catalog_content(latchkey_directory: Path) -> str:
-    """Return ``services.json`` with every custom service this computer knows overlaid on the shipped catalog.
+    """Return ``services.json`` with the pinned plugins' services and every custom service this computer knows overlaid.
 
     The desktop gateway's extensions validate a permission request against
     this file -- including the requests a remote machine's gateway forwards
@@ -979,14 +992,16 @@ def overlaid_services_catalog_content(latchkey_directory: Path) -> str:
     :class:`~imbue.mngr_latchkey.services_catalog.ServicesCatalog`, so the two
     agree about which services exist by construction: this is the one place
     the overlay is applied for the gateway, and the catalog applies the same
-    projection for Python. Neither gateway extension knows custom services
-    exist -- they keep reading one file in one shape.
+    projection for Python. Neither gateway extension knows custom services or
+    plugins exist -- they keep reading one file in one shape.
 
-    A materialized file therefore differs from the package resource of the same
-    name whenever the install has custom services. That is the point, but it is
-    worth knowing when comparing the two by hand.
+    A materialized file therefore always differs from the package resource of
+    the same name: it also names the plugins' services, and whatever custom
+    services the install has. That is the point, but it is worth knowing when
+    comparing the two by hand.
     """
     shipped = json.loads(bundled_gateway_extension_content(SERVICES_CATALOG_FILENAME))
+    shipped.update(service_plugin_catalog_payload(frozenset(shipped), KNOWN_SERVICE_PLUGINS))
     overlay = custom_service_catalog_payload(
         custom_service_registration_entries_of_every_machine(latchkey_directory), frozenset(shipped)
     )
@@ -1953,13 +1968,17 @@ class Latchkey(MutableModel):
         key play no part. The copy comes back in the format this computer's CLI
         writes, since the run migrates an older store first.
 
+        Every credential in the store is read, so a credential whose type a
+        latchkey plugin defines is readable only with that plugin installed
+        here; the scratch directory shares this directory's plugins for that.
+
         Raises:
             LatchkeyError: when the CLI cannot be launched, or refuses the store
                 for any reason other than it holding no credentials (a
                 ``store_key`` that does not open it included).
         """
         with (
-            _foreign_store_directory(store) as store_directory,
+            _foreign_store_directory(store, self.latchkey_directory) as store_directory,
             tempfile.TemporaryDirectory(prefix="mngr-latchkey-reencrypted-") as destination,
         ):
             result = self._run_against_foreign_store(
@@ -1990,7 +2009,7 @@ class Latchkey(MutableModel):
             LatchkeyError: when the CLI cannot be launched, or fails for any
                 reason other than the key.
         """
-        with _foreign_store_directory(store) as store_directory:
+        with _foreign_store_directory(store, self.latchkey_directory) as store_directory:
             result = self._run_against_foreign_store(
                 store_directory, candidate_key, ["auth", "list", "--offline"], stdin_bytes=b""
             )

@@ -73,6 +73,8 @@ from imbue.mngr_latchkey.account_scopes import resolved_schema_names
 from imbue.mngr_latchkey.core import custom_service_registration_entries_of_every_machine
 from imbue.mngr_latchkey.core import read_registered_services
 from imbue.mngr_latchkey.custom_services import custom_service_catalog_payload
+from imbue.mngr_latchkey.service_plugins import KNOWN_SERVICE_PLUGINS
+from imbue.mngr_latchkey.service_plugins import service_plugin_catalog_payload
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 
 # Package and filename of the bundled catalog. Kept in sync with the copy
@@ -359,9 +361,11 @@ class ServicesCatalog(FrozenModel):
             "Latchkey directory whose ``config.json`` carries the user-created custom services to "
             "overlay on the shipped catalog: the desktop's own, for the services registered on this "
             "computer's machine, or a machine store's, for the ones registered on the remote machine it "
-            "mirrors. When None the catalog is the shipped file alone -- which is what a surface wants when "
-            "it means 'the services this build ships' (the onboarding carousel) rather than 'the services "
-            "this machine can reach'."
+            "mirrors. The services of the latchkey plugins this build pins (see "
+            ":mod:`imbue.mngr_latchkey.service_plugins`), installed on every machine, are overlaid too. When "
+            "None the catalog is the shipped file alone -- which is what a surface wants when it means 'the "
+            "services this build ships' (the onboarding carousel) rather than 'the services this machine can "
+            "reach'."
         ),
     )
     is_including_every_machine: bool = Field(
@@ -404,6 +408,11 @@ class ServicesCatalog(FrozenModel):
         catalog = dict(self.catalog_override if self.catalog_override is not None else _load_bundled_catalog())
         if self.latchkey_directory is None:
             return catalog
+        catalog.update(
+            service_infos_from_catalog_payload(
+                service_plugin_catalog_payload(frozenset(catalog), KNOWN_SERVICE_PLUGINS)
+            )
+        )
         registered = (
             custom_service_registration_entries_of_every_machine(self.latchkey_directory)
             if self.is_including_every_machine

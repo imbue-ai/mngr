@@ -2,15 +2,16 @@ import m from "mithril";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { settle } from "../../../testing";
 import {
-  BROWSER_SIGN_IN,
   DESKTOPS,
   awsAvailable,
+  browserAvailable,
   credentialsSignIn,
   desktopEgress,
   pathSync,
   permissionsView,
   sharedPath,
   slackConnection,
+  stravaAvailable,
 } from "../../../models/workspacePermissions.testing";
 import type { UiWorkspacePermissions } from "../../../generated/ui";
 import type { RequestResult } from "../../../models/errors";
@@ -22,6 +23,10 @@ import { PermissionsTab } from "./PermissionsTab";
 import { OptionsPanel } from "./OptionsPanel";
 import { TITLEBAR_POPUP_ICONS } from "../../shell/RaisedTitlebarIcons";
 import { forgetFailedServiceMarks } from "../../components/ServiceMark";
+import {
+  EXPERIMENTAL_CONNECTOR_RISK_ATTR,
+  EXPERIMENTAL_CONNECTOR_RISK_DETAIL,
+} from "../../components/ExperimentalConnectorRisk";
 import { IMPLICIT_PERMISSIONS_HINT_ATTR } from "../../components/ImplicitPermissionsHint";
 import { Spinner } from "../../components/Spinner";
 import { ErrorNotice } from "../../components/ErrorDisplay";
@@ -1416,6 +1421,78 @@ describe("PermissionsTab add connection and self panels", () => {
   });
 });
 
+describe("PermissionsTab experimental connectors", () => {
+  function section(node: unknown): AnyVnode {
+    return withAttr(node, "data-perm-experimental-connectors")[0];
+  }
+
+  function connectNames(node: unknown): unknown[] {
+    return withAttr(node, "data-perm-connect").map((row) => attrsOf(row)["data-perm-connect"]);
+  }
+
+  it("lists an experimental service under its own heading, apart from the catalog", async () => {
+    const { root } = await render(
+      permissionsView({ available_connections: [browserAvailable("notion", "Notion"), stravaAvailable()] }),
+      { requestedSection: "add-connection" },
+    );
+
+    const panel = withAttr(root, "data-perm-panel")[0];
+    const text = allText(panel);
+    expect(text.indexOf("Notion")).toBeLessThan(text.indexOf("Experimental connectors"));
+    expect(text.indexOf("Experimental connectors")).toBeLessThan(text.indexOf("Strava"));
+    const risk = withAttr(section(root), EXPERIMENTAL_CONNECTOR_RISK_ATTR)[0];
+    expect(allText(risk)).toBe("Use at your own risk.");
+    expect(attrsOf(risk)["data-tooltip"]).toBe(EXPERIMENTAL_CONNECTOR_RISK_DETAIL);
+    // Connected like any other service, with the service's own mark on the row.
+    expect(connectNames(section(root))).toEqual(["strava"]);
+    expect(markSources(marks(section(root))[0])).toEqual(["/_static/service_icons/strava.svg"]);
+    expect(connectNames(root)).toEqual(["slack", "notion", "strava"]);
+  });
+
+  it("is left out when nothing experimental is on offer, and out of every other section", async () => {
+    const addConnection = await render(permissionsView(), { requestedSection: "add-connection" });
+    expect(withAttr(addConnection.root, "data-perm-experimental-connectors")).toEqual([]);
+    expect(allText(withAttr(addConnection.root, "data-perm-panel")[0])).not.toContain("Experimental");
+
+    const elsewhere = await render(permissionsView({ available_connections: [stravaAvailable()] }));
+    expect(withAttr(elsewhere.root, "data-perm-experimental-connectors")).toEqual([]);
+  });
+
+  it("says that the catalog is exhausted only of the ordinary services", async () => {
+    const { root } = await render(permissionsView({ available_connections: [stravaAvailable()] }), {
+      requestedSection: "add-connection",
+    });
+    const text = allText(withAttr(root, "data-perm-panel")[0]);
+    expect(text).toContain("Every available service already has an account connected.");
+    expect(text).toContain("Strava");
+  });
+
+  it("marks a connected experimental service's panel, and nobody else's", async () => {
+    const strava = slackConnection({ service_name: "strava", display_name: "Strava", is_experimental: true });
+    const { root } = await render(permissionsView({ connections: [slackConnection(), strava] }), {
+      requestedSection: "conn:strava:",
+    });
+    const badge = withAttr(root, "data-perm-experimental-badge")[0];
+    expect(allText(badge)).toBe("Experimental");
+    // The delegated [data-tooltip] chrome, not a native title: the two would
+    // otherwise show two tooltips on the same badge.
+    expect(attrsOf(badge)["data-tooltip"]).toBe(EXPERIMENTAL_CONNECTOR_RISK_DETAIL);
+    expect(attrsOf(badge).title).toBeUndefined();
+
+    const slack = await render(permissionsView());
+    expect(withAttr(slack.root, "data-perm-experimental-badge")).toEqual([]);
+  });
+
+  it("offers a second account for an experimental service with the connected ones", async () => {
+    const strava = slackConnection({ service_name: "strava", display_name: "Strava", is_experimental: true });
+    const { root } = await render(permissionsView({ connections: [strava], available_connections: [] }), {
+      requestedSection: "add-connection",
+    });
+    expect(connectNames(root)).toEqual(["strava"]);
+    expect(withAttr(root, "data-perm-experimental-connectors")).toEqual([]);
+  });
+});
+
 describe("PermissionsTab service marks", () => {
   const navMark = (root: unknown): AnyVnode => marks(withAttr(root, "data-perm-nav")[0])[0];
   const headingMark = (root: unknown): AnyVnode => marks(withAttr(root, "data-perm-panel")[0])[0];
@@ -1465,7 +1542,7 @@ describe("PermissionsTab service marks", () => {
   it("drains the marks of services that have no account yet", async () => {
     const { root } = await render(
       permissionsView({
-        available_connections: [{ service_name: "gitlab", display_name: "GitLab", sign_in: BROWSER_SIGN_IN }],
+        available_connections: [browserAvailable("gitlab", "GitLab")],
       }),
       { requestedSection: "add-connection" },
     );

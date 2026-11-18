@@ -23,6 +23,8 @@ from imbue.mngr_latchkey.remote._mirror import machine_store_dir
 from imbue.mngr_latchkey.remote._mirror import materialize_machine_store
 from imbue.mngr_latchkey.remote._mirror import write_machine_credentials
 from imbue.mngr_latchkey.remote._mirror import write_machine_store_config
+from imbue.mngr_latchkey.service_plugins import PLUGINS_DIR_NAME
+from imbue.mngr_latchkey.service_plugins import plugins_dir
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
@@ -318,3 +320,20 @@ def test_a_machine_store_resolves_the_desktop_key_as_its_own(tmp_path: Path) -> 
     store_dir = materialize_machine_store(latchkey_directory, data_dir, HostId.generate())
 
     assert load_or_create_encryption_key(store_dir) == desktop_key
+
+
+def test_materialize_shares_the_desktops_plugins_and_creates_them_so_the_link_never_dangles(tmp_path: Path) -> None:
+    """Every machine has the same plugins, and a credential of a plugin's type is only readable beside them."""
+    latchkey_directory, data_dir = _roots(tmp_path)
+    host_id = HostId.generate()
+
+    store_dir = materialize_machine_store(latchkey_directory, data_dir, host_id)
+
+    link = store_dir / PLUGINS_DIR_NAME
+    assert link.is_symlink()
+    assert not os.path.isabs(os.readlink(link))
+    assert link.resolve() == plugins_dir(latchkey_directory).resolve()
+    assert plugins_dir(latchkey_directory).is_dir()
+    assert stat.S_IMODE(plugins_dir(latchkey_directory).stat().st_mode) == stat.S_IRWXU
+    (plugins_dir(latchkey_directory) / "spotify").mkdir()
+    assert (link / "spotify").is_dir()

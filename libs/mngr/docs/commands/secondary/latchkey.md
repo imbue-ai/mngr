@@ -225,7 +225,9 @@ Run the shared Latchkey gateway and wire a gateway into every discovered agent.
 Long-running foreground process that:
 
 1. Initializes the configured ``Latchkey`` (version-checks the binary and
-   writes the bundled service registrations into latchkey's ``config.json``).
+   writes the bundled service registrations into latchkey's ``config.json``),
+   and installs the latchkey plugins this build pins into the latchkey
+   directory, downloading each one once per pinned commit.
 2. Eagerly spawns the shared ``latchkey gateway`` subprocess and
    supervises it: a background health check respawns it (reusing its
    original port) if the subprocess dies mid-session, so a crashed

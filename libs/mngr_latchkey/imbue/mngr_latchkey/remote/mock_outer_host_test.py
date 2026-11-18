@@ -11,10 +11,14 @@ on PATH: ``latchkey`` (a tiny store-backed CLI, below), ``docker`` (finds the
 one container, reports the mappings it was created with, and runs an exec in a
 fake container home), ``ssh-keygen``
 (mints a stand-in keypair), ``supervisorctl`` (records what it was asked),
-``curl`` (records what the gateway was asked and answers with a canned status)
-and the one ``stat`` probe that says whether the secrets directory is RAM-backed.
+``curl`` (records what the gateway was asked and answers with a canned status,
+and downloads only what a test serves) and the one ``stat`` probe that says
+whether the secrets directory is RAM-backed.
 The install itself (apt, dpkg) is faked too: the bootstrap command unpacks
-whatever ``.deb`` was last uploaded.
+whatever ``.deb`` was last uploaded. The package's ``postinst`` is not part of
+that, but ``run_postinst`` runs it for real on the fake machine, where
+``node``, ``npm``, ``systemctl``, ``sshd`` and ``uname`` are faked for it as on
+a machine that already has Node.js and the pinned latchkey CLI.
 
 The fake latchkey binary reads and writes a plaintext JSON stand-in for
 ``credentials.json.enc`` recording which accounts a store holds and which key
@@ -32,6 +36,7 @@ what uploads.
 import base64
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -78,12 +83,17 @@ from imbue.mngr_latchkey.remote._mirror import materialize_machine_store
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import write_machine_credentials
 from imbue.mngr_latchkey.remote.package import CONTAINER_TUNNEL_KEY_FILENAME
+from imbue.mngr_latchkey.remote.package import CURL_ROUTER_BIN
+from imbue.mngr_latchkey.remote.package import CURL_SHIMS_VERSION
+from imbue.mngr_latchkey.remote.package import CURL_VERSION_STAMP_FILENAME
 from imbue.mngr_latchkey.remote.package import DEFAULT_REMOTE_PACKAGE_LAYOUT
 from imbue.mngr_latchkey.remote.package import GATEWAY_CONF_FILENAME
+from imbue.mngr_latchkey.remote.package import LATCHKEY_VERSION
 from imbue.mngr_latchkey.remote.package import RemotePackageLayout
 from imbue.mngr_latchkey.remote.package import TUNNEL_CONF_FILENAME
 from imbue.mngr_latchkey.remote.package import build_remote_package
 from imbue.mngr_latchkey.remote.package import remote_package_context
+from imbue.mngr_latchkey.service_plugins import PLUGINS_DIR_NAME
 from imbue.mngr_latchkey.store import DESKTOP_EGRESS_RULES_FILENAME
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import PERMISSIONS_FORMAT_VERSION_FILENAME
@@ -92,6 +102,7 @@ from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 from imbue.mngr_latchkey.testing import extract_deb_data
 from imbue.mngr_latchkey.testing import read_deb_control_field
+from imbue.mngr_latchkey.testing import read_deb_tar
 
 # Stand-in for the key a machine keeps its own credential store under.
 MACHINE_KEY = "machine-key-5518"
@@ -108,6 +119,12 @@ OUTER_HOST_EXTRA_HOST = "host.docker.internal:host-gateway"
 _RAM_BACKED_FSTYPE = "tmpfs"
 _SHELL_TIMEOUT_SECONDS = 60.0
 _FAKE_BIN_DIR_NAME = "fakebin"
+
+# What the fake ``uname -m`` reports, and the curl-shims build that selects.
+_FAKE_MACHINE_ARCH = "x86_64"
+_FAKE_MACHINE_CURL_SHIMS_TRIPLE = "x86_64-unknown-linux-musl"
+# Where the fake ``curl`` finds what a test serves, each file named after its URL.
+_SERVED_DOWNLOADS_DIR_NAME = "curl-served"
 
 
 class RecordedCommand(MutableModel):
@@ -161,6 +178,7 @@ class FakeVps(MutableModel):
     )
     is_local: bool = Field(default=False, description="Whether this outer host is the local machine")
     is_install_failing: bool = Field(default=False, description="Whether the package install is to fail.")
+    install_stderr: str = Field(default="", description="What a package install that succeeds prints on stderr.")
     recorded: list[RecordedCommand] = Field(default_factory=list, description="Each command recorded in order")
     written: list[WrittenFile] = Field(default_factory=list, description="Each file write recorded in order")
     installed_versions: list[str] = Field(
@@ -182,6 +200,10 @@ class FakeVps(MutableModel):
     @property
     def secrets_dir(self) -> Path:
         return self.layout.secrets_dir
+
+    @property
+    def plugins_dir(self) -> Path:
+        return self.latchkey_dir / PLUGINS_DIR_NAME
 
     def get_name(self) -> str:
         return self.name
@@ -258,6 +280,37 @@ class FakeVps(MutableModel):
     def answer_curl_with(self, status: str) -> None:
         """Make every curl call print ``status`` as the HTTP status of its answer."""
         (self.root / "curl.status").write_text(status)
+
+    def serve_download(self, url: str, content: bytes) -> None:
+        """Make curl download ``content`` from ``url``; a URL nothing is served at is answered as a 404."""
+        served_dir = self.root / _SERVED_DOWNLOADS_DIR_NAME
+        served_dir.mkdir(exist_ok=True)
+        (served_dir / re.sub(r"[^A-Za-z0-9._-]", "_", url)).write_bytes(content)
+
+    def hold_downloads_until_in_flight(self, count: int) -> None:
+        """Make every curl download wait until ``count`` of them are running at once, and fail if they never are."""
+        (self.root / "curl.concurrent-downloads").write_text(str(count))
+
+    def hold_curl_shims(self) -> None:
+        """Give the machine the pinned curl shims, as one an earlier install set up has them."""
+        curl_install_dir = self.layout.curl_install_dir
+        curl_install_dir.mkdir(parents=True, exist_ok=True)
+        router = curl_install_dir / CURL_ROUTER_BIN
+        router.write_text("#!/bin/sh\n")
+        router.chmod(0o755)
+        (curl_install_dir / CURL_VERSION_STAMP_FILENAME).write_text(
+            f"{CURL_SHIMS_VERSION} {_FAKE_MACHINE_CURL_SHIMS_TRIPLE}\n"
+        )
+
+    def run_postinst(self) -> CommandResult:
+        """Run the ``postinst`` of a build of the package for this machine's layout, as dpkg does after unpacking it."""
+        artifact = build_remote_package(remote_package_context(self.layout))
+        with read_deb_tar(artifact.content, "control.tar.gz") as tar:
+            postinst_file = tar.extractfile("./postinst")
+            assert postinst_file is not None
+            postinst = self.root / "postinst"
+            postinst.write_bytes(postinst_file.read())
+        return self._run_shell(f"sh '{postinst}' configure")
 
     # The machine, as a test reads it back.
 
@@ -336,6 +389,16 @@ class FakeVps(MutableModel):
     def latchkey_calls(self) -> list[str]:
         path = self.root / "latchkey.log"
         return path.read_text().splitlines() if path.is_file() else []
+
+    def plugins_loaded_by(self, invocation_prefix: str) -> list[list[str]]:
+        """The plugins each latchkey invocation starting with ``invocation_prefix`` found where it ran, in order."""
+        path = self.root / "latchkey-plugins.log"
+        plugins_by_invocation = path.read_text().splitlines() if path.is_file() else []
+        return [
+            plugins.split()
+            for invocation, plugins in zip(self.latchkey_calls(), plugins_by_invocation, strict=True)
+            if invocation.startswith(invocation_prefix)
+        ]
 
     def docker_calls(self) -> list[str]:
         path = self.root / "docker.log"
@@ -464,7 +527,9 @@ class FakeVps(MutableModel):
         extract_deb_data(content, self.root)
         version = read_deb_control_field(content, "Version")
         self.installed_versions.append(version)
-        return CommandResult(stdout=f"Unpacking mngr-latchkey ({version}) ...\n", stderr="", success=True)
+        return CommandResult(
+            stdout=f"Unpacking mngr-latchkey ({version}) ...\n", stderr=self.install_stderr, success=True
+        )
 
     def _write_fake_binaries(self) -> None:
         bin_dir = self.root / _FAKE_BIN_DIR_NAME
@@ -476,8 +541,13 @@ class FakeVps(MutableModel):
             ("docker", _FAKE_DOCKER_SOURCE),
             ("ssh-keygen", _FAKE_SSH_KEYGEN_SOURCE),
             ("supervisorctl", _FAKE_SUPERVISORCTL_SOURCE),
-            ("curl", _FAKE_CURL_SOURCE),
+            ("curl", _FAKE_CURL_SOURCE.replace("SERVED_DOWNLOADS_DIR_NAME", _SERVED_DOWNLOADS_DIR_NAME)),
             ("stat", _FAKE_STAT_SOURCE.replace("REAL_STAT", real_stat)),
+            ("node", _FAKE_NODE_SOURCE.replace("LATCHKEY_VERSION", LATCHKEY_VERSION)),
+            ("npm", _FAKE_NPM_SOURCE),
+            ("systemctl", _FAKE_SYSTEMCTL_SOURCE),
+            ("sshd", _FAKE_SSHD_SOURCE),
+            ("uname", _FAKE_UNAME_SOURCE.replace("MACHINE_ARCH", _FAKE_MACHINE_ARCH)),
         ):
             script = bin_dir / name
             script.write_text(source)
@@ -672,10 +742,19 @@ _FAKE_LATCHKEY_SOURCE = (
     "directory = os.environ['LATCHKEY_DIRECTORY']\n"
     "argv = sys.argv[1:]\n"
     # On the fake machine every invocation is logged, so a test can see what
-    # the scripts told the CLI to do.
+    # the scripts told the CLI to do, and with it the plugins the real CLI
+    # would have loaded: the directories under the ``plugins`` of the directory
+    # it runs against, links followed and dot entries skipped.
     "if 'FAKE_VPS_ROOT' in os.environ:\n"
     "    with open(os.path.join(os.environ['FAKE_VPS_ROOT'], 'latchkey.log'), 'a') as log:\n"
     "        log.write(' '.join(argv) + '\\n')\n"
+    "    plugins_dir = os.path.join(directory, 'plugins')\n"
+    "    plugins = sorted(\n"
+    "        name for name in (os.listdir(plugins_dir) if os.path.isdir(plugins_dir) else [])\n"
+    "        if not name.startswith('.') and os.path.isdir(os.path.join(plugins_dir, name))\n"
+    "    )\n"
+    "    with open(os.path.join(os.environ['FAKE_VPS_ROOT'], 'latchkey-plugins.log'), 'a') as log:\n"
+    "        log.write(' '.join(plugins) + '\\n')\n"
     "data = load(directory)\n"
     "if argv[:2] == ['auth', 'list']:\n"
     "    require_key(data)\n"
@@ -807,14 +886,71 @@ _FAKE_SUPERVISORCTL_SOURCE = (
     "fi\n"
 )
 
-# Records every call (one line of its arguments) and prints the status a test
-# chose (``answer_curl_with``), 204 by default, as the real one does for
-# ``-w '%{http_code}'``; what the gateway would have answered is never run.
+# Records every call (one line of its arguments). A call that asks for a status
+# (``-w '%{http_code}'``) prints the one a test chose (``answer_curl_with``),
+# 204 by default; what the gateway would have answered is never run. Any other
+# call that names an output file is a download: it writes what a test serves at
+# the URL (``serve_download``), and fails the way the real one does on a 404
+# when nothing is. A test can make the downloads wait for one another
+# (``hold_downloads_until_in_flight``), which only downloads running at the
+# same time survive.
 _FAKE_CURL_SOURCE = (
     "#!/bin/sh\n"
     'printf \'%s\\n\' "$*" >> "$FAKE_VPS_ROOT/curl.log"\n'
-    'if [ -f "$FAKE_VPS_ROOT/curl.status" ]; then cat "$FAKE_VPS_ROOT/curl.status"; else printf 204; fi\n'
+    "_output=''\n"
+    "_previous=''\n"
+    "_is_status_asked=0\n"
+    'for _argument in "$@"; do\n'
+    '  if [ "$_previous" = -o ]; then _output="$_argument"; fi\n'
+    '  if [ "$_argument" = -w ]; then _is_status_asked=1; fi\n'
+    '  _previous="$_argument"\n'
+    "done\n"
+    'if [ -z "$_output" ] || [ "$_is_status_asked" = 1 ]; then\n'
+    '  if [ -f "$FAKE_VPS_ROOT/curl.status" ]; then cat "$FAKE_VPS_ROOT/curl.status"; else printf 204; fi\n'
+    "  exit 0\n"
+    "fi\n"
+    'if [ -f "$FAKE_VPS_ROOT/curl.concurrent-downloads" ]; then\n'
+    '  mkdir -p "$FAKE_VPS_ROOT/curl-in-flight"\n'
+    '  : > "$FAKE_VPS_ROOT/curl-in-flight/$$"\n'
+    "  _polls=0\n"
+    '  while [ "$(ls "$FAKE_VPS_ROOT/curl-in-flight" | wc -l)" -lt "$(cat "$FAKE_VPS_ROOT/curl.concurrent-downloads")" ]; do\n'
+    "    _polls=$((_polls + 1))\n"
+    '    if [ "$_polls" -gt 200 ]; then\n'
+    "      echo 'curl: (28) the other downloads never started' >&2\n"
+    "      exit 28\n"
+    "    fi\n"
+    "    sleep 0.05\n"
+    "  done\n"
+    "fi\n"
+    # The URL is the last argument, which the loop above left in hand.
+    "_served=\"$FAKE_VPS_ROOT/SERVED_DOWNLOADS_DIR_NAME/$(printf '%s' \"$_argument\" | tr -c 'A-Za-z0-9._-' '_')\"\n"
+    'if [ ! -f "$_served" ]; then\n'
+    "  echo 'curl: (22) The requested URL returned error: 404' >&2\n"
+    "  exit 22\n"
+    "fi\n"
+    'cp "$_served" "$_output"\n'
 )
+
+# A machine that already has Node.js and the pinned latchkey CLI: the two
+# probes the postinst makes are answered, and nothing else is run.
+_FAKE_NODE_SOURCE = '#!/bin/sh\nif [ "$1" = --version ]; then\n  echo v24.0.0\nelse\n  echo LATCHKEY_VERSION\nfi\n'
+
+_FAKE_NPM_SOURCE = (
+    "#!/bin/sh\n"
+    'printf \'%s\\n\' "$*" >> "$FAKE_VPS_ROOT/npm.log"\n'
+    'if [ "$1" = root ]; then\n'
+    '  echo "$FAKE_VPS_ROOT/npm-global"\n'
+    "fi\n"
+)
+
+# Every unit is reported inactive, so nothing is reloaded; everything else succeeds.
+_FAKE_SYSTEMCTL_SOURCE = (
+    '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$FAKE_VPS_ROOT/systemctl.log"\nif [ "$1" = is-active ]; then\n  exit 3\nfi\n'
+)
+
+_FAKE_SSHD_SOURCE = "#!/bin/sh\n"
+
+_FAKE_UNAME_SOURCE = "#!/bin/sh\necho MACHINE_ARCH\n"
 
 # Only the one probe the package's scripts make is faked: the filesystem type
 # of a directory, answered from a file a test can change.

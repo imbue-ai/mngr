@@ -84,6 +84,11 @@ if lk_doc_has credential_bundle; then
   mkdir -p "$_lk_bundle"
   cp "$(lk_doc_file credential_bundle)" "$_lk_bundle/{{ credentials_store_filename }}"
   cp "$(lk_doc_file credential_data_format_version)" "$_lk_bundle/{{ data_format_version_filename }}"
+  # Latchkey reads a credential whose type a plugin defines only with that
+  # plugin loaded, and loads plugins from the directory it runs against.
+  if [ -d "$LK_PLUGINS_DIR" ]; then
+    ln -s "$LK_PLUGINS_DIR" "$_lk_bundle/{{ plugins_dir_name }}"
+  fi
   set -- --services "$(lk_doc_get credential_service)"
   if lk_doc_has credential_account; then
     set -- "$@" --account "$(lk_doc_get credential_account)"

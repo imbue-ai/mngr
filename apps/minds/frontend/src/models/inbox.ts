@@ -90,6 +90,8 @@ export interface PredefinedPermissionDetail {
   display_name: string;
   /** Catalog service whose brand mark leads the dialog; "" when it has none. */
   service_name: string;
+  /** True for a service a latchkey plugin adds; the dialog warns about it. */
+  is_experimental: boolean;
   /** Every offered permission, grouped: full access first, the wildcard last. */
   permission_groups: UiPermissionGrantGroup[];
   /** What any grant carries without being a row (the protocol handshake);

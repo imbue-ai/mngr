@@ -384,6 +384,21 @@ def read_deb_control_field(content: bytes, field_name: str) -> str:
     raise AssertionError(f"no {field_name} field in the control file:\n{control}")
 
 
+def make_github_archive(files: Mapping[str, str], top_level: str | None) -> bytes:
+    """A tarball shaped like the one GitHub serves for a commit: every one of ``files`` under one ``top_level/``.
+
+    ``None`` puts the files at the top instead, where no such tarball has them.
+    """
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for path, content in files.items():
+            data = content.encode("utf-8")
+            info = tarfile.TarInfo(path if top_level is None else f"{top_level}/{path}")
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
 # The desktop a test's migrations run as: what grants from before grants named a
 # desktop are attributed to.
 MIGRATING_DEVICE_ID: Final[DesktopDeviceId] = DesktopDeviceId("host-migrating-desktop-5170")

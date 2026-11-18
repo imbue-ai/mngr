@@ -21,6 +21,7 @@ import {
   isPermissionRowDisabled,
   submittedPermissions,
 } from "../../../models/inbox";
+import { renderExperimentalConnectorRisk } from "../../components/ExperimentalConnectorRisk";
 import { Select } from "../../components/FormControls";
 import { Icon16 } from "../../components/Icon";
 import { renderImplicitPermissionsHint } from "../../components/ImplicitPermissionsHint";
@@ -330,6 +331,9 @@ export function PredefinedPermissionDetailView(): m.Component<PredefinedPermissi
           "brand",
           m(Icon16, { name: "key", extra: "text-primary" }),
         ),
+        headerNotice: detail.is_experimental
+          ? renderExperimentalConnectorRisk("This is an experimental connector. Use at your own risk.")
+          : null,
         rationale: detail.rationale,
         account: accountPicker(model, detail),
         credentialEntrySwitch: credentialEntrySwitch(model),

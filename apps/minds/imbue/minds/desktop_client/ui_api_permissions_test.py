@@ -55,6 +55,7 @@ from imbue.mngr_latchkey.custom_services import custom_service_name
 from imbue.mngr_latchkey.desktop_egress import build_desktop_egress_grant
 from imbue.mngr_latchkey.desktop_egress import list_desktop_egress_grants
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
+from imbue.mngr_latchkey.service_plugins import KNOWN_SERVICE_PLUGIN_SERVICE_NAMES
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
 from imbue.mngr_latchkey.store import load_permissions
@@ -275,8 +276,16 @@ def test_workspace_permissions_returns_the_full_toggle_tree(tmp_path: Path) -> N
         "slack-chat-write": False,
     }
     # GitHub has no signed-in account and no grants, so it is offered rather
-    # than rendered as a connection.
-    assert [entry["service_name"] for entry in payload["available_connections"]] == ["aws", "github"]
+    # than rendered as a connection; so are the services of the pinned latchkey
+    # plugins, which the pane sets apart as experimental.
+    assert [entry["service_name"] for entry in payload["available_connections"] if not entry["is_experimental"]] == [
+        "aws",
+        "github",
+    ]
+    assert {
+        entry["service_name"] for entry in payload["available_connections"] if entry["is_experimental"]
+    } == KNOWN_SERVICE_PLUGIN_SERVICE_NAMES
+    assert connection["is_experimental"] is False
     assert payload["waiting_requests"] == []
 
 
@@ -764,7 +773,9 @@ def test_connect_credentials_stores_them_and_returns_the_new_connection(tmp_path
     assert aws["account"] == ""
     assert aws["is_connected"] is True
     assert aws["granted_count"] == 0
-    assert [entry["service_name"] for entry in payload["available_connections"]] == ["github"]
+    assert [entry["service_name"] for entry in payload["available_connections"] if not entry["is_experimental"]] == [
+        "github"
+    ]
 
 
 def test_connect_credentials_reports_a_refused_credential_as_422(tmp_path: Path) -> None:

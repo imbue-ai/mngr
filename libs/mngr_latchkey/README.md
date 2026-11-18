@@ -512,9 +512,10 @@ the `.deb`, run a short bootstrap (apt dependencies, Node.js from NodeSource,
 has no key recorded for the machine, the read also brings the machine's
 credential store back, still encrypted, so that if the machine knows no key
 either, the desktop's key can be tried against it here before the store is
-given up on. The package's `postinst` installs the pinned latchkey CLI and the curl
+given up on. The package's `postinst` installs the pinned latchkey CLI, the curl
 shims from `imbue-ai/latchkey-curl-shims` (both version-gated, the shims
-verified against sha256 sums pinned in the package), loads the nftables policy
+verified against sha256 sums pinned in the package) and the pinned [latchkey
+plugins](#latchkey-plugins) (each gated on the commit stamped inside it), loads the nftables policy
 (and enables the unit that re-loads it at boot) before either bridge-bound
 service can start, scrubs what the ad-hoc provisioning left on a machine it
 set up, and registers the supervisord programs. The package is installed before the owner-exec
@@ -605,6 +606,7 @@ what it says is about to be shown or acted on, never trusted between times:
     machine_gateway_password      the machine's own password      (owned)
     config.json                   the desktop's settings, with the machine's
                                   own custom services             (owned)
+    plugins/                   -> the desktop's latchkey plugins
     permissions.json           -> latchkey_permissions.json
     browser_state.json.enc     -> the desktop's browser state
     encryption_key             -> the desktop's encryption key
@@ -737,6 +739,78 @@ The one write `refresh` makes after adopting is the migration: a machine whose
 policy is in a format older than this build writes has it brought up to date here
 and handed back in a second command (see [Data-format
 changes](#data-format-changes)).
+
+## Latchkey plugins
+
+Latchkey only builds in services that talk to a documented, public API. A
+service that rides an undocumented one ships as a
+[plugin](https://github.com/imbue-ai/latchkey/blob/main/docs/plugins.md): an ES
+module package in `<LATCHKEY_DIRECTORY>/plugins/<name>`, which latchkey loads
+as it starts and from then on treats like a built-in service. A plugin runs
+inside latchkey with access to every stored credential, so the only plugins
+ever installed are the ones this build pins, each at one commit of its
+repository: `KNOWN_SERVICE_PLUGINS` in `imbue.mngr_latchkey.service_plugins`
+(Garmin Connect, Spotify and Strava). Imbue Studio shows their services as
+experimental connectors. Three properties are worth knowing:
+
+- **Every machine has the same plugins.** `mngr latchkey forward` installs
+  them into its latchkey directory before it starts the gateway
+  (`install_known_service_plugins`), and a remote host's `mngr-latchkey`
+  package installs them into the machine's `~/.latchkey/plugins` from its
+  `postinst`, rendered from the same pins. Each install is the tarball GitHub
+  serves for the pinned commit, unpacked beside its destination under a name
+  latchkey skips and renamed into place, with the commit written to
+  `.mngr-latchkey-commit` inside the plugin. A plugin whose stamp names the
+  pinned commit costs nothing on the next start, so nothing is downloaded in
+  the steady state; a symlink in a plugin's place is left alone, as a checkout
+  somebody put there; anything else under the name is replaced. Machine
+  stores share this computer's
+  `plugins` directory by symlink (see [Machine stores](#machine-stores)), and
+  the scratch directory a foreign store is re-encrypted in links it as well,
+  because latchkey reads a credential whose type a plugin defines only with
+  that plugin loaded.
+
+- **A plugin is optional, and never holds a gateway up for long.** Latchkey
+  serves every other service without it, so on both sides the plugins are
+  downloaded concurrently, each download is bounded, and a plugin that cannot
+  be downloaded or unpacked (GitHub unreachable, its repository gone) is
+  skipped with a warning, leaving whatever copy is installed in place. Here
+  the installs run on a thread each and the gateway starts once the slowest
+  is over, without the services of a skipped plugin until the next start
+  installs it. On a remote host the `postinst` starts the downloads in the
+  background before anything else it installs and waits for them only where
+  it is about to start the gateway, so they overlap the rest of the install;
+  a skipped plugin does not fail the install, is reported on the `postinst`'s
+  stderr, which provisioning logs here as a warning, and is tried again by the
+  host's next provisioning pass.
+
+- **A gateway loads plugins only as it starts.** The install runs before the
+  gateway is spawned, here and on the machine alike (the `postinst` restarts
+  the machine's gateway when it changed a plugin), so a running gateway never
+  needs to be told.
+
+**To move a pin**, set the plugin's `commit` in `KNOWN_SERVICE_PLUGINS` to the
+new commit of its `main` (`git ls-remote https://github.com/<repository>
+HEAD`) and check that the plugin's `latchkeyVersion` range admits the latchkey
+this build pins (`LATCHKEY_MIN_VERSION` and `remote/package.py`'s
+`LATCHKEY_VERSION`): latchkey refuses to start with a plugin it cannot load,
+which would take every gateway down. Every computer installs the new commit on
+its next start, and every remote host on its next provisioning pass (the
+package version changes with the pins). A computer does so only while the
+latchkey it runs still loads the commit it already holds: `latchkey --version`
+runs before the install (`Latchkey.initialize`) and loads every plugin, so a
+latchkey release that refuses an installed commit stops there, and moving the
+pin does not reach that computer.
+
+A plugin's service has no Detent schemas, so the catalog gives each one a
+single scope pinned to the hosts its API lives on, with the catch-all as its
+only permission -- the shape a custom service gets (`custom_services.py`).
+Every catalog with a `latchkey_directory` names them (`ServicesCatalog`, and
+the `services.json` materialized for the gateway).
+
+`latchkey auth re-encrypt`, which every credential transfer between this
+computer and a machine goes through, carries the credential types a plugin
+defines only from latchkey 3.22.1, which `LATCHKEY_MIN_VERSION` is above.
 
 ## Permissions config
 
@@ -1403,7 +1477,8 @@ or approval from the newer computer registers it again). The desktop gateway's
 services (`core.custom_service_registration_entries_of_every_machine`), since
 the requests a remote machine's gateway forwards here name that machine's
 services; `ServicesCatalog(is_including_every_machine=True)` reads the same
-union, while a catalog over one store names that machine's alone.
+union, while a catalog over one store names that machine's alone; either one
+also names the services of the pinned [latchkey plugins](#latchkey-plugins).
 
 A typical end-to-end shell flow:
 

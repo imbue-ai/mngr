@@ -3,6 +3,10 @@ import { describe, expect, it } from "vitest";
 import { InboxModel } from "../../../models/inbox";
 import type { PredefinedPermissionDetail } from "../../../models/inbox";
 import { DESKTOPS } from "../../../models/workspacePermissions.testing";
+import {
+  EXPERIMENTAL_CONNECTOR_RISK_ATTR,
+  EXPERIMENTAL_CONNECTOR_RISK_DETAIL,
+} from "../../components/ExperimentalConnectorRisk";
 import { Select } from "../../components/FormControls";
 import { IMPLICIT_PERMISSIONS_HINT_ATTR } from "../../components/ImplicitPermissionsHint";
 import { PredefinedPermissionDetailView } from "./PredefinedPermissionDetail";
@@ -18,6 +22,7 @@ const DETAIL: PredefinedPermissionDetail = {
   scope: "slack-api",
   display_name: "Slack",
   service_name: "slack",
+  is_experimental: false,
   permission_groups: [
     {
       heading: "Full access",
@@ -97,6 +102,7 @@ const SCHEMA_NAMES = DETAIL.permission_groups.flatMap((group) =>
 interface ShellAttrs {
   headerLabel: string;
   mark: m.Children;
+  headerNotice: m.Children;
   account: m.Children;
   credentialEntrySwitch?: m.Children;
   footer?: m.Children;
@@ -240,6 +246,22 @@ describe("PredefinedPermissionDetailView summary", () => {
 
     expect(text).toContain("Everything (unrestricted)");
     expect(text).not.toContain("Manage chat");
+  });
+});
+
+describe("PredefinedPermissionDetailView experimental connector", () => {
+  it("warns under the header that the service is used at one's own risk, with why behind the tooltip", () => {
+    const detail = { ...DETAIL, service_name: "strava", display_name: "Strava", is_experimental: true };
+    const notice = renderShell(makeModel(detail), detail).headerNotice;
+
+    const [risk] = withAttr(notice, EXPERIMENTAL_CONNECTOR_RISK_ATTR);
+    expect(collectText(risk)).toEqual(["This is an experimental connector. Use at your own risk."]);
+    expect(attrsOf(risk)["data-tooltip"]).toBe(EXPERIMENTAL_CONNECTOR_RISK_DETAIL);
+    expect(EXPERIMENTAL_CONNECTOR_RISK_DETAIL).toContain("suspend your account");
+  });
+
+  it("says nothing of the kind for a built-in service", () => {
+    expect(renderShell(makeModel(), DETAIL).headerNotice).toBeNull();
   });
 });
 

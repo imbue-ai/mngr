@@ -150,6 +150,27 @@ def test_a_connect_merges_without_touching_the_machines_policy(tmp_path: Path) -
     assert vps.machine_permissions() == '{"rules": []}'
 
 
+def test_a_merge_reads_the_bundle_with_the_machines_plugins_loaded(tmp_path: Path) -> None:
+    """A credential whose type a plugin defines is readable only beside that plugin, and a bundle arrives with none."""
+    vps = as_vps(fake_vps(tmp_path))
+    vps.run_under_key(MACHINE_KEY)
+    (vps.plugins_dir / "strava").mkdir(parents=True)
+
+    _apply(
+        vps,
+        RemoteStateUpdate(
+            encryption_key=SecretStr(MACHINE_KEY),
+            credential_merge=_merge(store_document({"slack": ["a@example.com"]}, MACHINE_KEY), "a@example.com"),
+        ),
+        failure_description="connect",
+    )
+
+    assert vps.plugins_loaded_by("auth re-encrypt") == [["strava"]]
+    assert vps.machine_accounts() == {"slack": ["a@example.com"]}
+    # The bundle is dropped with its link to the plugins, which stay where they are.
+    assert (vps.plugins_dir / "strava").is_dir()
+
+
 def test_a_disconnect_takes_one_account_away_and_leaves_its_siblings(tmp_path: Path) -> None:
     """Signing out of one account of a service must not sign the machine out of the others."""
     vps = as_vps(

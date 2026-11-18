@@ -37,6 +37,7 @@ const PREDEFINED_DETAIL: PredefinedPermissionDetail = {
   scope: "slack-api",
   display_name: "Slack",
   service_name: "slack",
+  is_experimental: false,
   permission_groups: [
     {
       heading: "Full access",

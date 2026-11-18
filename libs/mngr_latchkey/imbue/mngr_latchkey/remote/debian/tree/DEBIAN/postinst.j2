@@ -2,8 +2,11 @@
 # Runs after every install of the package (dpkg -i re-runs it for an already
 # installed version too, which is how a provisioning pass repairs a machine).
 # Idempotent: each component is installed only when missing or -- for the
-# latchkey CLI and the curl shims, which live under version-less names -- when
-# the recorded version differs from the one this build pins.
+# latchkey CLI, the curl shims and the latchkey plugins, which live under
+# names that do not carry their version -- when the recorded version (for a
+# plugin, the commit stamped inside it) differs from the one this build pins.
+# Every component but the plugins is required, and fails the install when it
+# cannot be put in place; a plugin that cannot be is reported and skipped.
 #
 # apt is never run here: dpkg holds its lock while this runs, so the Debian
 # dependencies and Node.js are put in place by the bootstrap script that
@@ -16,6 +19,40 @@ case "${1:-}" in
 esac
 
 . '{{ layout.install_dir }}/functions'
+
+# Scratch space for every download below. However the script ends, it is gone,
+# and so is any plugin download still running in the background: left behind,
+# one would hold this script's output open until it finished.
+_lk_tmp="$(mktemp -d)"
+_lk_cleanup() {
+  for _lk_pid_file in "$_lk_tmp"/*.pid; do
+    if [ -f "$_lk_pid_file" ]; then
+      kill "$(cat "$_lk_pid_file")" 2>/dev/null || true
+    fi
+  done
+  rm -rf "$_lk_tmp"
+}
+trap _lk_cleanup EXIT
+
+# The latchkey plugins this build pins, each the tarball of its repository at
+# one commit, gated on the commit stamped inside the installed copy. They are
+# downloaded in the background, all at once and alongside everything installed
+# below, so they add nothing to the install but what the slowest of them takes
+# beyond it; each download is bounded, so an unreachable GitHub cannot hold the
+# install up for long. They are waited for, and put in place, only where the
+# gateway is about to be started: the last step, well after the latchkey CLI
+# that loads them is installed.
+_lk_start_plugin_download() {
+  _lk_plugin_dir="$LK_PLUGINS_DIR/$1"
+  if [ -L "$_lk_plugin_dir" ] || [ "$(cat "$_lk_plugin_dir/{{ plugin_commit_stamp_filename }}" 2>/dev/null)" = "$3" ]; then
+    return 0
+  fi
+  curl -fsSL --connect-timeout {{ plugin_download_connect_timeout_seconds }} --max-time {{ plugin_download_attempt_timeout_seconds }} --retry 2 --retry-delay 2 --retry-max-time {{ plugin_download_retry_window_seconds }} -o "${_lk_tmp}/$1.tar.gz" "$2" &
+  printf '%s\n' "$!" > "${_lk_tmp}/$1.pid"
+}
+{%- for plugin in service_plugins %}
+_lk_start_plugin_download '{{ plugin.name }}' '{{ plugin.archive_url }}' '{{ plugin.commit }}'
+{%- endfor %}
 
 # The curl router and the Chrome-impersonating curl it fronts, fetched from
 # the latchkey-curl-shims release: the statically linked musl build, so it
@@ -35,8 +72,6 @@ _lk_curl_want="{{ curl_shims_version }} ${_lk_triple}"
 if [ ! -x '{{ curl_router_path }}' ] || [ "$(cat '{{ curl_version_stamp_path }}' 2>/dev/null)" != "$_lk_curl_want" ]; then
   _lk_tarball="latchkey-curl-shims-${_lk_triple}.tar.gz"
   _lk_url="https://github.com/{{ curl_shims_repo }}/releases/download/{{ curl_shims_version }}/${_lk_tarball}"
-  _lk_tmp="$(mktemp -d)"
-  trap 'rm -rf "$_lk_tmp"' EXIT
   curl -fsSL --retry 3 --retry-delay 2 -o "${_lk_tmp}/${_lk_tarball}" "$_lk_url"
   (cd "${_lk_tmp}" && echo "${_lk_sha256}  ${_lk_tarball}" | sha256sum -c - >/dev/null)
   tar -xzf "${_lk_tmp}/${_lk_tarball}" -C "${_lk_tmp}" --strip-components=1
@@ -115,6 +150,57 @@ for _lk_sshd_unit in ssh sshd; do
     systemctl reload "$_lk_sshd_unit"
   fi
 done
+
+# The plugins whose download was started at the top, each put in place once
+# its download is over, right before the gateway that loads them is started
+# below. A plugin is optional -- latchkey serves every other
+# service without it -- so one whose download failed (GitHub unreachable, the
+# repository gone) or whose tarball does not unpack is reported and skipped,
+# leaving whatever copy is installed where it is, for a later install to try
+# again. Unpacked under a name latchkey skips and renamed into place, and the
+# copy it replaces renamed out under such a name before it is deleted, so a
+# gateway supervisord starts meanwhile never loads a half-written or
+# half-removed plugin; dpkg runs one postinst at a time, so both names are
+# fixed and a pass that failed mid-way is cleaned up by the next.
+_lk_plugin_skipped() {
+  printf '%s%s\n' {{ plugin_skipped_message_prefix | shquote }} "$*" >&2
+}
+_lk_install_plugin() {
+  _lk_plugin_pid_file="${_lk_tmp}/$1.pid"
+  if [ ! -f "$_lk_plugin_pid_file" ]; then
+    return 0
+  fi
+  _lk_plugin_download_status=0
+  wait "$(cat "$_lk_plugin_pid_file")" || _lk_plugin_download_status=$?
+  rm -f "$_lk_plugin_pid_file"
+  if [ "$_lk_plugin_download_status" -ne 0 ]; then
+    _lk_plugin_skipped "$1: its download failed (curl exit status $_lk_plugin_download_status)"
+    return 0
+  fi
+  # On a machine no apply-state pass has reached yet this also creates the
+  # latchkey directory itself, owner-only like apply-state would.
+  (umask 077 && mkdir -p "$LK_PLUGINS_DIR")
+  chmod 700 "$LK_PLUGINS_DIR"
+  _lk_plugin_staging="$LK_PLUGINS_DIR/.$1.installing"
+  rm -rf "$_lk_plugin_staging"
+  mkdir "$_lk_plugin_staging"
+  if ! tar -xzf "${_lk_tmp}/$1.tar.gz" -C "$_lk_plugin_staging" --strip-components=1; then
+    rm -rf "$_lk_plugin_staging"
+    _lk_plugin_skipped "$1: its downloaded archive does not unpack"
+    return 0
+  fi
+  printf '%s\n' "$2" > "$_lk_plugin_staging/{{ plugin_commit_stamp_filename }}"
+  _lk_plugin_dir="$LK_PLUGINS_DIR/$1"
+  _lk_plugin_doomed="$LK_PLUGINS_DIR/.$1.removing"
+  rm -rf "$_lk_plugin_doomed"
+  [ ! -e "$_lk_plugin_dir" ] || mv "$_lk_plugin_dir" "$_lk_plugin_doomed"
+  rm -rf "$_lk_plugin_doomed"
+  mv "$_lk_plugin_staging" "$_lk_plugin_dir"
+  _lk_gateway_needs_restart=1
+}
+{%- for plugin in service_plugins %}
+_lk_install_plugin '{{ plugin.name }}' '{{ plugin.commit }}'
+{%- endfor %}
 
 # Register (or re-register) the supervisord programs.
 supervisorctl reread

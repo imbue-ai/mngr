@@ -126,6 +126,7 @@ from imbue.mngr_latchkey.remote.package import DEFAULT_REMOTE_PACKAGE_LAYOUT as 
 from imbue.mngr_latchkey.remote.package import GATEWAY_PROGRAM_NAME as GATEWAY_PROGRAM_NAME
 from imbue.mngr_latchkey.remote.package import LATCHKEY_VERSION as LATCHKEY_VERSION
 from imbue.mngr_latchkey.remote.package import OUTER_PORT as OUTER_PORT
+from imbue.mngr_latchkey.remote.package import PLUGIN_SKIPPED_MESSAGE_PREFIX
 from imbue.mngr_latchkey.remote.package import REMOTE_GATEWAY_LOG_FILENAME as REMOTE_GATEWAY_LOG_FILENAME
 from imbue.mngr_latchkey.remote.package import REMOTE_TUNNEL_LOG_FILENAME as REMOTE_TUNNEL_LOG_FILENAME
 from imbue.mngr_latchkey.remote.package import RemotePackageArtifact
@@ -337,8 +338,10 @@ def _install_remote_package(
     unfinished and re-applies the bridge-services firewall (a machine the
     policy cannot be loaded on fails the install, so nothing is started
     unfenced). The read that follows is what makes the install verifiable: it
-    runs the package's own command. Raises :class:`RemoteGatewayError` if the
-    install fails.
+    runs the package's own command. A latchkey plugin the ``postinst`` could not
+    install is no failure of the install -- the machine serves every other
+    service without it -- so it is logged here as a warning instead. Raises
+    :class:`RemoteGatewayError` if the install fails.
     """
     host_name = host.get_name()
     artifact_path = context.layout.artifact_dir / artifact.filename
@@ -358,12 +361,29 @@ def _install_remote_package(
                 artifact.version, host_name, result.stderr.strip() or result.stdout.strip()
             )
         )
+    for skipped_plugin in _skipped_plugin_reports(result.stderr):
+        logger.warning(
+            "VPS {} runs without latchkey plugin {}; its services are unavailable there until a later "
+            "provisioning pass installs it",
+            host_name,
+            skipped_plugin,
+        )
     if elapsed_seconds > _SLOW_INSTALL_WARNING_THRESHOLD_SECONDS:
         logger.warning(
             "Installing the latchkey gateway package on VPS {} took {:.0f}s",
             host_name,
             elapsed_seconds,
         )
+
+
+@pure
+def _skipped_plugin_reports(install_stderr: str) -> tuple[str, ...]:
+    """What the package's ``postinst`` said of each latchkey plugin it skipped: the plugin's name and why."""
+    return tuple(
+        line.removeprefix(PLUGIN_SKIPPED_MESSAGE_PREFIX)
+        for line in install_stderr.splitlines()
+        if line.startswith(PLUGIN_SKIPPED_MESSAGE_PREFIX)
+    )
 
 
 def _resolve_bridge_listen_host(host: OuterHostInterface) -> str:

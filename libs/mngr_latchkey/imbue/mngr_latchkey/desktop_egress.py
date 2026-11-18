@@ -51,8 +51,8 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr_latchkey.account_scopes import ACCOUNT_METADATA_KEY
 from imbue.mngr_latchkey.account_scopes import SCHEMA_REFERENCE_PREFIX
 from imbue.mngr_latchkey.account_scopes import custom_metadata_const_gate
+from imbue.mngr_latchkey.account_scopes import is_scope_defined_by_its_catalog_entry
 from imbue.mngr_latchkey.account_scopes import referenced_schema_name
-from imbue.mngr_latchkey.custom_services import is_custom_service_name
 from imbue.mngr_latchkey.device_metadata import DEVICE_ID_METADATA_KEY
 from imbue.mngr_latchkey.devices import DesktopDeviceId
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
@@ -240,8 +240,9 @@ def build_desktop_egress_grant(
     scope: str,
     device_id: str,
     # The definition of ``scope`` itself. ``None`` leaves the reference to
-    # resolve as a detent builtin; a custom service's scope is not one, so it
-    # is required for those (read it off the catalog entry's ``scope_schema``).
+    # resolve as a detent builtin; the scope of a custom service or of a
+    # latchkey plugin's service is not one, so it is required for those (read
+    # it off the catalog entry's ``scope_schema``).
     base_scope_schema: Mapping[str, JsonValue] | None,
 ) -> tuple[str, tuple[str, ...], dict[str, JsonValue]]:
     """Assemble everything needed to write one desktop egress grant.
@@ -250,11 +251,11 @@ def build_desktop_egress_grant(
     :func:`~imbue.mngr_latchkey.account_scopes.build_account_grant` returns, to
     hand to the gateway's ``permissions`` extension.
     """
-    if base_scope_schema is None and is_custom_service_name(scope):
+    if base_scope_schema is None and is_scope_defined_by_its_catalog_entry(scope):
         raise DesktopEgressError(
-            f"Refusing to build a desktop egress grant for custom scope {scope!r} without its scope schema: the "
-            "rule would reference a definition the target file need not contain, which fails every permission "
-            "check on that host. Pass the catalog entry's scope_schema.",
+            f"Refusing to build a desktop egress grant for scope {scope!r}, which Detent does not define, without "
+            "its scope schema: the rule would reference a definition the target file need not contain, which "
+            "fails every permission check on that host. Pass the catalog entry's scope_schema.",
         )
     rule_key = desktop_egress_scope_key(scope, device_id)
     schemas: dict[str, JsonValue] = {rule_key: build_desktop_egress_scope_schema(scope, device_id)}

@@ -108,6 +108,8 @@ The CC BY 4.0 set requires attribution wherever the app ships. That lives in
 | `vercel-mcp-on-dark.svg` | Vercel brand assets `vercel-triangle-white.svg` |
 | `webflow-mcp.svg` | simple-icons v13.21.0 (CC0-1.0) |
 | `wix-mcp.svg` | simple-icons v13.21.0 (CC0-1.0) |
+| `spotify.svg` | `logos:spotify-icon` |
+| `strava.svg` | `selfhst:strava` |
 
 The brand-kit files carry the vendor's artwork unaltered, with two mechanical
 normalizations so they behave like the rest of the set: fixed root
@@ -137,10 +139,11 @@ choice, not a monochrome treatment applied here.
 Drop `<service_id>.svg` in, using the vendor's published artwork. Add
 `<service_id>-on-dark.svg` only if the mark is illegible on black *and* the
 vendor publishes a white variant — do not make one by recoloring. A service
-with no file falls back to a plain glyph in the Permissions tab. Eleven catalog
+with no file falls back to a plain glyph in the Permissions tab. Twelve catalog
 services currently do: Any.do, Attio, beehiiv, Fathom, Gamma, Granola, invideo,
-Otter.ai and Readwise appear in no vetted icon set; Peloton only as a
-near-black silhouette with no published white variant, so it would vanish on
+Otter.ai and Readwise appear in no vetted icon set; Peloton and Garmin Connect
+only as a near-black silhouette (for Garmin, the wordmark) with no published
+white variant, so each would vanish on
 the dark theme; and Canva only in simple-icons releases before v16, which
 removed it because Canva's brand guidelines restrict the logo to authorised
 parties and the set never obtained permission, so the mark is not taken from

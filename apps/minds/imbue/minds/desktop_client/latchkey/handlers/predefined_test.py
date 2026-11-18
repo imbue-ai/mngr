@@ -295,11 +295,12 @@ def _detail_payload(
     *,
     permissions: tuple[str, ...] = (),
     account: str | None = None,
+    scope: str = "slack-api",
 ) -> UiPredefinedPermissionDetail:
-    """The dialog's detail payload for a slack-api request, with no workspace route to speak of."""
+    """The dialog's detail payload for a request under ``scope``, with no workspace route to speak of."""
     event = create_predefined_permission_request(
         agent_id=str(AgentId()),
-        scope="slack-api",
+        scope=scope,
         permissions=permissions,
         rationale="need to read a channel",
         account=account,
@@ -1985,6 +1986,15 @@ def test_build_request_detail_payload_mirrors_the_fragment_derivation(tmp_path: 
     assert payload.new_account_value
     account_values = [choice.value for choice in payload.account_choices]
     assert payload.selected_account_value in account_values
+
+
+def test_build_request_detail_payload_marks_only_a_pinned_plugins_service_experimental(tmp_path: Path) -> None:
+    handler = _build_handler(
+        tmp_path, credential_status="missing", services_catalog=ServicesCatalog(latchkey_directory=tmp_path)
+    )
+
+    assert _detail_payload(handler, scope="strava").is_experimental is True
+    assert _detail_payload(handler, scope="slack-api").is_experimental is False
 
 
 def test_build_request_detail_payload_groups_permissions_for_the_dialog(tmp_path: Path) -> None:

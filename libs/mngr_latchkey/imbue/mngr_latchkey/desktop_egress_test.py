@@ -92,9 +92,11 @@ def test_desktop_egress_grant_for_a_custom_scope_defines_the_scope_it_refers_to(
     }
 
 
-def test_desktop_egress_grant_for_a_custom_scope_without_its_schema_is_refused() -> None:
-    with pytest.raises(DesktopEgressError, match="custom_example_com"):
-        build_desktop_egress_grant("custom_example_com", _DEVICE_ID, None)
+@pytest.mark.parametrize("scope", ["custom_example_com", "strava"])
+def test_desktop_egress_grant_for_a_scope_detent_does_not_define_is_refused_without_its_schema(scope: str) -> None:
+    """A custom service's scope and a latchkey plugin service's exist only where a grant wrote their schema."""
+    with pytest.raises(DesktopEgressError, match=scope):
+        build_desktop_egress_grant(scope, _DEVICE_ID, None)
 
 
 def test_list_desktop_egress_grants_reports_built_grants_and_ignores_per_account_grants() -> None:

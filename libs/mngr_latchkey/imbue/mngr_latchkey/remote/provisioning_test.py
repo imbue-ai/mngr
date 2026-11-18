@@ -49,6 +49,7 @@ from imbue.mngr_latchkey.remote.mock_outer_host_test import fake_vps
 from imbue.mngr_latchkey.remote.package import CONTAINER_TUNNEL_KEY_FILENAME
 from imbue.mngr_latchkey.remote.package import GATEWAY_CONF_FILENAME
 from imbue.mngr_latchkey.remote.package import GATEWAY_PROGRAM_NAME
+from imbue.mngr_latchkey.remote.package import PLUGIN_SKIPPED_MESSAGE_PREFIX
 from imbue.mngr_latchkey.remote.package import REMOTE_EXTENSIONS_DIR_NAME
 from imbue.mngr_latchkey.remote.package import TUNNEL_PROGRAM_NAME
 from imbue.mngr_latchkey.remote.provisioning import _do_extra_hosts_resolve_outer_host
@@ -302,6 +303,24 @@ def test_provision_remote_gateway_raises_when_the_install_fails(tmp_path: Path) 
 
     # Nothing was read or applied on a machine the package did not land on.
     assert len(_latchkey_commands(as_vps(outer))) == 1
+
+
+def test_provision_remote_gateway_warns_of_a_plugin_the_install_skipped_and_carries_on(tmp_path: Path) -> None:
+    """A latchkey plugin the machine could not fetch is no failure of the pass: the gateway is wired without it."""
+    outer = fake_vps(tmp_path)
+    as_vps(outer).install_stderr = (
+        "curl: (22) The requested URL returned error: 404\n"
+        f"{PLUGIN_SKIPPED_MESSAGE_PREFIX}spotify: its download failed (curl exit status 22)\n"
+    )
+
+    with capture_loguru() as log:
+        _provision(outer, _latchkey_directory(tmp_path), HostId.generate())
+
+    assert (
+        "VPS vps-test runs without latchkey plugin spotify: its download failed (curl exit status 22); "
+        "its services are unavailable there until a later provisioning pass installs it"
+    ) in log.getvalue()
+    assert as_vps(outer).supervisorctl_calls() == [f"restart {GATEWAY_PROGRAM_NAME}"]
 
 
 def test_provision_remote_gateway_uses_generous_install_timeout(tmp_path: Path) -> None:

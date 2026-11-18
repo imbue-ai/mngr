@@ -18,7 +18,7 @@ text as shipped with the set is at
 
 Icons used, unmodified: `google-docs`, `google-sheets`, `google-slides`,
 `google-contacts`, `yelp`, `stripe`, `coolify`, `cal-com`, `fastmail`,
-`ticktick`, `trello`, `amazon-web-services-light`, `cal-com-light`,
+`strava`, `ticktick`, `trello`, `amazon-web-services-light`, `cal-com-light`,
 `github-light`, `linear-light`, `sentry-light`, `tailscale-light`,
 `umami-light`.
 
@@ -38,8 +38,8 @@ Icons used, unmodified: `airtable`, `asana-icon`, `atlassian`, `aws`,
 `google-maps`, `google-drive`, `google-gmail`, `hugging-face-icon`,
 `linear-icon`, `mailchimp-freddie`, `neon-icon`, `netlify-icon`,
 `notion-icon`, `openrouter-icon`, `paypal`, `posthog-icon`, `sentry-icon`,
-`slack-icon`, `supabase-icon`, `tailscale`, `telegram`, `todoist-icon`,
-`zoom-icon`.
+`slack-icon`, `spotify-icon`, `supabase-icon`, `tailscale`, `telegram`,
+`todoist-icon`, `zoom-icon`.
 
 ## simple-icons — CC0 1.0
 

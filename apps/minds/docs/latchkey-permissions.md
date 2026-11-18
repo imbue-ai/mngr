@@ -1272,9 +1272,10 @@ back through a request.
 The left nav has one entry per **connection** -- a (service, account) pair
 that either has stored credentials or still appears in the host's rules,
 so a grant left behind by a disconnected account is never invisible --
-plus **Add connection**, **Local files** (the `minds-file-server-*`
-shared-path grants) and **Other workspaces** (the `minds-workspaces-*`
-verbs). A "Waiting on you" strip leads the pane when this workspace's agents
+plus **Add connection** (which also holds the [experimental
+connectors](#experimental-connectors)), **Local files** (the
+`minds-file-server-*` shared-path grants) and **Other workspaces** (the
+`minds-workspaces-*` verbs). A "Waiting on you" strip leads the pane when this workspace's agents
 have pending requests; each row opens the review popup on that request.
 
 Three properties are worth knowing:
@@ -1343,6 +1344,47 @@ The pane loads independently of the panel's other tabs. A latchkey gateway
 that cannot be reached shows as "permissions can't be loaded" rather than
 an empty, misleading "nothing granted", and does not take the share panel
 or Workspace settings down with it.
+
+### Experimental connectors
+
+Latchkey only builds in services that talk to a documented, public API. A
+service reached through an undocumented one -- a website's own session, a
+mobile app's private endpoints -- ships as a [latchkey
+plugin](https://github.com/imbue-ai/latchkey/blob/main/docs/plugins.md)
+instead. Imbue Studio installs the plugins it pins (Garmin Connect, Spotify
+and Strava) everywhere its gateways run -- into this computer's latchkey
+directory as the app starts, and onto every remote workspace's machine as it is
+provisioned -- so every workspace sees the same set, and offers their services
+as **experimental connectors**: at the foot of Add connection, under their own
+heading and a brief "Use at your own risk" warning whose tooltip says why, each
+with a Connect button like any other service and the service's logo where one
+ships (Spotify and Strava; Garmin Connect falls back to the plain glyph). One is
+connected and granted the same way as a built-in service; its only permission
+is full access to the host its API lives on, as for a [custom
+service](#additional-custom-services). A connected one is listed in the left
+nav like any connection, and its panel heading carries an "Experimental"
+label. A permission request for one says "This is an experimental connector.
+Use at your own risk." under the dialog's header, with the same tooltip: the
+service can stop working without notice and, in the extreme case, might suspend
+the account.
+
+There is nothing to install or remove: which connectors exist is a property of
+the build. A plugin Imbue Studio does not pin is not offered.
+
+A plugin is downloaded from GitHub the first time a build that pins it starts
+(and a remote workspace's machine is provisioned). One that cannot be
+downloaded then -- no connection, its repository gone -- is skipped without
+holding anything else up: every other service works as usual, and the
+connector is still listed, but connecting it fails until a later start (for a
+remote workspace, a later provisioning of its machine) installs the plugin.
+
+Connecting an account of a connector's service for a remote workspace relies
+on latchkey's `auth re-encrypt`, which carries every credential between this
+computer and a remote machine, and which carries the credential types a plugin
+defines from latchkey 3.22.1 on. Imbue Studio bundles a newer release.
+
+The plugins themselves are described under "Latchkey plugins" in
+`libs/mngr_latchkey/README.md`.
 
 ### Proxy through my desktop
 

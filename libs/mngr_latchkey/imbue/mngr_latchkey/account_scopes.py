@@ -65,6 +65,7 @@ from pydantic import JsonValue
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr_latchkey.custom_services import is_custom_service_name
+from imbue.mngr_latchkey.service_plugins import is_known_plugin_service
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 
 # Separator between the base detent scope and the account in a generated rule
@@ -174,6 +175,17 @@ def build_account_scope_schema(scope: str, account: str) -> dict[str, JsonValue]
 
 
 @pure
+def is_scope_defined_by_its_catalog_entry(scope: str) -> bool:
+    """Whether ``scope`` is defined nowhere but on its service's catalog entry: a custom service's, or a latchkey plugin service's.
+
+    Either is named after its service. Neither Detent nor the baseline every
+    permissions file starts from defines it, so every grant naming it has to
+    carry the entry's ``scope_schema``.
+    """
+    return is_custom_service_name(scope) or is_known_plugin_service(scope)
+
+
+@pure
 def build_account_grant(
     scope: str,
     account: str,
@@ -190,18 +202,19 @@ def build_account_grant(
 
     ``base_scope_schema`` defines ``scope`` itself. Detent ships a definition
     for every scope this package used to grant, so the default of ``None``
-    leaves the ``$ref`` to resolve as a builtin. A custom service's scope is
-    not a builtin and exists only where some grant wrote it, so one is
-    required for those: without it the returned schemas reference a ``$def``
+    leaves the ``$ref`` to resolve as a builtin. The scope of a custom service
+    or of a latchkey plugin's service is not a builtin and exists only where
+    some grant wrote it (:func:`is_scope_defined_by_its_catalog_entry`), so one
+    is required for those: without it the returned schemas reference a ``$def``
     that the target file may not contain, and an unresolvable reference fails
     the *entire* permission check for that host, not just this rule. Read it
     off the catalog entry (:attr:`ServicePermissionInfo.scope_schema`).
     """
-    if base_scope_schema is None and is_custom_service_name(scope):
+    if base_scope_schema is None and is_scope_defined_by_its_catalog_entry(scope):
         raise LatchkeyAccountScopeError(
-            f"Refusing to build a grant for custom scope {scope!r} without its scope schema: the rule would "
-            "reference a definition the target file need not contain, which fails every permission check on "
-            "that host. Pass the catalog entry's scope_schema.",
+            f"Refusing to build a grant for scope {scope!r}, which Detent does not define, without its scope "
+            "schema: the rule would reference a definition the target file need not contain, which fails every "
+            "permission check on that host. Pass the catalog entry's scope_schema.",
         )
     rule_key = account_scope_key(scope, account)
     schemas: dict[str, JsonValue] = {rule_key: build_account_scope_schema(scope, account)}

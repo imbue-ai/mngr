@@ -46,6 +46,7 @@ from imbue.mngr_latchkey.custom_services import validate_login_flow
 from imbue.mngr_latchkey.custom_services import validate_mcp_login_on_domain
 from imbue.mngr_latchkey.custom_services import validate_scheme
 from imbue.mngr_latchkey.remote._mirror import machine_store_dir
+from imbue.mngr_latchkey.service_plugins import KNOWN_SERVICE_PLUGIN_SERVICE_NAMES
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.services_catalog import WILDCARD_PERMISSION_NAME
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
@@ -667,7 +668,7 @@ def test_overlay_overlay_adds_and_never_removes(tmp_path: Path) -> None:
     _write_config(tmp_path, {"custom_example_com": {"baseApiUrl": "https://example.com/"}})
     overlaid = ServicesCatalog(latchkey_directory=tmp_path).all_service_names()
     assert shipped < overlaid
-    assert overlaid - shipped == {"custom_example_com"}
+    assert overlaid - shipped == {"custom_example_com"} | KNOWN_SERVICE_PLUGIN_SERVICE_NAMES
 
 
 def test_overlay_bundled_claude_ai_is_untouched(tmp_path: Path) -> None:
@@ -707,13 +708,16 @@ def test_overlay_gateway_catalog_matches_what_the_desktop_serves(tmp_path: Path)
     assert set(materialized) == set(ServicesCatalog(latchkey_directory=tmp_path).all_service_names())
 
 
-def test_overlay_gateway_catalog_without_custom_services_is_the_shipped_file(tmp_path: Path) -> None:
-    # The overlay is the only new thing in the system: with nothing to
-    # overlay, an install materializes exactly what it ships today.
+def test_overlay_gateway_catalog_without_custom_services_is_the_shipped_file_and_the_plugin_services(
+    tmp_path: Path,
+) -> None:
     _write_config(tmp_path, {})
-    assert json.loads(overlaid_services_catalog_content(tmp_path)) == json.loads(
-        bundled_gateway_extension_content(SERVICES_CATALOG_FILENAME)
-    )
+    materialized = json.loads(overlaid_services_catalog_content(tmp_path))
+    shipped = json.loads(bundled_gateway_extension_content(SERVICES_CATALOG_FILENAME))
+    assert {
+        name: entries for name, entries in materialized.items() if name not in KNOWN_SERVICE_PLUGIN_SERVICE_NAMES
+    } == shipped
+    assert set(materialized) - set(shipped) == KNOWN_SERVICE_PLUGIN_SERVICE_NAMES
 
 
 def test_preserve_custom_entries_survive_a_remerge() -> None:

@@ -141,6 +141,7 @@ from imbue.mngr_latchkey.credential_commands import describe_credential_command_
 from imbue.mngr_latchkey.credential_commands import parse_credential_command_example
 from imbue.mngr_latchkey.credential_commands import set_credentials_example_for
 from imbue.mngr_latchkey.custom_services import custom_service_credential_header
+from imbue.mngr_latchkey.service_plugins import is_known_plugin_service
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.services_catalog import WILDCARD_PERMISSION_NAME
@@ -1302,6 +1303,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             scope=service_info.scope,
             display_name=service_info.display_name,
             service_name=service_info.name,
+            is_experimental=is_known_plugin_service(service_info.name),
             permission_groups=_build_permission_grant_groups(service_info),
             implicit_note=describe_implicit_permissions(service_info),
             checked_permissions=tuple(pre_checked),

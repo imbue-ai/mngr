@@ -669,6 +669,31 @@ def custom_service_credential_header(registered_services: Mapping[str, JsonValue
     return registration_credential_header(registration) if isinstance(registration, dict) else None
 
 
+def single_scope_catalog_entry(
+    scope: str, display_name: str, description: str, scope_schema: Mapping[str, JsonValue]
+) -> list[dict[str, object]]:
+    """Return the ``services.json`` value of a service that exposes one scope and lists no permissions.
+
+    The shape every service without Detent schemas of its own gets -- a custom
+    service, or one a latchkey plugin adds: a single-element list, since the
+    service has exactly one scope, under which a grant uses Detent's builtin
+    catch-all ``any``, which every scope implicitly admits, so there is no
+    permission schema to define. The scope schema travels with the entry
+    because such a scope is not a detent builtin: any grant referencing it has
+    to carry its definition, and this is the only place both the desktop and
+    the gateway can read it from.
+    """
+    return [
+        {
+            "scope": scope,
+            "display_name": display_name,
+            "description": description,
+            "permissions": [],
+            "scope_schema": dict(scope_schema),
+        }
+    ]
+
+
 def custom_service_catalog_payload(
     registered_services: Mapping[str, JsonValue],
     shipped_service_names: frozenset[str] = frozenset(),
@@ -679,9 +704,7 @@ def custom_service_catalog_payload(
     :func:`imbue.mngr_latchkey.services_catalog.service_infos_from_catalog_payload`
     expects, so the catalog can overlay these on the shipped file without either
     side knowing where the other came from. Each service exposes exactly one
-    scope, so its value is a single-element list, and it lists no permissions:
-    the grant uses Detent's builtin catch-all ``any``, which every scope
-    implicitly admits, so there is no permission schema to define.
+    scope and lists no permissions (see :func:`single_scope_catalog_entry`).
 
     ``shipped_service_names`` are the names this build already serves; a custom
     entry may never override one, so the overlay only ever *adds*.
@@ -722,19 +745,12 @@ def custom_service_catalog_payload(
         if scheme is None:
             logger.warning("Ignoring custom service {}: baseApiUrl {!r} has no usable scheme", name, base_api_url)
             continue
-        payload[name] = [
-            {
-                "scope": name,
-                "display_name": custom_service_label(domain, scheme),
-                "description": f"Requests to {base_api_url_for_domain(domain, scheme)}.",
-                "permissions": [],
-                # The scope schema travels with the entry because a custom
-                # scope is not a detent builtin: any grant referencing it has
-                # to carry its definition, and this is the only place both the
-                # desktop and the gateway can read it from.
-                "scope_schema": build_custom_service_scope_schema(domain, scheme),
-            }
-        ]
+        payload[name] = single_scope_catalog_entry(
+            scope=name,
+            display_name=custom_service_label(domain, scheme),
+            description=f"Requests to {base_api_url_for_domain(domain, scheme)}.",
+            scope_schema=build_custom_service_scope_schema(domain, scheme),
+        )
     return payload
 
 

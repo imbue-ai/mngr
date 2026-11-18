@@ -302,9 +302,11 @@ def test_grant_for_a_custom_scope_defines_the_scope_it_refers_to() -> None:
     assert schemas["custom_example_com"] == base
 
 
-def test_grant_for_a_custom_scope_without_its_schema_is_refused() -> None:
-    with pytest.raises(LatchkeyAccountScopeError):
-        build_account_grant("custom_example_com", "", ("any",))
+@pytest.mark.parametrize("scope", ["custom_example_com", "strava"])
+def test_grant_for_a_scope_detent_does_not_define_is_refused_without_its_schema(scope: str) -> None:
+    """A custom service's scope and a latchkey plugin service's exist only where a grant wrote their schema."""
+    with pytest.raises(LatchkeyAccountScopeError, match=scope):
+        build_account_grant(scope, "", ("any",))
 
 
 def test_grant_for_a_shipped_scope_defines_only_the_account_gate() -> None:

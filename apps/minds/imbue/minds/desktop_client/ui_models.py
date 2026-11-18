@@ -1210,6 +1210,9 @@ class UiPermissionConnection(FrozenModel):
     desktop_egress: UiDesktopEgressSetting = Field(
         description="The service's desktop egress setting; identical across its accounts"
     )
+    is_experimental: bool = Field(
+        description="True for a service a latchkey plugin adds: it rides an undocumented API, used at one's own risk"
+    )
 
 
 class UiAvailableConnection(FrozenModel):
@@ -1218,6 +1221,9 @@ class UiAvailableConnection(FrozenModel):
     service_name: str = Field(description="Raw catalog service name")
     display_name: str = Field(description="Human-readable service label")
     sign_in: UiServiceSignIn = Field(description="How connecting this service establishes its credentials")
+    is_experimental: bool = Field(
+        description="True for a service a latchkey plugin adds; Add connection lists those apart, under a warning"
+    )
 
 
 class UiPathSync(FrozenModel):

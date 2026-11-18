@@ -125,6 +125,7 @@ from imbue.mngr_latchkey.file_sharing import parse_legacy_file_sharing_permissio
 from imbue.mngr_latchkey.remote.credentials import has_machine_of_its_own
 from imbue.mngr_latchkey.remote.credentials import read_host_desktop_egress_rules
 from imbue.mngr_latchkey.remote_execution import parse_remote_execution_permission
+from imbue.mngr_latchkey.service_plugins import is_known_plugin_service
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.services_catalog import WILDCARD_PERMISSION_NAME
@@ -333,6 +334,12 @@ class ConnectionPanel(FrozenModel):
     desktop_egress: DesktopEgressSetting = Field(
         description="The service's desktop egress setting; identical across its accounts.",
     )
+    is_experimental: bool = Field(
+        description=(
+            "Whether the service is one a latchkey plugin adds (see :mod:`imbue.mngr_latchkey.service_plugins`): "
+            "it rides an undocumented API and can stop working without notice, which the pane says."
+        ),
+    )
 
 
 class AvailableConnection(FrozenModel):
@@ -341,6 +348,9 @@ class AvailableConnection(FrozenModel):
     service_name: str = Field(description="Raw catalog service name; posted to the add-account route.")
     display_name: str = Field(description="Human-readable service label.")
     sign_in: ServiceSignIn = Field(description="How connecting this service establishes its credentials.")
+    is_experimental: bool = Field(
+        description="Whether the service is one a latchkey plugin adds; Add connection lists those apart, under a warning.",
+    )
 
 
 class SelfPermissionToggle(FrozenModel):
@@ -866,9 +876,15 @@ def build_workspace_permissions_view(
             is_account_stored=bool(stored),
             credential_header=custom_service_credential_header(registered_services, service_name),
         )
+        is_experimental = is_known_plugin_service(service_name)
         if not panel_accounts:
             available.append(
-                AvailableConnection(service_name=service_name, display_name=display_name, sign_in=sign_in)
+                AvailableConnection(
+                    service_name=service_name,
+                    display_name=display_name,
+                    sign_in=sign_in,
+                    is_experimental=is_experimental,
+                )
             )
             continue
         desktop_egress = build_desktop_egress_setting(
@@ -898,6 +914,7 @@ def build_workspace_permissions_view(
                         scopes=scopes,
                         sign_in=sign_in,
                         desktop_egress=desktop_egress,
+                        is_experimental=is_experimental,
                     ),
                 )
             )

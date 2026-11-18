@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from packaging.version import Version
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import GATEWAY_MAX_BODY_SIZE_BYTES
 from imbue.mngr_latchkey.core import LATCHKEY_MIN_VERSION
@@ -22,6 +23,9 @@ from imbue.mngr_latchkey.owner_exec_vm import VM_EXEC_PORT
 from imbue.mngr_latchkey.remote._machine import DIFFERENT_MACHINE_PASSWORD_MESSAGE
 from imbue.mngr_latchkey.remote._machine import REMOTE_COMMAND_NAME
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
+from imbue.mngr_latchkey.remote.mock_outer_host_test import FakeVps
+from imbue.mngr_latchkey.remote.mock_outer_host_test import as_vps
+from imbue.mngr_latchkey.remote.mock_outer_host_test import fake_vps
 from imbue.mngr_latchkey.remote.mock_outer_host_test import rooted_layout
 from imbue.mngr_latchkey.remote.package import CURL_SHIMS_SHA256_BY_TRIPLE
 from imbue.mngr_latchkey.remote.package import CURL_SHIMS_VERSION
@@ -31,6 +35,7 @@ from imbue.mngr_latchkey.remote.package import LATCHKEY_VERSION
 from imbue.mngr_latchkey.remote.package import MINIMUM_NODE_MAJOR_VERSION
 from imbue.mngr_latchkey.remote.package import OUTER_PORT
 from imbue.mngr_latchkey.remote.package import PACKAGE_NAME
+from imbue.mngr_latchkey.remote.package import PLUGIN_SKIPPED_MESSAGE_PREFIX
 from imbue.mngr_latchkey.remote.package import RemotePackageArtifact
 from imbue.mngr_latchkey.remote.package import RemotePackageLayout
 from imbue.mngr_latchkey.remote.package import SSHD_DROP_IN_FILENAME
@@ -41,7 +46,12 @@ from imbue.mngr_latchkey.remote.package import _require_complete_sources
 from imbue.mngr_latchkey.remote.package import build_remote_package
 from imbue.mngr_latchkey.remote.package import remote_package_context
 from imbue.mngr_latchkey.remote.package import render_bootstrap_script
+from imbue.mngr_latchkey.service_plugins import INSTALLED_COMMIT_STAMP_FILENAME
+from imbue.mngr_latchkey.service_plugins import KNOWN_SERVICE_PLUGINS
+from imbue.mngr_latchkey.service_plugins import ServicePlugin
+from imbue.mngr_latchkey.service_plugins import installed_plugin_commit
 from imbue.mngr_latchkey.testing import extract_deb_data
+from imbue.mngr_latchkey.testing import make_github_archive
 from imbue.mngr_latchkey.testing import read_deb_control_field
 from imbue.mngr_latchkey.testing import read_deb_members
 from imbue.mngr_latchkey.testing import read_deb_tar
@@ -315,7 +325,7 @@ def test_postinst_installs_the_curl_shims_version_gated(tmp_path: Path) -> None:
     assert "tar -xzf" in postinst and "--strip-components=1" in postinst
     # The download scratch is dropped however the install ends: a pass that
     # fails part-way is retried every cycle and must not fill /tmp.
-    assert "trap 'rm -rf \"$_lk_tmp\"' EXIT" in postinst
+    assert 'rm -rf "$_lk_tmp"\n}\ntrap _lk_cleanup EXIT' in postinst
     router = "/usr/local/bin/latchkey-curl-router"
     impersonate = "/usr/local/bin/curl-impersonate"
     # Both binaries are staged beside their destinations and then renamed into
@@ -393,13 +403,16 @@ def test_postinst_scrubs_what_the_ad_hoc_provisioning_left_behind(tmp_path: Path
     postinst = _code_lines((root / "DEBIAN/postinst").read_text())
 
     # The wrapper the ad-hoc provisioning wrote beside the store, the extension
-    # copy it staged, and secrets an older build kept on disk go; nothing is
-    # killed by PID any more (no pre-supervisord machine remains).
+    # copy it staged, and secrets an older build kept on disk go. The gateway is
+    # supervisord's to stop, so the only processes the script stops are its own
+    # downloads, tracked in its scratch.
     assert '"$LK_LATCHKEY_DIR/gateway_encryption_key"' in postinst
     assert '"$LK_LATCHKEY_DIR/gateway_run.sh"' in postinst
     assert '"$LK_EXTENSIONS_DIR/desktop_gateway_proxy.mjs.candidate"' in postinst
-    assert "kill" not in postinst
-    assert ".pid" not in postinst
+    assert [line.strip() for line in postinst.splitlines() if "kill" in line] == [
+        'kill "$(cat "$_lk_pid_file")" 2>/dev/null || true'
+    ]
+    assert all("_lk_tmp" in line for line in postinst.splitlines() if ".pid" in line)
     assert postinst.index("supervisorctl reread") < postinst.index("supervisorctl update")
 
 
@@ -410,7 +423,7 @@ def test_apply_state_refreshes_the_gateway_extension_from_the_packages_copy(tmp_
     apply_state = _code_lines((root / "usr/lib/mngr-latchkey/apply-state").read_text())
 
     assert 'lk_install_file "$LK_EXTENSIONS_DIR/desktop_gateway_proxy.mjs" "$LK_PACKAGE_EXTENSION"' in apply_state
-    assert "ln -s" not in apply_state
+    assert [line for line in apply_state.splitlines() if "ln -s" in line and "EXTENSIONS" in line] == []
     # Unconditional (no document entry gates it), and in place before the restart that loads it.
     assert apply_state.index("if lk_doc_has tunnel_host_id") < apply_state.index('mkdir -p "$LK_EXTENSIONS_DIR"')
     assert apply_state.index('mkdir -p "$LK_EXTENSIONS_DIR"') < apply_state.index("if lk_doc_has restart_gateway")
@@ -611,3 +624,170 @@ def test_the_bootstrap_survives_a_replay_after_the_artifact_was_consumed() -> No
         f"""if [ -f "$_lk_deb" ] || [ "$(dpkg-query -W -f '${{Version}}' '{PACKAGE_NAME}' 2>/dev/null || true)" """
         f"""!= '{artifact.version}' ]; then"""
     ) in bootstrap
+
+
+def _plugin_archive(plugin: ServicePlugin) -> bytes:
+    """A tarball shaped like the one GitHub serves for the plugin's pinned commit."""
+    return make_github_archive(
+        {"package.json": '{"main": "dist/index.js"}', "dist/index.js": f"// {plugin.name}\n"},
+        top_level=f"{plugin.repository.partition('/')[2]}-{plugin.commit}",
+    )
+
+
+def _provisioned_vps(tmp_path: Path) -> FakeVps:
+    """A fake machine an earlier install set up, so that the plugins are all its ``postinst`` has left to fetch."""
+    vps = as_vps(fake_vps(tmp_path))
+    vps.hold_curl_shims()
+    return vps
+
+
+def _plugin_downloads(vps: FakeVps) -> list[str]:
+    return [call for call in vps.curl_calls() if "/archive/" in call]
+
+
+def test_postinst_downloads_the_pinned_plugins_at_the_same_time_and_installs_each(tmp_path: Path) -> None:
+    vps = _provisioned_vps(tmp_path)
+    for plugin in KNOWN_SERVICE_PLUGINS:
+        vps.serve_download(plugin.archive_url, _plugin_archive(plugin))
+    # Each download waits for every other to be running, which one after another they never are.
+    vps.hold_downloads_until_in_flight(len(KNOWN_SERVICE_PLUGINS))
+
+    installed = vps.run_postinst()
+
+    assert installed.success, installed.stderr
+    assert installed.stderr == ""
+    for plugin in KNOWN_SERVICE_PLUGINS:
+        assert installed_plugin_commit(vps.latchkey_dir, plugin.name) == plugin.commit
+        # GitHub's ``<repository>-<commit>/`` wrapper is dropped, so latchkey finds the package at the top.
+        assert (vps.plugins_dir / plugin.name / "dist" / "index.js").read_text() == f"// {plugin.name}\n"
+    # Nothing is staged or left half-written beside them, in a directory only its owner reads.
+    assert sorted(path.name for path in vps.plugins_dir.iterdir()) == sorted(
+        plugin.name for plugin in KNOWN_SERVICE_PLUGINS
+    )
+    assert stat.S_IMODE(vps.plugins_dir.stat().st_mode) == stat.S_IRWXU
+    # The gateway loads plugins only as it starts, so it is bounced once they are in place.
+    assert vps.supervisorctl_calls() == ["reread", "update", f"restart {GATEWAY_PROGRAM_NAME}"]
+
+
+def test_postinst_downloads_nothing_for_plugins_at_the_pinned_commit_or_linked_in(tmp_path: Path) -> None:
+    vps = _provisioned_vps(tmp_path)
+    linked, *stamped = KNOWN_SERVICE_PLUGINS
+    for plugin in stamped:
+        vps.serve_download(plugin.archive_url, _plugin_archive(plugin))
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    vps.plugins_dir.mkdir(parents=True)
+    (vps.plugins_dir / linked.name).symlink_to(checkout, target_is_directory=True)
+    assert vps.run_postinst().success
+    assert len(_plugin_downloads(vps)) == len(stamped)
+
+    repeated = vps.run_postinst()
+
+    assert repeated.success, repeated.stderr
+    assert repeated.stderr == ""
+    assert len(_plugin_downloads(vps)) == len(stamped)
+    assert (vps.plugins_dir / linked.name).is_symlink()
+    # Nothing changed, so the gateway is left running.
+    assert vps.supervisorctl_calls() == ["reread", "update", f"restart {GATEWAY_PROGRAM_NAME}", "reread", "update"]
+
+
+def test_postinst_skips_a_plugin_that_cannot_be_downloaded_and_installs_the_rest(tmp_path: Path) -> None:
+    """A repository that is gone, or a GitHub that cannot be reached, costs that plugin and nothing else."""
+    vps = _provisioned_vps(tmp_path)
+    missing, *served = KNOWN_SERVICE_PLUGINS
+    for plugin in served:
+        vps.serve_download(plugin.archive_url, _plugin_archive(plugin))
+    # The copy an earlier build installed stays where it is.
+    earlier_copy = vps.plugins_dir / missing.name
+    earlier_copy.mkdir(parents=True)
+    (earlier_copy / INSTALLED_COMMIT_STAMP_FILENAME).write_text("0" * 40 + "\n")
+
+    installed = vps.run_postinst()
+
+    assert installed.success, installed.stderr
+    assert (
+        f"{PLUGIN_SKIPPED_MESSAGE_PREFIX}{missing.name}: its download failed (curl exit status 22)" in installed.stderr
+    )
+    assert installed.stderr.count(PLUGIN_SKIPPED_MESSAGE_PREFIX) == 1
+    assert installed_plugin_commit(vps.latchkey_dir, missing.name) == "0" * 40
+    for plugin in served:
+        assert installed_plugin_commit(vps.latchkey_dir, plugin.name) == plugin.commit
+    # The rest of the install is carried out all the same.
+    assert vps.supervisorctl_calls() == ["reread", "update", f"restart {GATEWAY_PROGRAM_NAME}"]
+
+
+def test_postinst_skips_a_plugin_whose_archive_does_not_unpack(tmp_path: Path) -> None:
+    vps = _provisioned_vps(tmp_path)
+    garbled, *served = KNOWN_SERVICE_PLUGINS
+    vps.serve_download(garbled.archive_url, b"<html>not a tarball</html>")
+    for plugin in served:
+        vps.serve_download(plugin.archive_url, _plugin_archive(plugin))
+
+    installed = vps.run_postinst()
+
+    assert installed.success, installed.stderr
+    assert f"{PLUGIN_SKIPPED_MESSAGE_PREFIX}{garbled.name}: its downloaded archive does not unpack" in installed.stderr
+    # Nothing of it is left for latchkey to load, or staged beside the others.
+    assert sorted(path.name for path in vps.plugins_dir.iterdir()) == sorted(plugin.name for plugin in served)
+
+
+def test_postinst_with_no_plugin_to_be_had_still_sets_the_machine_up(tmp_path: Path) -> None:
+    vps = _provisioned_vps(tmp_path)
+
+    installed = vps.run_postinst()
+
+    assert installed.success, installed.stderr
+    assert installed.stderr.count(PLUGIN_SKIPPED_MESSAGE_PREFIX) == len(KNOWN_SERVICE_PLUGINS)
+    assert not vps.plugins_dir.exists()
+    assert vps.supervisorctl_calls() == ["reread", "update"]
+
+
+def test_postinst_fetches_the_plugins_in_the_background_and_installs_them_right_before_the_gateway_starts(
+    tmp_path: Path,
+) -> None:
+    _, root = _unpacked(tmp_path)
+
+    postinst = _code_lines((root / "DEBIAN/postinst").read_text())
+
+    for plugin in KNOWN_SERVICE_PLUGINS:
+        assert f"_lk_start_plugin_download '{plugin.name}' '{plugin.archive_url}' '{plugin.commit}'" in postinst
+        assert f"_lk_install_plugin '{plugin.name}' '{plugin.commit}'" in postinst
+    # Every download is bounded, so a GitHub that does not answer cannot hold the install up, and runs in
+    # the background from before the first thing the install has to wait for.
+    assert (
+        "curl -fsSL --connect-timeout 10 --max-time 30 --retry 2 --retry-delay 2 --retry-max-time 40 "
+        '-o "${_lk_tmp}/$1.tar.gz" "$2" &'
+    ) in postinst
+    assert postinst.index("_lk_start_plugin_download '") < postinst.index('_lk_arch="$(uname -m)"')
+    # A download still running when the script ends is stopped rather than left holding its output open.
+    assert 'kill "$(cat "$_lk_pid_file")" 2>/dev/null || true' in postinst
+    # They are waited for only where the gateway is about to be started, so everything else the install
+    # does overlaps them: after the CLI that loads them and the firewall, right before the programs are registered.
+    assert postinst.index("npm install -g") < postinst.index("_lk_install_plugin '")
+    assert postinst.index("systemctl reload") < postinst.index("_lk_install_plugin '")
+    last_plugin_install = f"_lk_install_plugin '{KNOWN_SERVICE_PLUGINS[-1].name}' '{KNOWN_SERVICE_PLUGINS[-1].commit}'"
+    after_the_plugins = postinst[postinst.index(last_plugin_install) + len(last_plugin_install) :]
+    assert after_the_plugins.lstrip().startswith("supervisorctl reread\nsupervisorctl update\n")
+    # The copy being replaced is moved under a name latchkey skips before it is deleted, like the
+    # Python installer does, so a gateway started mid-removal never loads half of it.
+    assert '_lk_plugin_doomed="$LK_PLUGINS_DIR/.$1.removing"' in postinst
+    assert '[ ! -e "$_lk_plugin_dir" ] || mv "$_lk_plugin_dir" "$_lk_plugin_doomed"' in postinst
+    assert 'rm -rf "$_lk_plugin_dir"' not in postinst
+    assert postinst.index('mv "$_lk_plugin_dir" "$_lk_plugin_doomed"') < postinst.index(
+        'mv "$_lk_plugin_staging" "$_lk_plugin_dir"'
+    )
+
+
+def test_the_package_version_follows_the_plugin_pins() -> None:
+    context = remote_package_context(DEFAULT_REMOTE_PACKAGE_LAYOUT)
+    moved = context.model_copy_update(
+        to_update(
+            context.field_ref().service_plugins,
+            tuple(
+                plugin.model_copy_update(to_update(plugin.field_ref().commit, "f" * 40))
+                for plugin in context.service_plugins
+            ),
+        )
+    )
+
+    assert build_remote_package(context).version != build_remote_package(moved).version

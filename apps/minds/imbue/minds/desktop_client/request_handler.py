@@ -114,6 +114,9 @@ class UiPredefinedPermissionDetail(FrozenModel):
             "scope resolves to no catalog service, in which case the header draws its fallback glyph."
         )
     )
+    is_experimental: bool = Field(
+        description="True for a service a latchkey plugin adds; the dialog warns that it is used at one's own risk"
+    )
     permission_groups: tuple[UiPermissionGrantGroup, ...] = Field(
         description="Every grantable permission under the scope, grouped: full access first, the wildcard last"
     )

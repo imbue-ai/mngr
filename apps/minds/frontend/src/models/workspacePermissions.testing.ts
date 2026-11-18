@@ -88,6 +88,7 @@ export function slackConnection(overrides: Partial<UiPermissionConnection> = {})
   return {
     sign_in: BROWSER_SIGN_IN,
     desktop_egress: DESKTOP_EGRESS_UNSUPPORTED,
+    is_experimental: false,
     service_name: "slack",
     display_name: "Slack",
     account: "",
@@ -125,14 +126,24 @@ export function awsConnection(overrides: Partial<UiPermissionConnection> = {}): 
 }
 
 export function awsAvailable(overrides: Partial<UiServiceSignIn> = {}): UiAvailableConnection {
-  return { service_name: "aws", display_name: "AWS", sign_in: credentialsSignIn(overrides) };
+  return { service_name: "aws", display_name: "AWS", sign_in: credentialsSignIn(overrides), is_experimental: false };
+}
+
+/** A catalog service with no account yet, connected through the browser. */
+export function browserAvailable(serviceName: string, displayName: string): UiAvailableConnection {
+  return { service_name: serviceName, display_name: displayName, sign_in: BROWSER_SIGN_IN, is_experimental: false };
+}
+
+/** An experimental connector's service with no account yet: Strava. */
+export function stravaAvailable(): UiAvailableConnection {
+  return { ...browserAvailable("strava", "Strava"), is_experimental: true };
 }
 
 export function permissionsView(overrides: Partial<UiWorkspacePermissions> = {}): UiWorkspacePermissions {
   return {
     host_id: "host-" + "b".repeat(8),
     connections: [slackConnection()],
-    available_connections: [{ service_name: "notion", display_name: "Notion", sign_in: BROWSER_SIGN_IN }],
+    available_connections: [browserAvailable("notion", "Notion")],
     shared_paths: [],
     workspace_toggles: [],
     remote_execution_toggles: [],

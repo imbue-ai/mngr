@@ -83,6 +83,7 @@ from imbue.mngr_latchkey.remote.credentials import has_machine_of_its_own
 from imbue.mngr_latchkey.remote.credentials import read_host_permissions
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.sentry import setup_forward_sentry
+from imbue.mngr_latchkey.service_plugins import install_known_service_plugins
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import acquire_forward_lock
 from imbue.mngr_latchkey.store import list_host_permissions_paths
@@ -835,6 +836,14 @@ def _run_forward_supervisor(
     # the gateway starts reading them.
     _migrate_hosts_without_a_machine(latchkey, PermissionsMigrationContext(device_id=device.device_id))
 
+    # Before the gateway starts, which is the only time it loads plugins.
+    plugin_names_not_installed = install_known_service_plugins(latchkey.latchkey_directory, mngr_ctx.concurrency_group)
+    if plugin_names_not_installed:
+        logger.warning(
+            "The shared gateway starts without the latchkey plugins {}; the next start tries again.",
+            ", ".join(plugin_names_not_installed),
+        )
+
     # Eagerly ensure the gateway is up so users see startup failures
     # immediately, not on the first agent discovery. The discovery
     # handler will idempotently re-ensure on every fire. The gateway
@@ -1109,7 +1118,9 @@ CommandHelpMetadata(
     description="""Long-running foreground process that:
 
 1. Initializes the configured ``Latchkey`` (version-checks the binary and
-   writes the bundled service registrations into latchkey's ``config.json``).
+   writes the bundled service registrations into latchkey's ``config.json``),
+   and installs the latchkey plugins this build pins into the latchkey
+   directory, downloading each one once per pinned commit.
 2. Eagerly spawns the shared ``latchkey gateway`` subprocess and
    supervises it: a background health check respawns it (reusing its
    original port) if the subprocess dies mid-session, so a crashed

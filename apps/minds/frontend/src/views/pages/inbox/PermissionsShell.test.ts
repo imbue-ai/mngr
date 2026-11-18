@@ -23,6 +23,7 @@ const MANUAL_DETAIL: PredefinedPermissionDetail = {
   scope: "aws-api",
   display_name: "AWS",
   service_name: "aws",
+  is_experimental: false,
   permission_groups: [
     {
       heading: "Full access",
@@ -86,6 +87,7 @@ function renderShell(
   headerTooltip?: string,
   credentialEntrySwitch: m.Children = null,
   footer: m.Children = null,
+  headerNotice: m.Children = null,
 ): ElementVnode[] {
   const instance = PermissionsShell() as unknown as m.Component;
   const attrs = {
@@ -93,6 +95,7 @@ function renderShell(
     headerLabel: "AWS",
     headerTooltip,
     mark: m("span", { id: "permissions-mark-glyph" }),
+    headerNotice,
     rationale: "list the buckets",
     account,
     credentialEntrySwitch,
@@ -165,6 +168,22 @@ describe("PermissionsShell layout", () => {
 
     const withTooltip = renderShell(model, null, "/home/user/a/very/long/path");
     expect(header(withTooltip)?.attrs?.["data-tooltip"]).toBe("/home/user/a/very/long/path");
+  });
+
+  it("puts a kind's header notice right under the header, ahead of Account", () => {
+    const nodes = renderShell(
+      modelWithDetail({ ...MANUAL_DETAIL, manual_credentials: null }),
+      m("div", { id: "permissions-account" }),
+      undefined,
+      null,
+      null,
+      m("p", { id: "permissions-header-notice" }),
+    );
+
+    const order = ["permissions-header-mark", "permissions-header-notice", "permissions-account"];
+    const positions = order.map((id) => indexOfId(nodes, id));
+    expect(positions.every((position) => position > -1)).toBe(true);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
   });
 
   it("closes with Deny then Approve, right-aligned and in their answer colors", () => {

@@ -37,6 +37,7 @@ SINGLE_INK_MARKS: Final[frozenset[str]] = frozenset(
         "openrouter",
         "ramp",
         "sentry",
+        "spotify",
         "tailscale",
         "umami",
         "vercel-mcp",

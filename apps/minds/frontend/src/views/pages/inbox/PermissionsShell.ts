@@ -133,6 +133,9 @@ export interface PermissionsShellAttrs {
   /** Glyph for the header's 32px square: the service's brand mark, or the
    * category fallback for the kinds that name no service. */
   mark: m.Children;
+  /** A caution about the thing being asked for as a whole, right under the
+   * header that names it. */
+  headerNotice?: m.Children;
   rationale: string;
   /** The account the grant rides on; null when nothing is signed in yet. */
   account?: m.Children;
@@ -160,6 +163,7 @@ export function PermissionsShell(): m.Component<PermissionsShellAttrs> {
         headerLabel,
         headerTooltip,
         mark,
+        headerNotice,
         rationale,
         account,
         credentialEntrySwitch,
@@ -193,6 +197,7 @@ export function PermissionsShell(): m.Component<PermissionsShellAttrs> {
             headerLabel,
           ),
         ]),
+        headerNotice ?? null,
         account ?? null,
         rationale
           ? m("div", { id: "permissions-reason" }, [

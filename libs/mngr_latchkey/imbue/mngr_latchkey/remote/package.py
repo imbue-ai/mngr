@@ -12,7 +12,8 @@ which records this computer as a desktop connected to the machine,
 machine keeps for the user's desktops, and ``mngr-latchkey forget-request``,
 which drops one of them and withdraws it from every connected desktop (see
 :mod:`imbue.mngr_latchkey.remote._machine`).
-Its ``postinst`` installs the pinned latchkey CLI and the curl shims, loads
+Its ``postinst`` installs the pinned latchkey CLI, the curl shims and the
+pinned latchkey plugins (:mod:`imbue.mngr_latchkey.service_plugins`), loads
 the nftables policy that keeps the machine's bridge-bound services on the
 docker bridge (shipped with its boot-time systemd unit), scrubs what the
 ad-hoc provisioning left on a machine it set up, and registers the programs,
@@ -93,6 +94,10 @@ from imbue.mngr_latchkey.remote._machine import OUTCOME_DONE_MARKER
 from imbue.mngr_latchkey.remote._machine import REMOTE_LATCHKEY_DIR_NAME
 from imbue.mngr_latchkey.remote._machine import TMPFS_SECRETS_DIR
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
+from imbue.mngr_latchkey.service_plugins import INSTALLED_COMMIT_STAMP_FILENAME
+from imbue.mngr_latchkey.service_plugins import KNOWN_SERVICE_PLUGINS
+from imbue.mngr_latchkey.service_plugins import PLUGINS_DIR_NAME
+from imbue.mngr_latchkey.service_plugins import ServicePlugin
 from imbue.mngr_latchkey.store import DESKTOP_EGRESS_RULES_FILENAME
 from imbue.mngr_latchkey.store import PERMISSIONS_FORMAT_VERSION_FILENAME
 
@@ -129,6 +134,17 @@ CURL_STAGED_SUFFIX: Final[str] = ".new"
 # Records which release and target triple the installed shims came from; the
 # binaries live under version-less names, so this is what a bump reaches.
 CURL_VERSION_STAMP_FILENAME: Final[str] = ".latchkey-curl-version"
+
+# Bounds on each latchkey plugin download the package's postinst makes: how
+# long connecting may take, how long one attempt may, and the window a failed
+# attempt is retried within. Together they have to stay well inside the time a
+# provisioning pass gives the whole install.
+_PLUGIN_DOWNLOAD_CONNECT_TIMEOUT_SECONDS: Final[int] = 10
+_PLUGIN_DOWNLOAD_ATTEMPT_TIMEOUT_SECONDS: Final[int] = 30
+_PLUGIN_DOWNLOAD_RETRY_WINDOW_SECONDS: Final[int] = 40
+# What the postinst starts a line on stderr with for a plugin it skipped, which
+# is how the computer that ran the install learns of one.
+PLUGIN_SKIPPED_MESSAGE_PREFIX: Final[str] = "mngr-latchkey: skipped latchkey plugin "
 
 # Port the latchkey gateway binds on the machine's docker bridge address. It is
 # the same fixed agent-side port a desktop-gateway agent uses, so every agent's
@@ -388,6 +404,28 @@ class RemotePackageContext(FrozenModel):
     curl_impersonate_path: Path = Field(description="Where the impersonating curl is installed.")
     curl_staged_suffix: str = Field(description="Suffix new curl binaries are staged under before the swap.")
     curl_version_stamp_path: Path = Field(description="Records the release the installed curl shims came from.")
+    service_plugins: tuple[ServicePlugin, ...] = Field(
+        description=(
+            "The latchkey plugins the machine installs, each at its pinned commit: the ones this build pins "
+            "(:data:`imbue.mngr_latchkey.service_plugins.KNOWN_SERVICE_PLUGINS`)."
+        )
+    )
+    plugins_dir_name: str = Field(
+        description="The directory latchkey loads plugins from, under its latchkey directory."
+    )
+    plugin_commit_stamp_filename: str = Field(
+        description="The file inside an installed plugin recording the commit it was installed from."
+    )
+    plugin_download_connect_timeout_seconds: int = Field(description="How long a plugin download may take to connect.")
+    plugin_download_attempt_timeout_seconds: int = Field(
+        description="How long one attempt at a plugin download may take."
+    )
+    plugin_download_retry_window_seconds: int = Field(
+        description="The window, from its first attempt, in which a failed plugin download is retried."
+    )
+    plugin_skipped_message_prefix: str = Field(
+        description="What the postinst starts a line on stderr with for a plugin it could not install and skipped."
+    )
     outer_port: int = Field(
         description="Port the gateway binds on the machine's docker bridge address (the port the agent's container reaches it at)."
     )
@@ -513,6 +551,13 @@ def remote_package_context(layout: RemotePackageLayout) -> RemotePackageContext:
         curl_impersonate_path=layout.curl_install_dir / CURL_IMPERSONATE_BIN,
         curl_staged_suffix=CURL_STAGED_SUFFIX,
         curl_version_stamp_path=layout.curl_install_dir / CURL_VERSION_STAMP_FILENAME,
+        service_plugins=KNOWN_SERVICE_PLUGINS,
+        plugins_dir_name=PLUGINS_DIR_NAME,
+        plugin_commit_stamp_filename=INSTALLED_COMMIT_STAMP_FILENAME,
+        plugin_download_connect_timeout_seconds=_PLUGIN_DOWNLOAD_CONNECT_TIMEOUT_SECONDS,
+        plugin_download_attempt_timeout_seconds=_PLUGIN_DOWNLOAD_ATTEMPT_TIMEOUT_SECONDS,
+        plugin_download_retry_window_seconds=_PLUGIN_DOWNLOAD_RETRY_WINDOW_SECONDS,
+        plugin_skipped_message_prefix=PLUGIN_SKIPPED_MESSAGE_PREFIX,
         outer_port=OUTER_PORT,
         agent_side_port=AGENT_SIDE_LATCHKEY_PORT,
         max_body_size_bytes=GATEWAY_MAX_BODY_SIZE_BYTES,

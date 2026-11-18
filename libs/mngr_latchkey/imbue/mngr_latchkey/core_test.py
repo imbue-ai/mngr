@@ -54,9 +54,11 @@ from imbue.mngr_latchkey.additional_services import additional_service_registrat
 from imbue.mngr_latchkey.cli import _run_gateway_health_check_loop
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import CONFIG_FILENAME
+from imbue.mngr_latchkey.core import CREDENTIALS_STORE_FILENAME
 from imbue.mngr_latchkey.core import ChromeImportOutcome
 from imbue.mngr_latchkey.core import CodedLatchkeyFailure
 from imbue.mngr_latchkey.core import CredentialStatus
+from imbue.mngr_latchkey.core import EncryptedCredentialStore
 from imbue.mngr_latchkey.core import HIDDEN_BUILTIN_SERVICES
 from imbue.mngr_latchkey.core import LATCHKEY_CREDENTIAL_TYPE_OAUTH
 from imbue.mngr_latchkey.core import LATCHKEY_MIN_VERSION
@@ -71,12 +73,14 @@ from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_CLIENT_ID
 from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_CLIENT_SECRET
 from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_SERVICES
 from imbue.mngr_latchkey.core import MINDS_OAUTH_REDIRECT_URI
+from imbue.mngr_latchkey.core import UPSTREAM_DATA_FORMAT_VERSION_FILENAME
 from imbue.mngr_latchkey.core import _GATEWAY_OUTPUT_TAIL_MAX_LINES
 from imbue.mngr_latchkey.core import _GATEWAY_OUTPUT_TAIL_MAX_LINE_CHARS
 from imbue.mngr_latchkey.core import _GatewayOutputTail
 from imbue.mngr_latchkey.core import _REENCRYPT_TIMEOUT_SECONDS
 from imbue.mngr_latchkey.core import _allocate_free_port
 from imbue.mngr_latchkey.core import _describe_port_bindability
+from imbue.mngr_latchkey.core import _foreign_store_directory
 from imbue.mngr_latchkey.core import _log_gateway_output_line
 from imbue.mngr_latchkey.core import _terminate_and_diagnose_unbound_gateway
 from imbue.mngr_latchkey.core import is_mcp_oauth_service
@@ -106,6 +110,7 @@ from imbue.mngr_latchkey.remote._machine import REMOTE_COMMAND_NAME
 from imbue.mngr_latchkey.remote._machine import _ANNOUNCE_DEVICE_SUBCOMMAND
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.remote.mock_outer_host_test import ScriptedOuter
+from imbue.mngr_latchkey.service_plugins import plugins_dir
 from imbue.mngr_latchkey.store import admin_permissions_path
 from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_browser_log_path
@@ -4447,3 +4452,46 @@ def test_parse_coded_latchkey_failure_keeps_a_code_this_package_does_not_know() 
     assert failure is not None
     assert failure == CodedLatchkeyFailure(code="SOMETHING_NEW", message="A newer latchkey said so.")
     assert failure.known_code is None
+
+
+def test_foreign_store_directory_shares_the_desktops_plugins_so_their_credential_types_can_be_read(
+    tmp_path: Path,
+) -> None:
+    """A credential whose type a plugin defines is readable only beside that plugin, so the scratch store links them in."""
+    latchkey_directory = tmp_path / "latchkey"
+    (plugins_dir(latchkey_directory) / "strava").mkdir(parents=True)
+    store = EncryptedCredentialStore(content=b"encrypted", data_format_version="7")
+
+    with _foreign_store_directory(store, latchkey_directory) as store_directory:
+        assert (store_directory / CREDENTIALS_STORE_FILENAME).read_bytes() == b"encrypted"
+        assert (store_directory / UPSTREAM_DATA_FORMAT_VERSION_FILENAME).read_text() == "7"
+        link = plugins_dir(store_directory)
+        assert link.is_symlink()
+        assert link.resolve() == plugins_dir(latchkey_directory).resolve()
+        assert (link / "strava").is_dir()
+
+    assert not store_directory.exists()
+    assert (plugins_dir(latchkey_directory) / "strava").is_dir()
+
+
+def test_foreign_store_directory_links_no_plugins_when_the_desktop_has_none(tmp_path: Path) -> None:
+    latchkey_directory = tmp_path / "latchkey"
+    latchkey_directory.mkdir()
+    store = EncryptedCredentialStore(content=b"encrypted", data_format_version="7")
+
+    with _foreign_store_directory(store, latchkey_directory) as store_directory:
+        assert sorted(path.name for path in store_directory.iterdir()) == sorted(
+            [CREDENTIALS_STORE_FILENAME, UPSTREAM_DATA_FORMAT_VERSION_FILENAME]
+        )
+
+
+def test_foreign_store_directory_reaches_the_plugins_of_a_latchkey_directory_given_relatively(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The scratch store lives elsewhere, so a target relative to the working directory would point at nothing from it."""
+    (plugins_dir(tmp_path / "latchkey") / "strava").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    store = EncryptedCredentialStore(content=b"encrypted", data_format_version="7")
+
+    with _foreign_store_directory(store, Path("latchkey")) as store_directory:
+        assert (plugins_dir(store_directory) / "strava").is_dir()

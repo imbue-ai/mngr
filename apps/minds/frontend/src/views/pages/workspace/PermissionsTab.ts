@@ -18,6 +18,10 @@ import type { ErrorAction, UserFacingError } from "../../../models/errors";
 import { Badge } from "../../components/Badge";
 import { Button } from "../../components/Button";
 import { ErrorNotice } from "../../components/ErrorDisplay";
+import {
+  EXPERIMENTAL_CONNECTOR_RISK_DETAIL,
+  renderExperimentalConnectorRisk,
+} from "../../components/ExperimentalConnectorRisk";
 import { InlineError } from "../../components/errorDesign";
 import { TextInput } from "../../components/FormControls";
 import { Icon16 } from "../../components/Icon";
@@ -540,6 +544,18 @@ function renderConnectionPanel(
         // Same size and tone as the service name: the account is half of the
         // connection's identity, not an aside.
         m("span", { class: "type-heading text-primary truncate" }, `· ${connection.account_label}`),
+        connection.is_experimental
+          ? m(
+              "span",
+              {
+                class: "type-helper text-warning shrink-0 cursor-help",
+                tabindex: 0,
+                "data-tooltip": EXPERIMENTAL_CONNECTOR_RISK_DETAIL,
+                "data-perm-experimental-badge": "",
+              },
+              "Experimental",
+            )
+          : null,
       ]),
       connection.granted_count > 0 ? renderRevokeAllButton(model, local, connection) : null,
     ]),
@@ -777,7 +793,9 @@ function renderAddConnectionPanel(
   selectSection: (section: string) => void,
 ): m.Children {
   const connected = connectedServices(model.data?.connections ?? []);
-  const available = model.data?.available_connections ?? [];
+  const offered = model.data?.available_connections ?? [];
+  const available = offered.filter((service) => !service.is_experimental);
+  const experimental = offered.filter((service) => service.is_experimental);
   return m("section", { "data-perm-panel": ADD_CONNECTION_SECTION }, [
     m("h2", { class: "type-heading text-primary mb-1" }, "Add connection"),
     m(
@@ -798,6 +816,23 @@ function renderAddConnectionPanel(
     available.length === 0
       ? m(Notice, { variant: "info" }, "Every available service already has an account connected.")
       : renderCatalogList(model, available, "Connect", selectSection, "muted"),
+    experimental.length === 0 ? null : renderExperimentalConnectors(model, experimental, selectSection),
+  ]);
+}
+
+/** The foot of Add connection: the services that ride an undocumented API.
+ * Listed apart from the catalog, under their own warning, so connecting one
+ * is a choice made knowing it can stop working without notice; otherwise a
+ * row here is a catalog row like any other. */
+function renderExperimentalConnectors(
+  model: PermissionsModel,
+  services: UiAvailableConnection[],
+  selectSection: (section: string) => void,
+): m.Children {
+  return m("div", { "data-perm-experimental-connectors": "" }, [
+    m("h3", { class: CATALOG_HEADING_CLASS }, "Experimental connectors"),
+    renderExperimentalConnectorRisk("Use at your own risk.", "mb-1"),
+    renderCatalogList(model, services, "Connect", selectSection, "muted"),
   ]);
 }
 
@@ -813,6 +848,7 @@ function connectedServices(connections: UiPermissionConnection[]): UiAvailableCo
       service_name: connection.service_name,
       display_name: connection.display_name,
       sign_in: connection.sign_in,
+      is_experimental: connection.is_experimental,
     });
   }
   return [...services.values()];
