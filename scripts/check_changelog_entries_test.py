@@ -8,8 +8,15 @@ from scripts.check_changelog_entries import changed_files_against_base
 from scripts.check_changelog_entries import find_missing_entries
 from scripts.check_changelog_entries import is_exempt_branch
 from scripts.check_changelog_entries import main
-from scripts.check_changelog_entries import projects_requiring_entry
+from scripts.check_changelog_entries import projects_stamping_a_release
 from scripts.check_changelog_entries import resolve_diff_base
+from scripts.check_changelog_entries import touched_projects
+
+_RELEASED_SECTION = "## [v1.0.0] - 2026-05-01\n\n- Added: An old feature.\n"
+_UNSTAMPED_CHANGELOG = f"# Changelog\n\n## [Unreleased]\n\n- Added: A feature.\n\n{_RELEASED_SECTION}"
+_STAMPED_CHANGELOG = (
+    f"# Changelog\n\n## [Unreleased]\n\n## [v1.1.0] - 2026-05-11\n\n- Added: A feature.\n\n{_RELEASED_SECTION}"
+)
 
 
 def _init_repo(tmp_path: Path) -> Path:
@@ -28,6 +35,19 @@ def _init_repo(tmp_path: Path) -> Path:
     (repo / "dev" / "changelog").mkdir(parents=True)
     run_git_command(repo, "add", "-A")
     run_git_command(repo, "commit", "-m", "project skeleton")
+    return repo
+
+
+def _branch_changing_the_changelog(tmp_path: Path, branch: str, before: str, after: str) -> Path:
+    """Create a repo whose ``branch`` changes ``libs/mngr/CHANGELOG.md`` from ``before`` (on main) to ``after``."""
+    repo = _init_repo(tmp_path)
+    (repo / "libs" / "mngr" / "CHANGELOG.md").write_text(before)
+    run_git_command(repo, "add", "-A")
+    run_git_command(repo, "commit", "-m", "changelog")
+    run_git_command(repo, "checkout", "-b", branch)
+    (repo / "libs" / "mngr" / "CHANGELOG.md").write_text(after)
+    run_git_command(repo, "add", "-A")
+    run_git_command(repo, "commit", "-m", "change the changelog")
     return repo
 
 
@@ -96,7 +116,7 @@ def test_changed_files_detects_project_change(tmp_path: Path) -> None:
 
     changed = changed_files_against_base("main", repo)
     assert "libs/mngr/thing.py" in changed
-    assert projects_requiring_entry(changed, repo) == {"mngr"}
+    assert touched_projects(changed, repo) == {"mngr"}
 
 
 def test_root_file_maps_to_dev(tmp_path: Path) -> None:
@@ -107,7 +127,7 @@ def test_root_file_maps_to_dev(tmp_path: Path) -> None:
     run_git_command(repo, "commit", "-m", "root change")
 
     changed = changed_files_against_base("main", repo)
-    assert projects_requiring_entry(changed, repo) == {"dev"}
+    assert touched_projects(changed, repo) == {"dev"}
 
 
 def test_find_missing_entries(tmp_path: Path) -> None:
@@ -137,6 +157,74 @@ def test_main_passes_when_entry_present(tmp_path: Path) -> None:
     run_git_command(repo, "commit", "-m", "change with entry")
 
     assert main(repo) == 0
+
+
+def test_main_needs_no_entry_for_a_project_whose_changelog_gains_a_release_section(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _branch_changing_the_changelog(tmp_path, "release", _UNSTAMPED_CHANGELOG, _STAMPED_CHANGELOG)
+    (repo / "libs" / "mngr" / "version.py").write_text('VERSION = "1.1.0"\n')
+    run_git_command(repo, "add", "-A")
+    run_git_command(repo, "commit", "-m", "bump the version")
+
+    assert main(repo) == 0
+    assert "['mngr'] need none" in capsys.readouterr().out
+
+
+def test_main_still_needs_entries_for_the_other_projects_a_release_touches(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _branch_changing_the_changelog(tmp_path, "release", _UNSTAMPED_CHANGELOG, _STAMPED_CHANGELOG)
+    (repo / "justfile").write_text("recipe:\n")
+    run_git_command(repo, "add", "-A")
+    run_git_command(repo, "commit", "-m", "root change")
+
+    assert main(repo) == 1
+    err = capsys.readouterr().err
+    assert "dev/changelog/release.md" in err
+    assert "libs/mngr/changelog/release.md" not in err
+
+
+@pytest.mark.parametrize(
+    "edited_changelog",
+    [
+        pytest.param(_UNSTAMPED_CHANGELOG.replace("A feature.", "A better feature."), id="unreleased-bullet"),
+        pytest.param(_UNSTAMPED_CHANGELOG.replace("An old feature.", "An older feature."), id="released-bullet"),
+    ],
+)
+def test_main_needs_an_entry_for_a_changelog_edit_that_stamps_no_release(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], edited_changelog: str
+) -> None:
+    repo = _branch_changing_the_changelog(tmp_path, "correction", _UNSTAMPED_CHANGELOG, edited_changelog)
+
+    assert main(repo) == 1
+    assert "libs/mngr/changelog/correction.md" in capsys.readouterr().err
+
+
+def test_projects_stamping_a_release_ignores_an_added_unreleased_heading(tmp_path: Path) -> None:
+    repo = _branch_changing_the_changelog(
+        tmp_path, "setup", f"# Changelog\n\n{_RELEASED_SECTION}", _UNSTAMPED_CHANGELOG
+    )
+
+    assert projects_stamping_a_release("main", {"mngr"}, repo) == set()
+
+
+def test_projects_stamping_a_release_names_only_the_projects_that_stamp(tmp_path: Path) -> None:
+    repo = _branch_changing_the_changelog(tmp_path, "release", _UNSTAMPED_CHANGELOG, _STAMPED_CHANGELOG)
+
+    assert projects_stamping_a_release("main", {"mngr", "dev"}, repo) == {"mngr"}
+
+
+def test_projects_stamping_a_release_ignores_a_heading_main_changed_after_the_branch_was_cut(tmp_path: Path) -> None:
+    repo = _branch_changing_the_changelog(
+        tmp_path, "feature", _STAMPED_CHANGELOG, _STAMPED_CHANGELOG.replace("- Added: A feature.", "- Added: It.")
+    )
+    run_git_command(repo, "checkout", "main")
+    (repo / "libs" / "mngr" / "CHANGELOG.md").write_text(_STAMPED_CHANGELOG.replace("2026-05-11", "2026-05-12"))
+    run_git_command(repo, "commit", "-am", "re-date the release on main")
+    run_git_command(repo, "checkout", "feature")
+
+    assert projects_stamping_a_release("main", {"mngr"}, repo) == set()
 
 
 def test_main_errors_in_sandbox_shape(tmp_path: Path) -> None:

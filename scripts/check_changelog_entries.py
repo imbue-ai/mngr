@@ -8,18 +8,19 @@ so a base-branch diff computed there is structurally meaningless: it comes
 back empty and the check passes vacuously. See
 ``scripts/check_changelog_entries_test.py`` for the regression coverage.
 
-The check has exactly one input: the set of files this PR changed relative to
-its base. That input is computed here, where the base ref is present, and the
-gate refuses to run (loud non-zero exit) rather than pass vacuously when it
-cannot establish a base distinct from HEAD.
+The check's input is what this PR changed relative to its base: the files it
+touches, and the release headings it adds to a project's ``CHANGELOG.md``,
+each of which excuses that project from an entry. That input is computed here,
+where the base ref is present, and the gate refuses to run (loud non-zero exit)
+rather than pass vacuously when it cannot establish a base distinct from HEAD.
 
 Run it from the repo root as a module so ``scripts`` is importable::
 
     python -m scripts.check_changelog_entries
 
 Exit codes:
-    0  -- ok (entries present, or nothing to check: not a PR branch / exempt /
-          no project files changed)
+    0  -- ok (every required entry present, or nothing to check: not a PR
+          branch / exempt / no project files changed)
     1  -- one or more touched projects are missing their entry file
     2  -- cannot establish a usable diff base (misconfiguration); never a
           silent pass
@@ -29,9 +30,11 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Final
 
 from scripts.changelog_projects import DEV_PROJECT
 from scripts.changelog_projects import all_known_projects
+from scripts.changelog_projects import project_dir
 from scripts.changelog_projects import project_entries_dir
 from scripts.changelog_projects import project_for_path
 
@@ -42,6 +45,9 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 # caught requiring an entry for every project they touch. Dependabot's
 # version-bump PRs cannot write an entry.
 _EXEMPT_BRANCH_PREFIXES: tuple[str, ...] = ("mngr/changelog-consolidation", "dependabot/")
+
+_ADDED_RELEASE_HEADING_PREFIX: Final[str] = "+## ["
+_ADDED_UNRELEASED_HEADING: Final[str] = "+## [Unreleased]"
 
 
 def detect_branch(repo_root: Path) -> str | None:
@@ -121,14 +127,13 @@ def resolve_diff_base(repo_root: Path) -> str:
     raise RuntimeError("Cannot resolve a diff base distinct from HEAD: tried " + ", ".join(candidates) + "." + detail)
 
 
-def changed_files_against_base(base: str, repo_root: Path) -> list[str]:
-    """Return the repo-relative paths this branch changes vs. ``base``.
+def _diff_against_base(base: str, option: str, paths: list[str], repo_root: Path) -> str:
+    """Return the output of ``git diff <option> <base>...HEAD -- <paths>``.
 
-    Uses ``git diff --name-only <base>...HEAD`` (three-dot / merge-base form).
     Raises ``RuntimeError`` if ``git diff`` itself fails.
     """
     result = subprocess.run(
-        ["git", "diff", "--name-only", f"{base}...HEAD"],
+        ["git", "diff", option, f"{base}...HEAD", "--", *paths],
         cwd=repo_root,
         capture_output=True,
         text=True,
@@ -136,17 +141,27 @@ def changed_files_against_base(base: str, repo_root: Path) -> list[str]:
     )
     if result.returncode != 0:
         raise RuntimeError(f"git diff failed against {base} (exit {result.returncode}): {result.stderr.strip()}")
-    return [line for line in result.stdout.splitlines() if line.strip()]
+    return result.stdout
 
 
-def projects_requiring_entry(changed_files: list[str], repo_root: Path) -> set[str]:
-    """Return the set of projects this PR must produce a changelog entry for.
+def changed_files_against_base(base: str, repo_root: Path) -> list[str]:
+    """Return the repo-relative paths this branch changes vs. ``base``.
+
+    Uses ``git diff --name-only <base>...HEAD`` (three-dot / merge-base form).
+    Raises ``RuntimeError`` if ``git diff`` itself fails.
+    """
+    diff = _diff_against_base(base, "--name-only", [], repo_root)
+    return [line for line in diff.splitlines() if line.strip()]
+
+
+def touched_projects(changed_files: list[str], repo_root: Path) -> set[str]:
+    """Return the set of projects this PR touches.
 
     A project is "touched" iff the PR changes any file under it. Files that are
     themselves changelog artifacts are intentionally *not* excluded -- adding
     an entry file inherently satisfies the requirement, and a PR that only
     edits a project's consolidated ``CHANGELOG.md`` still owes a per-PR entry
-    describing that edit.
+    unless it adds a release heading (``projects_stamping_a_release``).
     """
     known = set(all_known_projects(repo_root))
     touched: set[str] = set()
@@ -155,6 +170,25 @@ def projects_requiring_entry(changed_files: list[str], repo_root: Path) -> set[s
         if project in known:
             touched.add(project)
     return touched
+
+
+def projects_stamping_a_release(base: str, touched: set[str], repo_root: Path) -> set[str]:
+    """Return the ``touched`` projects whose ``CHANGELOG.md`` gains a release heading vs. ``base``.
+
+    A release heading is an added line starting ``## [`` other than
+    ``## [Unreleased]``, e.g. ``## [v1.2.3] - 2026-05-11``. Raises
+    ``RuntimeError`` if ``git diff`` itself fails.
+    """
+    stamping: set[str] = set()
+    for project in sorted(touched):
+        changelog = (project_dir(project, repo_root) / "CHANGELOG.md").relative_to(repo_root)
+        diff = _diff_against_base(base, "-U0", [str(changelog)], repo_root)
+        if any(
+            line.startswith(_ADDED_RELEASE_HEADING_PREFIX) and line != _ADDED_UNRELEASED_HEADING
+            for line in diff.splitlines()
+        ):
+            stamping.add(project)
+    return stamping
 
 
 def find_missing_entries(branch: str, touched: set[str], repo_root: Path) -> list[str]:
@@ -189,20 +223,24 @@ def main(repo_root: Path = _REPO_ROOT) -> int:
         return 2
 
     changed_files = changed_files_against_base(diff_base, repo_root)
-    touched = projects_requiring_entry(changed_files, repo_root)
-    missing = find_missing_entries(branch, touched, repo_root)
+    touched = touched_projects(changed_files, repo_root)
+    stamping = projects_stamping_a_release(diff_base, touched, repo_root)
+    missing = find_missing_entries(branch, touched - stamping, repo_root)
 
     if not missing:
+        stamping_note = (
+            f" {sorted(stamping)} need none: their CHANGELOG.md gains a release section." if stamping else ""
+        )
         print(
             f"changelog gate: ok. Branch '{branch}' touches {sorted(touched)} "
-            f"(diff base '{diff_base}'); all required entries present."
+            f"(diff base '{diff_base}'); all required entries present.{stamping_note}"
         )
         return 0
 
     print(
         f"changelog gate FAILED: missing changelog entries for branch '{branch}' "
         f"(diff base '{diff_base}', via git diff --name-only {diff_base}...HEAD). "
-        f"This PR touches project(s) {sorted(touched)}; each needs its own entry file.\n"
+        f"This PR touches project(s) {sorted(touched - stamping)}; each needs its own entry file.\n"
         f"Create:\n" + "\n".join(f"  - {p}" for p in missing) + "\n"
         f"Each file should briefly describe the user-visible changes in this PR that "
         f"pertain to that project. The synthetic '{DEV_PROJECT}' project covers "
