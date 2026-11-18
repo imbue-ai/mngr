@@ -13,6 +13,7 @@ const {
   POPOUT_MIN_WIDTH,
   POPOUT_MIN_HEIGHT,
   followPosition,
+  windowGrab,
   popoutOpenBounds,
   overshootPastSurface,
   isTornOut,
@@ -36,6 +37,12 @@ test('followPosition never answers negative zero, which setPosition refuses', ()
   // deepStrictEqual tells -0 from 0 where deepEqual does not.
   assert.deepStrictEqual(followPosition({ x: 10, y: 0 }, { grabX: 10.4, grabY: 0.25 }), { x: 0, y: 0 });
   assert.deepStrictEqual(followPosition({ x: 10, y: 5 }, { grabX: 10.5, grabY: 5.6 }), { x: 0, y: -1 });
+});
+
+test('windowGrab moves a page grab by the native frame around the page, and not at all without one', () => {
+  const grab = { grabX: 40, grabY: 12 };
+  assert.deepStrictEqual(windowGrab(grab, { x: 200, y: 100 }, { x: 201, y: 131 }), { grabX: 41, grabY: 43 });
+  assert.deepStrictEqual(windowGrab(grab, { x: 200, y: 100 }, { x: 200, y: 100 }), grab);
 });
 
 test('a dragged popout opens under the cursor at the size the workspace drew it', () => {

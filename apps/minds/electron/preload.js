@@ -27,8 +27,8 @@ const windowControls = windowControlsArgument
 
 contextBridge.exposeInMainWorld('mindsNative', {
   platform: process.platform,
-  // 'native-mac', 'drawn-mac' or 'buttons' (window-controls.js); null when
-  // main did not say, which the SPA reads as the platform's own controls.
+  // A window-controls.js value; null when main did not say, which the SPA
+  // reads as the platform's own controls.
   windowControls,
   // This renderer's process id: the SPA sends it with its profiling spans, so
   // its lane and Chromium's lane for the same renderer are matched by eye.

@@ -31,6 +31,23 @@ function followPosition(cursor, grab) {
   return { x: wholePixel(cursor.x - grab.grabX), y: wholePixel(cursor.y - grab.grabY) };
 }
 
+/**
+ * A grab point in the page's coordinates as one in the window's: offset by
+ * where the page sits inside the window (inside its native frame, if it has
+ * one).
+ *
+ * @param {{grabX: number, grabY: number}} grab  Where inside the page it is held.
+ * @param {{x: number, y: number}} windowBounds  The window's bounds, frame included.
+ * @param {{x: number, y: number}} contentBounds  Its page's bounds.
+ * @returns {{grabX: number, grabY: number}}
+ */
+function windowGrab(grab, windowBounds, contentBounds) {
+  return {
+    grabX: grab.grabX + contentBounds.x - windowBounds.x,
+    grabY: grab.grabY + contentBounds.y - windowBounds.y,
+  };
+}
+
 // A whole pixel for setPosition, which takes int32s and refuses -0 (V8's
 // IsInt32 excludes it). Math.round gives -0 for anything in [-0.5, 0], which a
 // fractional grab offset (a HiDPI pointer) reaches whenever the window is held
@@ -137,6 +154,7 @@ module.exports = {
   POPOUT_MIN_HEIGHT,
   TEAR_OUT_DISTANCE,
   followPosition,
+  windowGrab,
   popoutOpenBounds,
   surfaceBounds,
   overshootPastSurface,

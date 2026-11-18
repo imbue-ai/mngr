@@ -218,6 +218,9 @@ export class ShellState {
   /** The bar draws macOS-style traffic lights itself (a window off macOS made
    * to look like one, the demo box); with isMac, the bar takes the Mac layout. */
   isTrafficLightsDrawn = false;
+  /** The window keeps its native frame (WSL), whose title bar carries the
+   * window controls, so the bar draws none. */
+  isNativeFrame = false;
   mngrForwardOrigin = "";
   /** The bell's notification feed: local overlay state, not a route, so it
    * pops over whatever surface is on screen (a hub page, the create form, a

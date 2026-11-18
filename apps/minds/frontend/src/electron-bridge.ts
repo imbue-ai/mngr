@@ -102,9 +102,9 @@ export interface UpdateState {
 export type UpdateInstallPolicy = "on-quit" | "on-request";
 
 /** Which window controls a window's bar shows (electron/window-controls.js):
- * the native macOS traffic lights, traffic lights the bar draws itself, or
- * the bar's own buttons. */
-export type WindowControls = "native-mac" | "drawn-mac" | "buttons";
+ * the native macOS traffic lights, traffic lights the bar draws itself, the
+ * bar's own buttons, or none (the native frame's title bar carries them). */
+export type WindowControls = "native-mac" | "drawn-mac" | "buttons" | "native-frame";
 
 interface MindsNativeSurface {
   platform: string;
@@ -361,6 +361,11 @@ export const electronBridge = {
    * that has no native ones. */
   get isTrafficLightsDrawn(): boolean {
     return native()?.windowControls === "drawn-mac";
+  },
+  /** Whether the window keeps its native frame, whose title bar carries the
+   * window controls. */
+  get isNativeFrame(): boolean {
+    return native()?.windowControls === "native-frame";
   },
   minimize(): void {
     native()?.minimize();

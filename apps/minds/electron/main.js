@@ -77,6 +77,7 @@ const {
 // live in ./popout-policy so they can be unit-tested under plain node.
 const {
   followPosition,
+  windowGrab,
   popoutOpenBounds,
   surfaceBounds,
   isTornOut,
@@ -115,7 +116,7 @@ const updater = require('./updater');
 const { INSTALL_NO_SIGNAL_CODE } = require('./install-policy');
 const displayZoom = require('./display-zoom');
 const launchVersion = require('./launch-version');
-const { resolveWindowControls, windowControlsSwitch } = require('./window-controls');
+const { NATIVE_FRAME, resolveWindowControls, windowControlsSwitch } = require('./window-controls');
 const { removeLegacyNameDirs } = require('./legacy-name-cleanup');
 const { PRODUCT_DISPLAY_NAME } = require('./product-name');
 // Window / quit lifecycle decisions live in ./lifecycle-policy so they can be
@@ -293,7 +294,7 @@ if (app.isPackaged) {
 
 const isMac = process.platform === 'darwin';
 // Resolved once, before any window: a bad setting fails the launch outright.
-const windowControls = resolveWindowControls(process.platform, process.env);
+const windowControls = resolveWindowControls(process.platform, process.env, os.release());
 
 // A popout follows the cursor on a timer (Electron cannot hand a live drag
 // to a new native window): once per frame is smooth enough and cheap.
@@ -1002,15 +1003,19 @@ function buildBundleWindowOptions(kind, bounds, partition) {
       windowOptions.width = bounds.width;
       windowOptions.height = bounds.height;
     }
+    // The workspace drew the page at that size; a native frame goes around it.
+    if (windowControls === NATIVE_FRAME) windowOptions.useContentSize = true;
   }
   // The SPA draws every window's bar. On macOS it sits under the native
-  // traffic lights (the bar leaves room for them); elsewhere the window is
-  // frameless and the bar carries the controls itself (its own buttons, or
-  // traffic lights it draws when MINDS_WINDOW_CONTROLS asks for them).
+  // traffic lights (the bar leaves room for them); under WSL it sits below the
+  // native frame's title bar (window-controls.js says why); elsewhere the
+  // window is frameless and the bar carries the controls itself (its own
+  // buttons, or traffic lights it draws when MINDS_WINDOW_CONTROLS asks for
+  // them).
   if (isMac) {
     windowOptions.titleBarStyle = 'hiddenInset';
     windowOptions.trafficLightPosition = { x: 12, y: (TITLEBAR_HEIGHT - 16) / 2 };
-  } else {
+  } else if (windowControls !== NATIVE_FRAME) {
     windowOptions.frame = false;
   }
   return windowOptions;
@@ -3758,7 +3763,10 @@ function startFollowingCursor(bundle, grab) {
       return;
     }
     const cursor = screen.getCursorScreenPoint();
-    const position = followPosition(cursor, bundle.popout.followGrab);
+    // Read each tick: a window manager may report its frame only once the
+    // window is mapped.
+    const grabInWindow = windowGrab(bundle.popout.followGrab, bundle.window.getBounds(), bundle.window.getContentBounds());
+    const position = followPosition(cursor, grabInWindow);
     bundle.window.setPosition(position.x, position.y);
   }, POPOUT_FOLLOW_INTERVAL_MS);
 }

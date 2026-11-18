@@ -1,6 +1,7 @@
 // Which window controls a window's bar shows: the native macOS traffic lights
-// (the bar leaves room for them), traffic lights the bar draws itself, or the
-// bar's own minimize / maximize / close buttons.
+// (the bar leaves room for them), traffic lights the bar draws itself, the
+// bar's own minimize / maximize / close buttons, or none (the window keeps the
+// native frame, whose title bar carries them).
 //
 // Deliberately free of any `electron` import so the rule is unit-testable
 // under plain node. Main resolves it once at startup and hands it to every
@@ -16,18 +17,29 @@ const WINDOW_CONTROLS_SWITCH = 'minds-window-controls';
 const NATIVE_MAC = 'native-mac';
 const DRAWN_MAC = 'drawn-mac';
 const BUTTONS = 'buttons';
+const NATIVE_FRAME = 'native-frame';
+
+// WSL2's kernel release (`5.15.167.4-microsoft-standard-WSL2`).
+const WSL_KERNEL_RELEASE_PATTERN = /microsoft/i;
 
 /**
- * The window controls for this launch, from the platform and the environment.
+ * The window controls for this launch, from the platform, the environment and
+ * the kernel release (`os.release()`).
+ *
+ * Under WSL the window keeps its native frame: WSLg places a maximized
+ * frameless window offset from where it takes input, so every click lands
+ * away from what it points at (microsoft/wslg#1015).
  *
  * Throws on a value the variable does not accept rather than falling back to
  * the platform's controls, so a misspelt setting cannot silently record a
  * demo with the wrong chrome.
  */
-function resolveWindowControls(platform, env) {
+function resolveWindowControls(platform, env, kernelRelease) {
   if (platform === 'darwin') return NATIVE_MAC;
   const requested = env[WINDOW_CONTROLS_ENV_VAR];
-  if (requested === undefined || requested === '') return BUTTONS;
+  if (requested === undefined || requested === '') {
+    return platform === 'linux' && WSL_KERNEL_RELEASE_PATTERN.test(kernelRelease) ? NATIVE_FRAME : BUTTONS;
+  }
   if (requested === DRAWN_MAC_ENV_VALUE) return DRAWN_MAC;
   throw new Error(
     `${WINDOW_CONTROLS_ENV_VAR}=${JSON.stringify(requested)} is not a window style; ` +
@@ -43,6 +55,7 @@ function windowControlsSwitch(windowControls) {
 module.exports = {
   BUTTONS,
   DRAWN_MAC,
+  NATIVE_FRAME,
   NATIVE_MAC,
   WINDOW_CONTROLS_ENV_VAR,
   WINDOW_CONTROLS_SWITCH,

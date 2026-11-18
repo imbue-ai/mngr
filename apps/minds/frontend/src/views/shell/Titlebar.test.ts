@@ -58,6 +58,7 @@ interface RenderTitlebarOptions {
   /** The shell's platform flags; a Mac by default, as the other cases assume. */
   isMac?: boolean;
   isTrafficLightsDrawn?: boolean;
+  isNativeFrame?: boolean;
   /** The chrome control a workspace's tour asked to have ringed. */
   highlightedChromeAnchor?: string | null;
   /** The route's workspace id; `agent-ab12` by default. */
@@ -82,6 +83,7 @@ function renderTitlebar(
   const shell = {
     isMac: options.isMac ?? true,
     isTrafficLightsDrawn: options.isTrafficLightsDrawn ?? false,
+    isNativeFrame: options.isNativeFrame ?? false,
     panelRouteBehindOverlay: options.panelRouteBehindOverlay ?? null,
     stores: {
       ...createEmptyStores(),
@@ -565,6 +567,12 @@ describe("Titlebar window controls", () => {
     expect(classTokensOf(buttonCluster)).toContain("hidden");
     // No spacer either: the lights take that room themselves.
     expect(collectVnodes(root).find((vnode) => classTokensOf(vnode).includes("w-[72px]") && vnode.tag === "div" && attrsOf(vnode).id === undefined)).toBeUndefined();
+  });
+
+  it("draws neither its own buttons nor lights when the native frame's title bar carries the controls", () => {
+    const root = renderTitlebar("", { isMac: false, isNativeFrame: true });
+    expect(collectVnodes(root).find((vnode) => vnode.tag === TrafficLights)).toBeUndefined();
+    expect(classTokensOf(windowButtonCluster(root))).toContain("hidden");
   });
 
   it("keeps its own buttons, and draws no lights, off macOS by default", () => {

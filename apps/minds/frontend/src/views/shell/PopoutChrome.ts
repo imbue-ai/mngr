@@ -1,9 +1,10 @@
 // The bar across the top of a pulled-out window (the pull-out-window spec,
 // section 4.3): the workspace's accent, the workspace name and the window's
-// title, and a close control (off macOS; on macOS the window's own traffic
-// lights close it, and the bar leaves room for them). It stands in for the
-// titlebar on the /popout route; the workspace shell under it shows one
-// window edge to edge, so this bar is the only chrome the popout has.
+// title, and a close control (on macOS the window's own traffic lights close
+// it instead, and the bar leaves room for them; under WSL the native frame's
+// title bar does). It stands in for the titlebar on the /popout
+// route; the workspace shell under it shows one window edge to edge, so this
+// bar is the only chrome the page draws for the popout.
 //
 // Dragging the bar moves the OS window: a pointer-capture handler tells main
 // where the bar was grabbed and main follows the cursor until the release
@@ -13,7 +14,7 @@
 import m from "mithril";
 import { Icon12 } from "../components/Icon";
 import { TitlebarButton } from "../components/TitlebarButton";
-import { CHROME_BAR_CLASS, CHROME_BAR_STYLE, isMacLayout, leftWindowControls } from "./Titlebar";
+import { CHROME_BAR_CLASS, CHROME_BAR_STYLE, hasOwnWindowButtons, leftWindowControls } from "./Titlebar";
 import { electronBridge } from "../../electron-bridge";
 import type { ShellState } from "./shell-state";
 
@@ -70,9 +71,8 @@ export function PopoutChrome(): m.Component<PopoutChromeAttrs> {
             const travelled = Math.hypot(event.clientX - pressPoint.x, event.clientY - pressPoint.y);
             if (travelled < DRAG_THRESHOLD_PX) return;
             isDragging = true;
-            // The page's origin is the window's on every platform (frameless
-            // off macOS, hiddenInset on it), so the press point is where
-            // inside the window the bar is held.
+            // The press point is where inside the page the bar is held; main
+            // adds the native frame around the page, where there is one (WSL).
             electronBridge.beginPopoutDrag({ grabX: pressPoint.x, grabY: pressPoint.y });
           },
           onpointerup: endDrag,
@@ -100,7 +100,8 @@ export function PopoutChrome(): m.Component<PopoutChromeAttrs> {
           m("div", { class: "flex items-center justify-end shrink-0 gap-1 pr-1" }, [
             // The close is the way back: main returns the window to the
             // desktop through a desktop window showing the workspace before
-            // this window goes. On macOS the traffic lights carry it.
+            // this window goes. On macOS the traffic lights carry it, and
+            // under WSL the native frame's title bar does.
             m(
               TitlebarButton,
               {
@@ -109,7 +110,7 @@ export function PopoutChrome(): m.Component<PopoutChromeAttrs> {
                 id: "popout-close-btn",
                 "aria-label": "Close",
                 "data-tooltip": "Close (returns the window to the desktop)",
-                hidden: !electronBridge.isDesktop || isMacLayout(shell),
+                hidden: !electronBridge.isDesktop || !hasOwnWindowButtons(shell),
                 onclick: () => electronBridge.close(),
               },
               m(Icon12, { name: "close" }),

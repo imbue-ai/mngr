@@ -12,10 +12,18 @@ import { allText, attrsOf, classTokensOf, collectVnodes, renderRoot } from "../.
 const WORKSPACE_ID = "agent-ab12";
 const WINDOW_ID = "win-0123";
 
-function renderBar(accent: string | null, title: string, isMac = false, isTrafficLightsDrawn = false): AnyVnode {
+/** The shell's platform flags; each is off unless given. */
+interface PlatformFlags {
+  isMac?: boolean;
+  isTrafficLightsDrawn?: boolean;
+  isNativeFrame?: boolean;
+}
+
+function renderBar(accent: string | null, title: string, platform: PlatformFlags = {}): AnyVnode {
   const shell = {
-    isMac,
-    isTrafficLightsDrawn,
+    isMac: platform.isMac ?? false,
+    isTrafficLightsDrawn: platform.isTrafficLightsDrawn ?? false,
+    isNativeFrame: platform.isNativeFrame ?? false,
     stores: {
       workspaces: {
         accentEntry: () => ({ accent, name: "Research" }),
@@ -69,13 +77,13 @@ describe("PopoutChrome", () => {
     window.mindsNative = { platform: "darwin", close: () => undefined } as unknown as NonNullable<
       Window["mindsNative"]
     >;
-    const bar = renderBar("#aabbcc", "Notes", true);
+    const bar = renderBar("#aabbcc", "Notes", { isMac: true });
     expect(attrsOf(buttonOf(bar, "popout-close-btn")).hidden).toBe(true);
     const spacer = collectVnodes(bar).find((vnode) => classTokensOf(vnode).includes("w-[72px]"));
     expect(spacer).toBeDefined();
     // The native lights take their cursor from the page under them, not the bar's grab.
     expect(classTokensOf(spacer!)).toContain("cursor-default");
-    const elsewhere = collectVnodes(renderBar("#aabbcc", "Notes", false));
+    const elsewhere = collectVnodes(renderBar("#aabbcc", "Notes"));
     expect(elsewhere.find((vnode) => classTokensOf(vnode).includes("w-[72px]"))).toBeUndefined();
   });
 
@@ -83,9 +91,18 @@ describe("PopoutChrome", () => {
     window.mindsNative = { platform: "linux", close: () => undefined } as unknown as NonNullable<
       Window["mindsNative"]
     >;
-    const bar = renderBar("#aabbcc", "Notes", false, true);
+    const bar = renderBar("#aabbcc", "Notes", { isTrafficLightsDrawn: true });
     expect(attrsOf(buttonOf(bar, "popout-close-btn")).hidden).toBe(true);
     expect(collectVnodes(bar).find((vnode) => vnode.tag === TrafficLights)).toBeDefined();
+  });
+
+  it("hides its close control, and draws no lights, when the native frame's title bar carries the controls", () => {
+    window.mindsNative = { platform: "linux", close: () => undefined } as unknown as NonNullable<
+      Window["mindsNative"]
+    >;
+    const bar = renderBar("#aabbcc", "Notes", { isNativeFrame: true });
+    expect(attrsOf(buttonOf(bar, "popout-close-btn")).hidden).toBe(true);
+    expect(collectVnodes(bar).find((vnode) => vnode.tag === TrafficLights)).toBeUndefined();
   });
 
   it("wears the titlebar's self-theming recipe only once an accent is painted", () => {

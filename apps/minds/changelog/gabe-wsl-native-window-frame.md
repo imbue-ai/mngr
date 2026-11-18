@@ -1,0 +1,1 @@
+Under WSL, Studio's windows now keep the native title bar instead of being frameless. WSLg drew a maximized frameless window offset from where it took clicks, so every click landed away from the button under the pointer (microsoft/wslg#1015). Studio's own bar stays below the native one, without its minimize, maximize and close buttons. Other platforms are unchanged.

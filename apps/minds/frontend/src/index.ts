@@ -49,6 +49,7 @@ function main(): void {
   const shell = new ShellState(bootContext.stores);
   shell.isMac = bootContext.seed.isMac;
   shell.isTrafficLightsDrawn = electronBridge.isTrafficLightsDrawn;
+  shell.isNativeFrame = electronBridge.isNativeFrame;
   shell.mngrForwardOrigin = bootContext.seed.mngrForwardOrigin;
   shell.accountId = bootContext.seed.accountId;
   onboardingProgress.seed(bootContext.seed.isOnboardingComplete);

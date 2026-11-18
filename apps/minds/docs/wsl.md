@@ -101,6 +101,15 @@ interface) exist only in tmux sessions that mngr recreates. A raw
 level but serving nothing -- until Imbue Studio's health tracker marks it STUCK and
 its recovery flow runs that `mngr start` for you a few minutes later.
 
+## Window frame
+
+Under WSL, Studio's windows keep the native title bar, with the minimize,
+maximize and close buttons on it, above Studio's own bar. WSLg mis-places a
+maximized frameless window: it draws the window offset from where the window
+takes clicks, so every click lands away from what the pointer is on
+([microsoft/wslg#1015](https://github.com/microsoft/wslg/issues/1015)).
+Framed windows maximize correctly.
+
 ## Gotchas (mostly for headless / remote setups)
 
 - CRITICAL -- WSLg session affinity: WSLg windows only appear in the Windows

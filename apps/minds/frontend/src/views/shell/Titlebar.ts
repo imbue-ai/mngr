@@ -59,10 +59,11 @@ export function trafficLightSpacer(): m.Children {
   return m("div", { class: "w-[72px] shrink-0 cursor-default", "aria-hidden": "true" });
 }
 
-/** Whether the bar takes the Mac layout: the window controls at its left
- * (native, or drawn by the bar) and none of its own buttons at the right. */
-export function isMacLayout(shell: ShellState): boolean {
-  return shell.isMac || shell.isTrafficLightsDrawn;
+/** Whether the bar draws its own minimize / maximize / close buttons at its
+ * right: not when the window controls are traffic lights at its left (native,
+ * or drawn by the bar), nor when the native frame's title bar carries them. */
+export function hasOwnWindowButtons(shell: ShellState): boolean {
+  return !shell.isMac && !shell.isTrafficLightsDrawn && !shell.isNativeFrame;
 }
 
 /** What the bar puts at its left for the window controls: the drawn traffic
@@ -121,7 +122,7 @@ function startTitlebar(shell: ShellState): m.Children {
               m("span", { class: "type-body text-tertiary group-hover:text-primary" }, EXISTING_LOGIN_LABEL),
             ),
           ]),
-      m("div", { class: "flex" + (isMacLayout(shell) ? " hidden" : "") }, [
+      m("div", { class: "flex" + (hasOwnWindowButtons(shell) ? "" : " hidden") }, [
         m(TitlebarButton, { variant: "control", "aria-label": "Minimize", hidden: !isDesktop, onclick: () => electronBridge.minimize() }, m(Icon12, { name: "minimize" })),
         m(TitlebarButton, { variant: "control", "aria-label": "Maximize", hidden: !isDesktop, onclick: () => electronBridge.maximize() }, m(Icon12, { name: "maximize" })),
         m(TitlebarButton, { variant: "control", tone: "danger", "aria-label": "Close", hidden: !isDesktop, onclick: () => electronBridge.close() }, m(Icon12, { name: "close" })),
@@ -434,7 +435,7 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
               },
               m(Icon16, { name: "bug" }),
             ),
-            m("div", { class: "flex" + (isMacLayout(shell) ? " hidden" : "") }, [
+            m("div", { class: "flex" + (hasOwnWindowButtons(shell) ? "" : " hidden") }, [
               m(
                 TitlebarButton,
                 {
