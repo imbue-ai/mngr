@@ -133,6 +133,17 @@ def _is_sidechain(record: Mapping[str, Any]) -> bool:
     return bool(record.get("isSidechain"))
 
 
+def _session_id(record: Mapping[str, Any]) -> str:
+    """The claude session id a raw record was written under ("" when it carries none).
+
+    This is the id claude sends as the ``x-claude-code-session-id`` header on the API
+    request behind the record, so it joins a step to a proxy's request log. A native
+    subagent's records carry the parent session's id, as do its requests.
+    """
+    session_id = record.get("sessionId")
+    return session_id if isinstance(session_id, str) else ""
+
+
 def _block_text(block: Mapping[str, Any]) -> str:
     """The transcript-visible text of one content block ("" when it carries none)."""
     block_type = block.get("type", "")
@@ -232,11 +243,14 @@ class _AssistantGroup:
     records do not break a group (anything else does).
     """
 
-    def __init__(self, message_id: str, first_uuid: str, first_timestamp: str, is_sidechain: bool) -> None:
+    def __init__(
+        self, message_id: str, first_uuid: str, first_timestamp: str, is_sidechain: bool, session_id: str
+    ) -> None:
         self.message_id = message_id
         self.event_id = _make_event_id(first_uuid, "assistant")
         self.timestamp = first_timestamp
         self.is_sidechain = is_sidechain
+        self.session_id = session_id
         self.records: list[Mapping[str, Any]] = []
 
 
@@ -265,7 +279,9 @@ def _group_assistant_records(
             # so it is always its own group (keyed by its uuid, which is unique).
             is_same_group = open_group is not None and message_id != "" and open_group.message_id == message_id
             if not is_same_group:
-                open_group = _AssistantGroup(message_id, record["uuid"], record["timestamp"], is_sidechain)
+                open_group = _AssistantGroup(
+                    message_id, record["uuid"], record["timestamp"], is_sidechain, _session_id(record)
+                )
                 groups.append(open_group)
             open_group.records.append(record)
         elif not _has_tool_results_only(message.get("content")):
@@ -369,6 +385,8 @@ def _build_agent_step(group: _AssistantGroup) -> dict[str, Any] | None:
         extra["message_id"] = group.message_id
     if group.is_sidechain:
         extra["is_sidechain"] = True
+    if group.session_id:
+        extra["harness_session_id"] = group.session_id
     if extra:
         step["extra"] = extra
     return step

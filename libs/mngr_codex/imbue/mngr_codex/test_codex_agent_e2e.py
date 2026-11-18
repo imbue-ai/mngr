@@ -23,15 +23,21 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from collections.abc import Generator
 from collections.abc import Sequence
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
 from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
 from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
+from imbue.mngr.agents.agent_release_testing import agent_state_dir
+from imbue.mngr.agents.agent_release_testing import is_step_from
 from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
 from imbue.mngr.agents.agent_release_testing import run_message_delivery_journey
+from imbue.mngr.agents.agent_release_testing import send_expecting_success
+from imbue.mngr.agents.agent_release_testing import wait_for_records
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import init_git_repo
@@ -196,6 +202,25 @@ class _CodexReleaseProfile(AgentReleaseProfile):
         return run_mngr_subprocess(args[0], *_PROVIDER_SETTINGS, *args[1:], env=dict(ctx.env), timeout=timeout)
 
 
+@contextmanager
+def _created_codex_agent(
+    profile: _CodexReleaseProfile, ctx: AgentReleaseContext, agent_name: str, *create_args: str
+) -> Generator[None, None, None]:
+    """Create a codex agent with ``create_args``; on exit force-destroy it and tear ``ctx`` down, even after a failed create."""
+    try:
+        create = profile.run_mngr(
+            ctx, "create", agent_name, "codex", "--no-connect", "--yes", *create_args, timeout=600
+        )
+        assert create.returncode == 0, f"create failed:\n{create.stdout}\n{create.stderr}"
+        yield
+    finally:
+        try:
+            profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=150)
+        finally:
+            if ctx.teardown is not None:
+                ctx.teardown()
+
+
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.rsync
@@ -248,25 +273,18 @@ def test_codex_agent_with_unoffered_pinned_model_starts_on_account_default(tmp_p
     ctx = profile.setup(tmp_path)
     agent_name = f"codex-fallback-{get_short_random_string()}"
     unoffered_model = f"gpt-unoffered-{get_short_random_string()}"
-    try:
-        create = profile.run_mngr(
-            ctx,
-            "create",
-            agent_name,
-            "codex",
-            "--no-connect",
-            "--yes",
-            "--no-ensure-clean",
-            "--source",
-            str(ctx.project_dir),
-            "-S",
-            f"agent_types.codex.model={unoffered_model}",
-            "-S",
-            "agent_types.codex.fall_back_to_account_default_model=true",
-            timeout=600,
-        )
-        assert create.returncode == 0, f"create failed:\n{create.stdout}\n{create.stderr}"
-
+    with _created_codex_agent(
+        profile,
+        ctx,
+        agent_name,
+        "--no-ensure-clean",
+        "--source",
+        str(ctx.project_dir),
+        "-S",
+        f"agent_types.codex.model={unoffered_model}",
+        "-S",
+        "agent_types.codex.fall_back_to_account_default_model=true",
+    ):
         agent_dirs = [path for path in (ctx.host_dir / "agents").glob("*") if path.is_dir()]
         assert len(agent_dirs) == 1
         root_thread_id = (agent_dirs[0] / APP_SERVER_THREAD_FILENAME).read_text().strip()
@@ -283,9 +301,42 @@ def test_codex_agent_with_unoffered_pinned_model_starts_on_account_default(tmp_p
 
         assert root_thread.model == account_default
         assert root_thread.model != unoffered_model
-    finally:
-        try:
-            profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=150)
-        finally:
-            if ctx.teardown is not None:
-                ctx.teardown()
+
+
+@pytest.mark.release
+@pytest.mark.harness_internals(harness="codex")
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(900)
+def test_codex_agent_steps_carry_the_session_and_turn_ids_codex_reports(tmp_path: Path) -> None:
+    """Every agent step carries, as ``extra.harness_session_id``, the root thread id codex's daemon reports.
+
+    Pins the rollout's ``session_meta`` naming the session (which codex also sends in the
+    ``x-codex-turn-metadata`` request header) and its ``turn_context`` naming each turn.
+    """
+    profile = _CodexReleaseProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+    ctx = profile.setup(tmp_path)
+    agent_name = f"codex-sessionid-{get_short_random_string()}"
+    with _created_codex_agent(profile, ctx, agent_name, *profile.create_extra_args(ctx)):
+        send_expecting_success(profile, ctx, agent_name, "Reply with just OK.")
+
+        common_records = wait_for_records(
+            ctx.host_dir,
+            profile.common_transcript_subdir,
+            lambda rs: any(is_step_from(r, "agent") for r in rs),
+            timeout=180,
+            description="no agent step reached the common transcript",
+        )
+        root_thread_id = (agent_state_dir(ctx.host_dir) / APP_SERVER_THREAD_FILENAME).read_text().strip()
+        extras = [r.get("extra") or {} for r in common_records if is_step_from(r, "agent")]
+        assert root_thread_id and all(extra.get("harness_session_id") == root_thread_id for extra in extras), (
+            f"agent steps carry {extras}, not harness_session_id {root_thread_id!r}; the rollout's session_meta "
+            "drifted (consumer: common_transcript_convert._session_meta_id)"
+        )
+        assert all(extra.get("harness_turn_id") for extra in extras), (
+            f"agent steps carry {extras}, some without a harness_turn_id; the rollout's turn_context drifted "
+            "(consumer: common_transcript_convert._stamp_inference_context)"
+        )

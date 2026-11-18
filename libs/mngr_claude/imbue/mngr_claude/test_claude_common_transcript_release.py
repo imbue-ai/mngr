@@ -8,6 +8,7 @@ from typing import Final
 
 import pytest
 
+from imbue.mngr.agents.agent_release_testing import agent_state_dir
 from imbue.mngr.agents.agent_release_testing import is_step_from
 from imbue.mngr.agents.agent_release_testing import send_expecting_success
 from imbue.mngr.agents.agent_release_testing import wait_for_records
@@ -190,4 +191,50 @@ def test_claude_failed_tool_call_reaches_the_common_transcript_as_an_error(tmp_p
         ), (
             f"the failed Bash call reached the common transcript as {observation}, not an error result from Bash "
             f"carrying its output {drift}; consumer: {_TOOL_RESULT_CONSUMER}"
+        )
+
+
+_SESSION_ID_CONSUMER: Final[str] = (
+    "common_transcript_convert._build_agent_step (extra.harness_session_id), which minds_evals joins to the "
+    "x-claude-code-session-id header a proxy records"
+)
+
+
+@pytest.mark.release
+@pytest.mark.harness_internals(harness="claude")
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(1500)
+def test_claude_agent_steps_carry_the_session_id_claude_reports(tmp_path: Path) -> None:
+    """Every agent step carries, as ``extra.harness_session_id``, the session id claude reports to its hooks.
+
+    Pins the ``sessionId`` claude writes on each assistant record of its session file.
+    """
+    profile = ClaudeReleaseProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    ctx = profile.setup(tmp_path)
+    agent_name = f"claude-sessionid-{get_short_random_string()}"
+    drift = drift_note(ctx, "the sessionId on assistant records")
+    prompt = "Reply with just OK."
+    with created_agent(profile, ctx, agent_name, destroy_timeout=AGENT_DESTROY_TIMEOUT_SECONDS):
+        send_expecting_success(profile, ctx, agent_name, prompt)
+        wait_for_turn_to_end(profile, ctx, prompt, drift)
+        session_id = (agent_state_dir(ctx.host_dir) / "claude_session_id").read_text().strip()
+
+        common_records = wait_for_records(
+            ctx.host_dir,
+            profile.common_transcript_subdir,
+            lambda rs: any(is_step_from(r, "agent") for r in rs),
+            timeout=TURN_PROGRESS_TIMEOUT_SECONDS,
+            description=f"no agent step reached the common transcript {drift}",
+        )
+        stamped = [
+            (r.get("extra") or {}).get("harness_session_id") for r in common_records if is_step_from(r, "agent")
+        ]
+        assert session_id and stamped and all(value == session_id for value in stamped), (
+            f"agent steps carry harness_session_id {stamped}, not the session id {session_id!r} claude reported "
+            f"{drift}; consumer: {_SESSION_ID_CONSUMER}"
         )

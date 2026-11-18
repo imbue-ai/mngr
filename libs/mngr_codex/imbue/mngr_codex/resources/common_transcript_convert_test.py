@@ -13,6 +13,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from imbue.mngr.agents.common_transcript_records import PINNED_ATIF_SCHEMA_VERSION
 from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
 from imbue.mngr_codex.resources import common_transcript_convert
@@ -25,6 +27,7 @@ from imbue.mngr_codex.resources.testing import rollout_function_call as _functio
 from imbue.mngr_codex.resources.testing import rollout_function_call_output as _function_call_output
 from imbue.mngr_codex.resources.testing import rollout_line as _line
 from imbue.mngr_codex.resources.testing import rollout_reasoning as _reasoning
+from imbue.mngr_codex.resources.testing import rollout_session_meta as _session_meta
 from imbue.mngr_codex.resources.testing import rollout_timestamp_ms as _timestamp_ms
 from imbue.mngr_codex.resources.testing import rollout_token_count as _token_count
 from imbue.mngr_codex.resources.testing import rollout_turn_context as _turn_context
@@ -379,6 +382,81 @@ def test_agent_steps_carry_the_turns_model_and_reasoning_effort(tmp_path: Path) 
     _assert_all_conform(_records(output_file))
 
 
+def test_agent_steps_carry_the_session_and_turn_ids(tmp_path: Path) -> None:
+    # codex sends the session id (inside x-codex-turn-metadata) and the turn id on every
+    # model request, so these join an agent step to a proxy's request log.
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    _write(
+        input_file,
+        [
+            _session_meta("session-a"),
+            _turn_context("gpt-5.6-sol", turn_id="turn-a1"),
+            _user("do it"),
+            _reasoning("thinking"),
+            _function_call("shell", "{}", "call-1"),
+            _function_call_output("call-1", "ok"),
+            _assistant("done"),
+            _token_count(input_tokens=100, output_tokens=10),
+        ],
+    )
+    common_transcript_convert.convert(str(input_file), str(output_file))
+
+    steps = _steps(output_file)
+    agent_steps = [s for s in steps if s["source"] == "agent"]
+    assert len(agent_steps) == 3
+    assert all(s["extra"] == {"harness_session_id": "session-a", "harness_turn_id": "turn-a1"} for s in agent_steps)
+    assert all("extra" not in s for s in steps if s["source"] != "agent")
+    _assert_all_conform(_records(output_file))
+
+
+def test_a_later_rollout_restamps_the_session_and_turn(tmp_path: Path) -> None:
+    # A resume can open a fresh rollout, so one input spans several sessions.
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    _write(
+        input_file,
+        [
+            _session_meta("session-a"),
+            _turn_context("gpt-5.6-sol", turn_id="turn-a1"),
+            _assistant("first"),
+            _token_count(input_tokens=1, output_tokens=1),
+            _session_meta("session-b"),
+            _turn_context("gpt-5.6-sol", turn_id="turn-b1"),
+            _assistant("second"),
+            _token_count(input_tokens=2, output_tokens=2),
+        ],
+    )
+    common_transcript_convert.convert(str(input_file), str(output_file))
+    assert [(s["extra"]["harness_session_id"], s["extra"]["harness_turn_id"]) for s in _steps(output_file)] == [
+        ("session-a", "turn-a1"),
+        ("session-b", "turn-b1"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("session_meta", "expected_extra"),
+    [
+        pytest.param(
+            _session_meta("root-session", thread_id="sub-thread"),
+            {"harness_session_id": "root-session"},
+            id="root_session_not_subagent_thread",
+        ),
+        pytest.param(
+            _line("session_meta", {"id": "older-codex-session"}),
+            {"harness_session_id": "older-codex-session"},
+            id="falls_back_to_id_without_session_id",
+        ),
+        pytest.param(_line("session_meta", {"id": ""}), None, id="no_id_leaves_no_extra"),
+    ],
+)
+def test_session_meta_names_the_stamped_session(
+    tmp_path: Path, session_meta: dict[str, Any], expected_extra: dict[str, str] | None
+) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    _write(input_file, [session_meta, _assistant("done")])
+    common_transcript_convert.convert(str(input_file), str(output_file), is_input_complete=True)
+    assert _steps(output_file)[0].get("extra") == expected_extra
+
+
 def test_turn_context_without_effort_leaves_reasoning_effort_absent(tmp_path: Path) -> None:
     input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
     _write(
@@ -657,6 +735,14 @@ def test_real_0146_rollout_prices_and_attributes_every_inference(tmp_path: Path)
     agent_steps = [s for s in _steps(output_file) if s["source"] == "agent"]
     assert all(s["model_name"] == "gpt-5.6-sol" for s in agent_steps)
     assert all(s["reasoning_effort"] == "medium" for s in agent_steps)
+    assert all(
+        s["extra"]
+        == {
+            "harness_session_id": "019fec66-64e8-7141-8812-65b577ad0319",
+            "harness_turn_id": "019fec66-c5a8-7320-bd45-5a63475e71bf",
+        }
+        for s in agent_steps
+    )
     measured = [s for s in agent_steps if "metrics" in s]
     assert len(measured) == 2
     # The first inference's usage lands on its tool call, not on the message that

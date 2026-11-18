@@ -35,16 +35,27 @@ an "<INSTRUCTIONS>" envelope) and codex's own "<user_instructions>" /
 their full text, so the session-configured instructions survive without being
 mistaken for user turns.
 
-Two rollout types outside "response_item" are read, because they are the only
-place codex reports what an inference cost and which model ran it. Neither
-produces a record of its own; both only decorate the agent steps around them.
+Three rollout types outside "response_item" are read, because they are the only
+place codex reports which session and turn an inference belongs to, what it cost
+and which model ran it. None produces a record of its own; they only decorate
+the agent steps around them.
+  type "session_meta"  -> the session id (payload.session_id, or payload.id where
+                          an older codex writes no session_id), stamped on every
+                          later agent step as extra.harness_session_id. codex
+                          writes one at the top of each rollout, and the input
+                          may span several rollouts (a resume can open a fresh
+                          one), so the most recent one before a step names its
+                          session. It is the session_id codex sends in the
+                          x-codex-turn-metadata request header, which joins a
+                          step to a proxy's request log.
   type "turn_context"  -> the turn's model / reasoning effort (payload.model,
                           payload.effort), stamped on every agent step of that
                           turn as ATIF model_name / reasoning_effort. codex
                           writes one per user turn and again after a mid-turn
                           compaction, so the most recent one before a step is
                           the context that step ran under. Its turn id
-                          (payload.turn_id) is also the turn each call after
+                          (payload.turn_id) is stamped on those steps as
+                          extra.harness_turn_id, and is also the turn each call after
                           it was made in, for command attribution (below).
   type "event_msg" with payload.type == "token_count"
                        -> the closing usage of one model response
@@ -625,14 +636,34 @@ def _step_record(event_id: str, timestamp: str, source: str, message: str) -> di
     }
 
 
-def _stamp_turn_context(step: dict[str, Any], model_name: str, reasoning_effort: JsonValue) -> None:
-    """Record on an agent step which model, at which effort, produced it."""
+def _stamp_inference_context(
+    step: dict[str, Any], model_name: str, reasoning_effort: JsonValue, session_id: str, turn_id: str
+) -> None:
+    """Record on an agent step which model, at which effort, in which session and turn, produced it."""
     if model_name:
         step["model_name"] = model_name
     # ATIF types reasoning_effort as a string or a number; codex names it
     # ("minimal" / "low" / ...) and omits it entirely when the turn set none.
     if isinstance(reasoning_effort, (str, float)) and reasoning_effort != "":
         step["reasoning_effort"] = reasoning_effort
+    extra: dict[str, Any] = {}
+    if session_id:
+        extra["harness_session_id"] = session_id
+    if turn_id:
+        extra["harness_turn_id"] = turn_id
+    if extra:
+        step["extra"] = extra
+
+
+def _session_meta_id(payload: JsonValue) -> str:
+    """The session id a session_meta payload names ("" when it names none)."""
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("session_id", "id"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 def _make_event_id(timestamp: str, content: str, kind: str) -> str:
@@ -696,6 +727,8 @@ def convert(input_file: str, output_file: str, agent_id: str = "", is_input_comp
     turn_effort: JsonValue = None
     # The id of the turn in progress, from the most recent turn_context; empty when unknown.
     current_turn_id = ""
+    # The id of the session in progress, from the most recent session_meta; empty when unknown.
+    current_session_id = ""
     # Index in ``records`` of the agent step the next token_count measures, or None
     # when there is none in the current window (see the pairing rule in the module
     # docstring).
@@ -736,6 +769,10 @@ def convert(input_file: str, output_file: str, agent_id: str = "", is_input_comp
 
             raw_type = raw.get("type")
             payload = raw.get("payload")
+
+            if raw_type == "session_meta":
+                current_session_id = _session_meta_id(payload)
+                continue
 
             if raw_type == "turn_context":
                 # A new turn context both re-reads the model/effort and closes the
@@ -839,7 +876,7 @@ def convert(input_file: str, output_file: str, agent_id: str = "", is_input_comp
                     unmeasured_step_index = None
                     continue
                 message_step = _step_record(event_id, timestamp, "agent", text)
-                _stamp_turn_context(message_step, turn_model, turn_effort)
+                _stamp_inference_context(message_step, turn_model, turn_effort, current_session_id, current_turn_id)
                 records.append(message_step)
                 unmeasured_step_index = len(records) - 1
 
@@ -854,7 +891,7 @@ def convert(input_file: str, output_file: str, agent_id: str = "", is_input_comp
                     unmeasured_step_index = None
                     continue
                 reasoning_step = _step_record(event_id, timestamp, "agent", "")
-                _stamp_turn_context(reasoning_step, turn_model, turn_effort)
+                _stamp_inference_context(reasoning_step, turn_model, turn_effort, current_session_id, current_turn_id)
                 reasoning_step["reasoning_content"] = reasoning
                 records.append(reasoning_step)
                 unmeasured_step_index = len(records) - 1
@@ -899,7 +936,7 @@ def convert(input_file: str, output_file: str, agent_id: str = "", is_input_comp
                     unmeasured_step_index = None
                     continue
                 call_step = _step_record(event_id, timestamp, "agent", "")
-                _stamp_turn_context(call_step, turn_model, turn_effort)
+                _stamp_inference_context(call_step, turn_model, turn_effort, current_session_id, current_turn_id)
                 call_step["tool_calls"] = [
                     {
                         "tool_call_id": call_id,

@@ -47,12 +47,14 @@ def make_assistant_record(
     stop_reason: str = "end_turn",
     usage: Mapping[str, int] | None = None,
     is_sidechain: bool = False,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     """Build one raw assistant line.
 
     ``message_id`` defaults to one derived from the line's own uuid, so separate
     calls describe separate inferences; pass the same id to two calls to describe
     one API response fanned out over two lines, as claude records it.
+    ``session_id`` becomes the line's ``sessionId``, which is left off when None.
     """
     content: list[dict[str, Any]] = []
     if thinking is not None:
@@ -68,7 +70,7 @@ def make_assistant_record(
                 "input": tool_use.get("input", {}),
             }
         )
-    return {
+    record: dict[str, Any] = {
         "type": "assistant",
         "uuid": uuid,
         "timestamp": timestamp,
@@ -82,6 +84,9 @@ def make_assistant_record(
             "usage": dict(DEFAULT_USAGE if usage is None else usage),
         },
     }
+    if session_id is not None:
+        record["sessionId"] = session_id
+    return record
 
 
 def make_user_record(

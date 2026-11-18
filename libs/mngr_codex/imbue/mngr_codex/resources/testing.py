@@ -154,6 +154,15 @@ def rollout_event_msg_user(text: str) -> dict[str, Any]:
     return rollout_line("event_msg", {"type": "user_message", "message": text, "images": []})
 
 
+def rollout_session_meta(session_id: str, *, thread_id: str | None = None) -> dict[str, Any]:
+    """The item codex writes at the top of each rollout, naming its session and thread.
+
+    A main thread's ``id`` (its thread id) equals its ``session_id``; a spawned subagent's
+    ``id`` is its own thread while ``session_id`` stays the root session's.
+    """
+    return rollout_line("session_meta", {"session_id": session_id, "id": thread_id or session_id})
+
+
 def rollout_turn_context(model: str, effort: str | None = "medium", turn_id: str = "turn-1") -> dict[str, Any]:
     """The per-turn config item codex writes before each turn's response items.
 

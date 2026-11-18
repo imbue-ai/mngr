@@ -127,6 +127,37 @@ def test_converts_assistant_message_with_metrics_and_tool_calls(tmp_path: Path) 
     assert validate_common_transcript_record(step) is None
 
 
+def test_agent_step_carries_the_session_id_of_its_lines(tmp_path: Path) -> None:
+    """The session id is what claude sends as x-claude-code-session-id, so a step joins a proxy's request log."""
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    write_raw_transcript(
+        input_file,
+        [
+            make_assistant_record("u1", text="one", session_id="session-a", timestamp="2026-01-01T00:00:01Z"),
+            make_user_record("u2", text="next", timestamp="2026-01-01T00:00:02Z"),
+            make_assistant_record("u3", text="two", session_id="session-b", timestamp="2026-01-01T00:00:03Z"),
+        ],
+    )
+    _convert_complete(input_file, output_file)
+    steps = read_steps(output_file, "agent")
+    assert [s["extra"]["harness_session_id"] for s in steps] == ["session-a", "session-b"]
+    for step in steps:
+        assert validate_common_transcript_record(step) is None
+
+
+def test_agent_step_without_a_session_id_omits_the_key(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    write_raw_transcript(
+        input_file,
+        [
+            make_assistant_record("u1", text="no id"),
+            make_assistant_record("u2", text="empty id", session_id="", timestamp="2026-01-01T00:00:02Z"),
+        ],
+    )
+    _convert_complete(input_file, output_file)
+    assert [("harness_session_id" in s["extra"]) for s in read_steps(output_file, "agent")] == [False, False]
+
+
 def test_usage_without_cache_counters_omits_the_cache_write_extra(tmp_path: Path) -> None:
     input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
     write_raw_transcript(
@@ -708,6 +739,7 @@ def _main_thread_inference_around_a_sidechain_turn() -> list[dict[str, Any]]:
             text="dispatching",
             tool_uses=[{"id": "t1", "name": "Task", "input": {"prompt": "look"}}],
             message_id="msg_main",
+            session_id="session-main",
             timestamp="2026-01-01T00:00:01Z",
         ),
         make_user_record("s1", text="look into the logs", is_sidechain=True, timestamp="2026-01-01T00:00:02Z"),
@@ -715,6 +747,7 @@ def _main_thread_inference_around_a_sidechain_turn() -> list[dict[str, Any]]:
             "s2",
             text="found it",
             message_id="msg_side",
+            session_id="session-main",
             is_sidechain=True,
             timestamp="2026-01-01T00:00:03Z",
         ),
@@ -723,6 +756,7 @@ def _main_thread_inference_around_a_sidechain_turn() -> list[dict[str, Any]]:
             text="",
             tool_uses=[{"id": "t2", "name": "Read", "input": {"file": "a"}}],
             message_id="msg_main",
+            session_id="session-main",
             timestamp="2026-01-01T00:00:04Z",
         ),
         make_user_record("m3", text="thanks", timestamp="2026-01-01T00:00:05Z"),
@@ -759,6 +793,7 @@ def test_sidechain_records_carry_their_provenance(tmp_path: Path) -> None:
                 text="",
                 tool_uses=[{"id": "t3", "name": "Grep"}],
                 message_id="msg_side_2",
+                session_id="session-main",
                 is_sidechain=True,
                 timestamp="2026-01-01T00:00:06Z",
             ),
@@ -769,6 +804,8 @@ def test_sidechain_records_carry_their_provenance(tmp_path: Path) -> None:
 
     sidechain_agent_steps = [s for s in read_steps(output_file, "agent") if s["extra"].get("is_sidechain")]
     assert [s["message"] for s in sidechain_agent_steps] == ["found it", ""]
+    # A subagent's lines and requests carry the parent session's id.
+    assert {s["extra"]["harness_session_id"] for s in read_steps(output_file, "agent")} == {"session-main"}
     sidechain_user_steps = [s for s in read_steps(output_file, "user") if s.get("extra", {}).get("is_sidechain")]
     assert [s["message"] for s in sidechain_user_steps] == ["look into the logs"]
     # The main thread's own turns stay unmarked.
@@ -916,6 +953,11 @@ def test_real_session_fans_the_thinking_text_and_tool_lines_into_one_step(tmp_pa
     assert [call["function_name"] for call in steps[0]["tool_calls"]] == ["Bash"]
     assert steps[1]["message"] == ""
     assert [call["function_name"] for call in steps[1]["tool_calls"]] == ["Bash"]
+    # The two inferences were captured from two sessions, and each keeps its own.
+    assert [s["extra"]["harness_session_id"] for s in steps] == [
+        "bd5996b7-e18d-46d4-8a10-9c86fb1fcea3",
+        "b5bfe749-f64d-4234-b414-42c45afd868c",
+    ]
 
 
 def test_real_session_slash_command_plumbing_is_filtered(tmp_path: Path) -> None:
