@@ -1,21 +1,12 @@
-"""The work-lease protocol: how work that outlives a turn declares itself, and how it is read.
-
-A lease is one file under an agent's ``leases/`` directory naming a unit of work that will
-wake the agent -- a background command, a subagent, a monitor, a workflow. This module holds
-both sides of the format, and the rule that turns a read of them into the agent's
-``RUNNING_BACKGROUND`` state. The shell half ships as ``resources/mngr_work_lease_lib.sh`` for the
-turn-end hooks that write the leases.
-
-The leases are what lets ``hosts.common``'s lifecycle rule separate an agent whose turn ended
-with something still running from one that is genuinely waiting on the user.
-"""
+"""The reader of background task records, one file per task under an agent's ``background_tasks/`` directory."""
 
 from __future__ import annotations
 
 import shlex
-from collections.abc import Sequence
+import unicodedata
 from datetime import datetime
 from typing import Final
+from urllib.parse import unquote
 
 from loguru import logger
 
@@ -28,20 +19,25 @@ from imbue.mngr.primitives import LifecycleProbeReading
 from imbue.mngr.primitives import LifecycleProbeResult
 from imbue.mngr.primitives import WORK_LEASE_NAME_PATTERN
 from imbue.mngr.primitives import WorkLease
+from imbue.mngr.primitives import WorkLeaseKind
 
-# Directory under an agent's state dir holding one file per outstanding unit of work.
-WORK_LEASE_DIR_NAME: Final[str] = "leases"
+# Directory under an agent's state dir holding one record file per background task.
+WORK_LEASE_DIR_NAME: Final[str] = "background_tasks"
 
-# A lease's first line is whitespace-separated `<key>:<value>` tokens, e.g.
-# `until:1792575895`. A reader ignores keys it does not know, so the grammar can grow
-# without breaking one that has already shipped.
-WORK_LEASE_UNTIL_KEY: Final[str] = "until"
+# The token keys of a record's line, e.g. `seen:1792575895 kind:SUBAGENT native_type:cloud%20session`.
+WORK_LEASE_SEEN_KEY: Final[str] = "seen"
+WORK_LEASE_KIND_KEY: Final[str] = "kind"
+WORK_LEASE_NATIVE_TYPE_KEY: Final[str] = "native_type"
+WORK_LEASE_SINCE_KEY: Final[str] = "since"
 
-# How far ahead a turn-end hook dates the leases it writes, and the environment variable that
-# overrides it for one agent. The bound is a backstop against work that died silently rather
-# than a prediction of how long work takes; see specs/agent-running-background. A hook runs
-# from the agent's own state dir against its own interpreter and cannot import this module, so
-# each one spells the pair out again and a test in its package pins it to these.
+# The longest native type a record publishes, in characters.
+WORK_LEASE_NATIVE_TYPE_MAX_LENGTH: Final[int] = 200
+_UNPRINTABLE_REPLACEMENT: Final[str] = "\ufffd"
+_LINE_SEPARATORS: Final[frozenset[str]] = frozenset({"\u2028", "\u2029"})
+# An epoch second with more digits than this is past what a datetime can hold.
+_EPOCH_SECONDS_MAX_DIGITS: Final[int] = 12
+
+# How long after a record was last seen the heartbeat counts it, and the environment variable that overrides it.
 WORK_LEASE_TTL_ENV_VAR: Final[str] = "HOOK_WORK_LEASE_TTL_SECONDS"
 DEFAULT_WORK_LEASE_TTL_SECONDS: Final[int] = 86400
 
@@ -52,26 +48,10 @@ LEASE_PREFIX: Final[str] = "LEASE="
 
 @pure
 def _build_work_lease_scan_program(lease_key_expression: str) -> str:
-    """Build the awk that emits one `LEASE=<key>\\t<first line>` per lease path read on stdin.
-
-    ``lease_key_expression`` names the lease from the components of its own path, which awk
-    holds in ``parts[1..n]``: ``parts[n]`` is the lease's file name, and a scan carrying more
-    than one agent reaches further up for whose lease it is.
-
-    One spawn covers every path, which matters on a sandboxed runtime (gVisor) where each
-    spawn costs tens of milliseconds. The paths arrive on stdin rather than as arguments, and
-    each is read with `getline`, because awk aborts outright on an argument it cannot open and
-    would drop every lease after it -- and a lease can vanish between the shell expanding the
-    glob and awk reaching it. ``build_work_lease_scan`` is what feeds it.
-
-    Every path is closed, read or not: awk holds an opened redirection for the life of the
-    program, so an empty lease file left open would spend a descriptor, and a scan over a
-    whole host's leases that runs out of them drops every lease after that -- which reads as
-    the work having ended.
-    """
+    """Build the awk printing `LEASE=<key>\\t<first line>` per path on stdin, the key built from ``parts[1..n]``."""
     program = (
-        "{ if ((getline bound < $0) > 0) "
-        f'{{ n = split($0, parts, "/"); print "{LEASE_PREFIX}" {lease_key_expression} "\\t" bound }} '
+        '{ first_line = ""; if ((getline first_line < $0) >= 0) '
+        f'{{ n = split($0, parts, "/"); print "{LEASE_PREFIX}" {lease_key_expression} "\\t" first_line }} '
         "close($0) }"
     )
     return f"awk {shlex.quote(program)}"
@@ -83,14 +63,7 @@ _ONE_AGENT_LEASE_KEY_EXPRESSION: Final[str] = "parts[n]"
 
 @pure
 def build_work_lease_scan(lease_glob: str, lease_key_expression: str) -> str:
-    """Build the scan over ``lease_glob``, which hands awk only paths it can read a line from.
-
-    The glob is filtered down to regular files in the shell, where ``[ -f ]`` and ``printf``
-    are builtins and the filter costs no spawn. awk survives a path it cannot *open* -- a
-    lease cleared between the glob and the read -- but dies on one it opens and cannot read,
-    which a directory under the lease dir is, and takes with it every lease that sorts after
-    it, in a host-wide scan every other agent's leases too.
-    """
+    """Build the scan that hands awk each regular file ``lease_glob`` matches."""
     return (
         f"for mngr_lease in {lease_glob}; do "
         f"""if [ -f "$mngr_lease" ]; then printf '%s\\n' "$mngr_lease"; fi; done """
@@ -100,12 +73,7 @@ def build_work_lease_scan(lease_glob: str, lease_key_expression: str) -> str:
 
 @pure
 def build_lifecycle_probe_read_command(agent_dir: str) -> str:
-    """Build the command reading one agent's turn marker and work leases in a single call.
-
-    `ACTIVE=` carries `true` where the marker is present and nothing where it is not, which
-    is what having a turn open means. Ends in `:` so a lease read that exits non-zero still
-    reports the marker.
-    """
+    """Build the command printing one agent's turn marker, as `ACTIVE=true` or `ACTIVE=`, and its record lines."""
     quoted_agent_dir = shlex.quote(agent_dir)
     quoted_lease_dir = shlex.quote(f"{agent_dir}/{WORK_LEASE_DIR_NAME}")
     lease_scan = build_work_lease_scan(f"{quoted_lease_dir}/*", _ONE_AGENT_LEASE_KEY_EXPRESSION)
@@ -118,14 +86,10 @@ def build_lifecycle_probe_read_command(agent_dir: str) -> str:
 
 @pure
 def parse_lifecycle_probe_reading(stdout: str) -> LifecycleProbeReading:
-    """Read one agent's work-state output into the turn marker and the raw lease lines.
-
-    Only the marker's presence is read, and both spellings of its absence are honoured: the
-    empty value this command emits and the `false` the batched listing uses.
-    """
+    """Read probe output into the turn marker, absent as `ACTIVE=` or `ACTIVE=false`, and the raw record lines."""
     is_active = False
     lease_lines: list[str] = []
-    for line in stdout.splitlines():
+    for line in stdout.split("\n"):
         if line.startswith(_ACTIVE_PREFIX):
             marker = line[len(_ACTIVE_PREFIX) :].strip()
             is_active = marker != "" and marker != "false"
@@ -137,10 +101,10 @@ def parse_lifecycle_probe_reading(stdout: str) -> LifecycleProbeReading:
 
 
 @pure
-def _parse_lease_tokens(bound: str) -> dict[str, str]:
-    """The `<key>:<value>` tokens of a lease line, keeping the first value given for a key."""
+def _parse_lease_tokens(first_line: str) -> dict[str, str]:
+    """The space-separated `<key>:<value>` tokens of a record line, keeping the first value given for a key."""
     tokens: dict[str, str] = {}
-    for token in bound.split():
+    for token in first_line.rstrip("\r").split(" "):
         key, separator, value = token.partition(":")
         if separator and key and key not in tokens:
             tokens[key] = value
@@ -148,39 +112,62 @@ def _parse_lease_tokens(bound: str) -> dict[str, str]:
 
 
 @pure
+def _parse_lease_kind(raw_kind: str) -> WorkLeaseKind:
+    if not raw_kind:
+        return WorkLeaseKind.OTHER
+    try:
+        return WorkLeaseKind(raw_kind)
+    except ValueError:
+        logger.trace("Reading background task kind {!r} as OTHER: this reader does not know it", raw_kind)
+        return WorkLeaseKind.OTHER
+
+
+@pure
+def _parse_lease_native_type(raw_native_type: str) -> str:
+    """A native type as published: decoded, capped, and with every control character replaced."""
+    native_type = unquote(raw_native_type)[:WORK_LEASE_NATIVE_TYPE_MAX_LENGTH]
+    return "".join(
+        _UNPRINTABLE_REPLACEMENT
+        if unicodedata.category(character) == "Cc" or character in _LINE_SEPARATORS
+        else character
+        for character in native_type
+    )
+
+
+@pure
+def _parse_lease_instant(raw_epoch_seconds: str) -> datetime | None:
+    """The instant an epoch-seconds token names, or None when it is not a number a datetime can hold."""
+    is_epoch_seconds = (
+        raw_epoch_seconds.isascii()
+        and raw_epoch_seconds.isdecimal()
+        and len(raw_epoch_seconds) <= _EPOCH_SECONDS_MAX_DIGITS
+    )
+    return timestamp_to_datetime(int(raw_epoch_seconds)) if is_epoch_seconds else None
+
+
+@pure
 def parse_work_leases(raw_leases: str) -> tuple[WorkLease, ...]:
-    """Parse ``<name>\\t<bound>`` lines into leases, dropping any line without a usable bound.
-
-    An unbounded, badly named or otherwise malformed lease is dropped rather than trusted, so
-    a bad writer can never pin an agent to RUNNING_BACKGROUND. A bound is tested with ``isdecimal``
-    rather than ``isdigit`` because the latter also admits characters ``int`` refuses, e.g. a
-    superscript.
-    """
+    """Parse ``<name>\\t<first line>`` lines into background tasks, one per validly named record whatever its fields."""
     leases: list[WorkLease] = []
-    for line in raw_leases.splitlines():
-        raw_name, separator, raw_bound = line.partition("\t")
-        name = raw_name.strip()
-        is_named = bool(separator) and bool(name) and WORK_LEASE_NAME_PATTERN.match(name) is not None
-        tokens = _parse_lease_tokens(raw_bound)
-        raw_until = tokens.get(WORK_LEASE_UNTIL_KEY, "")
-        expires_at = timestamp_to_datetime(int(raw_until)) if raw_until.isdecimal() else None
-        if not is_named or expires_at is None:
-            logger.trace("Dropping work lease {}: it is not both named and bounded", line)
+    for line in raw_leases.split("\n"):
+        if not line:
             continue
-        leases.append(WorkLease(name=name, expires_at=expires_at))
+        raw_name, _, first_line = line.partition("\t")
+        name = raw_name.strip()
+        if WORK_LEASE_NAME_PATTERN.match(name) is None:
+            logger.trace("Dropping background task record {!r}: its name is not a record name", line)
+            continue
+        tokens = _parse_lease_tokens(first_line)
+        leases.append(
+            WorkLease(
+                name=name,
+                kind=_parse_lease_kind(tokens.get(WORK_LEASE_KIND_KEY, "")),
+                native_type=_parse_lease_native_type(tokens.get(WORK_LEASE_NATIVE_TYPE_KEY, "")),
+                started_at=_parse_lease_instant(tokens.get(WORK_LEASE_SINCE_KEY, "")),
+                last_seen_at=_parse_lease_instant(tokens.get(WORK_LEASE_SEEN_KEY, "")),
+            )
+        )
     return tuple(leases)
-
-
-@pure
-def select_live_work_leases(leases: Sequence[WorkLease], now: datetime) -> tuple[WorkLease, ...]:
-    """The leases that still count: those whose deadline has not passed."""
-    return tuple(lease for lease in leases if lease.expires_at is not None and lease.expires_at > now)
-
-
-@pure
-def resolve_live_work_leases(raw_leases: str, now: datetime) -> tuple[WorkLease, ...]:
-    """An agent's work leases that still hold, from one collected read."""
-    return select_live_work_leases(parse_work_leases(raw_leases), now)
 
 
 @pure
@@ -191,20 +178,9 @@ def determine_agent_probe_result(
     # None when the process table could not be read.
     ps_output: str | None,
     reading: LifecycleProbeReading,
-    now: datetime,
     is_agent_type_known: bool = True,
 ) -> LifecycleProbeResult:
-    """One probe's lifecycle state, including whether declared work outlives the agent's turn.
-
-    The single entry point for every caller that probes an agent, so no caller assembles the
-    state itself. ``determine_lifecycle_probe_result`` settles it from the turn marker and the
-    process table; the leases only come into it once that says the turn has ended, where they
-    separate an agent something will wake from one waiting on the user. A lease is read for a
-    WAITING agent no dialog holds, and nowhere else: an agent with a turn open is already
-    RUNNING, a stopped or replaced one is carrying nothing whatever its directory still holds,
-    and one held on a dialog is the user's to move whatever it left running. So ``leases`` is
-    non-empty exactly where the state is RUNNING_BACKGROUND, which is what it is published as.
-    """
+    """One probe's lifecycle state: RUNNING_BACKGROUND where a WAITING agent that no dialog holds has a record."""
     probe = determine_lifecycle_probe_result(
         tmux_info=tmux_info,
         is_active=reading.is_active,
@@ -213,13 +189,13 @@ def determine_agent_probe_result(
         ps_output=ps_output,
         is_agent_type_known=is_agent_type_known,
     )
-    # A dialog is the user's turn to move, so it outranks work the agent left running.
+    # An agent a dialog holds reads WAITING whatever it has recorded.
     if probe.state is not AgentLifecycleState.WAITING or is_blocked_on_dialog:
         return probe
-    live_leases = resolve_live_work_leases(reading.raw_leases, now)
-    if not live_leases:
+    leases = parse_work_leases(reading.raw_leases)
+    if not leases:
         return probe
     return probe.model_copy_update(
         to_update(probe.field_ref().state, AgentLifecycleState.RUNNING_BACKGROUND),
-        to_update(probe.field_ref().leases, live_leases),
+        to_update(probe.field_ref().leases, leases),
     )

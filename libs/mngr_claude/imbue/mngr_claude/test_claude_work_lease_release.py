@@ -1,0 +1,153 @@
+from __future__ import annotations
+
+import re
+import shutil
+from pathlib import Path
+from typing import Final
+
+import pytest
+
+from imbue.mngr.agents.agent_release_testing import agent_state_dir
+from imbue.mngr.agents.agent_release_testing import send_expecting_success
+from imbue.mngr.hosts.work_leases import WORK_LEASE_DIR_NAME
+from imbue.mngr.primitives import WorkLease
+from imbue.mngr.primitives import WorkLeaseKind
+from imbue.mngr.utils.testing import get_short_random_string
+from imbue.mngr.utils.testing import read_work_leases_in
+from imbue.mngr_claude.testing import AGENT_DESTROY_TIMEOUT_SECONDS
+from imbue.mngr_claude.testing import ClaudeReleaseProfile
+from imbue.mngr_claude.testing import WORK_LEASE_KIND_BY_CLAUDE_TASK_LABEL
+from imbue.mngr_claude.testing import created_agent
+from imbue.mngr_claude.testing import drift_note
+from imbue.mngr_claude.testing import held_tool_command
+from imbue.mngr_claude.testing import wait_for_turn_to_end
+
+# Outlasts the turn that starts it.
+_BACKGROUND_SLEEP_SECONDS: Final[int] = 613
+_LEASE_CONSUMER: Final[str] = (
+    "wait_for_stop_hook.sh's write_work_leases, which leases each entry of the Stop payload's "
+    "background_tasks and normalises its `type` label to a WorkLeaseKind"
+)
+
+_JS_NAME: Final[str] = r"[A-Za-z_$][\w$]*"
+_JS_STRING_ENTRY: Final[str] = rf'{_JS_NAME}:"[^"\\]*"'
+# A minified object literal of string values, e.g. `{local_bash:"shell",dream:"dream"}`.
+_STRING_TABLE_PATTERN: Final[re.Pattern[bytes]] = re.compile(
+    rf"\{{({_JS_STRING_ENTRY}(?:,{_JS_STRING_ENTRY})*)\}}".encode()
+)
+_STRING_ENTRY_PATTERN: Final[re.Pattern[bytes]] = re.compile(rf'({_JS_NAME}):"([^"\\]*)"'.encode())
+# The name a table is assigned to, e.g. `Uuo=`, matched where the table starts.
+_TABLE_NAME_PATTERN: Final[re.Pattern[bytes]] = re.compile(rf"({_JS_NAME})=\Z".encode())
+_TABLE_NAME_WINDOW_BYTES: Final[int] = 64
+# How far past a table its lookup is searched for.
+_LOOKUP_WINDOW_BYTES: Final[int] = 512
+_RETURNED_STRING_PATTERN: Final[re.Pattern[bytes]] = re.compile(rb'return"([^"\\]*)"')
+# The task type claude registers a backgrounded command under.
+_SHELL_TASK_TYPE: Final[bytes] = b"local_bash"
+
+
+def _read_leases_a_turn_leaves(tmp_path: Path, prompt: str) -> tuple[tuple[WorkLease, ...], str]:
+    """Run ``prompt`` as a fresh agent's turn; return the leases standing once it ends and a drift note for them."""
+    profile = ClaudeReleaseProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    ctx = profile.setup(tmp_path)
+    agent_name = f"claude-lease-kind-{get_short_random_string()}"
+    drift = drift_note(ctx, "the background_tasks entries of claude's Stop payload")
+    with created_agent(profile, ctx, agent_name, destroy_timeout=AGENT_DESTROY_TIMEOUT_SECONDS):
+        send_expecting_success(profile, ctx, agent_name, prompt)
+        wait_for_turn_to_end(profile, ctx, prompt, drift)
+        leases = read_work_leases_in(agent_state_dir(ctx.host_dir) / WORK_LEASE_DIR_NAME)
+    return leases, drift
+
+
+@pytest.mark.release
+@pytest.mark.harness_internals(harness="claude")
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(1500)
+def test_claude_leases_a_backgrounded_command_as_shell_work(tmp_path: Path) -> None:
+    """A turn that leaves a backgrounded Bash command running ends with one SHELL lease of native type `shell`."""
+    leases, drift = _read_leases_a_turn_leaves(
+        tmp_path,
+        f"Use the Bash tool with run_in_background set to true to run exactly: sleep {_BACKGROUND_SLEEP_SECONDS} "
+        "-- do not wait for it or check on it, and then reply with just OK.",
+    )
+
+    assert [(lease.kind, lease.native_type, lease.last_seen_at is not None) for lease in leases] == [
+        (WorkLeaseKind.SHELL, "shell", True)
+    ], (
+        f"the turn that backgrounded `sleep {_BACKGROUND_SLEEP_SECONDS}` left the leases {leases} {drift}; "
+        f"consumer: {_LEASE_CONSUMER}"
+    )
+
+
+@pytest.mark.release
+@pytest.mark.harness_internals(harness="claude")
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(1500)
+def test_claude_leases_a_backgrounded_subagent_as_subagent_work(tmp_path: Path) -> None:
+    """A turn that leaves a backgrounded subagent running ends with one SUBAGENT lease of native type `subagent`."""
+    # Nothing creates the release path, so the command holds the subagent until the Bash tool times it out.
+    held_command = held_tool_command(tmp_path / "subagent-started", tmp_path / "subagent-release")
+    leases, drift = _read_leases_a_turn_leaves(
+        tmp_path,
+        "Use the Agent tool once, with subagent_type general-purpose, run_in_background set to true, and this "
+        f"prompt: 'Use the Bash tool to run exactly: {held_command}. Then reply with just DONE.' "
+        "Do not wait for the subagent or check on it, and then reply with just OK.",
+    )
+
+    assert [(lease.kind, lease.native_type, lease.last_seen_at is not None) for lease in leases] == [
+        (WorkLeaseKind.SUBAGENT, "subagent", True)
+    ], f"the turn that backgrounded a subagent left the leases {leases} {drift}; consumer: {_LEASE_CONSUMER}"
+
+
+def _read_task_label_sets(program: Path) -> set[frozenset[str]]:
+    """The labels of each task-type table ``program`` reads as ``Uuo[e]??e``, with the strings that lookup returns first."""
+    code = program.read_bytes()
+    label_sets: set[frozenset[str]] = set()
+    for table in _STRING_TABLE_PATTERN.finditer(code):
+        label_by_task_type = dict(_STRING_ENTRY_PATTERN.findall(table.group(1)))
+        if _SHELL_TASK_TYPE not in label_by_task_type:
+            continue
+        table_name = _TABLE_NAME_PATTERN.search(code, max(0, table.start() - _TABLE_NAME_WINDOW_BYTES), table.start())
+        if table_name is None:
+            continue
+        lookup = re.compile(
+            rb"(?<![\w$.])" + re.escape(table_name.group(1)) + rf"\[({_JS_NAME})\]\?\?\1(?![\w$])".encode()
+        ).search(code, table.end(), table.end() + _LOOKUP_WINDOW_BYTES)
+        if lookup is None:
+            continue
+        labels = [*label_by_task_type.values(), *_RETURNED_STRING_PATTERN.findall(code, table.end(), lookup.start())]
+        label_sets.add(frozenset(label.decode() for label in labels))
+    return label_sets
+
+
+@pytest.mark.release
+@pytest.mark.harness_internals(harness="claude")
+def test_installed_claude_labels_background_tasks_only_as_mngr_knows(tmp_path: Path) -> None:
+    """The labels the installed claude program gives a background task's `type` are the ones mngr's table lists."""
+    claude = shutil.which("claude")
+    if claude is None:
+        pytest.skip("Release test requires `claude` on PATH.")
+    program = Path(claude).resolve()
+    drift = drift_note(ClaudeReleaseProfile().setup(tmp_path), "claude's background task labels")
+
+    label_sets = _read_task_label_sets(program)
+    assert len(label_sets) == 1, (
+        f"found {len(label_sets)} tables of background task labels in {program}, not one: "
+        f"{sorted(sorted(labels) for labels in label_sets)} {drift}; the table is the object literal keyed by task "
+        f"type ({_SHELL_TASK_TYPE.decode()} and its siblings) that its lookup reads with a fallback to the raw type; "
+        f"consumer: {_LEASE_CONSUMER}"
+    )
+    (installed_labels,) = label_sets
+    known_labels = frozenset(WORK_LEASE_KIND_BY_CLAUDE_TASK_LABEL)
+    assert installed_labels == known_labels, (
+        f"the installed claude's background task labels are not the ones mngr lists: claude added "
+        f"{sorted(installed_labels - known_labels)} and no longer has {sorted(known_labels - installed_labels)} "
+        f"{drift}; update both WORK_LEASE_KIND_BY_CLAUDE_TASK_LABEL in imbue/mngr_claude/testing.py and the jq "
+        "function lease_kind in wait_for_stop_hook.sh, which maps each label to a WorkLeaseKind"
+    )

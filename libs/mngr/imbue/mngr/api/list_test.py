@@ -82,6 +82,8 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.primitives import SSHInfo
+from imbue.mngr.primitives import WorkLease
+from imbue.mngr.primitives import WorkLeaseKind
 from imbue.mngr.providers.local.backend import LOCAL_BACKEND_NAME
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
@@ -435,6 +437,26 @@ def test_agent_details_to_cel_context_exposes_project_alias() -> None:
 
     without_project = with_project.model_copy_update(to_update(with_project.field_ref().labels, {}))
     assert agent_details_to_cel_context(without_project)["project"] is None
+
+
+def test_a_cel_filter_can_ask_what_kind_of_background_task_an_agent_left_running() -> None:
+    shell_held = make_test_agent_details(
+        name="shell-held",
+        state=AgentLifecycleState.RUNNING_BACKGROUND,
+        background_tasks=(WorkLease(name="task-abc", kind=WorkLeaseKind.SHELL, native_type="shell"),),
+    )
+    monitor_held = make_test_agent_details(
+        name="monitor-held",
+        state=AgentLifecycleState.RUNNING_BACKGROUND,
+        background_tasks=(WorkLease(name="task-def", kind=WorkLeaseKind.MONITOR, native_type="monitor"),),
+    )
+    includes, excludes = compile_cel_filters(
+        ['background_tasks.exists(t, t.kind == "SHELL" && t.native_type == "shell")'], []
+    )
+
+    matched = [agent.name for agent in (shell_held, monitor_held) if _apply_cel_filters(agent, includes, excludes)]
+
+    assert matched == ["shell-held"]
 
 
 def test_agent_details_to_cel_context_preserves_full_model_structure() -> None:

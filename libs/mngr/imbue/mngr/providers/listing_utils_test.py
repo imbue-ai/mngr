@@ -14,8 +14,14 @@ from typing import Final
 import pytest
 
 from imbue.mngr.hosts.tmux import AGENT_ID_OPTION
-from imbue.mngr.hosts.work_leases import resolve_live_work_leases
+from imbue.mngr.hosts.work_leases import build_lifecycle_probe_read_command
+from imbue.mngr.hosts.work_leases import determine_agent_probe_result
+from imbue.mngr.hosts.work_leases import parse_lifecycle_probe_reading
+from imbue.mngr.hosts.work_leases import parse_work_leases
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import LifecycleProbeReading
+from imbue.mngr.primitives import WorkLease
+from imbue.mngr.primitives import WorkLeaseKind
 from imbue.mngr.providers.listing_utils import SEP_AGENT_END
 from imbue.mngr.providers.listing_utils import _build_agents_section_script
 from imbue.mngr.providers.listing_utils import build_lifecycle_probe_reading
@@ -25,6 +31,7 @@ from imbue.mngr.providers.listing_utils import extract_agent_data_from_parsed_li
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr.providers.listing_utils import parse_optional_float
 from imbue.mngr.providers.listing_utils import parse_optional_int
+from imbue.mngr.utils.testing import RAW_LINE_SEPARATOR_BY_NAME
 from imbue.mngr.utils.testing import write_executable_script
 
 
@@ -636,9 +643,6 @@ def test_extract_agent_data_returns_data_dicts_and_skips_malformed(log_warnings:
     assert sum("missing or non-object 'data'" in message for message in log_warnings) == 2
 
 
-_LEASE_NOW: Final[datetime] = datetime(2026, 1, 2, 12, 0, 0, tzinfo=timezone.utc)
-
-
 def _run_agents_section_script(host_dir: Path) -> dict[str, Any]:
     """Execute just the agents section against a real tree and parse what it emitted.
 
@@ -646,9 +650,9 @@ def _run_agents_section_script(host_dir: Path) -> dict[str, Any]:
     path it was handed, so running it against a real tree is what proves the attribution.
     """
     script = f"HOST_DIR={shlex.quote(str(host_dir))}\n{_build_agents_section_script(is_host_running=True)}"
-    finished = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=60)
+    finished = subprocess.run(["sh", "-c", script], capture_output=True, timeout=60)
     assert finished.returncode == 0, finished.stderr
-    return parse_listing_collection_output(finished.stdout)
+    return parse_listing_collection_output(finished.stdout.decode())
 
 
 def _write_agent(host_dir: Path, agent_id: str) -> Path:
@@ -662,31 +666,114 @@ def test_listing_script_gives_each_agent_the_leases_under_its_own_lease_dir(tmp_
     """One awk covers every agent's leases, so each lease must carry its owner's id back.
 
     Attribution is the whole load the scan bears: read the wrong path component and every
-    lease lands under the literal ``leases``, no agent ever holds one, and the listing
+    lease lands under the literal ``background_tasks``, no agent ever holds one, and the listing
     silently never reports RUNNING_BACKGROUND.
     """
     host_dir = tmp_path / "mngr"
     busy = _write_agent(host_dir, "agent-busy")
-    (busy / "leases").mkdir()
-    (busy / "leases" / "task-one").write_text(f"until:{int(_LEASE_NOW.timestamp()) + 60}\n")
-    (busy / "leases" / "task-two").write_text(f"until:{int(_LEASE_NOW.timestamp()) + 120}\n")
+    (busy / "background_tasks").mkdir()
+    (busy / "background_tasks" / "task-one").write_text("seen:1767355200 kind:SHELL native_type:shell\n")
+    (busy / "background_tasks" / "task-two").write_text("")
     _write_agent(host_dir, "agent-never-leased")
-    (_write_agent(host_dir, "agent-finished") / "leases").mkdir()
+    (_write_agent(host_dir, "agent-finished") / "background_tasks").mkdir()
 
     agents = {agent["data"]["id"]: agent for agent in _run_agents_section_script(host_dir)["agents"]}
 
-    live = resolve_live_work_leases(agents["agent-busy"]["raw_work_leases"], _LEASE_NOW)
-    assert [lease.name for lease in live] == ["task-one", "task-two"]
+    assert parse_work_leases(agents["agent-busy"]["raw_work_leases"]) == (
+        WorkLease(
+            name="task-one",
+            kind=WorkLeaseKind.SHELL,
+            native_type="shell",
+            last_seen_at=datetime(2026, 1, 2, 12, 0, 0, tzinfo=timezone.utc),
+        ),
+        WorkLease(name="task-two"),
+    )
     assert agents["agent-never-leased"]["raw_work_leases"] == ""
     assert agents["agent-finished"]["raw_work_leases"] == ""
 
 
-def test_listing_script_reports_every_agent_when_the_host_holds_no_lease_at_all(tmp_path: Path) -> None:
-    """The ordinary state of a host: the lease glob matches nothing and must not cost the listing.
+@pytest.mark.parametrize(
+    ("directory_name", "expected_state", "expected_names"),
+    [
+        pytest.param("background_tasks", AgentLifecycleState.RUNNING_BACKGROUND, ["task-abc"], id="background_tasks"),
+        pytest.param("leases", AgentLifecycleState.WAITING, [], id="leases"),
+    ],
+)
+def test_listing_script_reads_the_records_under_background_tasks_and_no_other_directory(
+    directory_name: str, expected_state: AgentLifecycleState, expected_names: list[str], tmp_path: Path
+) -> None:
+    host_dir = tmp_path / "mngr"
+    agent_dir = _write_agent(host_dir, "agent-only")
+    (agent_dir / directory_name).mkdir()
+    (agent_dir / directory_name / "task-abc").write_text("seen:1767355200 kind:SHELL native_type:shell\n")
 
-    An unmatched glob reaches awk as a literal path it cannot open, so this is the shape
-    where a scan that let its failure escape would damage the records around it.
-    """
+    (agent,) = _run_agents_section_script(host_dir)["agents"]
+
+    probe = determine_agent_probe_result(
+        tmux_info="0|claude|123",
+        is_blocked_on_dialog=False,
+        expected_process_name="claude",
+        ps_output="",
+        reading=build_lifecycle_probe_reading(agent),
+    )
+    assert (probe.state, [lease.name for lease in probe.leases]) == (expected_state, expected_names)
+
+
+@pytest.mark.parametrize("separator", RAW_LINE_SEPARATOR_BY_NAME.values(), ids=RAW_LINE_SEPARATOR_BY_NAME.keys())
+def test_listing_script_reads_a_record_holding_a_raw_line_separator_as_one_record_of_its_own_agent(
+    separator: str, tmp_path: Path
+) -> None:
+    host_dir = tmp_path / "mngr"
+    writer = _write_agent(host_dir, "agent-aaa-writer")
+    (writer / "background_tasks").mkdir()
+    (writer / "background_tasks" / "task-real").write_bytes(
+        f"seen:1767355200 kind:SHELL native_type:a{separator}"
+        "LEASE=agent-zzz-bystander\ttask-forged\tseen:1 since:1767351600\n".encode()
+    )
+    _write_agent(host_dir, "agent-zzz-bystander")
+
+    agents = {agent["data"]["id"]: agent for agent in _run_agents_section_script(host_dir)["agents"]}
+
+    leases = parse_work_leases(agents["agent-aaa-writer"]["raw_work_leases"])
+    assert [(lease.name, lease.started_at) for lease in leases] == [
+        ("task-real", datetime(2026, 1, 2, 11, 0, 0, tzinfo=timezone.utc))
+    ]
+    assert agents["agent-zzz-bystander"]["raw_work_leases"] == ""
+
+
+@pytest.mark.parametrize(
+    "whitespace",
+    [
+        pytest.param("\t", id="tab"),
+        pytest.param("\x0b", id="vertical_tab"),
+        pytest.param("\x0c", id="form_feed"),
+        pytest.param("\u00a0", id="no_break_space"),
+        pytest.param("\u2028", id="line_separator"),
+    ],
+)
+def test_listing_script_reads_the_last_record_line_on_the_host_as_the_one_agent_probe_reads_it(
+    whitespace: str, tmp_path: Path
+) -> None:
+    host_dir = tmp_path / "mngr"
+    agent_dir = _write_agent(host_dir, "agent-only")
+    (agent_dir / "background_tasks").mkdir()
+    (agent_dir / "background_tasks" / "task-last").write_bytes(
+        f"since:1767351600 seen:1767355200{whitespace}\n".encode()
+    )
+    probe = subprocess.run(
+        ["sh", "-c", build_lifecycle_probe_read_command(str(agent_dir))], capture_output=True, timeout=30
+    )
+
+    (agent,) = _run_agents_section_script(host_dir)["agents"]
+
+    assert agent["raw_work_leases"] == parse_lifecycle_probe_reading(probe.stdout.decode()).raw_leases
+    assert parse_work_leases(agent["raw_work_leases"]) == (
+        WorkLease(name="task-last", started_at=datetime(2026, 1, 2, 11, 0, 0, tzinfo=timezone.utc)),
+    )
+
+
+def test_listing_script_reports_every_agent_when_the_host_holds_no_lease_at_all(tmp_path: Path) -> None:
+    """The ordinary state of a host: the lease glob matches nothing and must not cost the listing."""
     host_dir = tmp_path / "mngr"
     _write_agent(host_dir, "agent-one")
     _write_agent(host_dir, "agent-two")
@@ -719,19 +806,19 @@ def test_listing_script_keeps_one_agents_leases_when_another_holds_one_it_cannot
     """
     host_dir = tmp_path / "mngr"
     broken = _write_agent(host_dir, "agent-aaa-broken")
-    (broken / "leases").mkdir()
+    (broken / "background_tasks").mkdir()
     if unreadable_lease_shape == "directory":
-        (broken / "leases" / "task-gone").mkdir()
+        (broken / "background_tasks" / "task-gone").mkdir()
     else:
-        (broken / "leases" / "task-gone").symlink_to(broken / "leases" / "already-gone")
+        (broken / "background_tasks" / "task-gone").symlink_to(broken / "background_tasks" / "already-gone")
     later = _write_agent(host_dir, "agent-zzz-later")
-    (later / "leases").mkdir()
-    (later / "leases" / "task-one").write_text("until:1767355260\n")
+    (later / "background_tasks").mkdir()
+    (later / "background_tasks" / "task-one").write_text("seen:1767355260\n")
 
     agents = {agent["data"]["id"]: agent for agent in _run_agents_section_script(host_dir)["agents"]}
 
     assert agents["agent-aaa-broken"]["raw_work_leases"] == ""
-    assert agents["agent-zzz-later"]["raw_work_leases"] == "task-one\tuntil:1767355260"
+    assert agents["agent-zzz-later"]["raw_work_leases"] == "task-one\tseen:1767355260"
 
 
 def test_listing_script_reports_the_turn_marker_of_each_agent(tmp_path: Path) -> None:

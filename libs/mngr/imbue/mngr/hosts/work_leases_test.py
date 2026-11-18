@@ -1,6 +1,5 @@
 import subprocess
 from datetime import datetime
-from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 from typing import Final
@@ -8,33 +7,31 @@ from typing import Final
 import pytest
 
 from imbue.mngr.hosts.work_leases import WORK_LEASE_DIR_NAME
+from imbue.mngr.hosts.work_leases import WORK_LEASE_NATIVE_TYPE_MAX_LENGTH
 from imbue.mngr.hosts.work_leases import build_lifecycle_probe_read_command
 from imbue.mngr.hosts.work_leases import determine_agent_probe_result
 from imbue.mngr.hosts.work_leases import parse_lifecycle_probe_reading
 from imbue.mngr.hosts.work_leases import parse_work_leases
-from imbue.mngr.hosts.work_leases import resolve_live_work_leases
-from imbue.mngr.hosts.work_leases import select_live_work_leases
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import LifecycleProbeReading
 from imbue.mngr.primitives import LifecycleProbeResult
 from imbue.mngr.primitives import WorkLease
+from imbue.mngr.primitives import WorkLeaseKind
+from imbue.mngr.utils.testing import RAW_LINE_SEPARATOR_BY_NAME
 
-_LEASE_NOW: Final[datetime] = datetime(2026, 1, 2, 12, 0, 0, tzinfo=timezone.utc)
-
-# Enough empty leases to outnumber the descriptors the scan is given, so one held open per
-# empty lease would starve the real lease that sorts after them.
+# More empty records than the scan is given file descriptors.
 _EMPTY_LEASE_COUNT: Final[int] = 60
 _SCAN_FILE_DESCRIPTOR_LIMIT: Final[int] = 40
 
 
 def test_parse_lifecycle_probe_reading_splits_the_turn_from_the_leases() -> None:
     reading = parse_lifecycle_probe_reading(
-        "ACTIVE=true\nLEASE=bg-1\tuntil:1767355200\nLEASE=wake-2\tuntil:1767355260\n"
+        "ACTIVE=true\nLEASE=bg-1\tseen:1767355200\nLEASE=wake-2\tseen:1767355260\n"
     )
 
     assert reading == LifecycleProbeReading(
         is_active=True,
-        raw_leases="bg-1\tuntil:1767355200\nwake-2\tuntil:1767355260",
+        raw_leases="bg-1\tseen:1767355200\nwake-2\tseen:1767355260",
     )
 
 
@@ -44,7 +41,7 @@ def test_parse_lifecycle_probe_reading_splits_the_turn_from_the_leases() -> None
         pytest.param("ACTIVE=\n", id="marker_absent"),
         pytest.param("ACTIVE=false\n", id="marker_absent_as_the_listing_spells_it"),
         pytest.param("", id="nothing_read"),
-        pytest.param("awk: cannot open /agents/a/leases/*\n", id="only_noise"),
+        pytest.param("awk: cannot open /agents/a/background_tasks/*\n", id="only_noise"),
     ],
 )
 def test_parse_lifecycle_probe_reading_reads_no_turn_and_no_lease(stdout: str) -> None:
@@ -57,7 +54,7 @@ def test_build_probe_read_command_reads_the_marker_and_the_leases_of_one_agent()
     command = build_lifecycle_probe_read_command("/state/agents/a")
 
     assert "/state/agents/a/active" in command
-    assert "/state/agents/a/leases/*" in command
+    assert "/state/agents/a/background_tasks/*" in command
     assert command.endswith("; :")
 
 
@@ -68,90 +65,251 @@ def test_build_probe_read_command_quotes_a_directory_that_needs_it() -> None:
 
 
 def test_build_probe_read_command_reads_a_lease_that_sorts_after_many_empty_ones(tmp_path: Path) -> None:
-    """A lease the scan opens but reads nothing from must still be closed.
-
-    An empty lease yields no line, so a scan that only closes what it read spends a descriptor
-    on each one and then cannot open the leases that follow -- which reads as the work having
-    ended. Run against a lowered descriptor limit so a host's worth of leases fits in a test.
-    """
+    """The scan closes every file it opens, so empty records do not use up its descriptors."""
     lease_dir = tmp_path / WORK_LEASE_DIR_NAME
     lease_dir.mkdir()
     for index in range(_EMPTY_LEASE_COUNT):
         (lease_dir / f"empty-{index}").touch()
-    (lease_dir / "zz-task").write_text("until:1767358800\n")
+    (lease_dir / "zz-task").write_text("seen:1767358800\n")
 
     command = f"ulimit -n {_SCAN_FILE_DESCRIPTOR_LIMIT}; {build_lifecycle_probe_read_command(str(tmp_path))}"
     result = subprocess.run(["sh", "-c", command], capture_output=True, text=True, timeout=30)
 
-    reading = parse_lifecycle_probe_reading(result.stdout)
-    assert [lease.name for lease in parse_work_leases(reading.raw_leases)] == ["zz-task"], result.stderr
+    leases = parse_work_leases(parse_lifecycle_probe_reading(result.stdout).raw_leases)
+    assert len(leases) == _EMPTY_LEASE_COUNT + 1, result.stderr
+    assert (leases[-1].name, leases[-1].last_seen_at) == (
+        "zz-task",
+        datetime(2026, 1, 2, 13, 0, 0, tzinfo=timezone.utc),
+    )
 
 
-def test_parse_work_leases_reads_the_bound_whatever_else_shares_the_line() -> None:
-    leases = parse_work_leases("bg-1\tuntil:1767355200\nwake-2\tsince:1767355100 until:1767355200\n")
+def _scan_leases_in(tmp_path: Path, content_by_name: dict[str, bytes]) -> tuple[WorkLease, ...]:
+    """Write each record file, then read the directory back through the production scan."""
+    lease_dir = tmp_path / WORK_LEASE_DIR_NAME
+    lease_dir.mkdir(exist_ok=True)
+    for name, content in content_by_name.items():
+        (lease_dir / name).write_bytes(content)
+    result = subprocess.run(
+        ["sh", "-c", build_lifecycle_probe_read_command(str(tmp_path))], capture_output=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    return parse_work_leases(parse_lifecycle_probe_reading(result.stdout.decode()).raw_leases)
 
-    assert [lease.name for lease in leases] == ["bg-1", "wake-2"]
-    assert leases[0].expires_at == datetime(2026, 1, 2, 12, 0, 0, tzinfo=timezone.utc)
-    assert leases[1].expires_at == datetime(2026, 1, 2, 12, 0, 0, tzinfo=timezone.utc)
+
+def test_a_scanned_record_counts_whatever_its_file_holds(tmp_path: Path) -> None:
+    leases = _scan_leases_in(
+        tmp_path,
+        {
+            "task-a-empty": b"",
+            "task-b-blank-line": b"\n",
+            "task-c-no-token": b"forever\n",
+            "task-d-unknown-fields": b"pid:4821 reason:compaction\n",
+            "task-e-no-newline": b"seen:1767355200 kind:SHELL",
+            "task-f-current": b"seen:1767355200 kind:SUBAGENT native_type:cloud%20session\n",
+        },
+    )
+
+    seen_at = datetime(2026, 1, 2, 12, 0, 0, tzinfo=timezone.utc)
+    assert leases == (
+        WorkLease(name="task-a-empty"),
+        WorkLease(name="task-b-blank-line"),
+        WorkLease(name="task-c-no-token"),
+        WorkLease(name="task-d-unknown-fields"),
+        WorkLease(name="task-e-no-newline", kind=WorkLeaseKind.SHELL, last_seen_at=seen_at),
+        WorkLease(
+            name="task-f-current", kind=WorkLeaseKind.SUBAGENT, native_type="cloud session", last_seen_at=seen_at
+        ),
+    )
 
 
-def test_parse_work_leases_ignores_a_token_it_does_not_know() -> None:
-    """The grammar can grow: a reader that has already shipped must not choke on a new key."""
-    leases = parse_work_leases("bg-1\tuntil:1767355200 reason:compaction\n")
+@pytest.mark.parametrize("separator", RAW_LINE_SEPARATOR_BY_NAME.values(), ids=RAW_LINE_SEPARATOR_BY_NAME.keys())
+def test_a_scanned_record_holding_a_raw_line_separator_is_one_record(separator: str, tmp_path: Path) -> None:
+    line = f"seen:1767355200 kind:SHELL native_type:a{separator}LEASE=task-forged\tseen:1 since:1767351600\n"
 
-    assert [lease.name for lease in leases] == ["bg-1"]
+    leases = _scan_leases_in(tmp_path, {"task-real": line.encode()})
+
+    assert [(lease.name, lease.started_at) for lease in leases] == [
+        ("task-real", datetime(2026, 1, 2, 11, 0, 0, tzinfo=timezone.utc))
+    ]
+
+
+@pytest.mark.parametrize(
+    ("directory_name", "expected_state", "expected_names"),
+    [
+        pytest.param("background_tasks", AgentLifecycleState.RUNNING_BACKGROUND, ["task-abc"], id="background_tasks"),
+        pytest.param("leases", AgentLifecycleState.WAITING, [], id="leases"),
+    ],
+)
+def test_the_probe_command_reads_the_records_under_background_tasks_and_no_other_directory(
+    directory_name: str, expected_state: AgentLifecycleState, expected_names: list[str], tmp_path: Path
+) -> None:
+    (tmp_path / directory_name).mkdir()
+    (tmp_path / directory_name / "task-abc").write_text("seen:1767355200 kind:SHELL native_type:shell\n")
+
+    result = subprocess.run(
+        ["sh", "-c", build_lifecycle_probe_read_command(str(tmp_path))], capture_output=True, text=True, timeout=30
+    )
+
+    assert result.returncode == 0, result.stderr
+    probe = _probe(parse_lifecycle_probe_reading(result.stdout))
+    assert (probe.state, [lease.name for lease in probe.leases]) == (expected_state, expected_names)
+
+
+def test_a_scan_counts_neither_a_dot_named_file_nor_a_directory(tmp_path: Path) -> None:
+    (tmp_path / WORK_LEASE_DIR_NAME / "task-directory").mkdir(parents=True)
+
+    leases = _scan_leases_in(tmp_path, {".task-abc.4821.0.tmp": b"seen:1767355200\n", "task-abc": b""})
+
+    assert leases == (WorkLease(name="task-abc"),)
+
+
+def test_parse_work_leases_reads_every_field_a_record_states() -> None:
+    leases = parse_work_leases("task-1\tseen:1767355200 kind:SUBAGENT native_type:cloud%20session since:1767351600\n")
+
+    assert leases == (
+        WorkLease(
+            name="task-1",
+            kind=WorkLeaseKind.SUBAGENT,
+            native_type="cloud session",
+            started_at=datetime(2026, 1, 2, 11, 0, 0, tzinfo=timezone.utc),
+            last_seen_at=datetime(2026, 1, 2, 12, 0, 0, tzinfo=timezone.utc),
+        ),
+    )
 
 
 @pytest.mark.parametrize(
     "raw",
     [
-        pytest.param("bg-1\n", id="no_bound"),
-        pytest.param("bg-1\t\n", id="empty_bound"),
-        pytest.param("bg-1\tforever\n", id="unknown_bound"),
-        pytest.param("bg-1\tsince:1767355100\n", id="unbounded_with_a_token_the_grammar_ignores"),
-        pytest.param("bg-1\tpid:4821\n", id="a_token_the_grammar_no_longer_bounds_by"),
-        pytest.param("\tuntil:1767355200\n", id="no_name"),
-        pytest.param("bad name\tuntil:1767355200\n", id="name_outside_the_grammar"),
-        # `str.isdigit` admits these; `int` does not, and a raising parse would take the
-        # whole probe -- or, in the batched path, the whole listing -- down with it.
-        pytest.param("bg-1\tuntil:²\n", id="superscript_deadline"),
-        pytest.param("bg-1\tuntil:99999999999999999999\n", id="deadline_past_the_end_of_time"),
+        pytest.param("task-1\t\n", id="no_fields"),
+        pytest.param("task-1\n", id="no_fields_and_no_separator"),
+        pytest.param("task-1\tpid:4821 reason:compaction\n", id="only_fields_this_reader_does_not_know"),
+        pytest.param("task-1\tforever\n", id="no_token_at_all"),
     ],
 )
-def test_parse_work_leases_drops_anything_without_a_usable_bound(raw: str) -> None:
+def test_parse_work_leases_counts_a_record_that_states_no_field_it_knows(raw: str) -> None:
+    assert parse_work_leases(raw) == (WorkLease(name="task-1"),)
+
+
+def test_parse_work_leases_keeps_the_first_value_given_for_a_key() -> None:
+    leases = parse_work_leases("task-1\tseen:1767355200 kind:SHELL seen:1767358800 kind:MONITOR\n")
+
+    assert [(lease.kind, lease.last_seen_at) for lease in leases] == [
+        (WorkLeaseKind.SHELL, datetime(2026, 1, 2, 12, 0, 0, tzinfo=timezone.utc))
+    ]
+
+
+@pytest.mark.parametrize(
+    "whitespace",
+    [
+        pytest.param("\t", id="tab"),
+        pytest.param("\r", id="carriage_return"),
+        pytest.param("\x0c", id="form_feed"),
+        pytest.param("\u00a0", id="no_break_space"),
+        pytest.param("\u2028", id="line_separator"),
+    ],
+)
+def test_parse_work_leases_ends_a_token_only_at_a_space(whitespace: str) -> None:
+    leases = parse_work_leases(f"task-1\tnative_type:a{whitespace}seen:1767355200 since:1767351600\n")
+
+    assert [(lease.last_seen_at, lease.started_at) for lease in leases] == [
+        (None, datetime(2026, 1, 2, 11, 0, 0, tzinfo=timezone.utc))
+    ]
+
+
+@pytest.mark.parametrize(
+    ("raw_native_type", "native_type"),
+    [
+        pytest.param("caf%C3%A9%20%E2%98%95", "caf\u00e9 \u2615", id="utf8_bytes"),
+        pytest.param("100%25%20%2541", "100% %41", id="an_escaped_percent_is_decoded_once"),
+        pytest.param("seen%3A9999999999", "seen:9999999999", id="a_colon"),
+        pytest.param("50%zz%2", "50%zz%2", id="a_percent_that_starts_no_escape_stands_for_itself"),
+        pytest.param("a%FFb", "a\ufffdb", id="invalid_utf8_is_replaced"),
+        pytest.param("bad/type", "bad/type", id="a_byte_a_writer_should_have_escaped"),
+        pytest.param(
+            "a%0Ab%09c%0Dd%00e%1Bf%7Fg%C2%85h",
+            "a\ufffdb\ufffdc\ufffdd\ufffde\ufffdf\ufffdg\ufffdh",
+            id="control_characters_are_replaced",
+        ),
+        pytest.param("a%E2%80%A8b%E2%80%A9c", "a\ufffdb\ufffdc", id="line_separators_are_replaced"),
+        pytest.param("x" * 2000, "x" * WORK_LEASE_NATIVE_TYPE_MAX_LENGTH, id="a_long_native_type_is_cut"),
+        pytest.param("%C3%A9" * 2000, "\u00e9" * WORK_LEASE_NATIVE_TYPE_MAX_LENGTH, id="the_cut_counts_characters"),
+    ],
+)
+def test_parse_work_leases_publishes_a_native_type_decoded_and_safe_to_print(
+    raw_native_type: str, native_type: str
+) -> None:
+    leases = parse_work_leases(f"task-1\tseen:1767355200 kind:OTHER native_type:{raw_native_type}\n")
+
+    assert [lease.native_type for lease in leases] == [native_type]
+
+
+@pytest.mark.parametrize("key", ["seen", "since"])
+@pytest.mark.parametrize(
+    "raw_instant",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("earlier", id="not_a_number"),
+        pytest.param("-1767355200", id="negative"),
+        pytest.param("1767355200.5", id="fractional"),
+        pytest.param("\u00b2", id="superscript_digit"),
+        pytest.param("\u0661\u0662\u0663", id="digits_outside_ascii"),
+        pytest.param("999999999999", id="past_the_last_year_a_datetime_holds"),
+        pytest.param("99999999999999999999", id="past_the_end_of_time"),
+        pytest.param("9" * 5000, id="longer_than_int_parses"),
+    ],
+)
+def test_parse_work_leases_reads_an_instant_that_is_not_a_valid_number_as_none(key: str, raw_instant: str) -> None:
+    leases = parse_work_leases(f"task-1\tkind:SHELL {key}:{raw_instant}\n")
+
+    assert leases == (WorkLease(name="task-1", kind=WorkLeaseKind.SHELL),)
+
+
+@pytest.mark.parametrize(
+    "first_line",
+    [
+        pytest.param("seen:1767355200", id="no_kind"),
+        pytest.param("seen:1767355200 kind:", id="empty_kind"),
+        pytest.param("seen:1767355200 kind:DAEMON", id="a_kind_this_reader_does_not_know"),
+        pytest.param("seen:1767355200 kind:subagent", id="a_kind_name_in_another_case"),
+    ],
+)
+def test_parse_work_leases_reads_a_kind_it_cannot_place_as_other(first_line: str) -> None:
+    leases = parse_work_leases(f"task-1\t{first_line}\n")
+
+    assert [(lease.name, lease.kind, lease.native_type) for lease in leases] == [("task-1", WorkLeaseKind.OTHER, "")]
+
+
+@pytest.mark.parametrize("kind", list(WorkLeaseKind))
+def test_parse_work_leases_reads_a_kind_by_its_exact_name(kind: WorkLeaseKind) -> None:
+    leases = parse_work_leases(f"task-1\tkind:{kind.value}\n")
+
+    assert [lease.kind for lease in leases] == [kind]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param("\n", id="blank_line"),
+        pytest.param("\tseen:1767355200\n", id="no_name"),
+        pytest.param("bad name\tseen:1767355200\n", id="name_outside_the_grammar"),
+        pytest.param(".task-1.4821.0.tmp\tseen:1767355200\n", id="dot_named_staging_file"),
+    ],
+)
+def test_parse_work_leases_drops_a_line_whose_name_is_not_a_record_name(raw: str) -> None:
     assert parse_work_leases(raw) == ()
 
 
-def test_work_lease_refuses_to_be_unbounded() -> None:
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("bg\t1", id="holds_a_tab"),
+        pytest.param(".bg-1", id="starts_with_a_dot"),
+    ],
+)
+def test_work_lease_refuses_a_name_no_record_file_can_have(name: str) -> None:
     with pytest.raises(ValueError):
-        WorkLease(name="bg-1")
-
-
-def test_work_lease_refuses_to_be_unnamed() -> None:
-    """An unnamed lease could never be matched to the work it stands for."""
-    with pytest.raises(ValueError):
-        WorkLease(name="", expires_at=_LEASE_NOW)
-
-
-def test_work_lease_refuses_a_name_outside_the_grammar() -> None:
-    """A tab in a name would corrupt every other agent's leases in a batched read."""
-    with pytest.raises(ValueError):
-        WorkLease(name="bg\t1", expires_at=_LEASE_NOW)
-
-
-def test_select_live_work_leases_drops_a_lease_whose_deadline_has_passed() -> None:
-    leases = (
-        WorkLease(name="unexpired", expires_at=_LEASE_NOW + timedelta(seconds=30)),
-        WorkLease(name="expired", expires_at=_LEASE_NOW - timedelta(seconds=30)),
-    )
-
-    assert [lease.name for lease in select_live_work_leases(leases, _LEASE_NOW)] == ["unexpired"]
-
-
-def test_resolve_live_work_leases_reads_and_bounds_in_one_step() -> None:
-    raw = "wake-2\tuntil:1767355260\nstale-3\tuntil:1767355140\n"
-
-    assert [lease.name for lease in resolve_live_work_leases(raw, _LEASE_NOW)] == ["wake-2"]
+        WorkLease(name=name)
 
 
 def _probe(
@@ -166,27 +324,48 @@ def _probe(
         expected_process_name="claude",
         ps_output=ps_output,
         reading=reading,
-        now=_LEASE_NOW,
     )
 
 
-def test_a_turn_that_ended_leaving_work_outstanding_is_running_background() -> None:
-    """The state the turn marker alone cannot express: no turn, but something will wake the agent."""
-    probe = _probe(LifecycleProbeReading(is_active=False, raw_leases="task-1\tuntil:1767358800"))
+@pytest.mark.parametrize(
+    "first_line",
+    [
+        pytest.param("seen:1767358800 kind:SHELL native_type:shell", id="seen_recently"),
+        pytest.param("seen:1 kind:SHELL native_type:shell", id="seen_decades_ago"),
+        pytest.param("pid:4821", id="only_a_field_this_reader_does_not_know"),
+        pytest.param("", id="no_fields"),
+    ],
+)
+def test_a_turn_that_ended_with_a_record_is_running_background_whatever_the_record_says(first_line: str) -> None:
+    probe = _probe(LifecycleProbeReading(is_active=False, raw_leases=f"task-1\t{first_line}"))
 
     assert probe.state == AgentLifecycleState.RUNNING_BACKGROUND
     assert [lease.name for lease in probe.leases] == ["task-1"]
 
 
-def test_a_background_working_probe_carries_the_pid_the_process_table_gave_it() -> None:
-    """Promoting the state must not cost the pid: an exit watcher is opened on that field.
-
-    ``AgentObserver`` reads a live agent with no pid as "the process table was not there",
-    and so as no evidence the watched process exited. A promotion that dropped the pid
-    would close the watcher of an agent whose work is still in flight.
-    """
+def test_a_background_working_probe_publishes_what_each_record_states() -> None:
     probe = _probe(
-        LifecycleProbeReading(is_active=False, raw_leases="task-1\tuntil:1767358800"),
+        LifecycleProbeReading(
+            is_active=False,
+            raw_leases="task-1\tseen:1767358800 kind:MONITOR native_type:monitor\ntask-2\tpid:4821",
+        )
+    )
+
+    assert probe.state is AgentLifecycleState.RUNNING_BACKGROUND
+    assert probe.leases == (
+        WorkLease(
+            name="task-1",
+            kind=WorkLeaseKind.MONITOR,
+            native_type="monitor",
+            last_seen_at=datetime(2026, 1, 2, 13, 0, 0, tzinfo=timezone.utc),
+        ),
+        WorkLease(name="task-2"),
+    )
+
+
+def test_a_background_working_probe_carries_the_pid_the_process_table_gave_it() -> None:
+    probe = _probe(
+        LifecycleProbeReading(is_active=False, raw_leases="task-1\tseen:1767358800"),
         ps_output="123 1 claude\n",
     )
 
@@ -195,19 +374,13 @@ def test_a_background_working_probe_carries_the_pid_the_process_table_gave_it() 
 
 
 def test_a_live_agent_whose_type_is_unknown_keeps_the_state_the_marker_gave_it() -> None:
-    """Its type is absent from this config, not its hooks from its state dir.
-
-    A claude agent whose plugin was disabled keeps writing the turn marker and keeps leasing
-    its work, and neither changes what mngr can say about a process it cannot name: the leases
-    are read only where the state is WAITING, so this one is reported as it was read.
-    """
+    """Records are read only where the state is WAITING, so an agent of unknown type reports none."""
     probe = determine_agent_probe_result(
         tmux_info="0|python3|123",
         is_blocked_on_dialog=False,
         expected_process_name="claude",
         ps_output="",
-        reading=LifecycleProbeReading(is_active=True, raw_leases="task-1\tuntil:1767358800"),
-        now=_LEASE_NOW,
+        reading=LifecycleProbeReading(is_active=True, raw_leases="task-1\tseen:1767358800"),
         is_agent_type_known=False,
     )
 
@@ -216,19 +389,14 @@ def test_a_live_agent_whose_type_is_unknown_keeps_the_state_the_marker_gave_it()
 
 
 def test_an_open_turn_is_running_whatever_it_left_outstanding() -> None:
-    """A turn in progress is the nearer fact: the agent is working now, not merely about to."""
-    probe = _probe(LifecycleProbeReading(is_active=True, raw_leases="task-1\tuntil:1767358800"))
+    probe = _probe(LifecycleProbeReading(is_active=True, raw_leases="task-1\tseen:1767358800"))
 
     assert probe.state == AgentLifecycleState.RUNNING
 
 
 def test_a_dialog_outranks_work_the_agent_left_running() -> None:
-    """Holding for a person is the one thing that means the user is the next mover.
-
-    The leases go unreported with it: the field is published as what makes a state RUNNING_BACKGROUND,
-    so a reader may take one as saying the agent will move itself.
-    """
-    reading = LifecycleProbeReading(is_active=True, raw_leases="task-1\tuntil:1767358800")
+    """An agent a dialog holds reads WAITING and reports no background tasks."""
+    reading = LifecycleProbeReading(is_active=True, raw_leases="task-1\tseen:1767358800")
 
     probe = _probe(reading, is_blocked_on_dialog=True)
 
@@ -243,17 +411,8 @@ def test_a_turn_that_ended_with_nothing_outstanding_is_waiting() -> None:
     assert probe.leases == ()
 
 
-def test_a_lease_whose_bound_has_lapsed_does_not_hold_the_agent() -> None:
-    """Work that died without cleaning up stops counting on its own."""
-    probe = _probe(LifecycleProbeReading(is_active=False, raw_leases="task-1\tuntil:1767355140"))
-
-    assert probe.state == AgentLifecycleState.WAITING
-    assert probe.leases == ()
-
-
-def test_a_deadline_bound_lease_holds_without_a_process_table() -> None:
-    """A deadline says something will wake the agent whatever the host can report."""
-    probe = _probe(LifecycleProbeReading(is_active=False, raw_leases="task-1\tuntil:1767358800"), ps_output=None)
+def test_a_record_holds_without_a_process_table() -> None:
+    probe = _probe(LifecycleProbeReading(is_active=False, raw_leases="task-1\tseen:1767358800"), ps_output=None)
 
     assert probe.state == AgentLifecycleState.RUNNING_BACKGROUND
 
@@ -270,7 +429,7 @@ def test_a_lease_cannot_revive_an_agent_that_is_not_live(
 ) -> None:
     """Whatever its directory still holds, an agent whose process is gone is carrying nothing."""
     probe = _probe(
-        LifecycleProbeReading(is_active=False, raw_leases="task-1\tuntil:1767358800"),
+        LifecycleProbeReading(is_active=False, raw_leases="task-1\tseen:1767358800"),
         tmux_info=tmux_info,
     )
 

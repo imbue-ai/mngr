@@ -48,7 +48,7 @@ mngr kanpan [OPTIONS]
 | ---- | ---- | ----------- | ------- |
 | `--include` | text | Include agents matching CEL expression (repeatable) | None |
 | `--exclude` | text | Exclude agents matching CEL expression (repeatable) | None |
-| `--running` | boolean | Show only agents that will move themselves: a turn in flight, or work left running that will start the next one (alias for --include 'state == "RUNNING" &#x7C;&#x7C; state == "RUNNING_BACKGROUND"') | `False` |
+| `--running` | boolean | Show only agents with a turn in flight or background tasks recorded (alias for --include 'state == "RUNNING" &#x7C;&#x7C; state == "RUNNING_BACKGROUND"') | `False` |
 | `--stopped` | boolean | Show only stopped agents (alias for --include 'state == "STOPPED"') | `False` |
 | `--archived` | boolean | Show only archived agents (alias for --include 'has(labels.archived_at)') | `False` |
 | `--active` | boolean | Show only active agents (anything not archived/destroyed/crashed/failed) | `False` |

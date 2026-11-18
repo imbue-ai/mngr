@@ -346,7 +346,6 @@ class BaseAgent(AgentInterface[AgentConfigT]):
                 expected_process_name=expected_process_name,
                 ps_output=readable_snapshot.ps_output,
                 reading=reading,
-                now=datetime.now(timezone.utc),
                 is_agent_type_known=is_type_known,
             )
             logger.trace("Determined agent {} lifecycle state: {} (pid={})", self.name, probe.state, probe.pid)

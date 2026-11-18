@@ -105,8 +105,8 @@ def add_agent_filter_options(command: TDecorated) -> TDecorated:
         "--running",
         is_flag=True,
         help=(
-            "Show only agents that will move themselves: a turn in flight, or work left running "
-            'that will start the next one (alias for --include \'state == "RUNNING" || state == "RUNNING_BACKGROUND"\')'
+            "Show only agents with a turn in flight or background tasks recorded "
+            '(alias for --include \'state == "RUNNING" || state == "RUNNING_BACKGROUND"\')'
         ),
     )(command)
     command = optgroup.option(

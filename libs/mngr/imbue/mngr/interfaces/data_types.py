@@ -693,12 +693,11 @@ class AgentDetails(FrozenModel):
             "is 'local')."
         ),
     )
-    leases: tuple[WorkLease, ...] = Field(
+    background_tasks: tuple[WorkLease, ...] = Field(
         default=(),
         description=(
-            "The work the agent declared still outstanding at its last turn end, which is what "
-            "makes its state RUNNING_BACKGROUND. Empty for every other state, and for an agent whose "
-            "type declares no leases"
+            "The background tasks the agent left running after its turn, each with its name, kind, "
+            "native_type, started_at and last_seen_at. Non-empty exactly where the state is RUNNING_BACKGROUND"
         ),
     )
     url: str | None = Field(default=None, description="Agent URL (reported)")
@@ -718,6 +717,14 @@ class AgentDetails(FrozenModel):
     host: HostDetails = Field(description="Host information")
 
     plugin: dict[str, Any] = Field(default_factory=dict, description="Plugin-specific fields")
+
+    # CLEANUP: drop this validator, its tests and the spec sentence about it once no workspace updates in place from minds-v0.10.1 to v0.10.4, which wrote `leases`.
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_retired_leases_key(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "leases" in data:
+            return {key: value for key, value in data.items() if key != "leases"}
+        return data
 
     @cached_property
     def address(self) -> AgentAddress:

@@ -1856,7 +1856,6 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
             expected_process_name=expected_process_name,
             ps_output=ps_output,
             is_agent_type_known=is_type_known,
-            now=now,
         )
         idle_timeout_raw = agent_data.get("idle_timeout_seconds", 800)
         idle_mode_value = agent_data.get("idle_mode", "DISABLED")
@@ -1871,7 +1870,7 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
             create_time=create_time,
             start_on_boot=agent_data.get("start_on_boot", False),
             state=lifecycle.state,
-            leases=lifecycle.leases,
+            background_tasks=lifecycle.leases,
             pid=lifecycle.pid,
             url=agent_raw.get("url"),
             start_time=start_time,

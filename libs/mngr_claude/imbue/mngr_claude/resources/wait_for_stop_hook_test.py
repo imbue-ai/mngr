@@ -3,31 +3,34 @@ import json
 import os
 import subprocess
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Final
+from urllib.parse import quote
 from uuid import uuid4
 
 import pytest
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr import resources as mngr_resources
-from imbue.mngr.hosts.work_leases import DEFAULT_WORK_LEASE_TTL_SECONDS
-from imbue.mngr.hosts.work_leases import WORK_LEASE_TTL_ENV_VAR
-from imbue.mngr.hosts.work_leases import parse_work_leases
+from imbue.mngr.primitives import WorkLeaseKind
 from imbue.mngr.utils.polling import poll_until
+from imbue.mngr.utils.testing import HOSTILE_NATIVE_TYPES
+from imbue.mngr.utils.testing import read_work_leases_in
 from imbue.mngr_claude.resources.testing import make_assistant_record
 from imbue.mngr_claude.resources.testing import make_user_record
 from imbue.mngr_claude.resources.testing import write_raw_transcript
+from imbue.mngr_claude.testing import WORK_LEASE_KIND_BY_CLAUDE_TASK_LABEL
 
 _WAIT_FOR_STOP_HOOK_PATH: Final[Path] = Path(__file__).parent / "wait_for_stop_hook.sh"
 _WORK_LEASE_LIB_NAME: Final[str] = "mngr_work_lease_lib.sh"
 _HOOK_TIMEOUT_SECONDS: Final[float] = 30.0
 # Long enough that the race test can append a record while the hook waits to re-check
 _SLOW_REQUEUE_RECHECK_DELAY_SECONDS: Final[float] = 2.0
-# How much later than the test's own clock the hook may date a lease from
-_LEASE_TTL_SLACK_SECONDS: Final[float] = 30.0
+# How far the test's clock and the hook's may read apart
+_CLOCK_SLACK: Final[timedelta] = timedelta(seconds=30)
 
 
 class _StopHook(FrozenModel):
@@ -107,7 +110,6 @@ def _prepare_stop_hook(
     requeue_recheck_delay_seconds: float = 0.0,
     background_tasks: list[dict[str, Any]] | None = None,
     is_work_lease_lib_installed: bool = True,
-    work_lease_ttl_override: str = "",
 ) -> _StopHook:
     """Set up the stop hook for the end of a turn that set the ``active`` marker.
 
@@ -118,9 +120,6 @@ def _prepare_stop_hook(
     ``commands/`` dir the way ``Host._ensure_shared_shell_libs`` does, which is the state
     every provisioned agent is in. Clearing it reproduces an agent provisioned before the
     library existed.
-
-    ``work_lease_ttl_override`` is the agent's setting for how long its leases hold; empty
-    is the agent that sets none, whatever the test runner's own environment holds.
     """
     agent_state_dir = tmp_path / "agent_state"
     agent_state_dir.mkdir()
@@ -146,13 +145,12 @@ def _prepare_stop_hook(
             "HOOK_GRACE_PERIOD": "0",
             "HOOK_MAX_WAIT": "0",
             "HOOK_REQUEUE_RECHECK_DELAY": str(requeue_recheck_delay_seconds),
-            WORK_LEASE_TTL_ENV_VAR: work_lease_ttl_override,
         },
         transcript=transcript,
         active_marker=agent_state_dir / "active",
         idle_since=agent_state_dir / "idle_since",
         activity_events=host_dir / "events" / "mngr" / "activity" / "events.jsonl",
-        lease_dir=agent_state_dir / "leases",
+        lease_dir=agent_state_dir / "background_tasks",
     )
 
 
@@ -182,7 +180,6 @@ def _run_stop_hook_at_turn_end(
     hook_event_name: str = "Stop",
     background_tasks: list[dict[str, Any]] | None = None,
     is_work_lease_lib_installed: bool = True,
-    work_lease_ttl_override: str = "",
 ) -> _StopHook:
     hook = _prepare_stop_hook(
         tmp_path,
@@ -190,7 +187,6 @@ def _run_stop_hook_at_turn_end(
         hook_event_name,
         background_tasks=background_tasks,
         is_work_lease_lib_installed=is_work_lease_lib_installed,
-        work_lease_ttl_override=work_lease_ttl_override,
     )
     result = _run_prepared_stop_hook(hook, tmp_path)
     assert result.returncode == 0, result.stderr
@@ -381,65 +377,22 @@ def test_stop_hook_leases_the_background_work_the_turn_leaves_running(tmp_path: 
     assert leases == ["task-abc-123", "task-def_456"]
 
 
-def test_stop_hook_writes_a_lease_mngr_can_parse_and_date(tmp_path: Path) -> None:
-    """The grammar the shared library writes: a bound, so the lease can expire, and a start.
-
-    Parsed here by the reader that consumes it in production, so the two halves of the
-    protocol are pinned against each other rather than against a literal spelled twice.
-    """
-    hook = _run_stop_hook_at_turn_end(
-        tmp_path,
-        [_prompt("hello"), _reply("done")],
-        background_tasks=[{"task_id": "abc-123"}],
-    )
-
-    lease_path = hook.lease_dir / "task-abc-123"
-    leases = parse_work_leases(f"{lease_path.name}\t{lease_path.read_text().strip()}")
-
-    assert len(leases) == 1
-    assert leases[0].name == "task-abc-123"
-    assert leases[0].expires_at is not None
-    assert leases[0].expires_at > datetime.now(timezone.utc)
-
-
-def _lease_ttl_seconds_at_turn_end(tmp_path: Path, work_lease_ttl_override: str) -> float:
-    """How far ahead the hook dates a lease, measured from the test's clock before it ran."""
+def test_stop_hook_writes_a_record_mngr_reads_as_seen_at_the_turn_end(tmp_path: Path) -> None:
+    """Parsed here by the reader that consumes it in production, so the two halves are pinned together."""
     started_at = datetime.now(timezone.utc)
     hook = _run_stop_hook_at_turn_end(
         tmp_path,
         [_prompt("hello"), _reply("done")],
         background_tasks=[{"task_id": "abc-123"}],
-        work_lease_ttl_override=work_lease_ttl_override,
-    )
-    lease_path = hook.lease_dir / "task-abc-123"
-    leases = parse_work_leases(f"{lease_path.name}\t{lease_path.read_text().strip()}")
-    assert len(leases) == 1
-    expires_at = leases[0].expires_at
-    assert expires_at is not None
-    return (expires_at - started_at).total_seconds()
-
-
-def _assert_lease_ttl_is(observed_ttl_seconds: float, expected_ttl_seconds: int) -> None:
-    """The hook dates a lease from its own clock, truncated to a whole second."""
-    assert expected_ttl_seconds - 1 <= observed_ttl_seconds <= expected_ttl_seconds + _LEASE_TTL_SLACK_SECONDS, (
-        observed_ttl_seconds
     )
 
+    leases = read_work_leases_in(hook.lease_dir)
 
-def test_stop_hook_dates_a_lease_by_the_default_ttl(tmp_path: Path) -> None:
-    """The bound an agent that sets nothing gets, which is the one mngr documents for every writer."""
-    _assert_lease_ttl_is(_lease_ttl_seconds_at_turn_end(tmp_path, ""), DEFAULT_WORK_LEASE_TTL_SECONDS)
-
-
-def test_stop_hook_dates_a_lease_by_the_agents_own_ttl(tmp_path: Path) -> None:
-    """An agent whose work is short can say so, rather than holding its host for the default."""
-    _assert_lease_ttl_is(_lease_ttl_seconds_at_turn_end(tmp_path, "600"), 600)
-
-
-@pytest.mark.parametrize("override", ["", " ", "0", "007", "4h", "-600", "1.5"])
-def test_stop_hook_ignores_a_lease_ttl_that_is_not_a_positive_count_of_seconds(tmp_path: Path, override: str) -> None:
-    """A lease dated by one of these would be expired on arrival, which reads as work that ended."""
-    _assert_lease_ttl_is(_lease_ttl_seconds_at_turn_end(tmp_path, override), DEFAULT_WORK_LEASE_TTL_SECONDS)
+    assert [(lease.name, lease.started_at) for lease in leases] == [("task-abc-123", None)]
+    assert leases[0].last_seen_at is not None
+    assert abs(leases[0].last_seen_at - started_at) <= _CLOCK_SLACK
+    line = (hook.lease_dir / "task-abc-123").read_text()
+    assert [token.partition(":")[0] for token in line.split()] == ["seen", "kind"]
 
 
 def test_stop_hook_leaves_the_turn_signal_alone_when_the_lease_library_is_missing(tmp_path: Path) -> None:
@@ -478,12 +431,7 @@ def test_stop_hook_drops_leases_for_work_that_has_since_finished(tmp_path: Path)
 
 
 def test_stop_hook_leaves_alone_a_lease_it_did_not_write(tmp_path: Path) -> None:
-    """The lease directory is the agent's, and anything that starts work may lease there.
-
-    Each lease states a bound it expires by, so there is nothing for this hook to clean up
-    on another writer's behalf -- and a lease it deleted anyway would vanish mid-work for
-    no reason its writer could see.
-    """
+    """The lease directory is the agent's, and a record under another prefix is another writer's to remove."""
     hook = _prepare_stop_hook(tmp_path, [_prompt("hello"), _reply("done")], background_tasks=[])
     hook.lease_dir.mkdir()
     (hook.lease_dir / "task-stale").write_text("until:1\n")
@@ -498,34 +446,76 @@ def test_stop_hook_leaves_alone_a_lease_it_did_not_write(tmp_path: Path) -> None
 
 
 def test_stop_hook_leases_every_kind_of_background_task_claude_reports(tmp_path: Path) -> None:
-    """The entry shape Claude Code sends: the id field is `id`, and the kind is in `type`."""
+    """The entry shape Claude Code sends: the id field is `id`, and the type label is in `type`."""
+    kind_by_label = WORK_LEASE_KIND_BY_CLAUDE_TASK_LABEL
     hook = _run_stop_hook_at_turn_end(
         tmp_path,
         [_prompt("hello"), _reply("done")],
         background_tasks=[
-            {"id": "b3tzesn7m", "type": "shell", "status": "running", "description": "a background command"},
-            {"id": "mon-1", "type": "monitor", "status": "running", "description": "an armed monitor"},
-            {"id": "mcp-1", "type": "MCP task", "status": "running", "description": "an mcp call"},
-            {"id": "wf-1", "type": "workflow", "status": "running", "description": "a workflow"},
-            {"id": "sub-1", "type": "subagent", "status": "running", "description": "a backgrounded subagent"},
+            {"id": f"t{index:02d}", "type": label, "status": "running", "description": f"a {label} task"}
+            for index, label in enumerate(kind_by_label)
         ],
     )
 
-    assert sorted(path.name for path in hook.lease_dir.iterdir()) == [
-        "task-b3tzesn7m",
-        "task-mcp-1",
-        "task-mon-1",
-        "task-sub-1",
-        "task-wf-1",
+    assert [(lease.name, lease.kind, lease.native_type) for lease in read_work_leases_in(hook.lease_dir)] == [
+        (f"task-t{index:02d}", kind, label) for index, (label, kind) in enumerate(kind_by_label.items())
+    ]
+
+
+def test_stop_hook_writes_a_task_label_exactly_as_claude_sent_it(tmp_path: Path) -> None:
+    hook = _run_stop_hook_at_turn_end(
+        tmp_path,
+        [_prompt("hello"), _reply("done")],
+        background_tasks=[
+            {"id": f"t{index:02d}", "type": label, "status": "running"}
+            for index, label in enumerate(HOSTILE_NATIVE_TYPES)
+        ],
+    )
+
+    written = [
+        (hook.lease_dir / f"task-t{index:02d}").read_text().split(" ", 1)[1]
+        for index in range(len(HOSTILE_NATIVE_TYPES))
+    ]
+    assert written == [
+        f"kind:{WORK_LEASE_KIND_BY_CLAUDE_TASK_LABEL.get(label, WorkLeaseKind.OTHER)} "
+        f"native_type:{quote(label, safe='')}\n"
+        for label in HOSTILE_NATIVE_TYPES
+    ]
+
+
+def test_stop_hook_leases_a_task_without_a_type_as_other_work(tmp_path: Path) -> None:
+    hook = _run_stop_hook_at_turn_end(
+        tmp_path,
+        [_prompt("hello"), _reply("done")],
+        background_tasks=[
+            {"id": "a-labelled", "type": "shell", "status": "running"},
+            {"id": "b-typeless", "status": "running"},
+        ],
+    )
+
+    assert [(lease.name, lease.kind, lease.native_type) for lease in read_work_leases_in(hook.lease_dir)] == [
+        ("task-a-labelled", WorkLeaseKind.SHELL, "shell"),
+        ("task-b-typeless", WorkLeaseKind.OTHER, ""),
+    ]
+
+
+def test_stop_hook_does_not_lease_a_task_that_names_no_id(tmp_path: Path) -> None:
+    hook = _run_stop_hook_at_turn_end(
+        tmp_path,
+        [_prompt("hello"), _reply("done")],
+        background_tasks=[
+            {"type": "shell", "status": "running"},
+            {"id": "named", "type": "shell", "status": "running"},
+        ],
+    )
+
+    assert [(lease.name, lease.kind, lease.native_type) for lease in read_work_leases_in(hook.lease_dir)] == [
+        ("task-named", WorkLeaseKind.SHELL, "shell")
     ]
 
 
 def test_stop_hook_does_not_lease_a_schedule(tmp_path: Path) -> None:
-    """A schedule is an appointment, not work in flight: nothing runs until it fires.
-
-    Leasing one would hold its agent for as long as the schedule existed, which for a standing
-    schedule is forever -- see specs/agent-running-background.
-    """
+    """No writer leases ``session_crons`` yet."""
     hook = _prepare_stop_hook(
         tmp_path,
         [_prompt("hello"), _reply("done")],
@@ -562,11 +552,7 @@ def test_stop_hook_marks_the_turn_over_even_when_the_leases_cannot_be_recorded(t
 
 
 def test_stop_hook_does_not_lease_a_task_that_reports_a_terminal_status(tmp_path: Path) -> None:
-    """A finished task must not hold the agent open for a whole lease TTL.
-
-    Claude Code documents `background_tasks` as in-flight work only, so this guards the case
-    where that stops holding rather than one seen in a payload.
-    """
+    """A task with a terminal status is not recorded, though Claude Code documents the list as in-flight only."""
     hook = _run_stop_hook_at_turn_end(
         tmp_path,
         [_prompt("hello"), _reply("done")],

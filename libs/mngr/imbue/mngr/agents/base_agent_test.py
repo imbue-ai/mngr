@@ -52,6 +52,7 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import InvalidName
 from imbue.mngr.primitives import LifecycleProbeResult
+from imbue.mngr.primitives import WorkLease
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import cleanup_tmux_session
@@ -290,6 +291,71 @@ def test_lifecycle_state_waiting_when_no_active_file(
     finally:
         # Clean up tmux session and all its processes
         cleanup_tmux_session(session_name)
+
+
+@pytest.mark.tmux
+def test_lifecycle_state_running_background_while_a_record_exists_whatever_it_says(
+    test_agent: BaseAgent,
+    local_provider: LocalProviderInstance,
+) -> None:
+    session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
+    window_name = test_agent.mngr_ctx.config.tmux.primary_window_name
+    test_agent.host.execute_idempotent_command(
+        f"tmux new-session -d -s '{session_name}' -n '{window_name}' 'sleep 1000'",
+        timeout_seconds=5.0,
+    )
+    lease_dir = local_provider.host_dir / "agents" / str(test_agent.id) / WORK_LEASE_DIR_NAME
+
+    try:
+        wait_for(
+            lambda: test_agent.get_lifecycle_state() == AgentLifecycleState.WAITING,
+            error_message="Expected agent lifecycle state to be WAITING",
+        )
+
+        lease_dir.mkdir(parents=True)
+        (lease_dir / "task-no-fields").write_text("")
+        (lease_dir / "task-unknown-field").write_text("pid:4821\n")
+        probe_with_records = test_agent.probe_lifecycle()
+
+        for record in lease_dir.iterdir():
+            record.unlink()
+        probe_without_records = test_agent.probe_lifecycle()
+    finally:
+        cleanup_tmux_session(session_name)
+
+    assert (probe_with_records.state, probe_with_records.leases) == (
+        AgentLifecycleState.RUNNING_BACKGROUND,
+        (WorkLease(name="task-no-fields"), WorkLease(name="task-unknown-field")),
+    )
+    assert (probe_without_records.state, probe_without_records.leases) == (AgentLifecycleState.WAITING, ())
+
+
+@pytest.mark.tmux
+def test_lifecycle_state_waiting_with_no_background_tasks_when_the_only_record_is_under_leases(
+    test_agent: BaseAgent,
+    local_provider: LocalProviderInstance,
+) -> None:
+    session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
+    window_name = test_agent.mngr_ctx.config.tmux.primary_window_name
+    test_agent.host.execute_idempotent_command(
+        f"tmux new-session -d -s '{session_name}' -n '{window_name}' 'sleep 1000'",
+        timeout_seconds=5.0,
+    )
+    unread_dir = local_provider.host_dir / "agents" / str(test_agent.id) / "leases"
+
+    try:
+        wait_for(
+            lambda: test_agent.get_lifecycle_state() == AgentLifecycleState.WAITING,
+            error_message="Expected agent lifecycle state to be WAITING",
+        )
+
+        unread_dir.mkdir(parents=True)
+        (unread_dir / "task-abc").write_text("seen:1767355200 kind:SHELL native_type:shell\n")
+        probe = test_agent.probe_lifecycle()
+    finally:
+        cleanup_tmux_session(session_name)
+
+    assert (probe.state, probe.leases) == (AgentLifecycleState.WAITING, ())
 
 
 @pytest.mark.tmux
@@ -1875,13 +1941,7 @@ def _read_work_state(agent: BaseAgent) -> tuple[bool, str]:
 def test_work_state_reports_the_active_marker_whatever_shape_the_lease_dir_is_in(
     test_agent: BaseAgent, lease_dir_shape: str
 ) -> None:
-    """The marker must survive a lease read that finds nothing to read.
-
-    The lease read globs the working dir, and an unmatched glob reaches awk as a literal
-    path it cannot open. Were the command to carry that failure, every agent that has never
-    leased work -- which is every agent, most of the time -- would read as having no `active`
-    marker, i.e. as WAITING while it works.
-    """
+    """The marker must survive a lease read that finds nothing to read."""
     agent_dir = get_agent_state_dir_path(test_agent.host.host_dir, test_agent.id)
     if lease_dir_shape == "empty":
         (agent_dir / WORK_LEASE_DIR_NAME).mkdir(parents=True)

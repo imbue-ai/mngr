@@ -822,11 +822,7 @@ COMPACTING_MARKER_FILENAME: Final[str] = "compacting"
 # literal in the hook shell snippets below.
 LAST_COMPACTION_FILENAME: Final[str] = "last_compaction.json"
 
-# Prefix naming the work leases (under ``$MNGR_AGENT_STATE_DIR/<WORK_LEASE_DIR_NAME>/``) that
-# ``wait_for_stop_hook.sh`` writes for the background work a turn leaves running, and so the only
-# ones mngr_claude may clear -- a lease under another name belongs to a different writer and
-# expires on its own bound. It is also a literal in that script, which cannot import it;
-# ``test_hook_lease_prefix_matches_the_stop_hook_script`` holds the two sides together.
+# The prefix of the record names ``wait_for_stop_hook.sh`` writes, which are the only ones mngr_claude clears.
 HOOK_WORK_LEASE_NAME_PREFIX: Final[str] = "task-"
 
 
@@ -954,13 +950,8 @@ def build_readiness_hooks_config() -> dict[str, Any]:
       claude_background_tasks.sh for as long as that loop counts the agent as working, and so
       only ever as wide as the condition written there. Its mtime is the signal: the host's
       idle watcher and ``mngr ls`` read the mtime, and nothing parses the contents.
-    - leases/task-<id>: one work lease per background task a turn left running, holding
-      its ``until:`` epoch second. Written by wait_for_stop_hook.sh
-      through mngr_work_lease_lib.sh, which
-      rewrites its whole set at each turn end; an agent holding a live lease reports
-      RUNNING_BACKGROUND though its turn has ended.
-      The next startup/resume SessionStart removes them, since what they stand for died with
-      the previous process.
+    - background_tasks/task-<id>: one record per background task the last turn left running,
+      e.g. ``seen:1792575895 kind:SHELL``.
     - claude_process_started: touched on every startup/resume SessionStart (a
       fresh, not-mid-turn Claude process). Its mtime is the restart boundary:
       a transcript event older than it belongs to a turn the current process
@@ -1058,8 +1049,8 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                             # (container restart, OOM, crash): the Stop hook never
                             # ran to clear 'active', and the leases its last run
                             # wrote outlive the tasks they stand for, so without
-                            # this the agent would report RUNNING after restart --
-                            # forever on the marker, until the deadline on a lease.
+                            # this the agent would report RUNNING or
+                            # RUNNING_BACKGROUND after restart until its next turn end.
                             # The 'claude_process_started' marker's mtime gives
                             # consumers (e.g. the system interface activity
                             # indicator) a restart boundary to compare transcript

@@ -21,11 +21,10 @@ Valid states include all agent lifecycle states (STOPPED, RUNNING, RUNNING_BACKG
 RUNNING_UNKNOWN_AGENT_TYPE, DONE, UNKNOWN) and all host states (BUILDING, STARTING, RUNNING,
 STOPPING, STOPPED, PAUSED, CRASHED, FAILED, DESTROYED, UNAUTHENTICATED, UNKNOWN).
 
-If no states are specified, waits until nothing but you will move the target: for an agent,
-that means any terminal state AND nothing left that would wake it, so a turn that ended
-leaving a background task running keeps the wait open for as long as that work is
-outstanding. Naming states explicitly waits for exactly those, whether or not such work
-is outstanding. An agent whose type does not report its work is judged on its state alone.
+If no states are specified, waits for any terminal state. RUNNING_BACKGROUND is not one, so an
+agent whose turn ended with background tasks recorded keeps the wait open while it reads that state.
+Naming states explicitly waits for exactly those. An agent whose type records no background
+tasks never reads RUNNING_BACKGROUND.
 
 When watching an agent, both agent and host states are tracked:
 - STOPPED counts if either the agent or host is stopped
@@ -93,7 +92,7 @@ mngr wait [OPTIONS] [TARGET] [STATES]...
 $ mngr wait my-agent DONE
 ```
 
-**Wait until nothing but you will move it**
+**Wait for any terminal state**
 
 ```bash
 $ mngr wait agent-abc123

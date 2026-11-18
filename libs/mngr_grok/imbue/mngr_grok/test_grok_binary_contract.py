@@ -37,6 +37,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.tmux import LONG_MESSAGE_THRESHOLD
+from imbue.mngr.hosts.work_leases import WORK_LEASE_DIR_NAME
 from imbue.mngr.interfaces.host import AgentProvisioningOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostLocation
@@ -51,11 +52,13 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import SystemPromptText
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.primitives import WorkLeaseKind
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import capture_tmux_pane_contents
 from imbue.mngr.utils.testing import get_short_random_string
+from imbue.mngr.utils.testing import read_work_leases_in
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import write_executable_script
 from imbue.mngr_grok.grok_config import FORK_FROM_RELATIVE_PATH
@@ -1122,6 +1125,7 @@ def test_an_auto_wake_turn_writes_turn_completed_under_its_task_completed_prompt
         _send_and_wait_for_turn(
             agent, f"{BACKGROUND_SHELL_TRIGGER} start the background job {get_short_random_string()}"
         )
+        leases_while_shell_runs = read_work_leases_in(_state_dir(agent) / WORK_LEASE_DIR_NAME)
         wake_completion = _wait_for_completed_wake_turn(agent, "task-completed-")
         wake_prompt_id = str(wake_completion["prompt_id"])
         submissions = (
@@ -1131,6 +1135,12 @@ def test_an_auto_wake_turn_writes_turn_completed_under_its_task_completed_prompt
             agent, _turn_end_log_fragment(_agent_session_id(agent), wake_prompt_id)
         )
 
+    assert [(lease.kind, lease.native_type, lease.last_seen_at is not None) for lease in leases_while_shell_runs] == [
+        (WorkLeaseKind.SHELL, "shell", True)
+    ], (
+        f"pinned grok {read_pinned_grok_version()}; grok_hook.py's _lease_line_of reads a background shell's type as "
+        f"`shell` in the Stop's backgroundTasks; leases seen: {leases_while_shell_runs}"
+    )
     assert wake_completion["stop_reason"] == "end_turn"
     assert (agent.work_dir / "bg_done.txt").is_file()
     assert f"{wake_prompt_id} {AUTO_WAKE_TAIL_MARKER}" in submissions
@@ -1175,9 +1185,15 @@ def test_a_background_subagent_holds_the_agent_running_background_until_it_ends_
         "stop subagents-pruned=0 subagents-marked-background=1 leases=1",
         "turn:end active:off",
     ], failure_context
-    assert (probe_while_subagent_runs.state, [lease.name for lease in probe_while_subagent_runs.leases]) == (
+    assert (
+        probe_while_subagent_runs.state,
+        [
+            (lease.name, lease.kind, lease.native_type, lease.last_seen_at is not None)
+            for lease in probe_while_subagent_runs.leases
+        ],
+    ) == (
         AgentLifecycleState.RUNNING_BACKGROUND,
-        [subagent_lease_name],
+        [(subagent_lease_name, WorkLeaseKind.SUBAGENT, "subagent", True)],
     ), failure_context
     assert wake_completion["stop_reason"] == "end_turn"
     (_, wake_marker_on_line) = [line for line in hook_log.splitlines() if " active:on" in line]

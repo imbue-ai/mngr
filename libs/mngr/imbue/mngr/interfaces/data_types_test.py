@@ -10,6 +10,7 @@ import pytest
 
 from imbue.mngr.errors import InvalidRelativePathError
 from imbue.mngr.interfaces.data_types import ActivityConfig
+from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import FileType
@@ -24,6 +25,8 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.utils.testing import make_agent_row_with_retired_leases_key
+from imbue.mngr.utils.testing import make_test_agent_details
 
 
 @pytest.mark.parametrize(
@@ -476,3 +479,20 @@ def test_to_activity_config_defaults_when_nothing_set() -> None:
     )
     assert activity_config.idle_mode == IdleMode.IO
     assert activity_config.idle_timeout_seconds == 800
+
+
+@pytest.mark.parametrize(
+    "leases",
+    [
+        pytest.param([], id="no_lease"),
+        pytest.param([{"name": "task-bq27e8h2p", "expires_at": "2026-11-17T08:16:15.664387Z"}], id="one_lease"),
+    ],
+)
+def test_agent_details_accepts_and_drops_the_retired_leases_key(leases: list[dict[str, str]]) -> None:
+    row = make_agent_row_with_retired_leases_key(make_test_agent_details(name="updated-in-place"), leases)
+
+    agent = AgentDetails.model_validate(row)
+
+    assert agent.name == "updated-in-place"
+    assert agent.background_tasks == ()
+    assert "leases" not in agent.model_dump()

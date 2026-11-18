@@ -26,6 +26,7 @@ from imbue.mngr.agents.agent_release_testing import agent_state_dir
 from imbue.mngr.agents.agent_release_testing import send_expecting_success
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import build_tmux_capture_pane_command
+from imbue.mngr.primitives import WorkLeaseKind
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import get_subprocess_test_env
@@ -97,6 +98,22 @@ RAW_TRANSCRIPT_RELPATH: Final[str] = "logs/claude_transcript/events.jsonl"
 
 # Claude Code's alias for the current Haiku, the cheapest tier.
 RELEASE_TEST_MODEL: Final[str] = "haiku"
+
+# Each label Claude Code gives a background task's `type`, and the kind the Stop hook leases it as.
+WORK_LEASE_KIND_BY_CLAUDE_TASK_LABEL: Final[Mapping[str, WorkLeaseKind]] = {
+    "shell": WorkLeaseKind.SHELL,
+    "subagent": WorkLeaseKind.SUBAGENT,
+    "teammate": WorkLeaseKind.SUBAGENT,
+    "cloud session": WorkLeaseKind.SUBAGENT,
+    "workflow": WorkLeaseKind.SUBAGENT,
+    "monitor": WorkLeaseKind.MONITOR,
+    "MCP task": WorkLeaseKind.OTHER,
+    "dream": WorkLeaseKind.OTHER,
+    "auto-mode scan": WorkLeaseKind.OTHER,
+    "memory import": WorkLeaseKind.OTHER,
+    "memory save": WorkLeaseKind.OTHER,
+    "code": WorkLeaseKind.OTHER,
+}
 
 
 def _init_claude_workspace(path: Path) -> None:

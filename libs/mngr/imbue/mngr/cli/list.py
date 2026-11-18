@@ -1361,7 +1361,7 @@ All agent fields from the "Available Fields" section can be used in filter expre
 
 **Simple equality filters:**
 - `name == "my-agent"` - Match agent by exact name
-- `state == "RUNNING" || state == "RUNNING_BACKGROUND"` - Match agents that will move themselves, which is what `--running` selects
+- `state == "RUNNING" || state == "RUNNING_BACKGROUND"` - Match agents with a turn in flight or background tasks recorded, which is what `--running` selects
 - `host.provider == "docker"` - Match agents on Docker hosts
 - `type == "claude"` - Match agents of type "claude"
 - `labels.project == "mngr"` - Match agents with a specific project label
@@ -1387,6 +1387,7 @@ All agent fields from the "Available Fields" section can be used in filter expre
 - `has(url)` - Agents that have a URL set
 - `has(host.ssh)` - Agents on remote hosts with SSH access
 - `has(labels.foo)` - Agents that have a `foo` label set
+- `background_tasks.exists(t, t.kind == "SHELL")` - Agents RUNNING_BACKGROUND on a command they left running (each background task has `name`, `kind`, `native_type`, `started_at` and `last_seen_at`)
 """,
         ),
         (

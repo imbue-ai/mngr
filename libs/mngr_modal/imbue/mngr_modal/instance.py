@@ -3355,7 +3355,6 @@ log "=== Shutdown script completed ==="
             expected_process_name=expected_process_name,
             ps_output=ps_output,
             is_agent_type_known=is_type_known,
-            now=now,
         )
 
         return AgentDetails(
@@ -3368,7 +3367,7 @@ log "=== Shutdown script completed ==="
             create_time=create_time,
             start_on_boot=agent_data.get("start_on_boot", False),
             state=lifecycle.state,
-            leases=lifecycle.leases,
+            background_tasks=lifecycle.leases,
             pid=lifecycle.pid,
             url=agent_raw.get("url"),
             start_time=start_time,

@@ -503,9 +503,7 @@ def determine_lifecycle_probe_result(
     case, states that would otherwise be REPLACED are reported as
     RUNNING_UNKNOWN_AGENT_TYPE instead.
 
-    This settles the state from the turn marker and the process table alone. Callers reach it
-    through ``determine_agent_probe_result`` in ``hosts.work_leases``, which reads the agent's work
-    leases on top of this result and reports RUNNING_BACKGROUND where a turn ended with work outstanding.
+    This settles the state from the turn marker and the process table alone, so it never reports RUNNING_BACKGROUND.
     """
     if not tmux_info:
         return LifecycleProbeResult(state=AgentLifecycleState.STOPPED)
@@ -601,9 +599,7 @@ def classify_waiting_reason(is_active: bool, is_blocked_on_permission: bool) -> 
     - active and blocked on a permission dialog -> PERMISSIONS
     - active and not blocked -> None (actively running)
 
-    These are the turn's own signals. The lifecycle reads one witness more -- the agent's
-    work leases -- so an agent whose turn ended while declared work is still outstanding
-    reports END_OF_TURN and a state of RUNNING_BACKGROUND together.
+    An agent whose turn ended with a background task recorded reports END_OF_TURN and RUNNING_BACKGROUND together.
 
     PERMISSIONS is gated on ``is_active``: a permission dialog is only meaningful
     during a live turn, so a *stranded* permission marker (one that outlived its

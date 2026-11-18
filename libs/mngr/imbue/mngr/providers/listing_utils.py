@@ -459,12 +459,18 @@ def parse_optional_float(value: str) -> float | None:
         return None
 
 
-def _extract_delimited_block(lines: list[str], idx: int, end_marker: str) -> tuple[str, int]:
-    """Extract lines between the current position and end_marker, returning the content and new index."""
+def _extract_delimited_lines(lines: list[str], idx: int, end_marker: str) -> tuple[list[str], int]:
+    """Collect the lines between the current position and end_marker, returning them whole and the new index."""
     collected: list[str] = []
     while idx < len(lines) and lines[idx].strip() != end_marker:
         collected.append(lines[idx])
         idx += 1
+    return collected, idx
+
+
+def _extract_delimited_block(lines: list[str], idx: int, end_marker: str) -> tuple[str, int]:
+    """Extract lines between the current position and end_marker, returning the content and new index."""
+    collected, idx = _extract_delimited_lines(lines, idx, end_marker)
     return "\n".join(collected).strip(), idx
 
 
@@ -508,10 +514,10 @@ def build_lifecycle_probe_reading(agent_raw: Mapping[str, Any]) -> LifecycleProb
 
 
 @pure
-def _parse_agent_work_leases(block: str) -> dict[str, str]:
-    """Group ``LEASE=<agent id>\\t<name>\\t<bound>`` lines into raw lease text per agent."""
+def _parse_agent_work_leases(lines: Sequence[str]) -> dict[str, str]:
+    """Group ``LEASE=<agent id>\\t<name>\\t<first line>`` lines into raw lease text per agent."""
     lease_lines_by_agent: dict[str, list[str]] = {}
-    for line in block.splitlines():
+    for line in lines:
         if not line.startswith(LEASE_PREFIX):
             continue
         agent_id, separator, lease = line[len(LEASE_PREFIX) :].partition("\t")
@@ -645,8 +651,8 @@ def parse_listing_collection_output(stdout: str) -> dict[str, Any]:
             mtime_by_agent_activity = _parse_agent_activity_mtimes(mtimes_block)
         elif line.strip() == SEP_AGENT_LEASES_START:
             idx += 1
-            leases_block, idx = _extract_delimited_block(lines, idx, SEP_AGENT_LEASES_END)
-            raw_leases_by_agent = _parse_agent_work_leases(leases_block)
+            lease_lines, idx = _extract_delimited_lines(lines, idx, SEP_AGENT_LEASES_END)
+            raw_leases_by_agent = _parse_agent_work_leases(lease_lines)
         elif line.strip().startswith(SEP_AGENT_START):
             agent_dir_name = line.strip().removeprefix(SEP_AGENT_START).removesuffix("---")
             idx += 1

@@ -406,8 +406,7 @@ class AgentLifecycleState(UpperCaseStrEnum):
 
     STOPPED = auto()
     RUNNING = auto()
-    # The turn has ended, but work the agent declared is still outstanding and will wake it:
-    # a background command, a subagent, a monitor or a workflow. The user is not the next mover.
+    # No turn is open and the agent has at least one background task record.
     RUNNING_BACKGROUND = auto()
     WAITING = auto()
     REPLACED = auto()
@@ -436,11 +435,7 @@ RUNNING_AGENT_LIFECYCLE_STATES: Final[frozenset[AgentLifecycleState]] = frozense
 
 
 class LifecycleProbeReading(FrozenModel):
-    """What one read of an agent's state directory saw of its turn and its outstanding work.
-
-    The single shape both collection paths produce -- the one-agent probe and the batched
-    host listing -- so the rule that reduces it runs on identical input either way.
-    """
+    """What one read of an agent's state directory saw of its turn and its background task records."""
 
     is_active: bool = Field(
         default=False,
@@ -448,45 +443,59 @@ class LifecycleProbeReading(FrozenModel):
     )
     raw_leases: str = Field(
         default="",
-        description="The collected `<name>\\t<bound>` lease lines, one per line, still to be parsed",
+        description="The collected `<name>\\t<first line>` record lines, one per line, still to be parsed",
     )
 
 
 class InvalidWorkLeaseError(ValueError):
-    """Raised when a work lease is unnamed, badly named, or states no bound it could expire by."""
+    """Raised when a background task record has no valid name."""
 
 
-# The characters a lease name may use. Narrow because the name has to survive being a file
-# name and being carried in the tab-delimited stream a host's leases are collected over, where
-# a name holding a tab or a newline would corrupt every other agent's leases in the same read.
-WORK_LEASE_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"\A[A-Za-z0-9_.-]+\Z")
+# What a record's file name may be: no leading dot, and only characters that survive the tab-delimited scan.
+WORK_LEASE_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"\A[A-Za-z0-9_-][A-Za-z0-9_.-]*\Z")
+
+
+class WorkLeaseKind(UpperCaseStrEnum):
+    """mngr's category for a background task."""
+
+    # A command the agent started and left running.
+    SHELL = auto()
+    # Other agents working on this one's behalf: a subagent, a teammate, a cloud session, a workflow.
+    SUBAGENT = auto()
+    # A watch that wakes the agent once its condition is met.
+    MONITOR = auto()
+    # A wake the agent scheduled for itself.
+    SCHEDULE = auto()
+    # Work the writer placed in no other kind.
+    OTHER = auto()
 
 
 class WorkLease(FrozenModel):
-    """One declared unit of in-flight work that will wake its agent when it finishes.
+    """One background task an agent left running after its turn, as read from its record file."""
 
-    Whatever starts the work writes a lease under the agent's ``leases/`` directory, and
-    the lifecycle probe reads them back, so work that dies without cleaning up stops counting
-    without anyone having to come back and remove it.
-
-    Every lease states a deadline, so a lease can always expire. The deadline is the only
-    bound: nothing a harness reports at turn end identifies the work's own process.
-    """
-
-    name: str = Field(description="Lease file name, e.g. `task-b09b409g6`")
-    expires_at: datetime | None = Field(default=None, description="Instant after which this lease no longer counts")
+    name: str = Field(description="Record file name, e.g. `task-b09b409g6`")
+    kind: WorkLeaseKind = Field(default=WorkLeaseKind.OTHER, description="mngr's category for the task")
+    native_type: str = Field(
+        default="",
+        description=(
+            "The harness's own name for the task type, e.g. `shell` or `cloud session`, with control "
+            "characters replaced; empty when the record has none"
+        ),
+    )
+    started_at: datetime | None = Field(
+        default=None,
+        description="Earliest instant the writer knows the task was running; None when the record does not say",
+    )
+    last_seen_at: datetime | None = Field(
+        default=None,
+        description="Instant the harness last listed the task as running; None when the record does not say",
+    )
 
     @model_validator(mode="after")
-    def _check_is_named_and_bounded(self) -> Self:
-        if not self.name:
-            raise InvalidWorkLeaseError("Work lease must be named")
+    def _check_is_named(self) -> Self:
         if WORK_LEASE_NAME_PATTERN.match(self.name) is None:
             raise InvalidWorkLeaseError(
-                f"Work lease name {self.name!r} must use only the characters {WORK_LEASE_NAME_PATTERN.pattern}"
-            )
-        if self.expires_at is None:
-            raise InvalidWorkLeaseError(
-                f"Work lease {self.name!r} must state an expiry, else it could never stop holding its agent"
+                f"Background task record name {self.name!r} must match {WORK_LEASE_NAME_PATTERN.pattern}"
             )
         return self
 
@@ -508,20 +517,15 @@ class LifecycleProbeResult(FrozenModel):
     )
     leases: tuple[WorkLease, ...] = Field(
         default=(),
-        description="The work leases that still hold, in the order read, naming what RUNNING_BACKGROUND is waiting on",
+        description=(
+            "The agent's background task records, in the order read; non-empty exactly where the state "
+            "is RUNNING_BACKGROUND"
+        ),
     )
 
 
 class WaitingReason(UpperCaseStrEnum):
-    """Why an agent's turn is not progressing.
-
-    Reported as the ``waiting_reason`` field by agent plugins (see the
-    ``agent_field_generators`` hook). Shared across plugins so the codex and claude
-    implementations agree on the vocabulary; see ``classify_waiting_reason`` in
-    ``imbue.mngr.hosts.common`` for the shared rule that produces it. It answers for the
-    turn, which is why RUNNING_BACKGROUND needs no value of its own here: an agent that ended its turn with
-    work still outstanding reports END_OF_TURN and RUNNING_BACKGROUND together.
-    """
+    """Why an agent's turn is not progressing, as agent plugins report it in the ``waiting_reason`` field."""
 
     # Blocked on a tool-approval dialog, waiting for the user to respond.
     PERMISSIONS = auto()

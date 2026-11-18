@@ -11,9 +11,10 @@ Invocations (each exits 0 with nothing on stdout or stderr, and logs one line to
 Both end the turn only while it is the session's recorded turn.
 
 ``active`` exists iff ``plugin/grok/turns/`` holds a file or ``plugin/grok/subagents/`` holds one not marked
-``background``; a task a ``Stop`` lists in flight holds a work lease, ``leases/task-<id>``, instead. Every state change
-runs under ``fcntl.flock`` on ``plugin/grok/state.lock``; a recompute that flips ``active`` appends a ``mngr/activity``
-event to ``$MNGR_HOST_DIR/events/mngr/activity/events.jsonl``, and one that removes it writes ``idle_since``.
+``background``; a task a ``Stop`` lists in flight is recorded at ``background_tasks/task-<id>`` instead. Every state
+change runs under ``fcntl.flock`` on ``plugin/grok/state.lock``; a recompute that flips ``active`` appends a
+``mngr/activity`` event to ``$MNGR_HOST_DIR/events/mngr/activity/events.jsonl``, and one that removes it writes
+``idle_since``.
 
 ``permissions_waiting`` holds the session ids grok asked the user about, one per line (empty when a notification named
 none); a tool of one of those sessions resolving, its top-level turn starting or ending, or the session ending removes
@@ -60,6 +61,7 @@ from typing import Any
 from typing import BinaryIO
 from typing import Final
 from typing import Optional
+from urllib.parse import quote
 
 NORMALIZED_PROBE_MAX_LENGTH: Final[int] = 60
 AUTO_WAKE_TAIL_MARKER: Final[str] = "<auto-wake>"
@@ -98,23 +100,18 @@ _IDLE_PROMPT_NOTIFICATION_TYPE: Final[str] = "idle_prompt"
 _END_TURN_REASON: Final[str] = "end_turn"
 _SUBAGENT_TASK_TYPE: Final[str] = "subagent"
 
-# One work lease per in-flight background task, under the agent's own state dir, so an agent
-# whose turn ended with work outstanding reads RUNNING_BACKGROUND rather than WAITING. The
-# grammar and its reader live in imbue.mngr.hosts.work_leases, which this script cannot import:
-# it runs from the agent's hook directory against the standard library alone. The shell half of
-# the same protocol is mngr_work_lease_lib.sh, and
-# ``test_a_leased_grok_task_parses_the_way_mngr_reads_it`` pins this writer to that reader.
-WORK_LEASE_DIRNAME: Final[str] = "leases"
+# One record file per in-flight background task, under the agent's own state dir, in the format mngr reads.
+WORK_LEASE_DIRNAME: Final[str] = "background_tasks"
 WORK_LEASE_NAME_PREFIX: Final[str] = "task-"
-# How far ahead a lease is dated, and the environment variable that overrides it for one agent.
-# They are DEFAULT_WORK_LEASE_TTL_SECONDS and WORK_LEASE_TTL_ENV_VAR in
-# imbue.mngr.hosts.work_leases, which every turn-end hook spells out again;
-# ``test_a_grok_lease_is_dated_by_the_default_ttl`` pins this writer to them.
-WORK_LEASE_TTL_ENV_VAR: Final[str] = "HOOK_WORK_LEASE_TTL_SECONDS"
-DEFAULT_WORK_LEASE_TTL_SECONDS: Final[int] = 86400
 _LEASE_NAME_DISALLOWED_PATTERN: Final[re.Pattern[str]] = re.compile(r"[^A-Za-z0-9_.-]")
-# grok's task statuses, of which these end the work. A status this does not name is leased,
-# because a lease withheld from live work is the error the state exists to prevent.
+# grok's task types as the WorkLeaseKind names they stand for.
+LEASE_KIND_BY_TASK_TYPE: Final[Mapping[str, str]] = {
+    "shell": "SHELL",
+    _SUBAGENT_TASK_TYPE: "SUBAGENT",
+    "monitor": "MONITOR",
+}
+OTHER_LEASE_KIND: Final[str] = "OTHER"
+# grok's task statuses that end a task; one with any other status is recorded.
 _TERMINAL_TASK_STATUSES: Final[frozenset[str]] = frozenset({"completed", "failed", "killed", "cancelled"})
 
 # Session and subagent ids name files, so they must be plain file names.
@@ -309,9 +306,7 @@ def _append_activity_event(host_dir: str, now: datetime) -> str:
 def _recompute_active_marker(state_dir: Path, host_dir: str, now: datetime) -> str:
     plugin_dir = _plugin_dir(state_dir)
     turn_ids = _visible_entry_names(plugin_dir / _TURNS_DIRNAME)
-    # The marker covers a turn, which a background subagent is not part of: that one holds its
-    # agent through a work lease. A dialog outlives the marker, because a background subagent
-    # can be the one waiting on the user, and being blocked on a person is not working.
+    # A background subagent is a recorded task outside any turn, and can hold a dialog after the marker is off.
     has_work = bool(turn_ids or _foreground_subagent_ids(state_dir))
     can_hold_a_dialog = bool(turn_ids or _visible_entry_names(plugin_dir / _SUBAGENTS_DIRNAME))
     active_path = state_dir / ACTIVE_MARKER_FILENAME
@@ -335,11 +330,7 @@ def _recompute_active_marker(state_dir: Path, host_dir: str, now: datetime) -> s
 
 
 def _foreground_subagent_ids(state_dir: Path) -> list[str]:
-    """The subagents running inside a turn, which hold the turn marker open.
-
-    One a parent's Stop listed is background work: it holds its agent through a work lease
-    instead, so the marker can come off and the agent read RUNNING_BACKGROUND.
-    """
+    """The subagents running inside a turn, which hold the turn marker open; one a parent's Stop listed does not."""
     plugin_dir = _plugin_dir(state_dir)
     foreground = []
     for subagent_id in _visible_entry_names(plugin_dir / _SUBAGENTS_DIRNAME):
@@ -419,7 +410,7 @@ def _end_root_session(state_dir: Path, host_dir: str, session_id: str, now: date
     is_turn_removed = _remove_file(_turn_path(state_dir, session_id))
     _remove_file(_pending_wake_path(state_dir, session_id))
     removed_subagent_count = _remove_subagents_of_parent(state_dir, session_id)
-    # The leases this session declared stood for work inside it.
+    # The records this session wrote name tasks inside it.
     _clear_work_leases(state_dir)
     _clear_session_permission_waiting(state_dir, session_id)
     outcome = f"root:end turn-removed={str(is_turn_removed).lower()} subagents-removed={removed_subagent_count}"
@@ -443,40 +434,32 @@ def _lease_name_of(task_id: str) -> str:
 
 
 def _drop_lease(state_dir: Path, task_id: str) -> None:
-    """A unit of work that has ended stops holding its agent, whichever path ended it."""
+    """Remove the record of a task that has ended."""
     _remove_file(_lease_dir(state_dir) / _lease_name_of(task_id))
 
 
-def _in_flight_task_ids(background_tasks: Sequence[Any]) -> list[str]:
-    """Every background task still in flight, whatever its kind, named for its lease."""
-    ids = []
+def _in_flight_tasks(background_tasks: Sequence[Any]) -> list[dict[str, Any]]:
+    """Every background task still in flight, whatever its kind."""
+    tasks = []
     for task in background_tasks:
         if not isinstance(task, dict) or not isinstance(task.get("id"), str) or task["id"] == "":
             continue
         if str(task.get("status") or "") in _TERMINAL_TASK_STATUSES:
             continue
-        ids.append(_lease_name_of(task["id"]))
-    return ids
+        tasks.append(task)
+    return tasks
 
 
-def _work_lease_ttl_seconds(environ: Mapping[str, str]) -> int:
-    """How far ahead a lease written now is dated.
-
-    Only a positive decimal count of seconds holds a lease, with no leading zero, which is the
-    spelling the shell writer of this protocol also takes as decimal.
-    """
-    override = environ.get(WORK_LEASE_TTL_ENV_VAR, "")
-    if override.isdecimal() and not override.startswith("0"):
-        return int(override)
-    return DEFAULT_WORK_LEASE_TTL_SECONDS
+def _lease_line_of(task: Mapping[str, Any], seen_at: int) -> str:
+    """A record's first line, e.g. ``seen:1792575895 kind:SHELL native_type:shell``."""
+    task_type = str(task.get("type") or "")
+    line = f"seen:{seen_at} kind:{LEASE_KIND_BY_TASK_TYPE.get(task_type, OTHER_LEASE_KIND)}"
+    native_type = quote(task_type, safe="", errors="replace")
+    return f"{line} native_type:{native_type}" if native_type else line
 
 
 def _clear_work_leases(state_dir: Path) -> str:
-    """Drop every lease under this writer's own prefix, so work that has ended stops counting.
-
-    The directory belongs to the agent and anything may lease there, so another writer's lease
-    is left to expire on its own bound.
-    """
+    """Drop every record under this writer's own prefix."""
     lease_dir = _lease_dir(state_dir)
     for lease_name in _visible_entry_names(lease_dir):
         if lease_name.startswith(WORK_LEASE_NAME_PREFIX):
@@ -484,17 +467,17 @@ def _clear_work_leases(state_dir: Path) -> str:
     return " leases=0"
 
 
-def _write_work_leases(state_dir: Path, background_tasks: Sequence[Any], now: datetime, ttl_seconds: int) -> str:
-    """Rewrite this writer's whole lease set, so work that has finished stops counting."""
+def _write_work_leases(state_dir: Path, background_tasks: Sequence[Any], now: datetime) -> str:
+    """Rewrite this writer's whole record set, one per in-flight task, each seen now."""
     cleared_outcome = _clear_work_leases(state_dir)
-    lease_names = _in_flight_task_ids(background_tasks)
-    if not lease_names:
+    tasks = _in_flight_tasks(background_tasks)
+    if not tasks:
         return cleared_outcome
-    expires_at = int(now.timestamp()) + ttl_seconds
+    seen_at = int(now.timestamp())
     lease_dir = _lease_dir(state_dir)
-    for lease_name in lease_names:
-        _write_text_atomically(lease_dir / lease_name, f"until:{expires_at}\n")
-    return f" leases={len(lease_names)}"
+    for task in tasks:
+        _write_text_atomically(lease_dir / _lease_name_of(task["id"]), _lease_line_of(task, seen_at) + "\n")
+    return f" leases={len(tasks)}"
 
 
 def _reconcile_subagents_with_snapshot(state_dir: Path, parent_id: str, running_subagent_ids: frozenset[str]) -> str:
@@ -567,9 +550,8 @@ def _handle_stop(state_dir: Path, host_dir: str, payload: Mapping[str, Any], now
     reconcile_outcome = _reconcile_subagents_with_snapshot(
         state_dir, session_id, _running_subagent_ids(background_tasks)
     )
-    # Ahead of the recompute, so no probe falls between the marker coming off and the leases
-    # landing and reads the agent as waiting on its user.
-    lease_outcome = _write_work_leases(state_dir, background_tasks, now, _work_lease_ttl_seconds(os.environ))
+    # Ahead of the recompute, so no probe sees the marker off before the records land.
+    lease_outcome = _write_work_leases(state_dir, background_tasks, now)
     return f"stop {reconcile_outcome}" + lease_outcome + _recompute_active_marker(state_dir, host_dir, now)
 
 

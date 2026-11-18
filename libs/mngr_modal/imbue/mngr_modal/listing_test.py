@@ -8,6 +8,8 @@ from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import WorkLease
+from imbue.mngr.primitives import WorkLeaseKind
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr_modal.instance import ModalProviderInstance
@@ -163,6 +165,43 @@ def test_build_single_agent_details_returns_agent_with_correct_state(
     assert result is not None
     # pane shows bash shell, expected process is "my-agent" (not found) -> DONE
     assert result.state == AgentLifecycleState.DONE
+
+
+def test_build_single_agent_details_publishes_the_background_tasks_of_a_listed_agent(
+    testing_provider: ModalProviderInstance,
+) -> None:
+    agent_raw: dict = {
+        "data": {
+            "id": str(AgentId.generate()),
+            "name": "test-agent",
+            "type": "unknown-type",
+            "command": "my-agent",
+            "create_time": datetime.now(timezone.utc).isoformat(),
+        },
+        "tmux_info": "0|my-agent|100",
+        "is_active": False,
+        "raw_work_leases": "task-full\tseen:1767355200 kind:SHELL native_type:shell\ntask-bare\tpid:4821",
+    }
+    result = testing_provider._build_single_agent_details(
+        agent_raw=agent_raw,
+        host_details=_make_host_details(),
+        ssh_activity=None,
+        ps_output="",
+        idle_timeout_seconds=300,
+        activity_sources=(ActivitySource.USER,),
+        idle_mode=IdleMode.USER,
+    )
+    assert result is not None
+    assert result.state == AgentLifecycleState.RUNNING_BACKGROUND
+    assert result.background_tasks == (
+        WorkLease(
+            name="task-full",
+            kind=WorkLeaseKind.SHELL,
+            native_type="shell",
+            last_seen_at=datetime(2026, 1, 2, 12, 0, 0, tzinfo=timezone.utc),
+        ),
+        WorkLease(name="task-bare"),
+    )
 
 
 def test_build_single_agent_details_returns_none_for_missing_id(

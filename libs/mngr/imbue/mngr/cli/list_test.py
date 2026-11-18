@@ -56,6 +56,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import WorkLease
+from imbue.mngr.primitives import WorkLeaseKind
 from imbue.mngr.utils.cel_utils import compile_cel_sort_keys
 from imbue.mngr.utils.testing import make_test_agent_details
 from imbue.mngr.utils.testing import record_host_name
@@ -71,9 +72,7 @@ def _create_test_snapshot(name: str, idx: int) -> SnapshotInfo:
     )
 
 
-# =============================================================================
 # Tests for _parse_slice_spec
-# =============================================================================
 
 
 def test_parse_slice_spec_single_index_zero() -> None:
@@ -148,9 +147,7 @@ def test_parse_slice_spec_invalid_non_integer_in_slice() -> None:
     assert result is None
 
 
-# =============================================================================
 # Tests for _format_value_as_string
-# =============================================================================
 
 
 def test_format_value_as_string_none_returns_empty() -> None:
@@ -181,25 +178,35 @@ def test_format_value_as_string_snapshot_uses_name() -> None:
     assert result == "my-snapshot"
 
 
-def test_get_field_value_names_the_work_leases_holding_an_agent() -> None:
-    """``--fields leases`` answers which work is holding a RUNNING_BACKGROUND agent, so it reads as names.
-
-    Each lease is a model, and a model with no display form of its own reaches this path as its
-    pydantic repr -- a column of ``name='task-abc' expires_at=datetime.datetime(...)``.
-    """
-    expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+def test_get_field_value_names_the_background_tasks_of_an_agent() -> None:
+    """``--fields background_tasks`` reads as the tasks' names."""
+    last_seen_at = datetime.now(timezone.utc)
+    started_at = last_seen_at - timedelta(hours=2)
     agent = make_test_agent_details(
         state=AgentLifecycleState.RUNNING_BACKGROUND,
-        leases=(WorkLease(name="task-abc", expires_at=expires_at), WorkLease(name="task-def", expires_at=expires_at)),
+        background_tasks=(
+            WorkLease(
+                name="task-abc",
+                kind=WorkLeaseKind.SUBAGENT,
+                native_type="cloud session",
+                started_at=started_at,
+                last_seen_at=last_seen_at,
+            ),
+            WorkLease(name="task-def"),
+        ),
     )
 
-    assert _get_field_value(agent, "leases") == "task-abc, task-def"
-    assert _get_field_value(agent, "leases[0]") == "task-abc"
+    assert _get_field_value(agent, "background_tasks") == "task-abc, task-def"
+    assert _get_field_value(agent, "background_tasks[0]") == "task-abc"
+    assert _get_field_value(agent, "background_tasks[0].kind") == "SUBAGENT"
+    assert _get_field_value(agent, "background_tasks[0].native_type") == "cloud session"
+    assert _get_field_value(agent, "background_tasks[0].started_at") == str(started_at)
+    assert _get_field_value(agent, "background_tasks[0].last_seen_at") == str(last_seen_at)
+    assert _get_field_value(agent, "background_tasks[1].started_at") == ""
+    assert _get_field_value(agent, "background_tasks[1].last_seen_at") == ""
 
 
-# =============================================================================
 # Tests for _get_field_value with bracket notation
-# =============================================================================
 
 
 def test_get_field_value_simple_field() -> None:
@@ -376,9 +383,7 @@ def test_get_field_value_too_many_colons_in_slice() -> None:
     assert result == ""
 
 
-# =============================================================================
 # Edge case tests for slicing
-# =============================================================================
 
 
 def test_get_field_value_step_zero_returns_empty() -> None:
@@ -502,9 +507,7 @@ def test_parse_slice_spec_negative_start_and_stop() -> None:
     assert result == slice(-3, -1)
 
 
-# =============================================================================
 # Tests for _get_field_value with host plugin dict access
-# =============================================================================
 
 
 def test_get_field_value_host_plugin_top_level() -> None:
@@ -542,9 +545,7 @@ def test_get_field_value_host_plugin_whole_dict() -> None:
     assert result == "iam_user=admin"
 
 
-# =============================================================================
 # Tests for _sort_agents_by_cel
-# =============================================================================
 
 
 def test_sort_agents_by_cel_ascending() -> None:
@@ -662,9 +663,7 @@ def test_sort_agents_by_cel_numeric_missing_sorts_last() -> None:
     assert [str(a.name) for a in descending] == ["has-idle", "no-idle"]
 
 
-# =============================================================================
 # Tests for _truncate_to_width
-# =============================================================================
 
 
 def test_truncate_to_width_pads_short_values() -> None:
@@ -692,9 +691,7 @@ def test_truncate_to_width_very_narrow_column() -> None:
     assert len(result) == 3
 
 
-# =============================================================================
 # Tests for _format_streaming_header_row and _format_streaming_agent_row
-# =============================================================================
 
 
 def test_format_streaming_header_row_uses_custom_labels() -> None:
@@ -748,9 +745,7 @@ def test_compute_column_widths_distributes_extra_space_evenly() -> None:
     assert widths["state"] > 10
 
 
-# =============================================================================
 # Tests for _StreamingHumanRenderer
-# =============================================================================
 
 
 def _create_streaming_renderer(
@@ -907,9 +902,7 @@ def test_streaming_renderer_tty_erases_status_on_finish() -> None:
     assert output.endswith("\r\x1b[K")
 
 
-# =============================================================================
 # Tests for _should_use_streaming_mode
-# =============================================================================
 
 
 def test_should_use_streaming_mode_default_human() -> None:
@@ -932,9 +925,7 @@ def test_should_use_streaming_mode_json_format_uses_batch() -> None:
     assert _should_use_streaming_mode(output_format=OutputFormat.JSON, is_sort_explicit=False) is False
 
 
-# =============================================================================
 # Tests for _is_streaming_eligible
-# =============================================================================
 
 
 def test_is_streaming_eligible_no_sort() -> None:
@@ -947,9 +938,7 @@ def test_is_streaming_eligible_explicit_sort_disables() -> None:
     assert _is_streaming_eligible(is_sort_explicit=True) is False
 
 
-# =============================================================================
 # Tests for _render_format_template
-# =============================================================================
 
 
 def test_render_format_template_simple_field() -> None:
@@ -1022,9 +1011,7 @@ def test_render_format_template_tab_separator() -> None:
     assert result == "my-agent\tSTOPPED"
 
 
-# =============================================================================
 # Tests for _emit_template_output
-# =============================================================================
 
 
 def test_emit_template_output() -> None:
@@ -1050,9 +1037,7 @@ def test_emit_template_output() -> None:
     assert lines[2] == "agent-charlie"
 
 
-# =============================================================================
 # Tests for _StreamingTemplateEmitter
-# =============================================================================
 
 
 def test_streaming_template_emitter_writes_formatted_line() -> None:
@@ -1117,9 +1102,7 @@ def test_streaming_template_emitter_thread_safety() -> None:
     assert len(lines) == agent_count
 
 
-# =============================================================================
 # Tests for _format_value_as_string with dict and tuple values
-# =============================================================================
 
 
 def test_format_value_as_string_formats_dict_as_key_value_pairs() -> None:
@@ -1140,9 +1123,7 @@ def test_format_value_as_string_formats_tuple_as_comma_separated() -> None:
     assert result == "USER, AGENT, SSH"
 
 
-# =============================================================================
 # Tests for _get_header_label
-# =============================================================================
 
 
 def test_get_header_label_returns_custom_label_for_known_fields() -> None:
@@ -1171,9 +1152,7 @@ def test_get_header_label_custom_headers_override_builtin() -> None:
     assert _get_header_label("some.field", custom) == "SOME FIELD"
 
 
-# =============================================================================
 # Tests for _get_field_value with tags
-# =============================================================================
 
 
 def test_get_field_value_formats_host_tags_as_key_value_pairs() -> None:
@@ -1190,9 +1169,7 @@ def test_get_field_value_returns_empty_for_empty_tags() -> None:
     assert result == ""
 
 
-# =============================================================================
 # Tests for --project and --host-label CLI option parsing
-# =============================================================================
 
 
 def test_project_option_generates_cel_filter(
@@ -1242,9 +1219,7 @@ def test_host_label_option_rejects_invalid_format(
     assert "KEY=VALUE" in result.output
 
 
-# =============================================================================
 # Tests for --label CLI option parsing
-# =============================================================================
 
 
 def test_label_option_generates_cel_filter(
@@ -1277,9 +1252,7 @@ def test_label_option_rejects_invalid_format(
     assert "KEY=VALUE" in result.output
 
 
-# =============================================================================
 # Tests for labels display in _get_field_value
-# =============================================================================
 
 
 def test_get_field_value_formats_labels_as_key_value_pairs() -> None:
@@ -1330,9 +1303,7 @@ def test_get_header_label_for_bare_project_alias() -> None:
     assert _get_header_label("project") == "PROJECT"
 
 
-# =============================================================================
 # Fake api_list_agents for CLI-level list command output formatting tests
-# =============================================================================
 
 
 class FakeApiListAgents:
@@ -1361,9 +1332,7 @@ def _patch_list_agents(monkeypatch: pytest.MonkeyPatch, agents: list[AgentDetail
     monkeypatch.setattr("imbue.mngr.cli.list.api_list_agents", FakeApiListAgents(agents))
 
 
-# =============================================================================
 # CLI-level tests: list_command output formatting with monkeypatched agents
-# =============================================================================
 
 
 def test_list_command_json_format_with_agents(
@@ -1391,6 +1360,52 @@ def test_list_command_json_format_with_agents(
     names = [a["name"] for a in output["agents"]]
     assert "alpha" in names
     assert "bravo" in names
+
+
+def test_list_command_json_format_publishes_exactly_the_five_fields_of_a_background_task(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    background_task = WorkLease(
+        name="task-abc",
+        kind=WorkLeaseKind.SUBAGENT,
+        native_type="cloud session",
+        started_at=datetime(2026, 1, 2, 11, 0, 0, tzinfo=timezone.utc),
+        last_seen_at=datetime(2026, 1, 2, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    _patch_list_agents(
+        monkeypatch,
+        [
+            make_test_agent_details(
+                name="alpha",
+                state=AgentLifecycleState.RUNNING_BACKGROUND,
+                background_tasks=(background_task, WorkLease(name="task-def")),
+            )
+        ],
+    )
+
+    result = cli_runner.invoke(list_command, ["--format", "json"], obj=plugin_manager, catch_exceptions=False)
+
+    assert result.exit_code == 0
+    agent = json.loads(result.output)["agents"][0]
+    assert "leases" not in agent
+    assert agent["background_tasks"] == [
+        {
+            "name": "task-abc",
+            "kind": "SUBAGENT",
+            "native_type": "cloud session",
+            "started_at": "2026-01-02T11:00:00Z",
+            "last_seen_at": "2026-01-02T12:00:00Z",
+        },
+        {
+            "name": "task-def",
+            "kind": "OTHER",
+            "native_type": "",
+            "started_at": None,
+            "last_seen_at": None,
+        },
+    ]
 
 
 def test_list_command_sorts_numeric_field_numerically(
@@ -1687,9 +1702,7 @@ def test_list_command_human_streaming_with_agents(
     assert "NAME" in result.output
 
 
-# =============================================================================
 # Tests for --headless CLI flag
-# =============================================================================
 
 
 def test_headless_flag_is_accepted_by_list_command(
@@ -1866,9 +1879,7 @@ def test_list_schema_rejects_agent_selection_options(
     assert "--schema lists fields and cannot be combined with" in result.output
 
 
-# =============================================================================
 # Provider error rendering + exit-code selection
-# =============================================================================
 
 
 def _provider_error(
@@ -1950,9 +1961,7 @@ def test_exit_code_for_list_errors_generic_when_any_non_inaccessible() -> None:
     assert _exit_code_for_list_errors(errors) == EXIT_CODE_ERROR
 
 
-# =============================================================================
 # --hosts view
-# =============================================================================
 
 
 def test_list_command_hosts_view_json_lists_agent_less_local_host(

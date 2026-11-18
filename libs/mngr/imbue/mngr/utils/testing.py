@@ -58,6 +58,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import build_tmux_capture_pane_command
+from imbue.mngr.hosts.work_leases import parse_work_leases
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CleanupFailure
@@ -1220,7 +1221,7 @@ def make_test_agent_details(
     idle_seconds: float | None = None,
     resource: HostResources | None = None,
     published_endpoints: Sequence[PublishedEndpoint] = (),
-    leases: Sequence[WorkLease] = (),
+    background_tasks: Sequence[WorkLease] = (),
 ) -> AgentDetails:
     """Create a real AgentDetails for testing.
 
@@ -1250,13 +1251,20 @@ def make_test_agent_details(
         start_on_boot=False,
         state=state,
         pid=pid,
-        leases=tuple(leases),
+        background_tasks=tuple(background_tasks),
         user_activity_time=user_activity_time,
         idle_seconds=idle_seconds,
         labels=labels or {},
         plugin=plugin or {},
         host=host_details,
     )
+
+
+def make_agent_row_with_retired_leases_key(agent: AgentDetails, leases: Sequence[Mapping[str, str]]) -> dict[str, Any]:
+    """The agent's JSON row with a `leases` key in place of `background_tasks`."""
+    row = agent.model_dump(mode="json")
+    del row["background_tasks"]
+    return {**row, "leases": list(leases)}
 
 
 def get_short_random_string() -> str:
@@ -2033,3 +2041,54 @@ def file_lock_held_by_another_process(
         yield
     finally:
         process.terminate(force_kill_seconds=1.0)
+
+
+# Text a record value must carry exactly. None holds a NUL: a shell argument cannot.
+HOSTILE_NATIVE_TYPES: Final[tuple[str, ...]] = (
+    "cloud session",
+    " space at each end ",
+    "tab\there",
+    "line\nbreak",
+    "carriage\rreturn",
+    "ends with a newline\n",
+    'it\'s "quoted"',
+    "back\\slash \\n \\t \\x41",
+    "100% %41 %zz %",
+    "key:value",
+    "x seen:9999999999 y",
+    "caf\u00e9 \u2615 \U0001f600",
+    "line\u2028and paragraph\u2029separators",
+    "~!*'()",
+    "/+#,=?@[]^{}",
+    "-n",
+    "*",
+    "$HOME `id` $(id) ; | & > <",
+    "\x01\x1b\x7f\x85",
+    "\u00e9" * 2000,
+    "jamo-\ua960",
+)
+
+# Every character other than the newline that str.splitlines breaks a line on, by name.
+RAW_LINE_SEPARATOR_BY_NAME: Final[Mapping[str, str]] = {
+    "carriage_return": "\r",
+    "vertical_tab": "\x0b",
+    "form_feed": "\x0c",
+    "file_separator": "\x1c",
+    "group_separator": "\x1d",
+    "record_separator": "\x1e",
+    "next_line": "\x85",
+    "line_separator": "\u2028",
+    "paragraph_separator": "\u2029",
+}
+
+
+def read_work_leases_in(lease_dir: Path) -> tuple[WorkLease, ...]:
+    """Every record under ``lease_dir``, in name order, parsed from each file's first line."""
+    if not lease_dir.is_dir():
+        return ()
+    first_line_by_name = {
+        path.name: path.read_bytes().decode().split("\n", 1)[0]
+        for path in lease_dir.iterdir()
+        if path.is_file() and not path.name.startswith(".")
+    }
+    return parse_work_leases("\n".join(f"{name}\t{line}" for name, line in sorted(first_line_by_name.items())))

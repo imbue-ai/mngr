@@ -33,7 +33,7 @@ mngr list [OPTIONS]
 | ---- | ---- | ----------- | ------- |
 | `--include` | text | Include agents matching CEL expression (repeatable) | None |
 | `--exclude` | text | Exclude agents matching CEL expression (repeatable) | None |
-| `--running` | boolean | Show only agents that will move themselves: a turn in flight, or work left running that will start the next one (alias for --include 'state == "RUNNING" &#x7C;&#x7C; state == "RUNNING_BACKGROUND"') | `False` |
+| `--running` | boolean | Show only agents with a turn in flight or background tasks recorded (alias for --include 'state == "RUNNING" &#x7C;&#x7C; state == "RUNNING_BACKGROUND"') | `False` |
 | `--stopped` | boolean | Show only stopped agents (alias for --include 'state == "STOPPED"') | `False` |
 | `--archived` | boolean | Show only archived agents (alias for --include 'has(labels.archived_at)') | `False` |
 | `--active` | boolean | Show only active agents (anything not archived/destroyed/crashed/failed) | `False` |
@@ -87,7 +87,7 @@ All agent fields from the "Available Fields" section can be used in filter expre
 
 **Simple equality filters:**
 - `name == "my-agent"` - Match agent by exact name
-- `state == "RUNNING" || state == "RUNNING_BACKGROUND"` - Match agents that will move themselves, which is what `--running` selects
+- `state == "RUNNING" || state == "RUNNING_BACKGROUND"` - Match agents with a turn in flight or background tasks recorded, which is what `--running` selects
 - `host.provider == "docker"` - Match agents on Docker hosts
 - `type == "claude"` - Match agents of type "claude"
 - `labels.project == "mngr"` - Match agents with a specific project label
@@ -113,6 +113,7 @@ All agent fields from the "Available Fields" section can be used in filter expre
 - `has(url)` - Agents that have a URL set
 - `has(host.ssh)` - Agents on remote hosts with SSH access
 - `has(labels.foo)` - Agents that have a `foo` label set
+- `background_tasks.exists(t, t.kind == "SHELL")` - Agents RUNNING_BACKGROUND on a command they left running (each background task has `name`, `kind`, `native_type`, `started_at` and `last_seen_at`)
 
 
 
@@ -133,7 +134,7 @@ Fields marked `(cel only)` cannot be used in `--fields`/`--format` template stri
 - `start_on_boot` - Whether agent starts on host boot
 - `state` - Agent lifecycle state (STOPPED/RUNNING/RUNNING_BACKGROUND/WAITING/REPLACED/RUNNING_UNKNOWN_AGENT_TYPE/DONE/UNKNOWN)
 - `pid` - PID of the agent's main process (e.g. claude) in its host's PID namespace, populated when the agent is running; None for stopped agents. Only watchable in-process (e.g. via psutil) when the host is the local machine (its provider is 'local').
-- `leases` - The work the agent declared still outstanding at its last turn end, which is what makes its state RUNNING_BACKGROUND. Empty for every other state, and for an agent whose type declares no leases
+- `background_tasks` - The background tasks the agent left running after its turn, each with its name, kind, native_type, started_at and last_seen_at. Non-empty exactly where the state is RUNNING_BACKGROUND
 - `url` - Agent URL (reported)
 - `start_time` - Last start time (reported)
 - `runtime_seconds` - Runtime in seconds

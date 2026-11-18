@@ -73,9 +73,12 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import WorkLease
+from imbue.mngr.primitives import WorkLeaseKind
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import capture_loguru
+from imbue.mngr.utils.testing import make_agent_row_with_retired_leases_key
 from imbue.mngr.utils.testing import make_test_agent_details
 from imbue.mngr.utils.testing import make_test_discovered_agent
 from imbue.mngr.utils.testing import make_test_discovered_host
@@ -1083,6 +1086,47 @@ def test_parse_observe_event_line_round_trips_agent_state() -> None:
     assert parsed.agent.name == "parsed"
 
 
+def test_parse_observe_event_line_round_trips_an_agents_background_tasks() -> None:
+    background_task = WorkLease(
+        name="task-abc",
+        kind=WorkLeaseKind.SUBAGENT,
+        native_type="cloud session",
+        started_at=datetime(2026, 1, 2, 11, 0, 0, tzinfo=timezone.utc),
+        last_seen_at=datetime(2026, 1, 2, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    agent = make_test_agent_details(
+        name="busy", state=AgentLifecycleState.RUNNING_BACKGROUND, background_tasks=(background_task,)
+    )
+    line = json.dumps(make_agent_state_event(agent).model_dump(mode="json"))
+    parsed = parse_observe_event_line(line)
+    assert isinstance(parsed, AgentStateEvent)
+    assert parsed.agent.background_tasks == (background_task,)
+
+
+def _full_state_line_with_retired_leases_keys() -> str:
+    """A snapshot line whose two agent rows carry `leases`, one empty and one holding a lease."""
+    idle = make_test_agent_details(name="idle", state=AgentLifecycleState.WAITING)
+    busy = make_test_agent_details(name="busy", state=AgentLifecycleState.RUNNING_BACKGROUND)
+    snapshot = make_full_agent_state_event([idle, busy]).model_dump(mode="json")
+    snapshot["agents"] = [
+        make_agent_row_with_retired_leases_key(idle, []),
+        make_agent_row_with_retired_leases_key(
+            busy, [{"name": "task-bq27e8h2p", "expires_at": "2026-11-17T08:16:15.664387Z"}]
+        ),
+    ]
+    return json.dumps(snapshot, separators=(",", ":"))
+
+
+def test_parse_observe_event_line_accepts_agent_rows_carrying_the_retired_leases_key() -> None:
+    parsed = parse_observe_event_line(_full_state_line_with_retired_leases_keys())
+
+    assert isinstance(parsed, FullAgentStateEvent)
+    assert [(agent.name, agent.state, agent.background_tasks) for agent in parsed.agents] == [
+        ("idle", AgentLifecycleState.WAITING, ()),
+        ("busy", AgentLifecycleState.RUNNING_BACKGROUND, ()),
+    ]
+
+
 def test_parse_observe_event_line_round_trips_full_state() -> None:
     agents = [make_test_agent_details(name="a"), make_test_agent_details(name="b")]
     line = json.dumps(make_full_agent_state_event(agents).model_dump(mode="json"))
@@ -1837,6 +1881,34 @@ def test_follower_starts_folding_at_the_newest_snapshot(temp_host_dir: Path) -> 
     event = parse_observe_event_line(seen[0])
     assert isinstance(event, FullAgentStateEvent)
     assert [agent.name for agent in event.agents] == ["current-agent"]
+
+
+def test_follower_seeded_from_a_snapshot_carrying_the_retired_leases_key_folds_a_later_line(
+    temp_host_dir: Path,
+) -> None:
+    events_path = get_observe_events_path(temp_host_dir)
+    events_path.parent.mkdir(parents=True)
+    events_path.write_text(_full_state_line_with_retired_leases_keys() + "\n")
+    background_task = WorkLease(name="task-abc", kind=WorkLeaseKind.SHELL, native_type="shell")
+    later = make_test_agent_details(
+        name="later", state=AgentLifecycleState.RUNNING_BACKGROUND, background_tasks=(background_task,)
+    )
+    folded: list[AgentStateEvent | FullAgentStateEvent | AgentRemovedEvent | None] = []
+
+    def fold(line: str) -> None:
+        folded.append(parse_observe_event_line(line))
+
+    with _observer_holding_the_lock(temp_host_dir):
+        follower = ObserveEventFollower(events_base_dir=temp_host_dir, on_line=fold)
+        follower.poll_once()
+        append_observe_event(temp_host_dir, make_agent_state_event(later))
+        follower.poll_once()
+
+    snapshot, update = folded
+    assert isinstance(snapshot, FullAgentStateEvent)
+    assert [agent.name for agent in snapshot.agents] == ["idle", "busy"]
+    assert isinstance(update, AgentStateEvent)
+    assert update.agent.background_tasks == (background_task,)
 
 
 def test_find_last_full_state_offset_is_none_before_any_snapshot(temp_host_dir: Path) -> None:
