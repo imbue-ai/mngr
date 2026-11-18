@@ -14,7 +14,8 @@
 #      grace period to exit (or for MAX_WAIT seconds to elapse).
 #   2. Run post-completion actions:
 #        - If the code-guardian orchestrator wrote
-#          .reviewer/outputs/orchestrator_success, upload this commit's
+#          .reviewer/outputs/orchestrator_success at the project root
+#          ($CLAUDE_PROJECT_DIR), upload this commit's
 #          autofix issue file
 #          (.reviewer/outputs/autofix/issues/${HEAD_hash}.jsonl) to the
 #          code-review-json Modal volume and remove the marker.
@@ -285,8 +286,8 @@ mark_inactive() {
 # issues.
 upload_autofix_issues() {
     local commit
-    commit=$(git rev-parse HEAD 2>/dev/null) || return
-    [ -n "$commit" ] || return
+    commit=$(git rev-parse HEAD 2>/dev/null) || return 0
+    [ -n "$commit" ] || return 0
 
     local issues_file=".reviewer/outputs/autofix/issues/${commit}.jsonl"
     if [ ! -s "$issues_file" ]; then
@@ -332,15 +333,20 @@ if [ -n "${MNGR_AGENT_STATE_DIR:-}" ] && [ -r "$MNGR_AGENT_STATE_DIR/commands/mn
     source "$MNGR_AGENT_STATE_DIR/commands/mngr_background_task_lib.sh"
 fi
 
-# Post-completion actions (run after all other stop hooks finish)
+# Post-completion actions (run after all other stop hooks finish). Best-effort: a
+# failure here must never keep the agent from being marked inactive.
 run_post_completion() {
     # Only run post-completion if the orchestrator succeeded.
     # The code-guardian orchestrator writes .reviewer/outputs/orchestrator_success
-    # on success with the commit hash.
-    if [ -f ".reviewer/outputs/orchestrator_success" ]; then
-        upload_autofix_issues
-        rm -f ".reviewer/outputs/orchestrator_success"
-    fi
+    # on success with the commit hash, at the project root: Claude runs this hook
+    # wherever the agent last cd'd to, so the check runs from the root too.
+    (
+        cd "${CLAUDE_PROJECT_DIR:-.}" || exit 0
+        if [ -f ".reviewer/outputs/orchestrator_success" ]; then
+            upload_autofix_issues
+            rm -f ".reviewer/outputs/orchestrator_success"
+        fi
+    )
 
     # Always notify the user (regardless of success/failure)
     notify_user 2>/dev/null || true
@@ -377,7 +383,7 @@ INITIAL_HOOKS=$(get_other_stop_hooks "$CLAUDE_PID" "$OUR_WRAPPER")
 
 if [ -z "$INITIAL_HOOKS" ]; then
     echo "wait_for_stop_hook: no other stop hooks found after grace period"
-    run_post_completion
+    run_post_completion || true
     mark_inactive
     exit 0
 fi
@@ -396,14 +402,14 @@ while true; do
 
     if [ "$ALL_DONE" = true ]; then
         echo "wait_for_stop_hook: all other stop hooks have finished"
-        run_post_completion
+        run_post_completion || true
         mark_inactive
         exit 0
     fi
 
     if [ "$WAITED" -ge "$MAX_WAIT" ]; then
         echo "wait_for_stop_hook: timed out after ${MAX_WAIT}s waiting for hooks, marking inactive" >&2
-        run_post_completion
+        run_post_completion || true
         mark_inactive
         exit 0
     fi

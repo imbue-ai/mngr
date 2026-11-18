@@ -919,8 +919,8 @@ def build_readiness_hooks_config() -> dict[str, Any]:
     - Stop: runs wait_for_stop_hook.sh which waits for all other stop hooks to
       finish, then runs post-completion actions (uploads the current commit's
       autofix issue file to the Modal code-review-json volume when the
-      code-guardian orchestrator wrote .reviewer/outputs/orchestrator_success,
-      and invokes notify_user best-effort), and finally removes 'active' and
+      code-guardian orchestrator wrote .reviewer/outputs/orchestrator_success
+      at the project root, and invokes notify_user best-effort), and finally removes 'active' and
       'permissions_waiting' and emits an activity event -- except that it leaves
       'active' in place while the session transcript shows a queued prompt
       (not a slash command) about to start the next turn

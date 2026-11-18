@@ -1,6 +1,7 @@
 import importlib.resources
 import json
 import os
+import shutil
 import subprocess
 from datetime import datetime
 from datetime import timedelta
@@ -140,6 +141,8 @@ def _prepare_stop_hook(
         env={
             **os.environ,
             "MAIN_CLAUDE_SESSION_ID": uuid4().hex,
+            # Claude sets the session's project root for every hook; the test's own dir, never the runner's.
+            "CLAUDE_PROJECT_DIR": str(tmp_path),
             "MNGR_AGENT_STATE_DIR": str(agent_state_dir),
             "MNGR_HOST_DIR": str(host_dir),
             "HOOK_GRACE_PERIOD": "0",
@@ -156,21 +159,29 @@ def _prepare_stop_hook(
 
 def _run_prepared_stop_hook(
     hook: _StopHook,
-    tmp_path: Path,
+    cwd: Path,
     hook_input: str | None = None,
+    claude_stand_in: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the hook against an agent state dir the caller has already arranged.
 
     ``hook_input`` replaces the prepared payload, for a test that adds a field to it.
+
+    ``claude_stand_in`` is a bash binary named ``claude`` to run the hook under, for a test
+    that needs the hook to find its Claude process.
     """
+    hook_command = ["bash", str(_WAIT_FOR_STOP_HOOK_PATH)]
+    if claude_stand_in is not None:
+        # A second command keeps bash from exec'ing the hook in place of the `claude` process.
+        hook_command = [str(claude_stand_in), "-c", f'bash "{_WAIT_FOR_STOP_HOOK_PATH}"; exit $?']
     return subprocess.run(
-        ["bash", str(_WAIT_FOR_STOP_HOOK_PATH)],
+        hook_command,
         input=hook.hook_input if hook_input is None else hook_input,
         capture_output=True,
         text=True,
         timeout=_HOOK_TIMEOUT_SECONDS,
         env=hook.env,
-        cwd=tmp_path,
+        cwd=cwd,
     )
 
 
@@ -203,6 +214,33 @@ def _assert_marked_idle(hook: _StopHook) -> None:
     assert not hook.active_marker.exists()
     assert hook.idle_since.exists()
     assert len(hook.activity_events.read_text().splitlines()) == 1
+
+
+@pytest.mark.skipif(not Path("/proc").is_dir(), reason="the hook finds its Claude process through /proc")
+def test_stop_hook_clears_code_guardians_success_marker_when_the_shell_is_in_a_subfolder(tmp_path: Path) -> None:
+    """code-guardian writes the marker at the project root, and Claude runs this hook wherever the agent last cd'd to.
+
+    The hook reaches its post-completion step only under a Claude process, which it finds by
+    process name, so it runs here under a copy of bash named ``claude``.
+    """
+    marker = tmp_path / ".reviewer" / "outputs" / "orchestrator_success"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("deadbeef\n")
+    subfolder = tmp_path / "libs" / "app"
+    subfolder.mkdir(parents=True)
+    fake_claude = tmp_path / "bin" / "claude"
+    fake_claude.parent.mkdir()
+    bash = shutil.which("bash")
+    assert bash is not None
+    shutil.copy(bash, fake_claude)
+    hook = _prepare_stop_hook(tmp_path, [_prompt("go"), _reply("done")])
+
+    result = _run_prepared_stop_hook(hook, subfolder, claude_stand_in=fake_claude)
+
+    assert result.returncode == 0, result.stderr
+    assert "no other stop hooks found" in result.stdout
+    assert not marker.exists()
+    _assert_marked_idle(hook)
 
 
 @pytest.mark.parametrize(

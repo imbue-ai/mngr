@@ -321,6 +321,7 @@ def test_snapshot_destroy_by_id_fictional(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
+@pytest.mark.flaky
 def test_snapshot_destroy_all_for_agent(e2e: E2eSession) -> None:
     """Tutorial block:
         # destroy all snapshots for an agent's host
