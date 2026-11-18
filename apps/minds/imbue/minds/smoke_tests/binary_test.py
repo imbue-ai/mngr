@@ -10,6 +10,7 @@ from imbue.minds.smoke_tests.binary import app_environment
 from imbue.minds.smoke_tests.binary import app_log_dir
 from imbue.minds.smoke_tests.binary import app_mngr_executable
 from imbue.minds.smoke_tests.binary import app_mngr_host_dir
+from imbue.minds.smoke_tests.binary import app_state_dir
 from imbue.minds.smoke_tests.binary import bundled_root_name_or_none
 from imbue.minds.smoke_tests.binary import cached_build_dir
 from imbue.minds.smoke_tests.binary import is_studio_binary_selected
@@ -140,6 +141,11 @@ def test_the_launch_target_of_a_packaged_build_has_no_main_script(tmp_path: Path
 def test_the_app_logs_under_the_tier_directory_of_the_data_home(tmp_path: Path) -> None:
     assert app_log_dir(tmp_path, "minds") == tmp_path / "production" / "logs"
     assert app_log_dir(tmp_path, "minds-staging") == tmp_path / "staging" / "logs"
+
+
+def test_the_app_keeps_its_state_under_the_tier_directory_of_the_data_home(tmp_path: Path) -> None:
+    assert app_state_dir(tmp_path, "minds") == tmp_path / "production" / "state"
+    assert app_state_dir(tmp_path, "minds-staging") == tmp_path / "staging" / "state"
 
 
 def test_the_app_keeps_its_mngr_host_dir_under_the_tier_s_state_directory_of_the_data_home(tmp_path: Path) -> None:

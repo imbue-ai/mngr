@@ -25,6 +25,7 @@ from pydantic import SecretStr
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.imbue_common.primitives import NonNegativeFloat
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.imbue_common.primitives import PositiveInt
 from imbue.minds.deployment_tests.primitives import MAILTM_ADDRESS_ENV_VAR
@@ -351,6 +352,7 @@ class StudioAppSession(FrozenModel):
     page: Page = Field(description="The window's chrome page, on the app's own backend origin.")
     backend_origin: NonEmptyStr = Field(description="``http://localhost:<port>``: the app's own web UI and API.")
     data_home: Path = Field(description="The ``STUDIO_ROOTS_OVERRIDE`` the app was launched with.")
+    state_dir: Path = Field(description="Where the app keeps its tier's state, its Sentry install id among it.")
     log_dir: Path = Field(
         description="Where the app writes ``minds.log``, ``electron.log`` and ``minds-events.jsonl``."
     )
@@ -430,3 +432,188 @@ class SmokeRunVerdict(FrozenModel):
     other_failure_count: NonNegativeInt = Field(
         description="Every other failure: a journey step, a probe, a fixture, or the run of the DWT suites itself."
     )
+
+
+class SmokeStepEventKind(UpperCaseStrEnum):
+    """What one line of a scenario's steps file says happened to a step."""
+
+    STARTED = auto()
+    COMPLETED = auto()
+    SKIPPED = auto()
+
+
+class SmokeStepEvent(FrozenModel):
+    """One line of a scenario's steps file."""
+
+    label: NonEmptyStr = Field(description="The step's name, as the scenario reports it.")
+    kind: SmokeStepEventKind = Field(description="What happened to the step.")
+    recorded_at: datetime = Field(description="When it happened (timezone-aware UTC).")
+    detail: str = Field(description="Why a skipped step was skipped; empty otherwise.")
+
+
+class SmokeStepOutcome(UpperCaseStrEnum):
+    """How one step of a scenario ended: an unfinished step started and never completed."""
+
+    COMPLETED = auto()
+    UNFINISHED = auto()
+    SKIPPED = auto()
+
+
+class SmokeStepRecord(FrozenModel):
+    """One step of a scenario, as its steps file says it went."""
+
+    label: NonEmptyStr = Field(description="The step's name, as the scenario reports it.")
+    outcome: SmokeStepOutcome = Field(description="How the step ended.")
+    started_at: datetime = Field(description="When the step started, or was skipped.")
+    finished_at: datetime | None = Field(description="When it completed or was skipped; None while unfinished.")
+    detail: str = Field(description="Why a skipped step was skipped; empty otherwise.")
+
+
+class SmokeScenarioOutcome(UpperCaseStrEnum):
+    """How one scenario of a smoke run ended.
+
+    An error is a failure outside the scenario's own body, in a fixture that
+    sets it up or tears it down; a scenario not run was selected, but the
+    session ended before it ran.
+    """
+
+    FAILED = auto()
+    ERROR = auto()
+    NOT_RUN = auto()
+    PASSED = auto()
+    SKIPPED = auto()
+
+
+class SmokeTestPhase(UpperCaseStrEnum):
+    """The pytest phase a scenario failed in."""
+
+    SETUP = auto()
+    CALL = auto()
+    TEARDOWN = auto()
+
+
+class SmokeSubtestResult(FrozenModel):
+    """One subtest a scenario reported, such as one default-workspace-template test of the journey."""
+
+    label: NonEmptyStr = Field(description="The subtest's label, e.g. ``dwt:<suite>::<node id>``.")
+    outcome: SmokeScenarioOutcome = Field(description="Passed, failed or skipped.")
+    duration_seconds: NonNegativeFloat = Field(description="How long the subtest's block ran.")
+    summary: str = Field(description="Its failure message or skip reason; empty for a pass.")
+    failure_text: str = Field(description="Its full failure report; empty unless it failed.")
+
+
+class SmokeArtifactKind(UpperCaseStrEnum):
+    """How the report shows a file a scenario left behind."""
+
+    IMAGE = auto()
+    FILE = auto()
+
+
+class SmokeArtifact(FrozenModel):
+    """One file a scenario wrote to its output directory during the run."""
+
+    relative_path: NonEmptyStr = Field(description="The file's path relative to the report, with forward slashes.")
+    kind: SmokeArtifactKind = Field(description="Whether the report shows the file inline as an image.")
+
+
+class SmokeScenarioResult(FrozenModel):
+    """One scenario (one test of the smoke suite) as the run's report shows it."""
+
+    node_id: NonEmptyStr = Field(description="The pytest node id.")
+    name: NonEmptyStr = Field(description="The test's name, with its parameters.")
+    description: str = Field(description="The first paragraph of the test's docstring; empty when it has none.")
+    source_path: NonEmptyStr = Field(description="The test file's path relative to the checkout root.")
+    source_line: PositiveInt = Field(description="The line the test function starts on.")
+    source_url: AnyUrl | None = Field(
+        description="The test function at the run's commit; None when the commit is unknown."
+    )
+    outcome: SmokeScenarioOutcome = Field(description="How the scenario ended.")
+    failed_phase: SmokeTestPhase | None = Field(description="Where it failed or errored; None otherwise.")
+    started_at: datetime | None = Field(description="When its setup started; None when it was not run.")
+    setup_seconds: NonNegativeFloat = Field(description="How long its fixtures took to set up.")
+    call_seconds: NonNegativeFloat = Field(description="How long its body ran.")
+    teardown_seconds: NonNegativeFloat = Field(description="How long its fixtures took to tear down.")
+    summary: str = Field(description="Why it failed, errored or skipped, in a few lines; empty for a pass.")
+    failure_text: str = Field(description="The full failure report of the phase it failed in.")
+    captured_output: str = Field(description="The end of what that phase printed and logged.")
+    subtests: tuple[SmokeSubtestResult, ...] = Field(description="Every subtest it reported, in order.")
+    steps: tuple[SmokeStepRecord, ...] = Field(description="Every step its steps file records, in order.")
+    output_dir_relative_path: str | None = Field(
+        description="Its output directory relative to the report; None when it wrote none."
+    )
+    artifacts: tuple[SmokeArtifact, ...] = Field(description="The files it wrote to that directory during the run.")
+    app_install_id: str | None = Field(
+        description="The Sentry install id (``user.id``) of the app it launched; None when it launched none."
+    )
+    sentry_url: AnyUrl | None = Field(
+        description="That install's Sentry issues around the scenario; None without an install id or SENTRY_ORG."
+    )
+
+
+class SmokeCollectionError(FrozenModel):
+    """A test file of the suite that pytest could not collect."""
+
+    node_id: NonEmptyStr = Field(description="The file's pytest node id.")
+    summary: str = Field(description="Why it could not be collected, in a few lines.")
+    failure_text: str = Field(description="The full collection error.")
+
+
+class SmokeRunParameterSpec(FrozenModel):
+    """One input a smoke run reads from its environment, as the report explains it."""
+
+    env_var: NonEmptyStr = Field(description="The environment variable.")
+    meaning: NonEmptyStr = Field(description="What the variable selects.")
+    is_value_hidden: bool = Field(description="Whether the report shows only that it is set, never its value.")
+
+
+class SmokeRunParameter(FrozenModel):
+    """One input of a smoke run, with the value the run was given."""
+
+    spec: SmokeRunParameterSpec = Field(description="Which input, and what it means.")
+    is_set: bool = Field(description="Whether the environment set it, overriding what an unset value means.")
+    shown_value: str | None = Field(description="Its value; None when it is unset or its value is hidden.")
+
+
+class SmokeRunCheckout(FrozenModel):
+    """The commit a smoke run's suite ran from."""
+
+    root_dir: Path = Field(description="The checkout's root, which the report's source paths are relative to.")
+    git_sha: NonEmptyStr = Field(description="The checkout's HEAD.")
+    branch_name: str = Field(description="The checked-out branch; empty for a detached HEAD.")
+    is_dirty: bool = Field(description="Whether tracked files differ from the commit, so the code that ran is not it.")
+    is_pushed: bool = Field(description="Whether a remote-tracking branch contains the commit, so its links resolve.")
+    commit_url: AnyUrl = Field(description="The commit on GitHub.")
+
+
+class SmokeRunEnvironment(FrozenModel):
+    """Where a smoke run ran, from which commit, and how pytest was invoked."""
+
+    host_name: NonEmptyStr = Field(description="The machine's host name.")
+    platform_description: NonEmptyStr = Field(description="The operating system and architecture.")
+    python_version: NonEmptyStr = Field(description="The Python the suite ran under.")
+    pytest_version: NonEmptyStr = Field(description="The pytest the suite ran under.")
+    pytest_arguments: tuple[str, ...] = Field(description="The arguments pytest was invoked with.")
+    ci_run_url: AnyUrl | None = Field(description="The GitHub Actions run it ran in; None outside CI.")
+    ci_run_description: str = Field(description="The workflow, attempt, job and runner; empty outside CI.")
+    repository_url: AnyUrl = Field(description="The GitHub repository its source links point into.")
+    checkout: SmokeRunCheckout | None = Field(description="The commit it ran from; None when git could not say.")
+
+
+class SmokeRunReport(FrozenModel):
+    """Everything a smoke run's HTML report shows."""
+
+    run_id: SmokeRunId | None = Field(description="The run's id; None when no scenario needed one.")
+    backend: SmokeBackend | None = Field(
+        description="The deployed environment under test, once a scenario resolved it."
+    )
+    studio_binary: StudioBinary | None = Field(description="The build under test, once a scenario resolved it.")
+    started_at: datetime = Field(description="When the first scenario started (or the run ended, if none did).")
+    finished_at: datetime = Field(description="When the session finished.")
+    exit_status: int = Field(description="pytest's exit status for the session.")
+    environment: SmokeRunEnvironment = Field(description="Where and how the run ran.")
+    parameters: tuple[SmokeRunParameter, ...] = Field(description="Every input the run reads, and what it was given.")
+    scenarios: tuple[SmokeScenarioResult, ...] = Field(description="Every selected scenario, in the order it ran.")
+    collection_errors: tuple[SmokeCollectionError, ...] = Field(description="Test files that could not be collected.")
+    deselected_count: NonNegativeInt = Field(description="Scenarios the run's selection (``-k``, ``-m``) left out.")
+    verdict: SmokeRunVerdict = Field(description="The session's failures, by kind.")
+    created_resources: tuple[SmokeRunManifestEntry, ...] = Field(description="What the run's manifest recorded.")

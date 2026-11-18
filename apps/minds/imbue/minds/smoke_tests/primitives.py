@@ -65,6 +65,9 @@ SMOKE_EXPECTED_TEMPLATE_REF_ENV_VAR: Final[str] = "MINDS_SMOKE_EXPECTED_TEMPLATE
 # ``1`` has the journey wait, with its workspace stopped, until the machine has left its server, so that the
 # start restores it from object storage; unset or ``0`` starts it at once, which restarts it in place.
 SMOKE_RESTORE_FROM_STORAGE_ENV_VAR: Final[str] = "MINDS_SMOKE_RESTORE_FROM_STORAGE"
+# The Sentry organization slug the run's report links the app's errors into; unset, the report names each
+# app's install id without a link. The slug is kept out of the repo, so it arrives through the environment.
+SMOKE_SENTRY_ORG_ENV_VAR: Final[str] = "SENTRY_ORG"
 
 # The mail.tm mailbox the throwaway account verifies its email through. The
 # address and JWT keep the names the deployment tests already thread through

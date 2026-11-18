@@ -17,6 +17,8 @@ dependencies = [
     "httpx2>=2.13.1",
     "imbue-common",
     "itsdangerous>=2.2.0",
+    # The smoke suite renders its run report from a template (imbue/minds/smoke_tests/report.py).
+    "jinja2>=3.1",
     "loguru",
     "imbue-mngr",
     # The cloud backends minds writes connection provider blocks for.

@@ -184,13 +184,18 @@ def resolve_sentry_environment() -> SentryDeployEnvironment:
     return sentry_deploy_environment_from_minds_env_name(activated_env_name)
 
 
+def sentry_dsn_for_environment(environment: SentryDeployEnvironment) -> str:
+    """The DSN of the Python Sentry project ``environment`` reports to."""
+    return _SENTRY_DSN_BY_ENVIRONMENT[environment]
+
+
 def _s3_attachment_bucket_for_environment(environment: SentryDeployEnvironment) -> str | None:
     return _S3_ATTACHMENT_BUCKET_BY_ENVIRONMENT[environment]
 
 
 # Filename (under the Imbue Studio data dir) holding this install's stable anonymous user id. Kept next to
 # the other per-install state (config.toml, the latchkey consent file) so it persists across sessions.
-_ANONYMOUS_USER_ID_FILENAME = "anonymous_user_id"
+ANONYMOUS_USER_ID_FILENAME = "anonymous_user_id"
 
 
 def resolve_anonymous_user_id(data_dir: Path) -> str:
@@ -204,7 +209,7 @@ def resolve_anonymous_user_id(data_dir: Path) -> str:
     atomic, so the Python backend and the Electron main process racing on first launch converge on one
     id (see ``get_or_create_anonymous_user_id``).
     """
-    return get_or_create_anonymous_user_id(data_dir / _ANONYMOUS_USER_ID_FILENAME)
+    return get_or_create_anonymous_user_id(data_dir / ANONYMOUS_USER_ID_FILENAME)
 
 
 def latchkey_forward_sentry_consent_path(data_dir: Path) -> Path:

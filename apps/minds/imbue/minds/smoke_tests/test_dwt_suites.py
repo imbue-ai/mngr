@@ -28,6 +28,10 @@ from imbue.minds.smoke_tests.mock_workspace_shell_test import LocalWorkspaceShel
 from imbue.minds.smoke_tests.primitives import SmokeConfigError
 from imbue.minds.testing import write_stub_supervisorctl
 
+# Each test drives the runner's real bash and nested pytest processes, which take up to ten seconds when
+# the suite runs in parallel.
+pytestmark = [pytest.mark.timeout(30)]
+
 _RUNNER_TIMEOUT_SECONDS = 120.0
 _ENV_CONVERGE_EXITED = "env-converge                     EXITED    Oct 29 08:00 AM"
 _ENV_CONVERGE_RUNNING = "env-converge                     RUNNING   pid 4242, uptime 0:05:00"

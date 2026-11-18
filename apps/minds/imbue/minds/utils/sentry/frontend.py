@@ -53,6 +53,11 @@ _FRONTEND_DSN_BY_ENVIRONMENT: Mapping[SentryDeployEnvironment, str] = {
 }
 
 
+def frontend_sentry_dsn_for_environment(environment: SentryDeployEnvironment) -> str:
+    """The DSN of the JavaScript Sentry project the web UI and the Electron shell report to in ``environment``."""
+    return _FRONTEND_DSN_BY_ENVIRONMENT[environment]
+
+
 class FrontendSentryConfig(FrozenModel):
     """The frontend Sentry settings the backend injects into each web-UI page.
 

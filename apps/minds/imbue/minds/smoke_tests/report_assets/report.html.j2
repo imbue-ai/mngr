@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ verdict_word }}: Imbue Studio smoke run{% if report.run_id %} {{ report.run_id }}{% endif %}</title>
+<style>
+:root {
+  --text: #1f2328; --muted: #59636e; --border: #d1d9e0; --page: #ffffff; --panel: #f6f8fa; --link: #0969da;
+  --passed: #1a7f37; --passed-bg: #dafbe1; --failed: #cf222e; --failed-bg: #ffebe9;
+  --skipped: #7d4e00; --skipped-bg: #fff8c5; --idle: #59636e; --idle-bg: #eaeef2;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --text: #e6edf3; --muted: #9198a1; --border: #3d444d; --page: #0d1117; --panel: #151b23; --link: #4493f8;
+    --passed: #3fb950; --passed-bg: #12261e; --failed: #f85149; --failed-bg: #2d1316;
+    --skipped: #d29922; --skipped-bg: #272115; --idle: #9198a1; --idle-bg: #212830;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--text);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code, pre { font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+pre { margin: 8px 0; padding: 10px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+  white-space: pre-wrap; word-break: break-word; max-height: 32em; overflow: auto; }
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+header.banner { padding: 22px 0 18px; border-bottom: 1px solid var(--border); border-top: 6px solid var(--idle); }
+header.banner.passed { border-top-color: var(--passed); }
+header.banner.failed { border-top-color: var(--failed); }
+header.banner.skipped { border-top-color: var(--skipped); }
+.eyebrow { margin: 0; color: var(--muted); }
+h1 { margin: 6px 0; font-size: 22px; }
+h2 { margin: 28px 0 10px; font-size: 18px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+h3 { margin: 18px 0 6px; font-size: 15px; }
+.meta { margin: 4px 0; color: var(--muted); }
+nav.links a { margin-right: 16px; }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  vertical-align: middle; white-space: nowrap; background: var(--idle-bg); color: var(--idle); }
+.badge.PASSED, .badge.COMPLETED { background: var(--passed-bg); color: var(--passed); }
+.badge.FAILED, .badge.ERROR, .badge.UNFINISHED { background: var(--failed-bg); color: var(--failed); }
+.badge.SKIPPED { background: var(--skipped-bg); color: var(--skipped); }
+.warning { color: var(--failed); }
+table { width: 100%; border-collapse: collapse; margin: 6px 0; }
+th, td { padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+th { color: var(--muted); font-weight: 600; }
+table.facts th { width: 190px; }
+tr.parameter.is-set td { background: var(--panel); }
+tr.parameter td:first-child { white-space: nowrap; }
+.muted { color: var(--muted); }
+.failed-list { margin: 10px 0 0; padding-left: 20px; }
+article.scenario { margin: 12px 0; padding: 12px 16px; border: 1px solid var(--border); border-left: 4px solid var(--idle);
+  border-radius: 6px; }
+article.scenario.PASSED { border-left-color: var(--passed); }
+article.scenario.FAILED, article.scenario.ERROR { border-left-color: var(--failed); }
+article.scenario.SKIPPED { border-left-color: var(--skipped); }
+article.scenario header { display: flex; gap: 12px; align-items: baseline; }
+article.scenario header .description { flex: 1; font-weight: 600; }
+article.scenario header .duration { color: var(--muted); white-space: nowrap; }
+.scenario-links { margin: 4px 0; color: var(--muted); }
+.scenario-links > * { margin-right: 14px; }
+.reason { margin: 8px 0; }
+details { margin: 6px 0; }
+summary { cursor: pointer; color: var(--muted); }
+details.scenario-group { margin: 10px 0; }
+details.scenario-group > summary { color: var(--text); }
+details.scenario-group > summary h3 { display: inline; }
+.thumbs { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0; }
+.thumbs figure { margin: 0; }
+.thumbs img { display: block; height: 120px; border: 1px solid var(--border); border-radius: 4px; }
+.thumbs figcaption { color: var(--muted); font-size: 12px; }
+ul.files { margin: 4px 0; padding-left: 20px; }
+footer { margin: 36px 0 28px; padding-top: 12px; border-top: 1px solid var(--border); color: var(--muted); }
+</style>
+</head>
+<body>
+{# Docstrings mark code with double backticks; the parts between them are code, each escaped as text. #}
+{% macro prose(text) %}{% for part in text.split("``") %}{% if loop.index is even %}<code>{{ part }}</code>{% else %}{{ part }}{% endif %}{% endfor %}{% endmacro %}
+<header class="banner {{ verdict_word|lower }}">
+  <div class="wrap">
+    <p class="eyebrow">Imbue Studio smoke run{% if report.run_id %} <code>{{ report.run_id }}</code>{% endif %}</p>
+    <h1><span class="badge {{ verdict_word }}">{{ verdict_word }}</span> {{ headline }}</h1>
+    <p class="meta">
+      {% if report.backend %}Against <strong>{{ report.backend.env_name }}</strong>{% else %}No tier resolved{% endif %}
+      {% if report.studio_binary %} with {{ report.studio_binary.label }}{% endif %}
+      &middot; started {{ format_utc_time(report.started_at) }}
+      &middot; took {{ format_duration((report.finished_at - report.started_at).total_seconds()) }}
+      {% if report.environment.ci_run_url %}&middot; in CI{% else %}&middot; on {{ report.environment.host_name }}{% endif %}
+    </p>
+    <nav class="links">
+      {% if report.environment.ci_run_url %}<a href="{{ report.environment.ci_run_url }}">CI run</a>{% endif %}
+      {% if report.environment.checkout %}<a href="{{ report.environment.checkout.commit_url }}">Commit <code>{{ report.environment.checkout.git_sha[:10] }}</code></a>{% endif %}
+      <a href="#scenarios">Scenarios</a>
+      <a href="#run">Run details</a>
+      <a href="#parameters">Parameters</a>
+      <a href="{{ docs_url }}">How smoke runs work</a>
+    </nav>
+    {% if failing_anchors %}
+    <ul class="failed-list">
+      {% for anchor, scenario in failing_anchors %}
+      <li><span class="badge {{ scenario.outcome }}">{{ scenario.outcome }}</span> <a href="#{{ anchor }}">{{ prose(scenario.description or scenario.name) }}</a></li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+</header>
+<main class="wrap">
+
+<section id="run">
+<h2>Run</h2>
+<table class="facts">
+  <tr><th>Run id</th><td>{% if report.run_id %}<code>{{ report.run_id }}</code>{% else %}<span class="muted">none; no selected scenario needed one</span>{% endif %}</td></tr>
+  <tr><th>Started</th><td>{{ format_utc_time(report.started_at) }}</td></tr>
+  <tr><th>Finished</th><td>{{ format_utc_time(report.finished_at) }} ({{ format_duration((report.finished_at - report.started_at).total_seconds()) }})</td></tr>
+  <tr><th>pytest exit status</th><td>{{ report.exit_status }} ({{ exit_status_meaning }})</td></tr>
+  <tr><th>Ran on</th><td>
+    {% if report.environment.ci_run_url %}<a href="{{ report.environment.ci_run_url }}">GitHub Actions</a>: {{ report.environment.ci_run_description }}<br>{% endif %}
+    {{ report.environment.host_name }} <span class="muted">({{ report.environment.platform_description }}, Python {{ report.environment.python_version }}, pytest {{ report.environment.pytest_version }})</span>
+  </td></tr>
+  <tr><th>Commit</th><td>
+    {% set checkout = report.environment.checkout %}
+    {% if checkout %}
+      <a href="{{ checkout.commit_url }}"><code>{{ checkout.git_sha }}</code></a>{% if checkout.branch_name %} on <code>{{ checkout.branch_name }}</code>{% endif %}
+      {% if checkout.is_dirty %}<br><span class="warning">The checkout had uncommitted changes, so the code that ran is not exactly this commit.</span>{% endif %}
+      {% if not checkout.is_pushed %}<br><span class="warning">No remote branch contains this commit, so its source links resolve only once it is pushed.</span>{% endif %}
+    {% else %}
+      <span class="muted">unknown; git could not describe the checkout</span>
+    {% endif %}
+  </td></tr>
+  <tr><th>Command</th><td><code>pytest {{ report.environment.pytest_arguments|join(" ") }}</code></td></tr>
+  <tr><th>Selection</th><td>{{ report.scenarios|length }} scenario{{ "" if report.scenarios|length == 1 else "s" }} selected{% if report.deselected_count %}, {{ report.deselected_count }} deselected by <code>-k</code> or <code>-m</code>{% endif %}</td></tr>
+  <tr><th>Tier</th><td>
+    {% if report.backend %}
+      <strong>{{ report.backend.env_name }}</strong> <span class="muted">(tier {{ report.backend.tier }})</span><br>
+      connector <a href="{{ report.backend.connector_url }}">{{ report.backend.connector_url }}</a><br>
+      accounts <a href="{{ report.backend.accounts_origin }}">{{ report.backend.accounts_origin }}</a>
+      {% if report.backend.chrome_origin %}<br>web chrome <a href="{{ report.backend.chrome_origin }}">{{ report.backend.chrome_origin }}</a>{% endif %}
+    {% else %}
+      <span class="muted">not resolved; no selected scenario reached the tier</span>
+    {% endif %}
+  </td></tr>
+  <tr><th>Build under test</th><td>
+    {% if report.studio_binary %}
+      {{ report.studio_binary.label }} <span class="muted">(runs as <code>{{ report.studio_binary.root_name }}</code>)</span><br>
+      <code>{{ report.studio_binary.executable }}</code>
+    {% else %}
+      <span class="muted">none; no selected scenario launched the app</span>
+    {% endif %}
+  </td></tr>
+  <tr><th>Failures by kind</th><td>{{ report.verdict.other_failure_count }} of the suite's own, {{ report.verdict.dwt_failure_count }} default-workspace-template test{{ "" if report.verdict.dwt_failure_count == 1 else "s" }} in the workspace</td></tr>
+</table>
+</section>
+
+{% macro parameter_rows(parameters) %}
+<table>
+  <tr><th>Parameter</th><th>Value</th><th>Explanation</th></tr>
+  {% for parameter in parameters %}
+  <tr class="parameter{% if parameter.is_set %} is-set{% endif %}">
+    <td><code>{{ parameter.spec.env_var }}</code></td>
+    <td>{% if parameter.shown_value is not none %}<code>{{ parameter.shown_value }}</code>{% elif parameter.is_set %}set <span class="muted">(value hidden)</span>{% else %}<span class="muted">unset</span>{% endif %}</td>
+    <td>{{ parameter.spec.meaning }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endmacro %}
+<section id="parameters">
+<h2>Parameters</h2>
+{% set set_parameters = report.parameters|selectattr("is_set")|list %}
+{% set unset_parameters = report.parameters|rejectattr("is_set")|list %}
+{% if set_parameters %}
+<p class="muted">The inputs the environment set for this run.</p>
+{{ parameter_rows(set_parameters) }}
+{% else %}
+<p class="muted">The environment set none of the suite's inputs.</p>
+{% endif %}
+{% if unset_parameters %}
+<details><summary>Inputs left unset ({{ unset_parameters|length }})</summary>
+{{ parameter_rows(unset_parameters) }}
+</details>
+{% endif %}
+</section>
+
+{% if report.collection_errors %}
+<section id="collection-errors">
+<h2>Test files that could not be collected</h2>
+{% for error in report.collection_errors %}
+<article class="scenario ERROR">
+  <header><span class="badge ERROR">ERROR</span><span class="description"><code>{{ error.node_id }}</code></span></header>
+  <pre class="reason">{{ error.summary }}</pre>
+  <details><summary>Full error</summary><pre>{{ error.failure_text }}</pre></details>
+</article>
+{% endfor %}
+</section>
+{% endif %}
+
+<section id="scenarios">
+<h2>Scenarios</h2>
+{% if not scenario_groups %}<p class="muted">No scenario was selected.</p>{% endif %}
+{% for group_outcome, group_title, is_group_open, anchored_scenarios in scenario_groups %}
+<details class="scenario-group {{ group_outcome }}"{% if is_group_open %} open{% endif %}>
+<summary><h3>{{ group_title }} ({{ anchored_scenarios|length }})</h3></summary>
+{% if group_outcome == "SKIPPED" %}
+<table class="skipped">
+  <tr><th>Scenario</th><th>Why it skipped</th></tr>
+  {% for anchor, scenario in anchored_scenarios %}
+  <tr id="{{ anchor }}">
+    <td>{{ prose(scenario.description or scenario.name) }}<br><code>{{ scenario.name }}</code> {% if scenario.source_url %}<a href="{{ scenario.source_url }}">{{ scenario.source_path }}:{{ scenario.source_line }}</a>{% else %}<span class="muted">{{ scenario.source_path }}:{{ scenario.source_line }}</span>{% endif %}</td>
+    <td>{{ scenario.summary }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+{% for anchor, scenario in anchored_scenarios %}
+<article class="scenario {{ scenario.outcome }}" id="{{ anchor }}">
+  <header>
+    <span class="badge {{ scenario.outcome }}">{{ scenario.outcome }}</span>
+    <span class="description">{{ prose(scenario.description or scenario.name) }}</span>
+    <span class="duration">{{ format_duration(scenario.setup_seconds + scenario.call_seconds + scenario.teardown_seconds) }}</span>
+  </header>
+  <p class="scenario-links">
+    <code>{{ scenario.name }}</code>
+    {% if scenario.source_url %}<a href="{{ scenario.source_url }}">{{ scenario.source_path }}:{{ scenario.source_line }}</a>{% else %}<span>{{ scenario.source_path }}:{{ scenario.source_line }}</span>{% endif %}
+    {% if scenario.output_dir_relative_path %}<a href="{{ scenario.output_dir_relative_path|urlencode }}/">output directory</a>{% endif %}
+    {% if scenario.sentry_url %}<a href="{{ scenario.sentry_url }}">Sentry issues of this run's app</a>{% endif %}
+  </p>
+  {% if scenario.started_at %}
+  <p class="muted">Started {{ format_utc_time(scenario.started_at) }}; setup {{ format_duration(scenario.setup_seconds) }}, body {{ format_duration(scenario.call_seconds) }}, teardown {{ format_duration(scenario.teardown_seconds) }}{% if scenario.failed_phase %}; failed in its {{ scenario.failed_phase|lower }}{% endif %}.</p>
+  {% endif %}
+  {% if scenario.summary %}<pre class="reason">{{ scenario.summary }}</pre>{% endif %}
+  {% if scenario.app_install_id and not scenario.sentry_url %}
+  <p class="muted">The app this scenario launched reports to Sentry as install <code>{{ scenario.app_install_id }}</code>: search <code>user.id:{{ scenario.app_install_id }}</code>{% if sentry_project_names %} in the <code>{{ sentry_project_names[0] }}</code> and <code>{{ sentry_project_names[1] }}</code> projects{% endif %}, or set <code>SENTRY_ORG</code> to link it.</p>
+  {% endif %}
+  {% if scenario.steps %}
+  <table class="steps">
+    <tr><th>Step</th><th>Outcome</th><th>At</th><th>Took</th></tr>
+    {% for step in scenario.steps %}
+    <tr class="step {{ step.outcome }}">
+      <td>{{ step.label }}</td>
+      <td><span class="badge {{ step.outcome }}">{{ step.outcome }}</span>{% if step.detail %} <span class="muted">{{ step.detail }}</span>{% endif %}</td>
+      <td class="muted">+{{ format_duration((step.started_at - scenario.started_at).total_seconds()) if scenario.started_at else "" }}</td>
+      <td>{% if step.finished_at %}{{ format_duration((step.finished_at - step.started_at).total_seconds()) }}{% else %}<span class="warning">did not finish</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+  {% if scenario.subtests %}
+  {% set failed_subtests = scenario.subtests|selectattr("outcome", "equalto", "FAILED")|list %}
+  <p>{{ scenario.subtests|length }} subtest{{ "" if scenario.subtests|length == 1 else "s" }}: {{ scenario.subtests|selectattr("outcome", "equalto", "PASSED")|list|length }} passed, {{ failed_subtests|length }} failed, {{ scenario.subtests|selectattr("outcome", "equalto", "SKIPPED")|list|length }} skipped.</p>
+  {% for subtest in failed_subtests %}
+  <details open><summary><span class="badge FAILED">FAILED</span> <code>{{ subtest.label }}</code> <span class="muted">{{ format_duration(subtest.duration_seconds) }}</span></summary>
+    <pre>{{ subtest.summary }}</pre>
+    {% if subtest.failure_text != subtest.summary %}<details><summary>Full failure</summary><pre>{{ subtest.failure_text }}</pre></details>{% endif %}
+  </details>
+  {% endfor %}
+  <details><summary>Every subtest</summary>
+    <table>
+      {% for subtest in scenario.subtests %}
+      <tr><td><span class="badge {{ subtest.outcome }}">{{ subtest.outcome }}</span></td><td><code>{{ subtest.label }}</code>{% if subtest.outcome == "SKIPPED" and subtest.summary %} <span class="muted">{{ subtest.summary }}</span>{% endif %}</td><td class="muted">{{ format_duration(subtest.duration_seconds) }}</td></tr>
+      {% endfor %}
+    </table>
+  </details>
+  {% endif %}
+  {% set images = scenario.artifacts|selectattr("kind", "equalto", "IMAGE")|list %}
+  {% set files = scenario.artifacts|selectattr("kind", "equalto", "FILE")|list %}
+  {% if images %}
+  <div class="thumbs">
+    {% for image in images %}
+    <figure><a href="{{ image.relative_path|urlencode }}"><img loading="lazy" src="{{ image.relative_path|urlencode }}" alt="{{ image.relative_path }}"></a><figcaption>{{ image.relative_path.rsplit("/", 1)[-1] }}</figcaption></figure>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% if files %}
+  <details{% if scenario.outcome in ("FAILED", "ERROR") %} open{% endif %}><summary>Files it wrote ({{ files|length }})</summary>
+    <ul class="files">
+      {% for file in files %}<li><a href="{{ file.relative_path|urlencode }}">{{ file.relative_path }}</a></li>{% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+  {% if scenario.failure_text and scenario.failure_text != scenario.summary %}
+  <details><summary>Full failure</summary><pre>{{ scenario.failure_text }}</pre></details>
+  {% endif %}
+  {% if scenario.captured_output %}
+  <details><summary>Captured output of the failing phase</summary><pre>{{ scenario.captured_output }}</pre></details>
+  {% endif %}
+</article>
+{% endfor %}
+{% endif %}
+</details>
+{% endfor %}
+</section>
+
+{% if report.created_resources %}
+<section id="resources">
+<h2>Resources the run created</h2>
+<p class="muted">From the run manifest; teardown releases each of them.</p>
+<table>
+  <tr><th>Kind</th><th>Id</th><th>Owner</th><th>Created</th></tr>
+  {% for resource in report.created_resources %}
+  <tr><td>{{ resource.kind }}</td><td><code>{{ resource.identifier }}</code></td><td>{{ resource.owner_email }}</td><td>{{ format_utc_time(resource.created_at) }}</td></tr>
+  {% endfor %}
+</table>
+</section>
+{% endif %}
+
+<footer>
+  Written by the smoke suite's session hook (<a href="{{ conftest_url }}">apps/minds/smoke_tests/conftest.py</a>) at the end of the session.
+  How the suite runs, and how to run it yourself: <a href="{{ docs_url }}">testing overview, section 1.10</a>.
+</footer>
+</main>
+</body>
+</html>

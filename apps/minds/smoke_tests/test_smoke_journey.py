@@ -85,6 +85,8 @@ from imbue.minds.smoke_tests.primitives import SMOKE_EMAIL_PREFIX
 from imbue.minds.smoke_tests.primitives import SMOKE_EXPECTED_TEMPLATE_REF_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_SKIP_DWT_TESTS_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SmokeRunId
+from imbue.minds.smoke_tests.steps import record_skipped_step
+from imbue.minds.smoke_tests.steps import recorded_step
 from imbue.minds.smoke_tests.workspace_exec import AppMngrWorkspaceShell
 from imbue.minds.smoke_tests.workspace_exec import app_mngr_workspace_shell
 from imbue.minds.smoke_tests.workspace_exec import workspace_exec_address
@@ -99,7 +101,16 @@ _DWT_ENV_CONVERGE_WAIT_SECONDS: Final[int] = 20 * 60
 _DWT_POLL_INTERVAL_SECONDS: Final[float] = 30.0
 # Reading the configs, starting and stopping the runner, and fetching its results, around the run itself.
 _DWT_STEP_OVERHEAD_SECONDS: Final[int] = 10 * 60
+# The journey's steps, as its run report's step table names them.
+_LAUNCH_STEP_LABEL: Final[str] = "Step 1: launch the app and reach its landing page"
+_SIGN_IN_STEP_LABEL: Final[str] = "Step 2: sign in to Imbue Cloud through the app's web login"
+_CREATE_STEP_LABEL: Final[str] = "Step 3: create an Imbue Cloud workspace"
 _DWT_STEP_LABEL: Final[str] = "Step 3b: run default-workspace-template's CI suites in the workspace"
+_BUILD_STEP_LABEL: Final[str] = "Step 4: have the workspace's agent build and register the hello app"
+_STOP_START_STEP_LABEL: Final[str] = "Step 4b: stop and start the workspace from the home page"
+_SHARE_STEP_LABEL: Final[str] = "Step 5: share the workspace and open the app through the share"
+_UNSHARE_STEP_LABEL: Final[str] = "Step 6: turn sharing off"
+_DESTROY_STEP_LABEL: Final[str] = "Step 7: destroy the workspace"
 _DWT_RESULTS_DIR_NAME: Final[str] = "dwt"
 # Beside the results; the smoke workflow adds it to its job's summary page.
 _DWT_SUMMARY_FILE_NAME: Final[str] = "summary.md"
@@ -406,6 +417,7 @@ def test_the_build_signs_in_creates_builds_stops_starts_shares_and_destroys_a_wo
     run_manifest: Path,
     smoke_run_id: SmokeRunId,
     smoke_output_dir: Path,
+    smoke_steps_path: Path,
     subtests: pytest.Subtests,
 ) -> None:
     """The first-shape journey, end to end, through the app's own UI."""
@@ -413,109 +425,120 @@ def test_the_build_signs_in_creates_builds_stops_starts_shares_and_destroys_a_wo
     nonce = get_short_random_string()
     workspace_name = _workspace_name(smoke_run_id)
 
-    landed_on = wait_for_landing_page(studio_app)
-    logger.info("Step 1: the app launched and landed on {}", landed_on)
-    screenshot_every_page(studio_app.browser, smoke_output_dir, "01-landing")
+    with recorded_step(smoke_steps_path, _LAUNCH_STEP_LABEL):
+        landed_on = wait_for_landing_page(studio_app)
+        logger.info("Step 1: the app launched and landed on {}", landed_on)
+        screenshot_every_page(studio_app.browser, smoke_output_dir, "01-landing")
 
     with visitor_browser_context(studio_app.browser.browser_type) as visitor:
-        _sign_in_through_the_app(studio_app, visitor, backend, persistent_account, landed_on, smoke_output_dir)
-        logger.info("Step 2: signed in as {}", owner_email)
-        screenshot_every_page(studio_app.browser, smoke_output_dir, "03-signed-in")
+        with recorded_step(smoke_steps_path, _SIGN_IN_STEP_LABEL):
+            _sign_in_through_the_app(studio_app, visitor, backend, persistent_account, landed_on, smoke_output_dir)
+            logger.info("Step 2: signed in as {}", owner_email)
+            screenshot_every_page(studio_app.browser, smoke_output_dir, "03-signed-in")
 
-        workspace_frame = create_imbue_cloud_workspace(studio_app, workspace_name, owner_email)
-        agent_id = agent_id_of_workspace_frame(studio_app, workspace_frame)
-        row = _workspace_row(studio_app, agent_id)
-        assert row.get("account_email") == owner_email, row
-        assert row.get("host_id"), row
-        host_db_id, leased_template_ref = _leased_pool_row(backend, persistent_account, str(row["host_id"]))
-        # Recorded before any check of the row, so teardown releases it however the check comes out.
-        record_created_resource(
-            run_manifest, kind=SmokeResourceKind.WORKSPACE, identifier=host_db_id, owner_email=owner_email
-        )
-        logger.info(
-            "Step 3: created workspace {} ({}, pool row {} baked at template {})",
-            workspace_name,
-            agent_id,
-            host_db_id,
-            leased_template_ref,
-        )
-        screenshot_every_page(studio_app.browser, smoke_output_dir, "04-workspace-ready")
-        if expected_template_ref is not None:
-            _assert_workspace_is_at_expected_template(expected_template_ref, leased_template_ref, host_db_id)
-
-        if is_dwt_tests_skipped:
-            with subtests.test(msg=_DWT_STEP_LABEL):
-                pytest.skip(f"{SMOKE_SKIP_DWT_TESTS_ENV_VAR}=1 skips default-workspace-template's CI tests")
-        else:
-            _run_dwt_ci_suites_reporting_each_test(
-                subtests,
-                studio_app,
-                row,
-                smoke_run_id,
-                smoke_output_dir / _DWT_RESULTS_DIR_NAME,
+        with recorded_step(smoke_steps_path, _CREATE_STEP_LABEL):
+            workspace_frame = create_imbue_cloud_workspace(studio_app, workspace_name, owner_email)
+            agent_id = agent_id_of_workspace_frame(studio_app, workspace_frame)
+            row = _workspace_row(studio_app, agent_id)
+            assert row.get("account_email") == owner_email, row
+            assert row.get("host_id"), row
+            host_db_id, leased_template_ref = _leased_pool_row(backend, persistent_account, str(row["host_id"]))
+            # Recorded before any check of the row, so teardown releases it however the check comes out.
+            record_created_resource(
+                run_manifest, kind=SmokeResourceKind.WORKSPACE, identifier=host_db_id, owner_email=owner_email
+            )
+            logger.info(
+                "Step 3: created workspace {} ({}, pool row {} baked at template {})",
+                workspace_name,
+                agent_id,
+                host_db_id,
                 leased_template_ref,
             )
+            screenshot_every_page(studio_app.browser, smoke_output_dir, "04-workspace-ready")
+            if expected_template_ref is not None:
+                _assert_workspace_is_at_expected_template(expected_template_ref, leased_template_ref, host_db_id)
 
-        welcome_chat = open_welcome_chat(workspace_frame)
-        adopt_imbue_credentials(welcome_chat, mint_workspace_llm_credentials(studio_app, agent_id))
-        prompt = _HELLO_PROMPT_TEMPLATE.format(port=_HELLO_PORT, nonce=nonce, service=_HELLO_SERVICE)
-        main_chat_id = send_prompt_to_main_chat(workspace_frame, welcome_chat, prompt, nonce)
-        reply_seconds = wait_for_reply(
-            workspace_frame, main_chat_id, _READY_REPLY_TEMPLATE.format(nonce=nonce), _AGENT_REPLY_TIMEOUT_SECONDS
-        )
-        logger.info("Step 4: the agent reported READY after {:.0f}s", reply_seconds)
-        screenshot_every_page(studio_app.browser, smoke_output_dir, "05-agent-ready")
+        if is_dwt_tests_skipped:
+            skip_reason = f"{SMOKE_SKIP_DWT_TESTS_ENV_VAR}=1 skips default-workspace-template's CI tests"
+            record_skipped_step(smoke_steps_path, _DWT_STEP_LABEL, skip_reason)
+            with subtests.test(msg=_DWT_STEP_LABEL):
+                pytest.skip(skip_reason)
+        else:
+            with recorded_step(smoke_steps_path, _DWT_STEP_LABEL):
+                _run_dwt_ci_suites_reporting_each_test(
+                    subtests,
+                    studio_app,
+                    row,
+                    smoke_run_id,
+                    smoke_output_dir / _DWT_RESULTS_DIR_NAME,
+                    leased_template_ref,
+                )
 
-        _assert_hello_file_holds_nonce(studio_app, row, nonce, "before the stop")
-        workspace_frame = _stop_and_start_from_the_home_page(
-            studio_app,
-            backend,
-            persistent_account,
-            agent_id,
-            host_db_id,
-            storage_restore_wait_seconds,
-            smoke_output_dir,
-        )
-        _assert_hello_file_holds_nonce(studio_app, row, nonce, "after the start")
-        # The desktop renders before the apps behind it are back, and the launcher hands a typed text to
-        # the chat app the moment Enter is pressed, so the chat's page has to be framed again first.
-        open_welcome_chat(workspace_frame)
-        restart_nonce = get_short_random_string()
-        restart_prompt = _HELLO_RESTART_PROMPT_TEMPLATE.format(port=_HELLO_PORT, nonce=restart_nonce)
-        send_prompt_to_known_main_chat(workspace_frame, main_chat_id, restart_prompt, restart_nonce)
-        restart_reply_seconds = wait_for_reply(
-            workspace_frame,
-            main_chat_id,
-            _BACK_REPLY_TEMPLATE.format(nonce=restart_nonce),
-            _AGENT_REPLY_TIMEOUT_SECONDS,
-        )
-        logger.info(
-            "Step 4b: the workspace stopped and started ({}), and the agent reported BACK after {:.0f}s",
-            "restored from storage" if storage_restore_wait_seconds is not None else "started at once",
-            restart_reply_seconds,
-        )
-        screenshot_every_page(studio_app.browser, smoke_output_dir, "05c-started-again")
+        with recorded_step(smoke_steps_path, _BUILD_STEP_LABEL):
+            welcome_chat = open_welcome_chat(workspace_frame)
+            adopt_imbue_credentials(welcome_chat, mint_workspace_llm_credentials(studio_app, agent_id))
+            prompt = _HELLO_PROMPT_TEMPLATE.format(port=_HELLO_PORT, nonce=nonce, service=_HELLO_SERVICE)
+            main_chat_id = send_prompt_to_main_chat(workspace_frame, welcome_chat, prompt, nonce)
+            reply_seconds = wait_for_reply(
+                workspace_frame, main_chat_id, _READY_REPLY_TEMPLATE.format(nonce=nonce), _AGENT_REPLY_TIMEOUT_SECONDS
+            )
+            logger.info("Step 4: the agent reported READY after {:.0f}s", reply_seconds)
+            screenshot_every_page(studio_app.browser, smoke_output_dir, "05-agent-ready")
 
-        publish_share_from_panel(studio_app, agent_id)
-        sharing = read_sharing_status(studio_app, agent_id)
-        assert sharing.get("enabled") is True, sharing
-        assert sharing.get("host_id"), sharing
-        record_created_resource(
-            run_manifest, kind=SmokeResourceKind.SHARE, identifier=str(sharing["host_id"]), owner_email=owner_email
-        )
-        share_url = wait_for_share_url(studio_app, agent_id, _HELLO_SERVICE, _SHARE_LINK_TIMEOUT_SECONDS)
-        assert _SHARE_URL_PATTERN.match(share_url), share_url
-        screenshot_every_page(studio_app.browser, smoke_output_dir, "06-shared")
-        _open_share_as_owner(visitor, share_url, persistent_account, _HELLO_BODY_TEMPLATE.format(nonce=nonce))
-        logger.info("Step 5: the share link {} served the hello app", share_url)
+        with recorded_step(smoke_steps_path, _STOP_START_STEP_LABEL):
+            _assert_hello_file_holds_nonce(studio_app, row, nonce, "before the stop")
+            workspace_frame = _stop_and_start_from_the_home_page(
+                studio_app,
+                backend,
+                persistent_account,
+                agent_id,
+                host_db_id,
+                storage_restore_wait_seconds,
+                smoke_output_dir,
+            )
+            _assert_hello_file_holds_nonce(studio_app, row, nonce, "after the start")
+            # The desktop renders before the apps behind it are back, and the launcher hands a typed text to
+            # the chat app the moment Enter is pressed, so the chat's page has to be framed again first.
+            open_welcome_chat(workspace_frame)
+            restart_nonce = get_short_random_string()
+            restart_prompt = _HELLO_RESTART_PROMPT_TEMPLATE.format(port=_HELLO_PORT, nonce=restart_nonce)
+            send_prompt_to_known_main_chat(workspace_frame, main_chat_id, restart_prompt, restart_nonce)
+            restart_reply_seconds = wait_for_reply(
+                workspace_frame,
+                main_chat_id,
+                _BACK_REPLY_TEMPLATE.format(nonce=restart_nonce),
+                _AGENT_REPLY_TIMEOUT_SECONDS,
+            )
+            logger.info(
+                "Step 4b: the workspace stopped and started ({}), and the agent reported BACK after {:.0f}s",
+                "restored from storage" if storage_restore_wait_seconds is not None else "started at once",
+                restart_reply_seconds,
+            )
+            screenshot_every_page(studio_app.browser, smoke_output_dir, "05c-started-again")
 
-        unpublish_share_from_panel(studio_app, agent_id)
-        assert read_sharing_status(studio_app, agent_id).get("enabled") is False
-        logger.info("Step 6: sharing is off")
-        screenshot_every_page(studio_app.browser, smoke_output_dir, "07-unshared")
+        with recorded_step(smoke_steps_path, _SHARE_STEP_LABEL):
+            publish_share_from_panel(studio_app, agent_id)
+            sharing = read_sharing_status(studio_app, agent_id)
+            assert sharing.get("enabled") is True, sharing
+            assert sharing.get("host_id"), sharing
+            record_created_resource(
+                run_manifest, kind=SmokeResourceKind.SHARE, identifier=str(sharing["host_id"]), owner_email=owner_email
+            )
+            share_url = wait_for_share_url(studio_app, agent_id, _HELLO_SERVICE, _SHARE_LINK_TIMEOUT_SECONDS)
+            assert _SHARE_URL_PATTERN.match(share_url), share_url
+            screenshot_every_page(studio_app.browser, smoke_output_dir, "06-shared")
+            _open_share_as_owner(visitor, share_url, persistent_account, _HELLO_BODY_TEMPLATE.format(nonce=nonce))
+            logger.info("Step 5: the share link {} served the hello app", share_url)
 
-    destroy_workspace_from_settings(studio_app, agent_id)
-    wait_for_destroy_done(studio_app, agent_id, _DESTROY_TIMEOUT_SECONDS)
-    assert is_workspace_gone(list_workspaces(studio_app), agent_id)
-    logger.info("Step 7: workspace {} is destroyed", agent_id)
-    screenshot_every_page(studio_app.browser, smoke_output_dir, "08-destroyed")
+        with recorded_step(smoke_steps_path, _UNSHARE_STEP_LABEL):
+            unpublish_share_from_panel(studio_app, agent_id)
+            assert read_sharing_status(studio_app, agent_id).get("enabled") is False
+            logger.info("Step 6: sharing is off")
+            screenshot_every_page(studio_app.browser, smoke_output_dir, "07-unshared")
+
+    with recorded_step(smoke_steps_path, _DESTROY_STEP_LABEL):
+        destroy_workspace_from_settings(studio_app, agent_id)
+        wait_for_destroy_done(studio_app, agent_id, _DESTROY_TIMEOUT_SECONDS)
+        assert is_workspace_gone(list_workspaces(studio_app), agent_id)
+        logger.info("Step 7: workspace {} is destroyed", agent_id)
+        screenshot_every_page(studio_app.browser, smoke_output_dir, "08-destroyed")

@@ -15,6 +15,8 @@ import sys
 import time
 from collections.abc import Generator
 from collections.abc import Iterator
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Final
 
@@ -61,6 +63,15 @@ from imbue.minds.smoke_tests.primitives import SMOKE_TIER_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SmokeConfigError
 from imbue.minds.smoke_tests.primitives import SmokeRunId
 from imbue.minds.smoke_tests.primitives import is_smoke_switch_on
+from imbue.minds.smoke_tests.report import SMOKE_REPORT_FILE_NAME
+from imbue.minds.smoke_tests.report import write_smoke_run_report
+from imbue.minds.smoke_tests.steps import STEPS_FILE_NAME
+from imbue.minds.smoke_tests.testing import SMOKE_APP_STATE_DIR_KEY
+from imbue.minds.smoke_tests.testing import SMOKE_BACKEND_KEY
+from imbue.minds.smoke_tests.testing import SMOKE_RUN_ID_KEY
+from imbue.minds.smoke_tests.testing import SMOKE_RUN_MANIFEST_KEY
+from imbue.minds.smoke_tests.testing import SMOKE_STUDIO_BINARY_KEY
+from imbue.minds.smoke_tests.testing import smoke_run_report_of_session
 
 # Captured from /etc/passwd at import, before the autouse HOME redirect, so the
 # browsers ``playwright install chromium`` put under the real home are found.
@@ -85,24 +96,28 @@ _IS_BODY_RUNNING_KEY: Final[pytest.StashKey[bool]] = pytest.StashKey[bool]()
 
 
 @pytest.fixture(scope="session")
-def backend() -> SmokeBackend:
+def backend(request: pytest.FixtureRequest) -> SmokeBackend:
     """The deployed environment under test, named by ``MINDS_SMOKE_TIER``."""
     tier = os.environ.get(SMOKE_TIER_ENV_VAR, "")
     if not tier:
         pytest.skip(f"{SMOKE_TIER_ENV_VAR} is not set; run the smoke suite with `just minds-smoke <tier>`.")
     env_name = DevEnvName(tier)
-    return resolve_smoke_backend(env_name, resolve_smoke_client_config_path(env_name))
+    resolved_backend = resolve_smoke_backend(env_name, resolve_smoke_client_config_path(env_name))
+    request.config.stash[SMOKE_BACKEND_KEY] = resolved_backend
+    return resolved_backend
 
 
 @pytest.fixture(scope="session")
-def studio_binary(backend: SmokeBackend) -> StudioBinary:
+def studio_binary(request: pytest.FixtureRequest, backend: SmokeBackend) -> StudioBinary:
     """The Imbue Studio build under test, resolved once per run (a channel's build is downloaded here)."""
     if not is_studio_binary_selected(os.environ):
         pytest.skip(
             f"No Imbue Studio build is named; set one of {', '.join(BINARY_SELECTION_ENV_VARS)} "
             "(MINDS_SMOKE_DEV_CHECKOUT=1 runs this checkout's Electron)."
         )
-    return resolve_studio_binary(backend, os.environ)
+    resolved_binary = resolve_studio_binary(backend, os.environ)
+    request.config.stash[SMOKE_STUDIO_BINARY_KEY] = resolved_binary
+    return resolved_binary
 
 
 @pytest.fixture(scope="session")
@@ -187,12 +202,18 @@ def throwaway_inbox(_smoke_run_handoff: SmokeRunHandoff) -> MailtmInbox:
 
 
 @pytest.fixture(scope="session")
-def smoke_run_id() -> SmokeRunId:
+def smoke_run_id(request: pytest.FixtureRequest) -> SmokeRunId:
     """This run's id: the environment's, else the handoff state file's, else one minted now.
 
     Names the run's workspaces and its manifest, so a local run without a
     handoff still gets a manifest of its own.
     """
+    resolved_run_id = _resolve_smoke_run_id()
+    request.config.stash[SMOKE_RUN_ID_KEY] = resolved_run_id
+    return resolved_run_id
+
+
+def _resolve_smoke_run_id() -> SmokeRunId:
     from_env = os.environ.get(SMOKE_RUN_ID_ENV_VAR, "")
     if from_env:
         return SmokeRunId(from_env)
@@ -208,9 +229,11 @@ def smoke_run_id() -> SmokeRunId:
 def run_manifest(request: pytest.FixtureRequest, smoke_run_id: SmokeRunId) -> Path:
     """Where this run records the resources it creates, for teardown to release."""
     from_env = resolve_manifest_path_or_none()
-    if from_env is not None:
-        return from_env
-    return default_manifest_path(_smoke_outputs_dir(request.config), smoke_run_id)
+    manifest_path = (
+        from_env if from_env is not None else default_manifest_path(_smoke_outputs_dir(request.config), smoke_run_id)
+    )
+    request.config.stash[SMOKE_RUN_MANIFEST_KEY] = manifest_path
+    return manifest_path
 
 
 @pytest.fixture(scope="session")
@@ -258,13 +281,26 @@ def smoke_output_dir(request: pytest.FixtureRequest) -> Path:
 
 
 @pytest.fixture
+def smoke_steps_path(smoke_output_dir: Path) -> Path:
+    """This test's steps file (``steps.py``), cleared of the steps an earlier run recorded there."""
+    steps_path = smoke_output_dir / STEPS_FILE_NAME
+    steps_path.unlink(missing_ok=True)
+    return steps_path
+
+
+@pytest.fixture
 def studio_app(
-    studio_binary: StudioBinary, backend: SmokeBackend, smoke_display: str | None, tmp_path: Path
+    request: pytest.FixtureRequest,
+    studio_binary: StudioBinary,
+    backend: SmokeBackend,
+    smoke_display: str | None,
+    tmp_path: Path,
 ) -> Iterator[StudioAppSession]:
     """The build under test, launched on a throwaway data home with Playwright attached; one per test."""
     with launched_studio_app(
         studio_binary, backend, tmp_path / "studio-data-home", find_free_port(), smoke_display
     ) as session:
+        request.node.stash[SMOKE_APP_STATE_DIR_KEY] = session.state_dir
         yield session
 
 
@@ -307,11 +343,13 @@ def pytest_runtest_makereport(
 
 
 @pytest.hookimpl(tryfirst=True)
-def pytest_sessionfinish(session: pytest.Session) -> None:
-    """Write ``.test_output/smoke/verdict.json``: how many failures were default-workspace-template tests.
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Write ``.test_output/smoke/verdict.json`` and, beside it, the run's report, ``report.html``.
 
-    A failed template test fails the same way on a rerun, so the workflow
-    skips its rerun when those are the session's only failures.
+    The verdict says how many failures were default-workspace-template tests:
+    a failed template test fails the same way on a rerun, so the workflow
+    skips its rerun when those are the session's only failures. The report is
+    the run one level below its verdict, for a person deciding what happened.
     """
     terminal_reporter = session.config.pluginmanager.get_plugin("terminalreporter")
     if terminal_reporter is None:
@@ -322,9 +360,29 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
         if isinstance(report, pytest.SubtestReport)
     )
     verdict = smoke_run_verdict(len(session.config.stash.get(_OWN_FAILURES_KEY, [])), failed_subtest_labels)
-    verdict_path = _smoke_outputs_dir(session.config) / _VERDICT_FILE_NAME
-    verdict_path.parent.mkdir(parents=True, exist_ok=True)
-    verdict_path.write_text(verdict.model_dump_json())
+    outputs_dir = _smoke_outputs_dir(session.config)
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    (outputs_dir / _VERDICT_FILE_NAME).write_text(verdict.model_dump_json())
+    # A session that only collected ran nothing, and must not replace the report of the last run that did.
+    if session.config.getoption("collectonly"):
+        return
+    report = smoke_run_report_of_session(
+        session,
+        terminal_reporter=terminal_reporter,
+        exit_status=int(exitstatus),
+        outputs_dir=outputs_dir,
+        verdict=verdict,
+        environ=os.environ,
+        finished_at=datetime.now(timezone.utc),
+    )
+    write_smoke_run_report(outputs_dir / SMOKE_REPORT_FILE_NAME, report)
+
+
+def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
+    """Name the run's report last, where a person reading the session's output looks for what to open."""
+    report_path = _smoke_outputs_dir(terminalreporter.config) / SMOKE_REPORT_FILE_NAME
+    if report_path.is_file():
+        terminalreporter.write_sep("-", f"smoke run report: {report_path.as_uri()}")
 
 
 def _copy_app_logs(log_dir: Path, destination: Path) -> None:

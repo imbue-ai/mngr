@@ -444,9 +444,15 @@ def app_log_dir(data_home: Path, root_name: str) -> Path:
 
 
 @pure
+def app_state_dir(data_home: Path, root_name: str) -> Path:
+    """Where the app keeps its state under the data home: ``<data home>/<tier>/state``."""
+    return data_home / env_name_from_root_name(root_name) / _STATE_DIR_NAME
+
+
+@pure
 def app_mngr_host_dir(data_home: Path, root_name: str) -> Path:
     """The ``MNGR_HOST_DIR`` the app runs mngr with: ``<data home>/<tier>/state/mngr``."""
-    return data_home / env_name_from_root_name(root_name) / _STATE_DIR_NAME / _MNGR_HOST_DIR_NAME
+    return app_state_dir(data_home, root_name) / _MNGR_HOST_DIR_NAME
 
 
 @pure
@@ -458,8 +464,7 @@ def app_mngr_executable(binary: StudioBinary, data_home: Path, test_venv_bin_dir
     """
     match binary.kind:
         case StudioBinaryKind.PACKAGED:
-            state_dir = data_home / env_name_from_root_name(str(binary.root_name)) / _STATE_DIR_NAME
-            return state_dir / _PACKAGED_MNGR_RELATIVE_PATH
+            return app_state_dir(data_home, str(binary.root_name)) / _PACKAGED_MNGR_RELATIVE_PATH
         case StudioBinaryKind.DEV_CHECKOUT:
             return test_venv_bin_dir / _MNGR_EXECUTABLE_NAME
         case _ as unreachable:
@@ -580,6 +585,7 @@ def launched_studio_app(
             page=page,
             backend_origin=NonEmptyStr(backend_origin_from_page(page)),
             data_home=data_home,
+            state_dir=app_state_dir(data_home, str(binary.root_name)),
             log_dir=app_log_dir(data_home, str(binary.root_name)),
             launch_cwd=launch_cwd,
             mngr_executable=app_mngr_executable(binary, data_home, Path(sys.executable).parent),

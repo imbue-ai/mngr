@@ -327,8 +327,8 @@ with the trigger later. Linux runs first, on `ubuntu-latest`, against the `.deb`
 successful `minds-admin env deploy` against production (`--skip-smoke` opts
 out). A release-channel publish (`minds-release-channels.yml`) does not trigger
 a run, so publishing a new app binary never starts one on its own. In CI the
-manifest, the pytest log and the screenshots are uploaded as the run's artifact,
-which `teardown` downloads. A daily run, when it is added, may carry a different
+run report, the manifest, the pytest log and the screenshots are uploaded as
+the run's artifact, which `teardown` downloads. A daily run, when it is added, may carry a different
 target (for example stable/production daily, alpha/production post deploy).
 The release's staging rehearsal starts a run by hand from the release checkout
 ("Running it locally" below, and `apps/minds/docs/deploy/ops/services.md`,
@@ -614,6 +614,32 @@ starts) unless `MINDS_SMOKE_MANIFEST_PATH` names a place;
 live in `apps/minds/imbue/minds/smoke_tests/`; the tooling is
 `apps/minds_admin/scripts/smoke_tests.py` (`setup`, `teardown`,
 `create-persistent-account`), each with its own `just` recipe.
+
+**The run report.** Every session writes `.test_output/smoke/report.html`
+beside `verdict.json` and names it at the end of its output; a collect-only
+session writes none, so it never replaces the last real run's report. The
+report is the run one level below its verdict. Its header gives the verdict
+and links each failed scenario. The run section says when the session ran and
+for how long, where (the GitHub Actions run, or the machine), from which commit
+(and whether the checkout was dirty, or the commit unpushed so its links do not
+resolve yet), the pytest command and selection, the tier's URLs, and the build
+under test. The parameters table lists the suite's inputs the environment set,
+each with its value and what it does; the rest fold away. Every selected
+scenario follows, grouped by outcome in folds of their own, failures first and
+open, passes and skips closed: its duration by phase, why it failed or
+skipped, the subtests it reported (each failed `dwt:` test with its failure
+text), its screenshots and the other files it wrote during this run, and a
+link to its source at the run's commit. The journey records each of its steps
+in `.test_output/smoke/<test name>/steps.jsonl` (`steps.py` among the helpers),
+so its scenario shows which steps completed, how long each took, and the step
+it did not finish. A scenario that launched the app links that app's Sentry
+issues: a fresh data home mints a fresh install id, Sentry's `user.id`, so the
+search finds exactly the errors this run's app reported, in the tier's Python
+and JavaScript projects. The link needs the Sentry organization slug in
+`SENTRY_ORG` (a repository variable in CI), which the repo does not hold;
+without it the report names the install id to search for. In CI the job
+summary links the artifact that holds the report, and before a rerun the first
+attempt's output, its report included, is kept under `attempt-1/`.
 
 **Prerequisites before the first production run.** The Vault terraform change is
 applied and the three GitHub Environments exist; the operator has run the
