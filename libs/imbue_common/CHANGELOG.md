@@ -12,6 +12,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `imbue.imbue_common.profiling`, a Chrome JSON trace tracer (W3C `traceparent` propagation, cross-process flow links, file-writer and in-memory collector modes, no-op until enabled) behind Imbue Studio's profiling mode; `log_span`, `info_span`, `trace_span` and `log_call` now also open tracer spans.
 - Added: `imbue.imbue_common.container_meminfo_publisher`, the shared Perl that publishes each container's cgroup memory headroom as `.host-meminfo`.
 - Added: Shared pytest markers `ratchet_scan(source_dir)` (preloads a ratchet test's file scan during setup, via new `preload_text_scan`, `preload_python_ast_scan` and `preload_ratchet_scan_for_test`) and `harness_internals(harness)`.
+- Added: `imbue_common.public_email_domains.PUBLIC_EMAIL_DOMAINS`, the shared list of public mail providers that the desktop and connector use to refuse whole-domain share grants.
 
 ### Changed
 

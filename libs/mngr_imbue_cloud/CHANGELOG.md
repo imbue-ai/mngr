@@ -16,6 +16,9 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Gen-2 slice VMs run `mngr-btrfs-reclaim.service` on every boot, enabling btrfs `dynamic_reclaim` and `periodic_reclaim` on kernels with the transaction-abort fix, so data block groups no longer fill the disk and cause ENOSPC while `df` shows free space.
 - Added: `ImbueCloudQuotaExceededError` reports its entitlement, limit and use in the JSONL `error` event's `details`; a plan switch refused with a reason raises `ImbueCloudPlanRefusedError` (`code: plan_refused`), so a waitlisted account no longer reads as "Unauthenticated (403)".
 - Added: Info-level diagnostics for connector requests refused with 401 (route, attempt, the token's remaining validity at the first and refused attempts, and whether the computer was suspended in between) and for each refreshed token's lifetime; a refused refresh logs at warning.
+- Added: Recipient-side sharing commands: `shares shared-with-me` (every active share naming the account, with owner, workspace name, target links and status), `shares shared-with-me-matches`, `shares respond <host_id> --response accepted|declined|reported` and `shares clear-response`; all fail with `shared_with_me_unavailable` against an older connector. New wire models include `SharedWithMeListing`, `SharedWithMeShare` and `SharedWithMeMatches`.
+- Added: `mngr imbue_cloud auth browser-session-code` mints the single-use code the desktop's embedded browser redeems for an accounts-origin session.
+- Added: `shares push-grants` forwards optional `targets` and `workspace_name`; a refused domain grant raises with code `grants_refused` and `ImbueCloudShareRefusedError.refusals`.
 
 ### Changed
 
@@ -23,7 +26,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Fast-path workspace creation makes fewer round trips (one SSH connection for slice adoption, no redundant container sshd wait, host env and `data.json` cached under the host lock) and logs where the time goes.
 - Changed: `ShareGrantsPushResult` gains `share`, `outcomes` and `identities`, printed by `shares push-grants`.
 - Changed: `auth login` JSON output includes `is_email_verified`.
-- Changed: The batched listing collects work leases, so agents can report `RUNNING_BACKGROUND`.
+- Changed: The batched listing collects work leases, so agents can report `RUNNING_BACKGROUND`, and publishes them as the agent's `background_tasks`.
 - Changed: `connector/session_store.py`'s `_decode_jwt_exp` is now public as `decode_jwt_exp` and returns None instead of raising for an unreadable payload or `exp`.
 
 ### Removed

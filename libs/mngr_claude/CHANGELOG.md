@@ -8,7 +8,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Added
 
-- Added: Claude agents declare a work lease per in-flight background task at turn end (from the Stop payload's `background_tasks`), so they report `RUNNING_BACKGROUND` until that work wakes them; leases hold 24 hours by default (`HOOK_WORK_LEASE_TTL_SECONDS` overrides it; a value that is not a positive count of seconds is ignored), and a restart drops them.
+- Added: Claude agents' Stop hook records each in-flight background task from the Stop payload's `background_tasks` under `background_tasks/`, with its `kind` and claude's own `native_type`, so they report `RUNNING_BACKGROUND` until that work wakes them; records carry no deadline and a restart drops them. Agents created before this change write under `leases/`, which mngr does not read, so they never report `RUNNING_BACKGROUND`.
 
 ### Changed
 

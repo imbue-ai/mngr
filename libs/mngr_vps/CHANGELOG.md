@@ -16,7 +16,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Changed: gVisor pinned to `20261102`, installed from its sha512-checked `gvisor.tar.zstd` release tarball (runsc, shim and `gvisor-bin/` sidecars); `render_gvisor_binary_install_script` now takes the release and install directory and upgrades an older runsc in place.
 - Changed: runsc containers default to `--ulimit memlock=64 MiB` so earlyoom's `mlockall` succeeds.
-- Changed: The batched listing collects work leases, so agents can report `RUNNING_BACKGROUND`.
+- Changed: The batched listing collects background task records, so agents can report `RUNNING_BACKGROUND` and listings publish `background_tasks`.
 
 ### Fixed
 

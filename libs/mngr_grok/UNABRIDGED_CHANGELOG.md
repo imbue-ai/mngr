@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-17
+
+grok's hook records each background task grok lists in flight under the agent's `background_tasks/` directory, which replaces `leases/`, as `seen:<now> kind:<KIND> native_type:<type>`, where the type is grok's own task `type`, kept exactly, and the kind is what it maps to: `shell` is `SHELL`, `subagent` is `SUBAGENT`, `monitor` is `MONITOR`, any other type is `OTHER`. `mngr list` shows them as `background_tasks`. A record carries no deadline: it stays until a later `Stop` no longer lists its task, its subagent ends, or a top-level session starts or ends. `HOOK_WORK_LEASE_TTL_SECONDS` now only bounds how long after a record was last seen it keeps the agent's activity clock fresh. An agent created on an earlier version keeps its own hooks, which write under `leases/`: mngr no longer reads those records, so it never reads `RUNNING_BACKGROUND`. The binary-contract tests pin the kind and native type against the pinned grok.
+
 ## 2026-11-11
 
 Fixed: a host no longer idle-stops itself out from under an agent that is working.

@@ -15,7 +15,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Changed: `mngr create` raises `ModalDeployedAppLimitMngrError` when the Modal workspace is out of deployed-app slots, naming the cap and how to free slots.
 - Changed: New `-b volume=` volumes are v2 Modal Volumes, without v1's 500,000-file limit.
-- Changed: The batched listing collects work leases, so agents can report `RUNNING_BACKGROUND`.
+- Changed: The batched listing collects background task records, so agents can report `RUNNING_BACKGROUND` and listings publish `background_tasks`.
 
 ### Fixed
 

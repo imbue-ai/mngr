@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-17
+
+New `imbue_common.public_email_domains.PUBLIC_EMAIL_DOMAINS`, the mail providers anyone can sign up at (moved from the minds desktop's share grant validation), so the desktop's refusal of a whole-domain grant on one and the connector's refusal to surface such a grant to recipients read one list.
+
 ## 2026-11-15
 
 A test that runs a real child program -- a bash script, git, a fresh interpreter, a nested pytest -- now gets 60 seconds instead of the repo-wide 10-second `pytest-timeout` default, which was sized for work that stays inside the pytest process.

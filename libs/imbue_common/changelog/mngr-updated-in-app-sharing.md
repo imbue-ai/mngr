@@ -1,1 +1,0 @@
-New `imbue_common.public_email_domains.PUBLIC_EMAIL_DOMAINS`, the mail providers anyone can sign up at (moved from the minds desktop's share grant validation), so the desktop's refusal of a whole-domain grant on one and the connector's refusal to surface such a grant to recipients read one list.

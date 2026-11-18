@@ -4,6 +4,10 @@ Full, unedited changelog entries for the `mngr_wait` project, consolidated night
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-17
+
+`mngr wait --help` describes the default wait as waiting for any terminal state, which `RUNNING_BACKGROUND` (no open turn, background tasks recorded) is not. What `mngr wait` does is unchanged.
+
 ## 2026-11-09
 
 Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.

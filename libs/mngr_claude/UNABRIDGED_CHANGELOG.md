@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-17
+
+The Stop hook records each background task claude lists under the agent's `background_tasks/` directory, which replaces `leases/`, as `seen:<now> kind:<KIND> native_type:<label>`: the label is claude's own `type` for the task, and the kind is `SHELL` for `shell`, `SUBAGENT` for `subagent`, `teammate`, `cloud session` and `workflow`, `MONITOR` for `monitor` and `OTHER` for every other label. A record carries no deadline. An agent created on an earlier version keeps its own hooks, which write under `leases/`: mngr no longer reads those records, so it never reads `RUNNING_BACKGROUND`. Release tests pin the `shell` and `subagent` labels against a real claude agent, and claude's own label table against the labels mngr lists.
+
 ## 2026-11-15
 
 The two `provision()` remote-trust tests no longer carry a hand-written 30-second `pytest-timeout`. Both run the local `claude --version` check as a real subprocess, so both now inherit the 60 seconds imbue-common gives any test running a child program.

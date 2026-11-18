@@ -186,6 +186,9 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `custom-service` permission requests may use Latchkey 3.22.0's `mcp` login flow, checked against the metadata the MCP server publishes.
 - Added: Released Imbue Studio 0.10.4, a patch over 0.10.3 pinning template `minds-v0.10.4` (Claude Code 2.1.323 / Claude Fable 5.2, Codex 0.169.0, OpenCode 1.19.5), carrying the error-copy rewrite, system-browser sign-ins, latchkey 3.24.0 and paramiko 5.0.1, and promoted it to the alpha desktop (mac, Linux) and browser channels; beta and stable stay on 0.9.4.
 - Added: Agents can ask for a `custom-service` connection to be proxied through the desktop with `"proxy": true`; the approval dialog shows the **Proxy through my desktop** switch, and approving creates, grants and routes the connection in one change.
+- Added: Released Imbue Studio 0.10.5, a patch cut from the `minds-v0.10.4` tag (0.10.4's app with template `minds-v0.10.5`, which moves apps off the Screen's ports 8090/8091), and promoted it to the alpha and stable desktop (mac, Linux) and browser channels; beta stays on 0.9.4.
+- Added: Shared with me: workspaces and apps shared with the window's account are listed with owner, status, liveness and last-open verdict, offering open, decline (with undo), report (a permanent strike against the owner), retry, remove and a pasted-link input; opening signs a per-account Electron session into the accounts origin and loads the share in the workspace frame; `imbue-studio://shared/<host-id>` deep links land on its card.
+- Added: Shared workspaces report `is_owned=false` (UI channel schema 29, `GET /api/v1/workspaces` with `share_link`, titlebar), hide owner-only tabs, and refuse owner actions with `403 not_owned`.
 
 ### Changed
 
@@ -401,6 +404,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Every MCP-based sign-in (builtin `*-mcp` connectors and custom MCP-flow services) returns through Imbue Studio's hosted callback page, so the consent screen no longer shows a localhost redirect.
 - Changed: Bundled latchkey moves to 3.24.0.
 - Changed: Host recovery worker log records carry `recovery_kind`, `recovery_trigger` and `provider_name`; `dispatch_host_recovery` takes a required `trigger` argument.
+- Changed: Redesigned the home page as Workspaces, Apps and Invitations tabs: wallpaper workspace cards with status badges and a "..." menu, shared-workspace guest cards, desktop-style icons for own and shared apps, and Join/Decline invitation cards; "Studio settings" moves into the section head and the bottom-left launchers are removed.
+- Changed: A share grants push carries each target's label and display name and the workspace name, and a domain grant may only name the granter's own email domain (none for a public mail provider), enforced by the share panel and the connector.
 
 ### Deprecated
 

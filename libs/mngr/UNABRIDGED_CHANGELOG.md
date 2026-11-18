@@ -4,6 +4,18 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-17
+
+`background_tasks` replaces `leases` on `AgentDetails`, in `mngr list --format json`, `--fields`, CEL filters and `mngr observe` events. Each item has `name`, `kind` (`SHELL`, `SUBAGENT`, `MONITOR`, `SCHEDULE` or `OTHER`), `native_type` (the harness's own type name), `started_at` and `last_seen_at`; `expires_at` is gone. A row that still carries `leases` is accepted and the key dropped.
+
+Background task records move from an agent's `leases/` directory to `background_tasks/` and no longer expire: an agent reads `RUNNING_BACKGROUND` exactly when it has a record and no open turn. `HOOK_WORK_LEASE_TTL_SECONDS` now only bounds how long a record keeps the agent's activity clock fresh.
+
+An agent created on an earlier version keeps writing under `leases/`, which mngr no longer reads: it never reads `RUNNING_BACKGROUND` and publishes no background tasks, while its own hooks and heartbeat keep working among themselves. Imbue Studio's busy checks use the workspace template's task markers and are unaffected.
+
+The `--running` help describes its states as a turn in flight or background tasks recorded.
+
+Regenerated `docs/commands/secondary/imbue_cloud.md` for the imbue_cloud plugin's new recipient-side sharing commands (`shares shared-with-me`, `shares shared-with-me-matches`, `shares respond`, `shares clear-response`) and `auth browser-session-code`.
+
 ## 2026-11-16
 
 `mngr check-deps` keeps the `sudo apt-get` commands it runs to install missing dependencies in its own process group, so sudo's password prompt still reaches the terminal now that `ConcurrencyGroup` runs every other child in a session of its own.
