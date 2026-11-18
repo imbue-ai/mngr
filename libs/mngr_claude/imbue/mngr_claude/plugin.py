@@ -71,6 +71,7 @@ from imbue.mngr.config.external_settings import apply_settings_patch
 from imbue.mngr.config.field_markers import SettingsPatchField
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import ConfigError
+from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendFailureKind
@@ -153,6 +154,7 @@ from imbue.mngr_claude.compaction import CLAUDE_DEFAULT_CACHE_TTL_MINUTES
 from imbue.mngr_claude.compaction import get_agent_context_tokens
 from imbue.mngr_claude.compaction import get_agent_idle_since
 from imbue.mngr_claude.compaction import record_agent_compacted
+from imbue.mngr_claude.dialogs import CLAUDE_CODE_VERSION
 from imbue.mngr_claude.dialogs import COMPACT_COMMAND
 from imbue.mngr_claude.dialogs import DialogBlocked
 from imbue.mngr_claude.dialogs import INPUT_PROMPT_GLYPH
@@ -161,6 +163,8 @@ from imbue.mngr_claude.dialogs import Unrecognized
 from imbue.mngr_claude.dialogs import classify
 from imbue.mngr_claude.dialogs import count_message_turns_above_input_row
 from imbue.mngr_claude.dialogs import deal_with_dialogs
+from imbue.mngr_claude.dialogs import describe_unrecognized_pane
+from imbue.mngr_claude.dialogs import format_unrecognized_pane_shape
 from imbue.mngr_claude.dialogs import get_input_region
 from imbue.mngr_claude.dialogs import get_pane_text_without_input_row_hints
 from imbue.mngr_claude.dialogs import has_input_prompt_line
@@ -883,7 +887,8 @@ def _build_claude_json(
     else:
         data = _generate_claude_json(version, current_time=current_time, disable_auto_update=disable_auto_update)
 
-    data.update(compute_claude_json_flags(ctx))
+    claude_json_flags = compute_claude_json_flags(ctx)
+    data.update(claude_json_flags)
 
     projects = data.setdefault("projects", {})
 
@@ -903,8 +908,26 @@ def _build_claude_json(
                 projects[worktree_path_str] = worktree_config
 
     # Trust work_dir if unattended or auto_dismiss_dialogs_at_startup
+    resolved_work_dir = work_dir.resolve()
     if should_trust_work_dir(config, ctx):
-        projects.setdefault(str(work_dir.resolve()), {})["hasTrustDialogAccepted"] = True
+        projects.setdefault(str(resolved_work_dir), {})["hasTrustDialogAccepted"] = True
+
+    # Which first-run dismissals the agent starts with, so a startup prompt that later blocks a
+    # send can be tied to them (and to the claude pin). They are read back from the finished
+    # config: the generated defaults and a synced or copied config set them too, not only the
+    # flags provisioning applies.
+    dismissal_flags_set = sorted(
+        flag for flag in (*_DIALOG_DISMISS_CLAUDE_JSON_FLAGS, *_PERMISSION_CLAUDE_JSON_FLAGS) if data.get(flag) is True
+    )
+    logger.debug(
+        "Claude config flags: claude pinned at {}, dismissal flags set: {}, work dir trusted: {}, "
+        "auto_dismiss_dialogs_at_startup: {}, flags applied by provisioning: {}",
+        config.version or "unpinned",
+        dismissal_flags_set,
+        (find_project_config(projects, resolved_work_dir) or {}).get("hasTrustDialogAccepted") is True,
+        config.auto_dismiss_dialogs_at_startup,
+        sorted(claude_json_flags),
+    )
 
     return data
 
@@ -2815,7 +2838,8 @@ class ClaudeAgent(
         try:
             return deal_with_dialogs(self._dialog_pane(tmux_target))
         except DialogBlocked as e:
-            if e.nickname == Unrecognized().get_nickname() and poll_until(
+            is_unrecognized = e.nickname == Unrecognized().get_nickname()
+            if is_unrecognized and poll_until(
                 lambda: self._input_prompt_present(tmux_target),
                 timeout=self._unpainted_pane_grace_seconds(),
             ):
@@ -2825,7 +2849,55 @@ class ClaudeAgent(
                 # delivers the first message as soon as the session_started hook fires, which is
                 # when claude STARTS, not when its TUI has drawn.
                 return None
+            if is_unrecognized:
+                self._log_unrecognized_dialog_shape(tmux_target)
             raise DialogDetectedError(str(self.name), e.nickname, e.message) from e
+
+    def _log_unrecognized_dialog_shape(self, tmux_target: TmuxWindowTarget | str) -> None:
+        """Log what an unnamed dialog that refused a send looks like, without any of its text.
+
+        The facts here are the ones that decide how to handle a new Claude Code surface: which
+        claude is installed, whether a digit could answer it, and whether it carries an Esc footer that
+        ``GenericBenign`` missed only because of where (or with which verb) it is drawn.
+        """
+        try:
+            pane_content = self._capture_input_box_pane_content(tmux_target)
+        except HostConnectionError as e:
+            logger.debug("Could not capture agent {}'s pane to describe its dialog: {}", self.name, e)
+            pane_content = None
+        # A failed capture is reported as such: described as an empty pane it would read as a
+        # dialog with no selector and no footer, which is a diagnosis rather than a missing one.
+        shape_summary = (
+            "pane could not be captured"
+            if pane_content is None
+            else format_unrecognized_pane_shape(describe_unrecognized_pane(pane_content))
+        )
+        logger.warning(
+            "Unrecognized dialog refused a send to agent {} (installed claude version: {}; pinned: {}; "
+            "dialog patterns read from: {}; {})",
+            self.name,
+            self._get_installed_claude_version() or "unknown",
+            self.agent_config.version or "unpinned",
+            CLAUDE_CODE_VERSION,
+            shape_summary,
+        )
+
+    def _get_installed_claude_version(self) -> str | None:
+        """The version the agent's host reports for ``claude --version``, or None when it reports none.
+
+        This is the binary on PATH, which an auto-update can move past the process still running.
+        A host that cannot be reached also yields None: this only feeds a diagnostic log written
+        while a send is being refused, and it must not replace that refusal with its own error.
+        """
+        env_command_prefix = self.host.build_source_env_prefix(self)
+        try:
+            result = self.host.execute_idempotent_command(
+                f"{env_command_prefix} claude --version", timeout_seconds=10.0
+            )
+        except HostConnectionError as e:
+            logger.debug("Could not read the claude version on agent {}'s host: {}", self.name, e)
+            return None
+        return _parse_claude_version_output(result.stdout) if result.success else None
 
     def _unpainted_pane_grace_seconds(self) -> float:
         """How long preflight waits for the input box before refusing an unreadable pane.

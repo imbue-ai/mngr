@@ -50,6 +50,7 @@ from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import ConfigError
 from imbue.mngr.errors import ConfigParseError
+from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MessageDeliveredButBlockedError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import SendFailureKind
@@ -62,6 +63,7 @@ from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.hosts.tmux import PANE_SESSION_NAME_SHELL_EXPRESSION
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostLocation
@@ -115,6 +117,7 @@ from imbue.mngr_claude.plugin import MANAGED_SETTINGS_LAUNCH_ARG
 from imbue.mngr_claude.plugin import ProvisioningContext
 from imbue.mngr_claude.plugin import STDERR_LOG_NAME
 from imbue.mngr_claude.plugin import _build_claude_install_command
+from imbue.mngr_claude.plugin import _build_claude_json
 from imbue.mngr_claude.plugin import _build_install_command_hint
 from imbue.mngr_claude.plugin import _build_settings_json
 from imbue.mngr_claude.plugin import _claude_json_has_primary_api_key
@@ -6396,6 +6399,55 @@ def test_get_files_for_deploy_rewrites_marketplace_paths_to_sentinel(
     )
 
 
+@pytest.mark.parametrize(
+    ("ctx", "expected_trusted"),
+    [
+        pytest.param(ProvisioningContext(is_unattended=False, is_auto_approve=True), True, id="auto-approved"),
+        # Provisioning applies no dismissal flags here, but the generated defaults still carry them.
+        pytest.param(ProvisioningContext(is_unattended=False, is_auto_approve=False), False, id="interactive"),
+    ],
+)
+def test_build_claude_json_logs_the_dismissal_flags_the_config_carries(
+    tmp_path: Path, ctx: ProvisioningContext, expected_trusted: bool
+) -> None:
+    """The agent's startup dismissals are logged with its claude pin, so a later startup prompt can be tied to them."""
+    with capture_loguru(level="DEBUG") as log_output:
+        data = _build_claude_json(
+            work_dir=tmp_path,
+            config=ClaudeAgentConfig(check_installation=False, version="2.1.50"),
+            ctx=ctx,
+            sync_local=False,
+            # The deploy paths pass no version even when the config pins one.
+            version=None,
+        )
+    flag_logs = [line for line in log_output.getvalue().splitlines() if line.startswith("Claude config flags")]
+    assert len(flag_logs) == 1
+    assert "claude pinned at 2.1.50" in flag_logs[0]
+    assert data["hasCompletedOnboarding"] is True
+    assert (
+        "dismissal flags set: ['bypassPermissionsModeAccepted', 'effortCalloutDismissed', 'hasCompletedOnboarding']"
+        in flag_logs[0]
+    )
+    assert f"work dir trusted: {expected_trusted}" in flag_logs[0]
+
+
+def test_build_claude_json_logs_a_work_dir_trusted_through_its_ancestor(tmp_path: Path) -> None:
+    _write_claude_trust(tmp_path)
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    with capture_loguru(level="DEBUG") as log_output:
+        _build_claude_json(
+            work_dir=work_dir,
+            config=ClaudeAgentConfig(check_installation=False),
+            ctx=ProvisioningContext(is_unattended=False, is_auto_approve=False),
+            sync_local=True,
+            version=None,
+        )
+    flag_logs = [line for line in log_output.getvalue().splitlines() if line.startswith("Claude config flags")]
+    assert len(flag_logs) == 1
+    assert "work dir trusted: True" in flag_logs[0]
+
+
 # _build_settings_json tests
 
 
@@ -7540,10 +7592,154 @@ def test_preflight_waits_for_an_unpainted_pane_instead_of_refusing(
     agent._preflight_send_message(_TARGET)
 
 
+class _VersionedScriptedClaudeAgent(_ScriptedPaneClaudeAgent):
+    """Scripted agent whose host reports a fixed claude version, so no ``claude`` binary is run."""
+
+    def _get_installed_claude_version(self) -> str | None:
+        return "9.9.9"
+
+
+def _unrecognized_dialog_shape_logs(log_warnings: list[str]) -> list[str]:
+    return [message for message in log_warnings if message.startswith("Unrecognized dialog refused a send")]
+
+
+def test_preflight_refusing_an_unrecognized_dialog_logs_its_shape_without_its_text(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext, log_warnings: list[str]
+) -> None:
+    """The refusal logs the claude version and the pane's shape -- and none of the pane's words."""
+    pane = "  Try the new widget?\n\n  ❯ 1. Yes, try it\n    2. Not now\n"
+    agent = _make_scripted_agent(
+        local_provider, tmp_path, temp_mngr_ctx, [pane], agent_class=_VersionedScriptedClaudeAgent
+    )
+    with pytest.raises(DialogDetectedError):
+        agent._preflight_send_message(_TARGET)
+    shape_logs = _unrecognized_dialog_shape_logs(log_warnings)
+    assert len(shape_logs) == 1
+    shape_log = shape_logs[0]
+    assert "claude version: 9.9.9" in shape_log
+    assert "selector present: True" in shape_log
+    assert "selector options: 2" in shape_log
+    assert "esc phrase in bottom 3 lines: False" in shape_log
+    assert "widget" not in shape_log and "Not now" not in shape_log
+
+
+def test_preflight_refusing_an_uncapturable_pane_logs_no_shape(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext, log_warnings: list[str]
+) -> None:
+    """A capture that fails is logged as uncaptured, not as a dialog with no selector and no footer."""
+    agent = _make_scripted_agent(
+        local_provider, tmp_path, temp_mngr_ctx, [None], agent_class=_VersionedScriptedClaudeAgent
+    )
+    with pytest.raises(DialogDetectedError):
+        agent._preflight_send_message(_TARGET)
+    shape_logs = _unrecognized_dialog_shape_logs(log_warnings)
+    assert len(shape_logs) == 1
+    assert "pane could not be captured" in shape_logs[0]
+    assert "selector present" not in shape_logs[0]
+
+
+class _CaptureFailingClaudeAgent(_VersionedScriptedClaudeAgent):
+    """Scripted agent whose pane capture fails the way a dropped SSH connection does."""
+
+    def _capture_input_box_pane_content(self, tmux_target: TmuxWindowTarget | str) -> str | None:
+        raise HostConnectionError("connection dropped")
+
+
+def test_unrecognized_dialog_shape_log_survives_a_capture_that_loses_the_host(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext, log_warnings: list[str]
+) -> None:
+    """A lost connection is logged as an uncaptured pane rather than raised over the send's refusal."""
+    agent = _make_scripted_agent(local_provider, tmp_path, temp_mngr_ctx, [], agent_class=_CaptureFailingClaudeAgent)
+    agent._log_unrecognized_dialog_shape(_TARGET)
+    shape_logs = _unrecognized_dialog_shape_logs(log_warnings)
+    assert len(shape_logs) == 1
+    assert "pane could not be captured" in shape_logs[0]
+
+
+class _UnreachableFakeHost(FakeHost):
+    """A host whose commands fail the way a remote host's do when SSH times out or drops."""
+
+    def execute_idempotent_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        raise HostConnectionError("connection timed out")
+
+
+class _ScriptedResultFakeHost(FakeHost):
+    """A host that answers every command with one fixed result, so no real binary is run."""
+
+    scripted_result: CommandResult = Field(description="The result every command returns")
+
+    def execute_idempotent_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        return self.scripted_result
+
+
+@pytest.mark.parametrize(
+    ("host", "expected_version"),
+    [
+        pytest.param(
+            _ScriptedResultFakeHost(
+                scripted_result=CommandResult(stdout="2.1.50 (Claude Code)\n", stderr="", success=True)
+            ),
+            "2.1.50",
+            id="reports-version",
+        ),
+        pytest.param(
+            _ScriptedResultFakeHost(
+                scripted_result=CommandResult(stdout="", stderr="claude: command not found", success=False)
+            ),
+            None,
+            id="command-fails",
+        ),
+        # The probe only feeds the refusal's log, so an unreachable host must not raise over the refusal.
+        pytest.param(_UnreachableFakeHost(), None, id="host-unreachable"),
+    ],
+)
+def test_installed_claude_version_reads_what_the_host_reports(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    host: FakeHost,
+    expected_version: str | None,
+) -> None:
+    agent = _make_scripted_agent(local_provider, tmp_path, temp_mngr_ctx, [])
+    agent = agent.model_copy_update(to_update(agent.field_ref().host, cast(OnlineHostInterface, host)))
+    assert agent._get_installed_claude_version() == expected_version
+
+
+def test_preflight_refusing_a_named_dialog_does_not_log_an_unrecognized_shape(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext, log_warnings: list[str]
+) -> None:
+    agent = _make_scripted_agent(
+        local_provider, tmp_path, temp_mngr_ctx, [_COMMAND_SHELL_MODE_PANE], agent_class=_VersionedScriptedClaudeAgent
+    )
+    with pytest.raises(DialogDetectedError):
+        agent._preflight_send_message(_TARGET)
+    assert not _unrecognized_dialog_shape_logs(log_warnings)
+
+
 def test_preflight_still_refuses_a_pane_that_never_paints(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """The grace above is a wait, not a bypass: a pane that stays unreadable is still refused."""
-    agent = _make_scripted_agent(local_provider, tmp_path, temp_mngr_ctx, ["something we cannot name"])
+    agent = _make_scripted_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        ["something we cannot name"],
+        agent_class=_VersionedScriptedClaudeAgent,
+    )
     with pytest.raises(DialogDetectedError):
         agent._preflight_send_message(_TARGET)

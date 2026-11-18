@@ -37,6 +37,7 @@ from collections.abc import Sequence
 from typing import Final
 from typing import Protocol
 
+from pydantic import Field
 from rich.ansi import AnsiDecoder
 from rich.style import Style
 from rich.text import Text
@@ -78,14 +79,20 @@ INPUT_REGION_LINES: Final[int] = 12
 
 
 @pure
+def _get_last_non_blank_lines(pane_content: str, line_count: int) -> str:
+    """The last ``line_count`` non-blank lines of the pane, joined by newlines."""
+    non_blank = [line for line in pane_content.splitlines() if line.strip()]
+    return "\n".join(non_blank[-line_count:])
+
+
+@pure
 def get_input_region(pane_content: str) -> str:
     """The bottom of the pane: the last :data:`INPUT_REGION_LINES` non-blank lines.
 
     Blank lines are dropped first, so the region is unaffected by however much padding a
     surface leaves above its content.
     """
-    non_blank = [line for line in pane_content.splitlines() if line.strip()]
-    return "\n".join(non_blank[-INPUT_REGION_LINES:])
+    return _get_last_non_blank_lines(pane_content, INPUT_REGION_LINES)
 
 
 # How much of the pane's bottom a footer-only match may look at. Tighter than the input
@@ -97,8 +104,58 @@ BENIGN_FOOTER_REGION_LINES: Final[int] = 3
 @pure
 def get_benign_footer_region(pane_content: str) -> str:
     """The last :data:`BENIGN_FOOTER_REGION_LINES` non-blank lines of the pane."""
-    non_blank = [line for line in pane_content.splitlines() if line.strip()]
-    return "\n".join(non_blank[-BENIGN_FOOTER_REGION_LINES:])
+    return _get_last_non_blank_lines(pane_content, BENIGN_FOOTER_REGION_LINES)
+
+
+# How far up from the bottom :func:`describe_unrecognized_pane` looks for an Esc footer beyond
+# the footer region. Eight non-blank lines covers a dialog footer drawn under a few option rows
+# or a wrapped hint, without reaching back into a full transcript.
+WIDE_FOOTER_REGION_LINES: Final[int] = 8
+# Any "esc to <verb>" phrase -- wider than GenericBenign's close/cancel, because what the log has
+# to tell apart is "no footer at all" from "a footer whose verb or position we do not accept".
+_ANY_ESC_PHRASE_RE: Final[re.Pattern[str]] = re.compile(r"\besc to \w+", re.IGNORECASE)
+# A selector row, highlighted (`  ❯ 1. ...`) or not (`    2. ...`): indented, number, dot, space.
+_SELECTOR_OPTION_ROW_RE: Final[re.Pattern[str]] = re.compile(r"^[ \t]+(?:❯[ \t]*)?\d+\.[ \t]", re.MULTILINE)
+
+
+class UnrecognizedPaneShape(FrozenModel):
+    """The shape of a pane nothing in the catalogue explained, for logs. Never carries pane text."""
+
+    is_selector_present: bool = Field(description="Whether the pane shows a highlighted numbered-selector row")
+    selector_option_count: int = Field(description="How many numbered option rows the input region shows")
+    is_esc_phrase_in_footer_region: bool = Field(
+        description="Whether any 'esc to ...' phrase is in the bottom BENIGN_FOOTER_REGION_LINES non-blank lines"
+    )
+    is_esc_phrase_in_wide_footer_region: bool = Field(
+        description="Whether any 'esc to ...' phrase is in the bottom WIDE_FOOTER_REGION_LINES non-blank lines"
+    )
+
+
+@pure
+def describe_unrecognized_pane(pane_content: str) -> UnrecognizedPaneShape:
+    """What an unrecognised pane looks like, as low-cardinality facts that are safe to log.
+
+    Answers the questions a new unnamed dialog raises -- would a digit answer it, and does it
+    offer an Esc dismissal that :class:`GenericBenign` missed only because of where or how the
+    footer is drawn -- without recording any of the pane's words.
+    """
+    wide_footer_region = _get_last_non_blank_lines(pane_content, WIDE_FOOTER_REGION_LINES)
+    return UnrecognizedPaneShape(
+        is_selector_present=SELECTOR_HIGHLIGHTED_OPTION_RE.search(pane_content) is not None,
+        selector_option_count=len(_SELECTOR_OPTION_ROW_RE.findall(get_input_region(pane_content))),
+        is_esc_phrase_in_footer_region=_ANY_ESC_PHRASE_RE.search(get_benign_footer_region(pane_content)) is not None,
+        is_esc_phrase_in_wide_footer_region=_ANY_ESC_PHRASE_RE.search(wide_footer_region) is not None,
+    )
+
+
+@pure
+def format_unrecognized_pane_shape(shape: UnrecognizedPaneShape) -> str:
+    """The shape of an unrecognized pane as ``label: value`` log fields."""
+    return (
+        f"selector present: {shape.is_selector_present}; selector options: {shape.selector_option_count}; "
+        f"esc phrase in bottom {BENIGN_FOOTER_REGION_LINES} lines: {shape.is_esc_phrase_in_footer_region}; "
+        f"esc phrase in bottom {WIDE_FOOTER_REGION_LINES} lines: {shape.is_esc_phrase_in_wide_footer_region}"
+    )
 
 
 # What Claude puts at the start of the input row in shell mode, in place of the usual glyph.

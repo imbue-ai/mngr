@@ -32,6 +32,7 @@ from imbue.mngr_claude.dialogs import Unrecognized
 from imbue.mngr_claude.dialogs import classify
 from imbue.mngr_claude.dialogs import cycle_to_option
 from imbue.mngr_claude.dialogs import deal_with_dialogs
+from imbue.mngr_claude.dialogs import describe_unrecognized_pane
 from imbue.mngr_claude.dialogs import get_input_row
 from imbue.mngr_claude.dialogs import get_pane_text_without_input_row_hints
 from imbue.mngr_claude.dialogs import is_nonbenign_answer_allowed
@@ -824,3 +825,52 @@ def test_option_labels_match_installed_binary() -> None:
 )
 def test_is_restored_compact_command_matches_only_the_compact_command(input_text: str, expected: bool) -> None:
     assert is_restored_compact_command(input_text) is expected
+
+
+# A startup opt-in selector: a rule, a question, a few bullets, two numbered options, and no
+# footer under them. Synthetic wording.
+_OPT_IN_SELECTOR_ROWS = (
+    "────────────────────────────────────────\n"
+    "  Try the new widget?\n"
+    "\n"
+    "  · First benefit of the widget\n"
+    "  · Second benefit of the widget\n"
+    "\n"
+    "  ❯ 1. Yes, try it\n"
+    "    2. Not now\n"
+)
+
+
+def test_describe_unrecognized_pane_reports_a_footerless_selector() -> None:
+    """A two-option selector with no Esc footer anywhere near the bottom."""
+    shape = describe_unrecognized_pane(_OPT_IN_SELECTOR_ROWS)
+    assert isinstance(classify(_OPT_IN_SELECTOR_ROWS), Unrecognized)
+    assert shape.is_selector_present is True
+    assert shape.selector_option_count == 2
+    assert shape.is_esc_phrase_in_footer_region is False
+    assert shape.is_esc_phrase_in_wide_footer_region is False
+
+
+def test_describe_unrecognized_pane_finds_a_footer_with_a_verb_generic_benign_does_not_accept() -> None:
+    """An 'esc to <verb>' footer GenericBenign leaves alone still shows up, so the log tells it from no footer."""
+    pane = _OPT_IN_SELECTOR_ROWS + "\n  Enter to confirm · Esc to skip\n"
+    shape = describe_unrecognized_pane(pane)
+    assert isinstance(classify(pane), Unrecognized)
+    assert shape.is_esc_phrase_in_footer_region is True
+    assert shape.is_esc_phrase_in_wide_footer_region is True
+
+
+def test_describe_unrecognized_pane_tells_a_footer_above_the_footer_region_apart() -> None:
+    """A footer drawn above the bottom three lines is out of GenericBenign's reach but inside the wide region."""
+    pane = "  Try the new widget?\n  Esc to cancel\n  ❯ 1. Yes, try it\n    2. Not now\n    3. Never\n"
+    shape = describe_unrecognized_pane(pane)
+    assert isinstance(classify(pane), Unrecognized)
+    assert shape.selector_option_count == 3
+    assert shape.is_esc_phrase_in_footer_region is False
+    assert shape.is_esc_phrase_in_wide_footer_region is True
+
+
+def test_describe_unrecognized_pane_reports_no_selector_on_a_bare_pane() -> None:
+    shape = describe_unrecognized_pane("something we cannot name")
+    assert shape.is_selector_present is False
+    assert shape.selector_option_count == 0
