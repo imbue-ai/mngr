@@ -1,6 +1,8 @@
 import pytest
 
 from imbue.skitwright.data_types import CommandResult
+from imbue.skitwright.expect import ResultExpectation
+from imbue.skitwright.expect import StringExpectation
 from imbue.skitwright.expect import expect
 
 
@@ -13,6 +15,10 @@ def _fail(exit_code: int = 1, stdout: str = "", stderr: str = "") -> CommandResu
 
 
 # --- ResultExpectation ---
+
+# For these assertion helpers, "does not raise on a passing input" IS the behavior under
+# test, so the pass-path tests below intentionally have no explicit assertion. Each is
+# paired with a *_fails_* test that verifies the raising branch and its message.
 
 
 def test_to_succeed_passes_on_zero_exit() -> None:
@@ -111,13 +117,11 @@ def test_to_be_empty_fails_on_nonempty() -> None:
 
 
 def test_expect_dispatches_to_result_expectation() -> None:
-    expectation = expect(_ok())
-    expectation.to_succeed()
+    assert isinstance(expect(_ok()), ResultExpectation)
 
 
 def test_expect_dispatches_to_string_expectation() -> None:
-    expectation = expect("hello")
-    expectation.to_contain("hello")
+    assert isinstance(expect("hello"), StringExpectation)
 
 
 def test_expect_raises_on_unsupported_type() -> None:
