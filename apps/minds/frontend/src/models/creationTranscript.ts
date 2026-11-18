@@ -80,7 +80,7 @@ export function interruptedLine(retryUnavailableReason: string): string {
 /** What the failure turn says, and which ways forward fit it. Report a bug is always offered. */
 export interface FailureCopy {
   message: string;
-  /** Retry can help; it cannot while the account itself is refused. */
+  /** Retry can help, possibly once the person deals with the cause outside Imbue Studio. */
   isRetryOffered: boolean;
   /** Imbue Cloud refused the create, so running the workspace on this computer is a way forward. */
   isRunHereOffered: boolean;
@@ -229,8 +229,8 @@ function causeCopy(
     case "WAITLISTED":
       return copyOf(
         `${couldNot} Your account is still on the waitlist, so it can't run workspaces on Imbue Cloud yet. ` +
-          `*Open the invite link in your invitation email*, ${RUN_HERE_TAIL}`,
-        { isRetryOffered: false, isRunHereOffered: true, isImbueCloudUnusable: true },
+          `*Open the invite link in your invitation email and accept the invite, then select Retry*, ${RUN_HERE_TAIL}`,
+        { isRunHereOffered: true, isImbueCloudUnusable: true },
       );
     case "QUOTA_EXCEEDED":
       return copyOf(

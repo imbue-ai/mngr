@@ -204,8 +204,9 @@ describe("failureCopy", () => {
       return rest;
     };
     // The account can't use Imbue Cloud at all: running here also turns its Imbue Cloud backups and sharing off.
+    // Accepting the invite takes the account off the waitlist, so Retry can then go through.
     expect(ways("WAITLISTED")).toEqual({
-      isRetryOffered: false,
+      isRetryOffered: true,
       isRunHereOffered: true,
       isImbueCloudUnusable: true,
       isUpdateOffered: false,
@@ -240,7 +241,7 @@ describe("failureCopy", () => {
   });
 
   it("asks for no retry where none is offered", () => {
-    for (const errorKind of ["ACCOUNT_SUSPENDED", "WAITLISTED", "CLIENT_TOO_OLD"]) {
+    for (const errorKind of ["ACCOUNT_SUSPENDED", "CLIENT_TOO_OLD"]) {
       const copy = failureCopy("alpha", failure(errorKind), request());
       expect(copy.isRetryOffered).toBe(false);
       expect(copy.message).not.toMatch(/try again|Retry/i);

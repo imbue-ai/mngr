@@ -785,7 +785,7 @@ describe("CreatingPage across a route change", () => {
     expect([...failureActions(view).keys()]).toEqual(["Retry", "Dismiss"]);
   });
 
-  it("offers a waitlisted account its own computer instead of a Retry that fails the same way", async () => {
+  it("offers a waitlisted account its own computer, and a Retry on Imbue Cloud for once it accepts its invite", async () => {
     const { render } = await mountRecord(
       "create-attempt-w",
       recordWith("create-attempt-w", { error: "This account is on the waitlist.", error_kind: "WAITLISTED" }),
@@ -793,13 +793,18 @@ describe("CreatingPage across a route change", () => {
     const view = render();
     expect(shownText(view)).toContain("still on the waitlist");
     const offered = failureActions(view);
-    expect([...offered.keys()]).toEqual(["Run on this computer", "Dismiss"]);
+    expect([...offered.keys()]).toEqual(["Run on this computer", "Retry", "Dismiss"]);
     offered.get("Run on this computer")?.onclick();
     expect(retryFormAttrs(render())).toMatchObject({
       retryId: "create-attempt-w",
       initialPreset: "local",
       isImbueCloudRefused: true,
     });
+    offered.get("Retry")?.onclick();
+    const retryForm = retryFormAttrs(render());
+    expect(retryForm?.retryId).toBe("create-attempt-w");
+    expect(retryForm?.initialPreset).toBeUndefined();
+    expect(retryForm?.isImbueCloudRefused).toBe(false);
   });
 
   it("leads a plan limit with a run on this computer that keeps Imbue Cloud backups and sharing, Retry behind it", async () => {
