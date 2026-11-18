@@ -80,6 +80,7 @@ from imbue.minds.desktop_client.create_attempt_rows import CreateAttemptOwner
 from imbue.minds.desktop_client.create_attempt_rows import CreateAttemptRow
 from imbue.minds.desktop_client.create_attempt_rows import derive_create_attempt_rows
 from imbue.minds.desktop_client.create_attempt_rows import derive_settling_create_owners
+from imbue.minds.desktop_client.create_attempt_rows import is_host_being_created
 from imbue.minds.desktop_client.create_progress_history import make_progress_history_store
 from imbue.minds.desktop_client.data_types import BackupAccessState
 from imbue.minds.desktop_client.data_types import CloudRowKeyState
@@ -1064,8 +1065,14 @@ def _compute_backup_access(
 def _collect_remote_workspace_tiles(
     backend_resolver: BackendResolverInterface,
     session_store: MultiAccountSessionStore | None,
+    creating_rows: Sequence[CreateAttemptRow],
 ) -> list[RemoteWorkspaceTile]:
-    """Workspaces known only from synced records (not in local discovery), for the landing list."""
+    """Workspaces known only from synced records (not in local discovery), for the landing list.
+
+    A cloud record named for a host that a CREATING row in ``creating_rows`` is
+    building gets no tile: the connector writes it at lease time, and the row
+    already stands for that workspace.
+    """
     if session_store is None or session_store.record_store is None:
         return []
     # "Not in local discovery" is only meaningful once discovery has produced
@@ -1092,6 +1099,12 @@ def _collect_remote_workspace_tiles(
             # device's hostname the record carries.
             connection_store = session_store.record_store.connection_store
             is_cloud_row = _is_account_synced_row(record, connection_store)
+            if is_cloud_row and is_host_being_created(
+                creating_rows,
+                provider_instance_name_for_synced_row(str(account.user_id), record.provider_kind),
+                record.display_name,
+            ):
+                continue
             if is_cloud_row:
                 kind = RemoteWorkspaceKind.CLOUD
                 location = _remote_location_label(record.provider_kind, connection_store)
@@ -1124,6 +1137,7 @@ def _collect_remote_workspace_tiles(
 def _build_remote_tile_states(
     backend_resolver: BackendResolverInterface,
     session_store: MultiAccountSessionStore | None,
+    creating_rows: Sequence[CreateAttemptRow],
 ) -> dict[str, RemoteTileState]:
     """``agent_id -> derived state`` (with its detail) for every remote tile (the drift payload).
 
@@ -1133,7 +1147,7 @@ def _build_remote_tile_states(
     """
     return {
         tile.agent_id: RemoteTileState(state=tile.state, detail=tile.state_detail)
-        for tile in _collect_remote_workspace_tiles(backend_resolver, session_store)
+        for tile in _collect_remote_workspace_tiles(backend_resolver, session_store, creating_rows)
     }
 
 
@@ -1746,7 +1760,7 @@ def _build_workspace_list(
     # device, or a cloud workspace this device cannot currently see). They
     # render greyed and non-navigable; ``location`` names where they live and
     # ``backup_access`` whether their backups are reachable from here.
-    for tile in _collect_remote_workspace_tiles(backend_resolver, session_store):
+    for tile in _collect_remote_workspace_tiles(backend_resolver, session_store, create_attempt_rows or ()):
         remote_entry: dict[str, str] = {
             "id": tile.agent_id,
             "name": tile.name,
@@ -2315,11 +2329,12 @@ def _derive_ui_workspaces_message(
 ) -> UiWorkspacesMessage:
     with app.app_context():
         live_create_infos, create_records = _create_attempt_sources()
+        create_attempt_rows = _visible_create_attempt_rows(backend_resolver, live_create_infos, create_records)
         rows = _build_workspace_list(
             backend_resolver,
             session_store,
             tracker=get_state().system_interface_health_tracker,
-            create_attempt_rows=_visible_create_attempt_rows(backend_resolver, live_create_infos, create_records),
+            create_attempt_rows=create_attempt_rows,
             stop_kind_by_host_id=(
                 machine_stop_kind_tracker.stop_kind_by_host_id() if machine_stop_kind_tracker is not None else None
             ),
@@ -2361,7 +2376,7 @@ def _derive_ui_workspaces_message(
                 agent_id for agent_id, marker_status in destroying_marker.items() if marker_status == "confirming"
             ),
             restorable_workspace_ids=tuple(restorable_ids),
-            remote_workspace_states=_build_remote_tile_states(backend_resolver, session_store),
+            remote_workspace_states=_build_remote_tile_states(backend_resolver, session_store, create_attempt_rows),
         )
 
 

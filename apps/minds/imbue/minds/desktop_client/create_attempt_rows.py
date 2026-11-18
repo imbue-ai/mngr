@@ -152,6 +152,18 @@ def _row_from_record(record: PendingCreateAttemptRecord) -> CreateAttemptRow | N
 
 
 @pure
+def is_host_being_created(rows: Sequence[CreateAttemptRow], provider_instance_name: str, host_name: str) -> bool:
+    """Whether a CREATING row targets ``host_name`` on ``provider_instance_name`` (names compare casefolded)."""
+    folded_host_name = host_name.casefold()
+    return any(
+        row.kind is CreateAttemptRowKind.CREATING
+        and row.provider_instance_name == provider_instance_name
+        and row.host_name.casefold() == folded_host_name
+        for row in rows
+    )
+
+
+@pure
 def derive_create_attempt_rows(
     live_infos: Sequence[AgentCreateAttemptInfo],
     records: Sequence[PendingCreateAttemptRecord],

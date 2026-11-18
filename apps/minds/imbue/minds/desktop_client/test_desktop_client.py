@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import httpx2
 import pytest
@@ -29,9 +30,11 @@ from imbue.imbue_common.sentry.testing import recording_s3_bucket
 from imbue.imbue_common.sentry.testing import registered_attachments_uploader
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.app import _build_remote_tile_states
 from imbue.minds.desktop_client.app import _build_requests_payload
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import _collect_remote_workspace_tiles
+from imbue.minds.desktop_client.app import _derive_ui_workspaces_message
 from imbue.minds.desktop_client.app import _finalize_and_mark_destroying
 from imbue.minds.desktop_client.app import _ui_workspace_entry_from_legacy_dict
 from imbue.minds.desktop_client.app import create_desktop_client
@@ -67,6 +70,8 @@ from imbue.minds.desktop_client.cookie_manager import _COOKIE_SALT
 from imbue.minds.desktop_client.cookie_manager import _SESSION_PAYLOAD
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.create_attempt_rows import CreateAttemptOwner
+from imbue.minds.desktop_client.create_attempt_rows import CreateAttemptRow
+from imbue.minds.desktop_client.create_attempt_rows import CreateAttemptRowKind
 from imbue.minds.desktop_client.data_types import BackupAccessState
 from imbue.minds.desktop_client.data_types import RemoteWorkspaceKind
 from imbue.minds.desktop_client.dek_store import bundle_mirror_path
@@ -81,6 +86,8 @@ from imbue.minds.desktop_client.latchkey.response_events import create_request_r
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.minds_config import WorkspaceAutoUpdateMode
 from imbue.minds.desktop_client.minds_config import WorkspaceAutoUpdateOverride
+from imbue.minds.desktop_client.mock_agent_creator_test import InFlightCreateAttempt
+from imbue.minds.desktop_client.mock_agent_creator_test import make_in_flight_agent_creator
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
@@ -109,6 +116,7 @@ from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordSto
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceSecretsPayload
 from imbue.minds.desktop_client.workspace_record_store import encode_encrypted_secrets
 from imbue.minds.primitives import CookieSigningKey
+from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServiceName
 from imbue.minds.utils.mngr_caller import MngrCallResult
@@ -1042,10 +1050,10 @@ def test_remote_tiles_wait_for_the_initial_discovery_snapshot(tmp_path: Path) ->
     )
 
     undiscovered_resolver = MngrCliBackendResolver()
-    assert _collect_remote_workspace_tiles(undiscovered_resolver, session_store) == []
+    assert _collect_remote_workspace_tiles(undiscovered_resolver, session_store, ()) == []
 
     discovered_resolver = make_resolver_with_data(agents_json=make_agents_json(AgentId.generate()))
-    tiles = _collect_remote_workspace_tiles(discovered_resolver, session_store)
+    tiles = _collect_remote_workspace_tiles(discovered_resolver, session_store, ())
     assert [tile.agent_id for tile in tiles] == ["agent-elsewhere"]
 
 
@@ -1104,6 +1112,194 @@ def test_remote_row_entry_carries_the_records_host_id_for_removal(tmp_path: Path
     assert _ui_workspace_entry_from_legacy_dict(remote_entry).host_id == record.host_id
 
 
+def _upsert_lease_stub_record(
+    session_store: MultiAccountSessionStore,
+    *,
+    user_id: str,
+    email: str,
+    agent_id: AgentId,
+    host_name: str,
+) -> None:
+    """Store the ACTIVE record the connector writes when a host is leased: the host name as display name, no colour."""
+    record_store = session_store.record_store
+    assert record_store is not None
+    record_store.upsert_local_record(
+        user_id,
+        email,
+        ReplicaRecord(
+            host_id=str(HostId.generate()),
+            agent_id=str(agent_id),
+            display_name=host_name,
+            color=None,
+            provider_kind=legacy_imbue_cloud_provider_name_for_account(email),
+            hosting_device_id=None,
+            device_label="",
+            state=RECORD_STATE_ACTIVE,
+            encrypted_secrets=None,
+        ),
+    )
+
+
+def _create_attempt_row(
+    *, host_name: str, provider_instance_name: str, kind: CreateAttemptRowKind
+) -> CreateAttemptRow:
+    return CreateAttemptRow(
+        create_attempt_id=f"create-attempt-{uuid4().hex}",
+        kind=kind,
+        display_name=host_name,
+        host_name=host_name,
+        provider_instance_name=provider_instance_name,
+        launch_mode=LaunchMode.IMBUE_CLOUD,
+    )
+
+
+def test_lease_stub_of_a_host_being_created_has_no_remote_tile_beside_its_creating_row(tmp_path: Path) -> None:
+    """While a create is building the leased host, its row stands for the connector's lease-time record.
+
+    The leased agent carries no workspace labels until the create finishes, so the stub falls outside
+    local discovery and would render as a second, greyed, unreachable row for the same workspace.
+    """
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    session_store = make_session_store_for_test(tmp_path, cli=cli)
+    stub_agent_id = AgentId.generate()
+    host_name = f"workspace-{uuid4().hex}"
+    _upsert_lease_stub_record(
+        session_store, user_id="user-1", email="a@b.com", agent_id=stub_agent_id, host_name=host_name
+    )
+    resolver = make_resolver_with_data(agents_json=make_agents_json(AgentId.generate()))
+    creating_row = _create_attempt_row(
+        host_name=host_name.upper(),
+        provider_instance_name=imbue_cloud_provider_name_for_user("user-1"),
+        kind=CreateAttemptRowKind.CREATING,
+    )
+
+    assert [tile.agent_id for tile in _collect_remote_workspace_tiles(resolver, session_store, ())] == [
+        str(stub_agent_id)
+    ]
+    assert _collect_remote_workspace_tiles(resolver, session_store, (creating_row,)) == []
+    assert _build_remote_tile_states(resolver, session_store, (creating_row,)) == {}
+    entries = _build_workspace_list(resolver, session_store, create_attempt_rows=(creating_row,))
+    assert [entry["id"] for entry in entries if entry.get("is_remote") == "true"] == []
+    assert [entry["id"] for entry in entries if entry.get("create_attempt_state") == "creating"] == [
+        creating_row.create_attempt_id
+    ]
+
+
+@pytest.mark.parametrize(
+    ("row_host_name", "row_provider_instance_name", "row_kind"),
+    [
+        pytest.param(
+            "another-host-name-61207",
+            imbue_cloud_provider_name_for_user("user-1"),
+            CreateAttemptRowKind.CREATING,
+            id="other-host-name",
+        ),
+        pytest.param(
+            "stub-host-name-61207",
+            imbue_cloud_provider_name_for_user("user-2"),
+            CreateAttemptRowKind.CREATING,
+            id="other-account",
+        ),
+        pytest.param(
+            "stub-host-name-61207",
+            imbue_cloud_provider_name_for_user("user-1"),
+            CreateAttemptRowKind.FAILED,
+            id="failed-row",
+        ),
+        pytest.param(
+            "stub-host-name-61207",
+            imbue_cloud_provider_name_for_user("user-1"),
+            CreateAttemptRowKind.INTERRUPTED,
+            id="interrupted-row",
+        ),
+    ],
+)
+def test_lease_stub_keeps_its_remote_tile_unless_a_creating_row_targets_its_host_and_account(
+    tmp_path: Path,
+    row_host_name: str,
+    row_provider_instance_name: str,
+    row_kind: CreateAttemptRowKind,
+) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    session_store = make_session_store_for_test(tmp_path, cli=cli)
+    stub_agent_id = AgentId.generate()
+    _upsert_lease_stub_record(
+        session_store, user_id="user-1", email="a@b.com", agent_id=stub_agent_id, host_name="stub-host-name-61207"
+    )
+    resolver = make_resolver_with_data(agents_json=make_agents_json(AgentId.generate()))
+    row = _create_attempt_row(
+        host_name=row_host_name, provider_instance_name=row_provider_instance_name, kind=row_kind
+    )
+
+    tiles = _collect_remote_workspace_tiles(resolver, session_store, (row,))
+
+    assert [tile.agent_id for tile in tiles] == [str(stub_agent_id)]
+
+
+def test_other_device_record_named_like_a_creating_host_keeps_its_remote_tile(tmp_path: Path) -> None:
+    """Only an account-synced (cloud) record shares a host-name namespace with the create; a device's own does not."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    session_store = make_session_store_for_test(tmp_path, cli=cli)
+    other_device_agent_id = AgentId.generate()
+    _upsert_remote_record(
+        session_store,
+        user_id="user-1",
+        email="a@b.com",
+        agent_id=other_device_agent_id,
+        provider_kind="docker",
+        device_label="mac",
+        encrypted_secrets=None,
+    )
+    resolver = make_resolver_with_data(agents_json=make_agents_json(AgentId.generate()))
+    creating_row = _create_attempt_row(
+        host_name="elsewhere", provider_instance_name="docker", kind=CreateAttemptRowKind.CREATING
+    )
+
+    tiles = _collect_remote_workspace_tiles(resolver, session_store, (creating_row,))
+
+    assert [tile.agent_id for tile in tiles] == [str(other_device_agent_id)]
+
+
+def test_workspaces_message_carries_only_the_creating_row_for_a_host_whose_lease_stub_is_synced(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """The list and the tile-state drift payload both leave out the stub of a host a live create is building."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    session_store = make_session_store_for_test(tmp_path / "session-store", cli)
+    host_name = f"workspace-{uuid4().hex}"
+    _upsert_lease_stub_record(
+        session_store, user_id="user-1", email="a@b.com", agent_id=AgentId.generate(), host_name=host_name
+    )
+    resolver = make_resolver_with_data(agents_json=make_agents_json(AgentId.generate()))
+    agent_creator = make_in_flight_agent_creator(
+        tmp_path,
+        root_concurrency_group,
+        (
+            InFlightCreateAttempt(
+                provider_instance_name=imbue_cloud_provider_name_for_user("user-1"), host_name=host_name
+            ),
+        ),
+    )
+    _client, app, _auth_store = build_desktop_client_for_test(
+        tmp_path,
+        is_authenticated=True,
+        backend_resolver=resolver,
+        session_store=session_store,
+        agent_creator=agent_creator,
+        imbue_cloud_cli=cli,
+    )
+
+    message = _derive_ui_workspaces_message(app, resolver, session_store, None, None)
+
+    assert [entry.id for entry in message.workspaces if entry.is_remote] == []
+    assert [entry.name for entry in message.workspaces if entry.create_attempt_state == "creating"] == [host_name]
+    assert message.remote_workspace_states == {}
+
+
 def test_cloud_record_outside_discovery_is_badged_with_its_provider_not_the_creating_device(
     tmp_path: Path,
 ) -> None:
@@ -1138,7 +1334,7 @@ def test_cloud_record_outside_discovery_is_badged_with_its_provider_not_the_crea
     )
     resolver = make_resolver_with_data(agents_json=make_agents_json(AgentId.generate()))
 
-    tile_by_agent_id = {tile.agent_id: tile for tile in _collect_remote_workspace_tiles(resolver, session_store)}
+    tile_by_agent_id = {tile.agent_id: tile for tile in _collect_remote_workspace_tiles(resolver, session_store, ())}
 
     cloud_tile = tile_by_agent_id[str(cloud_agent_id)]
     assert cloud_tile.kind is RemoteWorkspaceKind.CLOUD
@@ -1172,7 +1368,7 @@ def test_record_on_an_account_connection_is_badged_with_the_alias_and_stays_a_cl
     )
     resolver = make_resolver_with_data(agents_json=make_agents_json(AgentId.generate()))
 
-    (tile,) = _collect_remote_workspace_tiles(resolver, session_store)
+    (tile,) = _collect_remote_workspace_tiles(resolver, session_store, ())
 
     assert tile.kind is RemoteWorkspaceKind.CLOUD
     assert tile.location == "team modal (Modal)"
@@ -1180,7 +1376,7 @@ def test_record_on_an_account_connection_is_badged_with_the_alias_and_stays_a_cl
 
     connection_store.remove_connection("user-1", "a@b.com", str(connection_id))
 
-    (tile,) = _collect_remote_workspace_tiles(resolver, session_store)
+    (tile,) = _collect_remote_workspace_tiles(resolver, session_store, ())
 
     assert tile.kind is RemoteWorkspaceKind.CLOUD
     assert tile.location == "Modal"
@@ -1265,7 +1461,7 @@ def test_remote_tile_backup_access_follows_where_the_credentials_are(tmp_path: P
     resolver = make_resolver_with_data(agents_json=make_agents_json(AgentId.generate()))
 
     access_by_agent_id = {
-        tile.agent_id: tile.backup_access for tile in _collect_remote_workspace_tiles(resolver, session_store)
+        tile.agent_id: tile.backup_access for tile in _collect_remote_workspace_tiles(resolver, session_store, ())
     }
 
     assert access_by_agent_id[str(local_env_agent_id)] is BackupAccessState.AVAILABLE

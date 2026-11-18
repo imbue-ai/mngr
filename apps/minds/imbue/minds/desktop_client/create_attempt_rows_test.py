@@ -9,6 +9,7 @@ from imbue.minds.desktop_client.agent_creator import CreateAttemptErrorKind
 from imbue.minds.desktop_client.create_attempt_rows import CreateAttemptRowKind
 from imbue.minds.desktop_client.create_attempt_rows import derive_create_attempt_rows
 from imbue.minds.desktop_client.create_attempt_rows import derive_settling_create_owners
+from imbue.minds.desktop_client.create_attempt_rows import is_host_being_created
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
@@ -151,6 +152,40 @@ def test_record_only_rows_sort_oldest_first() -> None:
     )
     rows = derive_create_attempt_rows([], [newer, older], frozenset())
     assert [row.create_attempt_id for row in rows] == [older.create_attempt_id, newer.create_attempt_id]
+
+
+def test_is_host_being_created_matches_a_creating_row_on_its_provider_ignoring_case() -> None:
+    rows = derive_create_attempt_rows(
+        [_live_info(AgentCreateAttemptStatus.CREATING_WORKSPACE, host_name="Workspace-1")], [], frozenset()
+    )
+
+    assert is_host_being_created(rows, "lima", "workspace-1")
+
+
+def test_is_host_being_created_ignores_another_provider_and_another_host_name() -> None:
+    rows = derive_create_attempt_rows(
+        [_live_info(AgentCreateAttemptStatus.CREATING_WORKSPACE, host_name="workspace-1")], [], frozenset()
+    )
+
+    assert not is_host_being_created(rows, "docker", "workspace-1")
+    assert not is_host_being_created(rows, "lima", "workspace-2")
+    assert not is_host_being_created([], "lima", "workspace-1")
+
+
+def test_is_host_being_created_ignores_failed_and_interrupted_rows() -> None:
+    failed_rows = derive_create_attempt_rows(
+        [_live_info(AgentCreateAttemptStatus.FAILED, host_name="workspace-1", error="boom")], [], frozenset()
+    )
+    interrupted_rows = derive_create_attempt_rows(
+        [],
+        [_record("create-attempt-interrupted-70412", PendingCreateAttemptState.IN_FLIGHT, host_name="workspace-1")],
+        frozenset(),
+    )
+
+    assert [row.kind for row in failed_rows] == [CreateAttemptRowKind.FAILED]
+    assert [row.kind for row in interrupted_rows] == [CreateAttemptRowKind.INTERRUPTED]
+    assert not is_host_being_created(failed_rows, "lima", "workspace-1")
+    assert not is_host_being_created(interrupted_rows, "lima", "workspace-1")
 
 
 def _owned_record(
