@@ -17,7 +17,7 @@ from loguru import logger
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import ConfigError
-from imbue.mngr.hosts.work_leases import WORK_LEASE_DIR_NAME
+from imbue.mngr.hosts.background_tasks import BACKGROUND_TASK_DIR_NAME
 from imbue.mngr.utils.file_utils import atomic_write
 
 
@@ -823,7 +823,7 @@ COMPACTING_MARKER_FILENAME: Final[str] = "compacting"
 LAST_COMPACTION_FILENAME: Final[str] = "last_compaction.json"
 
 # The prefix of the record names ``wait_for_stop_hook.sh`` writes, which are the only ones mngr_claude clears.
-HOOK_WORK_LEASE_NAME_PREFIX: Final[str] = "task-"
+HOOK_BACKGROUND_TASK_NAME_PREFIX: Final[str] = "task-"
 
 
 # Shell snippet that appends one activity event so `mngr observe` promptly
@@ -896,9 +896,9 @@ def build_readiness_hooks_config() -> dict[str, Any]:
       kept only for old senders and is scheduled for removal.
       Filtering on source ensures normal startup/resume don't fire stale signals.
       Finally, on ``startup``/``resume`` it clears the 'active' and
-      'permissions_waiting' markers (see below) and this hook set's work leases:
-      a fresh Claude process is not mid-turn and runs none of the background work
-      the previous process left running, so anything left over from a turn that
+      'permissions_waiting' markers (see below) and this hook set's background task
+      records: a fresh Claude process is not mid-turn and runs none of the background
+      work the previous process left running, so anything left over from a turn that
       was abandoned by an abnormal exit (container restart, OOM, crash -- where
       the Stop hook never ran) is stale and must be reset, otherwise the agent
       reports RUNNING. ``compact`` is excluded because auto-compaction fires
@@ -1044,10 +1044,10 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                             # mid-turn and runs none of the background work the
                             # previous process left behind, so record the
                             # process-start time and reset the activity markers
-                            # and this hook's work leases. This heals the case
-                            # where a turn was abandoned by an abnormal exit
+                            # and this hook's background task records. This heals
+                            # the case where a turn was abandoned by an abnormal exit
                             # (container restart, OOM, crash): the Stop hook never
-                            # ran to clear 'active', and the leases its last run
+                            # ran to clear 'active', and the records its last run
                             # wrote outlive the tasks they stand for, so without
                             # this the agent would report RUNNING or
                             # RUNNING_BACKGROUND after restart until its next turn end.
@@ -1065,7 +1065,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                                 ' _MNGR_SOURCE=$(echo "$_MNGR_HOOK_INPUT" | jq -r ".source // empty");'
                                 ' case "$_MNGR_SOURCE" in startup|resume)'
                                 ' rm -f "$MNGR_AGENT_STATE_DIR/compacting";'
-                                f' rm -f "$MNGR_AGENT_STATE_DIR"/{WORK_LEASE_DIR_NAME}/{HOOK_WORK_LEASE_NAME_PREFIX}*;'
+                                f' rm -f "$MNGR_AGENT_STATE_DIR"/{BACKGROUND_TASK_DIR_NAME}/{HOOK_BACKGROUND_TASK_NAME_PREFIX}*;'
                                 ' touch "$MNGR_AGENT_STATE_DIR/claude_process_started" && '
                                 + _CLEAR_ACTIVE_MARKERS_AND_EMIT_ACTIVITY_EVENT
                                 + " ;; esac"

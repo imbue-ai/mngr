@@ -1,0 +1,1 @@
+Follows mngr's rename of `LifecycleProbeResult.leases` to `background_tasks` and of `imbue.mngr.hosts.work_leases` to `imbue.mngr.hosts.background_tasks`. What an agent listing publishes is unchanged.

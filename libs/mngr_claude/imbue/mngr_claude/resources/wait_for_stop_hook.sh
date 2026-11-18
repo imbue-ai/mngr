@@ -192,15 +192,15 @@ has_blocked_stop_hook() {
 }
 
 # The prefix of the record names this hook writes, which are the only ones it clears.
-WORK_LEASE_NAME_PREFIX="task-"
+BACKGROUND_TASK_NAME_PREFIX="task-"
 
 # Rewrite this hook's records: one per background task the Stop payload lists without a terminal status.
-write_work_leases() {
-    local lease_entries
-    command -v mngr_work_lease_declare >/dev/null 2>&1 || return 0
-    lease_entries=$(printf '%s' "$HOOK_INPUT" \
-        | jq -r --arg task_prefix "$WORK_LEASE_NAME_PREFIX" '
-            def lease_kind:
+write_background_task_records() {
+    local record_entries
+    command -v mngr_background_task_write >/dev/null 2>&1 || return 0
+    record_entries=$(printf '%s' "$HOOK_INPUT" \
+        | jq -r --arg task_prefix "$BACKGROUND_TASK_NAME_PREFIX" '
+            def record_kind:
                 if . == "shell" then "SHELL"
                 elif . == "subagent" or . == "teammate" or . == "cloud session" or . == "workflow" then "SUBAGENT"
                 elif . == "monitor" then "MONITOR"
@@ -210,16 +210,16 @@ write_work_leases() {
                     | . != "completed" and . != "failed" and . != "killed" and . != "cancelled")
                 | (.task_id // .id // empty) as $id
                 | ((.type // "") | tostring) as $task_type
-                | ([$task_prefix + ($id | tostring), ($task_type | lease_kind)] | @tsv)
+                | ([$task_prefix + ($id | tostring), ($task_type | record_kind)] | @tsv)
                     + "\t" + ($task_type | @uri | split("%") | join("\\x"))' 2>/dev/null) || true
-    mngr_work_lease_clear "$WORK_LEASE_NAME_PREFIX"
-    [ -n "$lease_entries" ] || return 0
-    printf '%s\n' "$lease_entries" | while IFS=$'\t' read -r lease_name lease_kind lease_native_type_escaped; do
-        [ -n "$lease_name" ] || continue
-        # jq wrote each byte @uri escapes as \xHH; %b turns the type back into the raw text declare takes.
-        lease_native_type=""
-        [ -z "$lease_native_type_escaped" ] || printf -v lease_native_type '%b' "$lease_native_type_escaped"
-        mngr_work_lease_declare "$lease_name" "$lease_kind" "$lease_native_type"
+    mngr_background_task_clear "$BACKGROUND_TASK_NAME_PREFIX"
+    [ -n "$record_entries" ] || return 0
+    printf '%s\n' "$record_entries" | while IFS=$'\t' read -r record_name record_kind record_native_type_escaped; do
+        [ -n "$record_name" ] || continue
+        # jq wrote each byte @uri escapes as \xHH; %b turns the type back into the raw text the writer takes.
+        record_native_type=""
+        [ -z "$record_native_type_escaped" ] || printf -v record_native_type '%b' "$record_native_type_escaped"
+        mngr_background_task_write "$record_name" "$record_kind" "$record_native_type"
     done
 }
 
@@ -239,9 +239,9 @@ mark_inactive() {
     local reason="${1:-}"
     local flush_lock_timeout="${2:-$FLUSH_LOCK_TIMEOUT_NORMAL}"
     # Guarded, like the flush below: this runs ahead of the marker clear, so under
-    # `set -e` any failure recording the leases would strand the turn-end signal --
-    # leaving the agent reading RUNNING forever rather than merely leaseless.
-    write_work_leases || true
+    # `set -e` any failure writing the records would strand the turn-end signal --
+    # leaving the agent reading RUNNING forever rather than merely without records.
+    write_background_task_records || true
     # Flush the transcript pipeline before clearing the marker (see the comment
     # above the lib source below). This lives in mark_inactive -- not
     # run_post_completion -- so it runs on EVERY turn-end path, including the
@@ -324,11 +324,12 @@ if [ -n "${MNGR_AGENT_STATE_DIR:-}" ] && [ -r "$MNGR_AGENT_STATE_DIR/commands/mn
     source "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh"
 fi
 
-# The work-lease writers. Sourced defensively, like the lib above: an agent provisioned
-# before this one existed declares no leases and still reaches the end of its turn.
-if [ -n "${MNGR_AGENT_STATE_DIR:-}" ] && [ -r "$MNGR_AGENT_STATE_DIR/commands/mngr_work_lease_lib.sh" ]; then
-    # shellcheck source=../../../mngr/imbue/mngr/resources/mngr_work_lease_lib.sh
-    source "$MNGR_AGENT_STATE_DIR/commands/mngr_work_lease_lib.sh"
+# The background task record writers. Sourced defensively, like the lib above: an
+# agent provisioned before this one existed writes no records and still reaches the
+# end of its turn.
+if [ -n "${MNGR_AGENT_STATE_DIR:-}" ] && [ -r "$MNGR_AGENT_STATE_DIR/commands/mngr_background_task_lib.sh" ]; then
+    # shellcheck source=../../../mngr/imbue/mngr/resources/mngr_background_task_lib.sh
+    source "$MNGR_AGENT_STATE_DIR/commands/mngr_background_task_lib.sh"
 fi
 
 # Post-completion actions (run after all other stop hooks finish)

@@ -5,11 +5,11 @@ from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import BackgroundTask
+from imbue.mngr.primitives import BackgroundTaskKind
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.primitives import WorkLease
-from imbue.mngr.primitives import WorkLeaseKind
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr_modal.instance import ModalProviderInstance
@@ -180,7 +180,7 @@ def test_build_single_agent_details_publishes_the_background_tasks_of_a_listed_a
         },
         "tmux_info": "0|my-agent|100",
         "is_active": False,
-        "raw_work_leases": "task-full\tseen:1767355200 kind:SHELL native_type:shell\ntask-bare\tpid:4821",
+        "raw_background_tasks": "task-full\tseen:1767355200 kind:SHELL native_type:shell\ntask-bare\tpid:4821",
     }
     result = testing_provider._build_single_agent_details(
         agent_raw=agent_raw,
@@ -194,13 +194,13 @@ def test_build_single_agent_details_publishes_the_background_tasks_of_a_listed_a
     assert result is not None
     assert result.state == AgentLifecycleState.RUNNING_BACKGROUND
     assert result.background_tasks == (
-        WorkLease(
+        BackgroundTask(
             name="task-full",
-            kind=WorkLeaseKind.SHELL,
+            kind=BackgroundTaskKind.SHELL,
             native_type="shell",
             last_seen_at=datetime(2026, 1, 2, 12, 0, 0, tzinfo=timezone.utc),
         ),
-        WorkLease(name="task-bare"),
+        BackgroundTask(name="task-bare"),
     )
 
 

@@ -30,6 +30,7 @@ from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import BackgroundTask
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
@@ -45,7 +46,6 @@ from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
-from imbue.mngr.primitives import WorkLease
 
 # Canonical mapping from IdleMode to the activity sources it enables.
 ACTIVITY_SOURCES_BY_IDLE_MODE: Final[dict[IdleMode, tuple[ActivitySource, ...]]] = {
@@ -693,7 +693,7 @@ class AgentDetails(FrozenModel):
             "is 'local')."
         ),
     )
-    background_tasks: tuple[WorkLease, ...] = Field(
+    background_tasks: tuple[BackgroundTask, ...] = Field(
         default=(),
         description=(
             "The background tasks the agent left running after its turn, each with its name, kind, "

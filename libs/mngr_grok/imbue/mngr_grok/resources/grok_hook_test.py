@@ -25,11 +25,11 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.agents.tui_utils import NORMALIZED_PROBE_MAX_LENGTH
 from imbue.mngr.agents.tui_utils import build_normalized_message_probe
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.hosts.work_leases import WORK_LEASE_DIR_NAME
-from imbue.mngr.primitives import WorkLeaseKind
+from imbue.mngr.hosts.background_tasks import BACKGROUND_TASK_DIR_NAME
+from imbue.mngr.primitives import BackgroundTaskKind
 from imbue.mngr.utils.testing import HOSTILE_NATIVE_TYPES
 from imbue.mngr.utils.testing import file_lock_held_by_another_process
-from imbue.mngr.utils.testing import read_work_leases_in
+from imbue.mngr.utils.testing import read_background_task_records_in
 from imbue.mngr_grok.resources import grok_hook
 from imbue.mngr_grok.resources.testing import HOOK_FIXTURES_DIR
 from imbue.mngr_grok.resources.testing import read_complete_jsonl_records
@@ -185,7 +185,7 @@ def _describe_marker_state(target: _HookTarget, fixture: _HookFixture) -> str:
         f"{_label(name, fixture)}<{_label(_file_lines(plugin_dir / 'pending_wake' / name)[0], fixture)}"
         for name in _visible_names(plugin_dir / "pending_wake")
     ]
-    leases = [
+    record_names = [
         "task-" + _label(name[len("task-") :], fixture)
         for name in _visible_names(target.state_dir / "background_tasks")
     ]
@@ -193,7 +193,7 @@ def _describe_marker_state(target: _HookTarget, fixture: _HookFixture) -> str:
     words.extend([f"turns={','.join(turns)}"] if turns else [])
     words.extend([f"subagents={','.join(subagents)}"] if subagents else [])
     words.extend([f"pending-wake={','.join(pending_wakes)}"] if pending_wakes else [])
-    words.extend([f"leases={','.join(leases)}"] if leases else [])
+    words.extend([f"records={','.join(record_names)}"] if record_names else [])
     words.extend(["permissions-waiting"] if (target.state_dir / "permissions_waiting").exists() else [])
     return " ".join(words)
 
@@ -323,11 +323,11 @@ _BGSUBAGENT_EXPECTED: Final = (
     ("R post_tool_use spawn_subagent", "active turns=R:p1"),
     ("R subagent_start C1", "active turns=R:p1 subagents=C1"),
     ("C1 user_prompt_submit C1.p1", "active turns=R:p1 subagents=C1"),
-    ("R stop end_turn p1", "active turns=R:p1 subagents=C1(bg) leases=task-C1"),
-    ("R --turn-completed p1", "idle subagents=C1(bg) leases=task-C1"),
-    ("R notification idle_prompt", "idle subagents=C1(bg) leases=task-C1"),
-    ("C1 subagent_stop C1.p1", "idle subagents=C1(bg) leases=task-C1"),
-    ("C1 --turn-completed C1.p1", "idle subagents=C1(bg) leases=task-C1"),
+    ("R stop end_turn p1", "active turns=R:p1 subagents=C1(bg) records=task-C1"),
+    ("R --turn-completed p1", "idle subagents=C1(bg) records=task-C1"),
+    ("R notification idle_prompt", "idle subagents=C1(bg) records=task-C1"),
+    ("C1 subagent_stop C1.p1", "idle subagents=C1(bg) records=task-C1"),
+    ("C1 --turn-completed C1.p1", "idle subagents=C1(bg) records=task-C1"),
     ("C1 session_end shutdown", "active turns=R:pending-wake:C1"),
     ("R user_prompt_submit wake-C1", "active turns=R:wake-C1"),
     ("R stop end_turn wake-C1", "active turns=R:wake-C1"),
@@ -344,11 +344,11 @@ _BGSUBAGENT_BUSY_ROOT_EXPECTED: Final = (
     ("R post_tool_use spawn_subagent", "active turns=R:p1"),
     ("R subagent_start C1", "active turns=R:p1 subagents=C1"),
     ("C1 user_prompt_submit C1.p1", "active turns=R:p1 subagents=C1"),
-    ("R stop end_turn p1", "active turns=R:p1 subagents=C1(bg) leases=task-C1"),
-    ("R --turn-completed p1", "idle subagents=C1(bg) leases=task-C1"),
-    ("R user_prompt_submit p2", "active turns=R:p2 subagents=C1(bg) leases=task-C1"),
-    ("C1 subagent_stop C1.p1", "active turns=R:p2 subagents=C1(bg) leases=task-C1"),
-    ("C1 --turn-completed C1.p1", "active turns=R:p2 subagents=C1(bg) leases=task-C1"),
+    ("R stop end_turn p1", "active turns=R:p1 subagents=C1(bg) records=task-C1"),
+    ("R --turn-completed p1", "idle subagents=C1(bg) records=task-C1"),
+    ("R user_prompt_submit p2", "active turns=R:p2 subagents=C1(bg) records=task-C1"),
+    ("C1 subagent_stop C1.p1", "active turns=R:p2 subagents=C1(bg) records=task-C1"),
+    ("C1 --turn-completed C1.p1", "active turns=R:p2 subagents=C1(bg) records=task-C1"),
     ("C1 session_end shutdown", "active turns=R:p2 pending-wake=R<C1"),
     ("R stop end_turn p2", "active turns=R:p2 pending-wake=R<C1"),
     ("R --turn-completed p2", "active turns=R:pending-wake:C1 pending-wake=R<C1"),
@@ -364,11 +364,11 @@ _BGSHELL_EXPECTED: Final = (
     ("R user_prompt_submit p1", "active turns=R:p1"),
     ("R pre_tool_use run_terminal_command", "active turns=R:p1"),
     ("R post_tool_use run_terminal_command", "active turns=R:p1"),
-    ("R stop end_turn p1", "active turns=R:p1 leases=task-01a156da-5fa8-7e01-bed9-b3e2112a053a"),
-    ("R --turn-completed p1", "idle leases=task-01a156da-5fa8-7e01-bed9-b3e2112a053a"),
-    ("R notification idle_prompt", "idle leases=task-01a156da-5fa8-7e01-bed9-b3e2112a053a"),
-    ("R notification task_complete", "idle leases=task-01a156da-5fa8-7e01-bed9-b3e2112a053a"),
-    ("R user_prompt_submit wake-T1", "active turns=R:wake-T1 leases=task-01a156da-5fa8-7e01-bed9-b3e2112a053a"),
+    ("R stop end_turn p1", "active turns=R:p1 records=task-01a156da-5fa8-7e01-bed9-b3e2112a053a"),
+    ("R --turn-completed p1", "idle records=task-01a156da-5fa8-7e01-bed9-b3e2112a053a"),
+    ("R notification idle_prompt", "idle records=task-01a156da-5fa8-7e01-bed9-b3e2112a053a"),
+    ("R notification task_complete", "idle records=task-01a156da-5fa8-7e01-bed9-b3e2112a053a"),
+    ("R user_prompt_submit wake-T1", "active turns=R:wake-T1 records=task-01a156da-5fa8-7e01-bed9-b3e2112a053a"),
     ("R stop end_turn wake-T1", "active turns=R:wake-T1"),
     ("R --turn-completed wake-T1", "idle"),
     ("R notification idle_prompt", "idle"),
@@ -412,11 +412,11 @@ _STOP_BLOCK_EXPECTED: Final = (
     ("R user_prompt_submit p2", "active turns=R:p2"),
     ("R pre_tool_use run_terminal_command", "active turns=R:p2"),
     ("R post_tool_use run_terminal_command", "active turns=R:p2"),
-    ("R stop end_turn p2", "active turns=R:p2 leases=task-01a156df-7eed-7d61-b833-461a1546cea2"),
-    ("R stop end_turn p2 again", "active turns=R:p2 leases=task-01a156df-7eed-7d61-b833-461a1546cea2"),
-    ("R --turn-completed p2", "idle leases=task-01a156df-7eed-7d61-b833-461a1546cea2"),
-    ("R notification task_complete", "idle leases=task-01a156df-7eed-7d61-b833-461a1546cea2"),
-    ("R user_prompt_submit wake-T1", "active turns=R:wake-T1 leases=task-01a156df-7eed-7d61-b833-461a1546cea2"),
+    ("R stop end_turn p2", "active turns=R:p2 records=task-01a156df-7eed-7d61-b833-461a1546cea2"),
+    ("R stop end_turn p2 again", "active turns=R:p2 records=task-01a156df-7eed-7d61-b833-461a1546cea2"),
+    ("R --turn-completed p2", "idle records=task-01a156df-7eed-7d61-b833-461a1546cea2"),
+    ("R notification task_complete", "idle records=task-01a156df-7eed-7d61-b833-461a1546cea2"),
+    ("R user_prompt_submit wake-T1", "active turns=R:wake-T1 records=task-01a156df-7eed-7d61-b833-461a1546cea2"),
     ("R stop end_turn wake-T1", "active turns=R:wake-T1"),
     ("R stop end_turn wake-T1 again", "active turns=R:wake-T1"),
     ("R --turn-completed wake-T1", "idle"),
@@ -450,13 +450,13 @@ _SILENT_WAKE_EXHAUST_EXPECTED: Final = (
     ("R user_prompt_submit p1", "active turns=R:p1"),
     ("R pre_tool_use run_terminal_command", "active turns=R:p1"),
     ("R post_tool_use run_terminal_command", "active turns=R:p1"),
-    ("R stop end_turn p1", "active turns=R:p1 leases=task-01a156de-a2e8-7f11-9db4-63f72b8f05ac"),
-    ("R --turn-completed p1", "idle leases=task-01a156de-a2e8-7f11-9db4-63f72b8f05ac"),
-    ("R notification task_complete", "idle leases=task-01a156de-a2e8-7f11-9db4-63f72b8f05ac"),
-    ("R user_prompt_submit wake-T1", "active turns=R:wake-T1 leases=task-01a156de-a2e8-7f11-9db4-63f72b8f05ac"),
-    ("R notification agent_error", "active turns=R:wake-T1 leases=task-01a156de-a2e8-7f11-9db4-63f72b8f05ac"),
-    ("R stop_failure wake-T1", "active turns=R:wake-T1 leases=task-01a156de-a2e8-7f11-9db4-63f72b8f05ac"),
-    ("R --turn-completed wake-T1", "idle leases=task-01a156de-a2e8-7f11-9db4-63f72b8f05ac"),
+    ("R stop end_turn p1", "active turns=R:p1 records=task-01a156de-a2e8-7f11-9db4-63f72b8f05ac"),
+    ("R --turn-completed p1", "idle records=task-01a156de-a2e8-7f11-9db4-63f72b8f05ac"),
+    ("R notification task_complete", "idle records=task-01a156de-a2e8-7f11-9db4-63f72b8f05ac"),
+    ("R user_prompt_submit wake-T1", "active turns=R:wake-T1 records=task-01a156de-a2e8-7f11-9db4-63f72b8f05ac"),
+    ("R notification agent_error", "active turns=R:wake-T1 records=task-01a156de-a2e8-7f11-9db4-63f72b8f05ac"),
+    ("R stop_failure wake-T1", "active turns=R:wake-T1 records=task-01a156de-a2e8-7f11-9db4-63f72b8f05ac"),
+    ("R --turn-completed wake-T1", "idle records=task-01a156de-a2e8-7f11-9db4-63f72b8f05ac"),
     ("R session_end shutdown", "idle"),
     ("R stop shutdown", "idle"),
 )
@@ -535,10 +535,10 @@ _DEAD_STREAMER_BGSHELL_EXPECTED: Final = (
     ("R user_prompt_submit p1", "active turns=R:p1"),
     ("R pre_tool_use run_terminal_command", "active turns=R:p1"),
     ("R post_tool_use run_terminal_command", "active turns=R:p1"),
-    ("R stop end_turn p1", "active turns=R:p1 leases=task-01a156da-5fa8-7e01-bed9-b3e2112a053a"),
-    ("R notification idle_prompt", "idle leases=task-01a156da-5fa8-7e01-bed9-b3e2112a053a"),
-    ("R notification task_complete", "idle leases=task-01a156da-5fa8-7e01-bed9-b3e2112a053a"),
-    ("R user_prompt_submit wake-T1", "active turns=R:wake-T1 leases=task-01a156da-5fa8-7e01-bed9-b3e2112a053a"),
+    ("R stop end_turn p1", "active turns=R:p1 records=task-01a156da-5fa8-7e01-bed9-b3e2112a053a"),
+    ("R notification idle_prompt", "idle records=task-01a156da-5fa8-7e01-bed9-b3e2112a053a"),
+    ("R notification task_complete", "idle records=task-01a156da-5fa8-7e01-bed9-b3e2112a053a"),
+    ("R user_prompt_submit wake-T1", "active turns=R:wake-T1 records=task-01a156da-5fa8-7e01-bed9-b3e2112a053a"),
     ("R stop end_turn wake-T1", "active turns=R:wake-T1"),
     ("R notification idle_prompt", "idle"),
     ("R session_end shutdown", "idle"),
@@ -565,9 +565,9 @@ _DEAD_STREAMER_BGSUBAGENT_EXPECTED: Final = (
     ("R post_tool_use spawn_subagent", "active turns=R:p1"),
     ("R subagent_start C1", "active turns=R:p1 subagents=C1"),
     ("C1 user_prompt_submit C1.p1", "active turns=R:p1 subagents=C1"),
-    ("R stop end_turn p1", "active turns=R:p1 subagents=C1(bg) leases=task-C1"),
-    ("R notification idle_prompt", "idle subagents=C1(bg) leases=task-C1"),
-    ("C1 subagent_stop C1.p1", "idle subagents=C1(bg) leases=task-C1"),
+    ("R stop end_turn p1", "active turns=R:p1 subagents=C1(bg) records=task-C1"),
+    ("R notification idle_prompt", "idle subagents=C1(bg) records=task-C1"),
+    ("C1 subagent_stop C1.p1", "idle subagents=C1(bg) records=task-C1"),
     ("C1 session_end shutdown", "active turns=R:pending-wake:C1"),
     ("R user_prompt_submit wake-C1", "active turns=R:wake-C1"),
     ("R stop end_turn wake-C1", "active turns=R:wake-C1"),
@@ -714,9 +714,9 @@ def test_wake_turn_starting_before_the_late_turn_completed_consumes_the_pending_
         ("R session_start new", "idle"),
         ("R user_prompt_submit p1", "active turns=R:p1"),
         ("R subagent_start C1", "active turns=R:p1 subagents=C1"),
-        ("R stop end_turn p1", "active turns=R:p1 subagents=C1(bg) leases=task-C1"),
-        ("R --turn-completed p1", "idle subagents=C1(bg) leases=task-C1"),
-        ("R user_prompt_submit p2", "active turns=R:p2 subagents=C1(bg) leases=task-C1"),
+        ("R stop end_turn p1", "active turns=R:p1 subagents=C1(bg) records=task-C1"),
+        ("R --turn-completed p1", "idle subagents=C1(bg) records=task-C1"),
+        ("R user_prompt_submit p2", "active turns=R:p2 subagents=C1(bg) records=task-C1"),
         ("C1 session_end shutdown", "active turns=R:p2 pending-wake=R<C1"),
         ("R stop end_turn p2", "active turns=R:p2 pending-wake=R<C1"),
         ("R user_prompt_submit wake-C1", "active turns=R:wake-C1"),
@@ -761,12 +761,12 @@ def test_stop_snapshot_prunes_a_lost_subagent_and_never_recreates_an_ended_one(t
         "active turns=R:p1 subagents=C1",
         "active turns=R:p1",
         "active turns=R:p1 subagents=C1",
-        "active turns=R:p1 subagents=C1(bg) leases=task-C1",
-        "idle subagents=C1(bg) leases=task-C1",
+        "active turns=R:p1 subagents=C1(bg) records=task-C1",
+        "idle subagents=C1(bg) records=task-C1",
         "active turns=R:pending-wake:C1",
         "active turns=R:wake-C1",
-        "active turns=R:wake-C1 leases=task-C1",
-        "idle leases=task-C1",
+        "active turns=R:wake-C1 records=task-C1",
+        "idle records=task-C1",
     ]
 
 
@@ -838,20 +838,20 @@ def test_root_session_end_drops_its_running_subagents(temp_host_dir: Path) -> No
 
     observed = [state for _, state in _replay(target, fixture, steps)]
 
-    assert observed[-2:] == ["idle subagents=C1(bg) leases=task-C1", "idle"]
+    assert observed[-2:] == ["idle subagents=C1(bg) records=task-C1", "idle"]
 
 
 @pytest.mark.parametrize(
     "fixture_name, kind, native_type",
     [
-        pytest.param("bgshell", WorkLeaseKind.SHELL, "shell", id="background_shell"),
-        pytest.param("bgsubagent", WorkLeaseKind.SUBAGENT, "subagent", id="background_subagent"),
+        pytest.param("bgshell", BackgroundTaskKind.SHELL, "shell", id="background_shell"),
+        pytest.param("bgsubagent", BackgroundTaskKind.SUBAGENT, "subagent", id="background_subagent"),
     ],
 )
-def test_a_leased_grok_task_parses_the_way_mngr_reads_it(
-    fixture_name: str, kind: WorkLeaseKind, native_type: str, temp_host_dir: Path
+def test_a_recorded_grok_task_parses_the_way_mngr_reads_it(
+    fixture_name: str, kind: BackgroundTaskKind, native_type: str, temp_host_dir: Path
 ) -> None:
-    """The lease written here and the reader in imbue.mngr are two halves of one format.
+    """The record written here and the reader in imbue.mngr are two halves of one format.
 
     grok_hook.py cannot import that reader: it runs from the agent's hook directory against the
     standard library alone. Nothing but this test holds the two sides together.
@@ -867,20 +867,20 @@ def test_a_leased_grok_task_parses_the_way_mngr_reads_it(
 
     _replay(target, fixture, through_the_turn_end)
 
-    lease_dir = target.state_dir / WORK_LEASE_DIR_NAME
-    lease_names = _visible_names(lease_dir)
-    assert len(lease_names) == 1, lease_names
-    leases = read_work_leases_in(lease_dir)
-    assert [lease.name for lease in leases] == lease_names
-    assert (leases[0].kind, leases[0].native_type, leases[0].started_at) == (kind, native_type, None)
-    assert leases[0].last_seen_at is not None
-    assert abs(leases[0].last_seen_at - started_at) <= _CLOCK_SLACK
-    line = (lease_dir / lease_names[0]).read_text()
+    record_dir = target.state_dir / BACKGROUND_TASK_DIR_NAME
+    record_names = _visible_names(record_dir)
+    assert len(record_names) == 1, record_names
+    records = read_background_task_records_in(record_dir)
+    assert [record.name for record in records] == record_names
+    assert (records[0].kind, records[0].native_type, records[0].started_at) == (kind, native_type, None)
+    assert records[0].last_seen_at is not None
+    assert abs(records[0].last_seen_at - started_at) <= _CLOCK_SLACK
+    line = (record_dir / record_names[0]).read_text()
     assert [token.partition(":")[0] for token in line.split()] == ["seen", "kind", "native_type"]
 
 
-def _lease_lines_after_a_stop_listing(temp_host_dir: Path, task_types: Sequence[str]) -> list[str]:
-    """What follows `seen` in each lease a root turn's Stop writes for tasks of ``task_types``, in order."""
+def _record_lines_after_a_stop_listing(temp_host_dir: Path, task_types: Sequence[str]) -> list[str]:
+    """What follows `seen` in each record a root turn's Stop writes for tasks of ``task_types``, in order."""
     fixture = _load_fixture("bgshell")
     target = _make_target(temp_host_dir)
     stop = {
@@ -894,28 +894,28 @@ def _lease_lines_after_a_stop_listing(temp_host_dir: Path, task_types: Sequence[
 
     _run_handler_process(target, [], json.dumps(stop), {})
 
-    lease_dir = target.state_dir / "background_tasks"
-    assert _visible_names(lease_dir) == [f"task-t{index:02d}" for index in range(len(task_types))]
-    return [(lease_dir / f"task-t{index:02d}").read_text().split(" ", 1)[1] for index in range(len(task_types))]
+    record_dir = target.state_dir / "background_tasks"
+    assert _visible_names(record_dir) == [f"task-t{index:02d}" for index in range(len(task_types))]
+    return [(record_dir / f"task-t{index:02d}").read_text().split(" ", 1)[1] for index in range(len(task_types))]
 
 
 def test_grok_writes_a_task_type_exactly_as_its_native_type(temp_host_dir: Path) -> None:
-    assert _lease_lines_after_a_stop_listing(temp_host_dir, HOSTILE_NATIVE_TYPES) == [
+    assert _record_lines_after_a_stop_listing(temp_host_dir, HOSTILE_NATIVE_TYPES) == [
         f"kind:OTHER native_type:{quote(native_type, safe='')}\n" for native_type in HOSTILE_NATIVE_TYPES
     ]
 
 
-def test_grok_leases_a_task_whose_type_is_not_valid_unicode(temp_host_dir: Path) -> None:
-    assert _lease_lines_after_a_stop_listing(temp_host_dir, ["half \ud83d pair"]) == [
+def test_grok_records_a_task_whose_type_is_not_valid_unicode(temp_host_dir: Path) -> None:
+    assert _record_lines_after_a_stop_listing(temp_host_dir, ["half \ud83d pair"]) == [
         "kind:OTHER native_type:half%20%3F%20pair\n"
     ]
 
 
-def test_grok_lease_kinds_are_ones_mngr_publishes() -> None:
-    spelled = set(grok_hook.LEASE_KIND_BY_TASK_TYPE.values()) | {grok_hook.OTHER_LEASE_KIND}
+def test_grok_background_task_kinds_are_ones_mngr_publishes() -> None:
+    spelled = set(grok_hook.BACKGROUND_TASK_KIND_BY_TASK_TYPE.values()) | {grok_hook.OTHER_BACKGROUND_TASK_KIND}
 
-    assert spelled <= {kind.value for kind in WorkLeaseKind}
-    assert grok_hook.OTHER_LEASE_KIND == WorkLeaseKind.OTHER.value
+    assert spelled <= {kind.value for kind in BackgroundTaskKind}
+    assert grok_hook.OTHER_BACKGROUND_TASK_KIND == BackgroundTaskKind.OTHER.value
 
 
 def test_repeated_subagent_start_and_stop_listing_keep_one_background_subagent(temp_host_dir: Path) -> None:
@@ -936,13 +936,13 @@ def test_repeated_subagent_start_and_stop_listing_keep_one_background_subagent(t
         "active turns=R:p1",
         "active turns=R:p1 subagents=C1",
         "active turns=R:p1 subagents=C1",
-        "active turns=R:p1 subagents=C1(bg) leases=task-C1",
-        "active turns=R:p1 subagents=C1(bg) leases=task-C1",
+        "active turns=R:p1 subagents=C1(bg) records=task-C1",
+        "active turns=R:p1 subagents=C1(bg) records=task-C1",
     ]
     log_lines = _hook_log_lines(target)
     assert log_lines[2].endswith(" subagent:known")
-    assert log_lines[3].endswith(" stop subagents-pruned=0 subagents-marked-background=1 leases=1")
-    assert log_lines[4].endswith(" stop subagents-pruned=0 subagents-marked-background=0 leases=1")
+    assert log_lines[3].endswith(" stop subagents-pruned=0 subagents-marked-background=1 background_tasks=1")
+    assert log_lines[4].endswith(" stop subagents-pruned=0 subagents-marked-background=0 background_tasks=1")
 
 
 def _steps_leaving_two_background_subagents_running(
@@ -980,8 +980,8 @@ def test_a_second_background_subagent_ending_while_idle_replaces_the_wake_placeh
     observed = [state for _, state in _replay(target, fixture, steps)]
 
     assert observed[-3:] == [
-        f"idle subagents=C1(bg),{second_child_id}(bg) leases=task-C1,task-{second_child_id}",
-        f"active turns=R:pending-wake:C1 subagents={second_child_id}(bg) leases=task-{second_child_id}",
+        f"idle subagents=C1(bg),{second_child_id}(bg) records=task-C1,task-{second_child_id}",
+        f"active turns=R:pending-wake:C1 subagents={second_child_id}(bg) records=task-{second_child_id}",
         f"active turns=R:pending-wake:{second_child_id}",
     ]
 
@@ -1004,7 +1004,7 @@ def test_a_wake_prompt_that_beats_its_subagent_session_end_leaves_no_wake_pendin
     observed = [state for _, state in _replay(target, fixture, steps)]
 
     assert observed[-3:] == [
-        "active turns=R:wake-C1 subagents=C1(bg) leases=task-C1",
+        "active turns=R:wake-C1 subagents=C1(bg) records=task-C1",
         "active turns=R:wake-C1",
         "idle",
     ]
@@ -1180,8 +1180,8 @@ def test_a_subagent_ending_clears_its_own_permission_dialog_while_other_work_run
 
     activity = "active turns=R:pending-wake:C1" if is_wake_expected else "idle"
     assert observed[-2:] == [
-        f"idle subagents=C1(bg),{second_child_id}(bg) leases=task-C1,task-{second_child_id} permissions-waiting",
-        f"{activity} subagents={second_child_id}(bg) leases=task-{second_child_id}",
+        f"idle subagents=C1(bg),{second_child_id}(bg) records=task-C1,task-{second_child_id} permissions-waiting",
+        f"{activity} subagents={second_child_id}(bg) records=task-{second_child_id}",
     ]
 
 
@@ -1189,9 +1189,9 @@ def test_a_subagent_ending_clears_its_own_permission_dialog_while_other_work_run
     ("is_cleared_by_the_turn_end", "expected_state"),
     [
         pytest.param(
-            False, "active turns=R:p2 subagents=C1(bg) leases=task-C1 permissions-waiting", id="next_root_prompt"
+            False, "active turns=R:p2 subagents=C1(bg) records=task-C1 permissions-waiting", id="next_root_prompt"
         ),
-        pytest.param(True, "idle subagents=C1(bg) leases=task-C1 permissions-waiting", id="root_turn_end"),
+        pytest.param(True, "idle subagents=C1(bg) records=task-C1 permissions-waiting", id="root_turn_end"),
     ],
 )
 def test_a_root_prompt_or_turn_end_clears_only_the_root_permission_dialog(

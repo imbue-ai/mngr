@@ -29,6 +29,9 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MessageLockTimeoutError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.background_tasks import build_lifecycle_probe_read_command
+from imbue.mngr.hosts.background_tasks import determine_agent_probe_result
+from imbue.mngr.hosts.background_tasks import parse_lifecycle_probe_reading
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import find_agent_session_name
 from imbue.mngr.hosts.common import find_first_pane_info
@@ -40,9 +43,6 @@ from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import capture_tmux_pane_content
 from imbue.mngr.hosts.tmux import quote_tmux_text_argument
-from imbue.mngr.hosts.work_leases import build_lifecycle_probe_read_command
-from imbue.mngr.hosts.work_leases import determine_agent_probe_result
-from imbue.mngr.hosts.work_leases import parse_lifecycle_probe_reading
 from imbue.mngr.interfaces.agent import AgentConfigT
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import InteractiveAgentMixin

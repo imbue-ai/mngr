@@ -68,6 +68,8 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import BackgroundTask
+from imbue.mngr.primitives import BackgroundTaskKind
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
@@ -82,8 +84,6 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.primitives import SSHInfo
-from imbue.mngr.primitives import WorkLease
-from imbue.mngr.primitives import WorkLeaseKind
 from imbue.mngr.providers.local.backend import LOCAL_BACKEND_NAME
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
@@ -443,12 +443,12 @@ def test_a_cel_filter_can_ask_what_kind_of_background_task_an_agent_left_running
     shell_held = make_test_agent_details(
         name="shell-held",
         state=AgentLifecycleState.RUNNING_BACKGROUND,
-        background_tasks=(WorkLease(name="task-abc", kind=WorkLeaseKind.SHELL, native_type="shell"),),
+        background_tasks=(BackgroundTask(name="task-abc", kind=BackgroundTaskKind.SHELL, native_type="shell"),),
     )
     monitor_held = make_test_agent_details(
         name="monitor-held",
         state=AgentLifecycleState.RUNNING_BACKGROUND,
-        background_tasks=(WorkLease(name="task-def", kind=WorkLeaseKind.MONITOR, native_type="monitor"),),
+        background_tasks=(BackgroundTask(name="task-def", kind=BackgroundTaskKind.MONITOR, native_type="monitor"),),
     )
     includes, excludes = compile_cel_filters(
         ['background_tasks.exists(t, t.kind == "SHELL" && t.native_type == "shell")'], []

@@ -31,6 +31,9 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MessageLockTimeoutError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.background_tasks import BACKGROUND_TASK_DIR_NAME
+from imbue.mngr.hosts.background_tasks import build_lifecycle_probe_read_command
+from imbue.mngr.hosts.background_tasks import parse_lifecycle_probe_reading
 from imbue.mngr.hosts.common import PROCESS_TABLE_SNAPSHOT_COMMAND
 from imbue.mngr.hosts.common import TMUX_PANES_SNAPSHOT_COMMAND
 from imbue.mngr.hosts.common import get_agent_state_dir_path
@@ -38,9 +41,6 @@ from imbue.mngr.hosts.common import parse_tmux_pane_listings
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import capture_tmux_pane_content
-from imbue.mngr.hosts.work_leases import WORK_LEASE_DIR_NAME
-from imbue.mngr.hosts.work_leases import build_lifecycle_probe_read_command
-from imbue.mngr.hosts.work_leases import parse_lifecycle_probe_reading
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import HostLifecycleSnapshot
 from imbue.mngr.primitives import ActivitySource
@@ -48,11 +48,11 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import BackgroundTask
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import InvalidName
 from imbue.mngr.primitives import LifecycleProbeResult
-from imbue.mngr.primitives import WorkLease
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import cleanup_tmux_session
@@ -304,7 +304,7 @@ def test_lifecycle_state_running_background_while_a_record_exists_whatever_it_sa
         f"tmux new-session -d -s '{session_name}' -n '{window_name}' 'sleep 1000'",
         timeout_seconds=5.0,
     )
-    lease_dir = local_provider.host_dir / "agents" / str(test_agent.id) / WORK_LEASE_DIR_NAME
+    record_dir = local_provider.host_dir / "agents" / str(test_agent.id) / BACKGROUND_TASK_DIR_NAME
 
     try:
         wait_for(
@@ -312,22 +312,22 @@ def test_lifecycle_state_running_background_while_a_record_exists_whatever_it_sa
             error_message="Expected agent lifecycle state to be WAITING",
         )
 
-        lease_dir.mkdir(parents=True)
-        (lease_dir / "task-no-fields").write_text("")
-        (lease_dir / "task-unknown-field").write_text("pid:4821\n")
+        record_dir.mkdir(parents=True)
+        (record_dir / "task-no-fields").write_text("")
+        (record_dir / "task-unknown-field").write_text("pid:4821\n")
         probe_with_records = test_agent.probe_lifecycle()
 
-        for record in lease_dir.iterdir():
+        for record in record_dir.iterdir():
             record.unlink()
         probe_without_records = test_agent.probe_lifecycle()
     finally:
         cleanup_tmux_session(session_name)
 
-    assert (probe_with_records.state, probe_with_records.leases) == (
+    assert (probe_with_records.state, probe_with_records.background_tasks) == (
         AgentLifecycleState.RUNNING_BACKGROUND,
-        (WorkLease(name="task-no-fields"), WorkLease(name="task-unknown-field")),
+        (BackgroundTask(name="task-no-fields"), BackgroundTask(name="task-unknown-field")),
     )
-    assert (probe_without_records.state, probe_without_records.leases) == (AgentLifecycleState.WAITING, ())
+    assert (probe_without_records.state, probe_without_records.background_tasks) == (AgentLifecycleState.WAITING, ())
 
 
 @pytest.mark.tmux
@@ -355,7 +355,7 @@ def test_lifecycle_state_waiting_with_no_background_tasks_when_the_only_record_i
     finally:
         cleanup_tmux_session(session_name)
 
-    assert (probe.state, probe.leases) == (AgentLifecycleState.WAITING, ())
+    assert (probe.state, probe.background_tasks) == (AgentLifecycleState.WAITING, ())
 
 
 @pytest.mark.tmux
@@ -1922,29 +1922,29 @@ def test_send_message_fails_within_its_command_timeouts_when_tmux_hangs(
 
 
 def _read_work_state(agent: BaseAgent) -> tuple[bool, str]:
-    """Whether the agent's real work-state read found a turn, and the lease lines it returned."""
+    """Whether the agent's real work-state read found a turn, and the record lines it returned."""
     result = agent.host.execute_idempotent_command(
         build_lifecycle_probe_read_command(str(agent._get_agent_dir())), timeout_seconds=5.0
     )
     assert result.success, result.stderr
     reading = parse_lifecycle_probe_reading(result.stdout)
-    return reading.is_active, reading.raw_leases
+    return reading.is_active, reading.raw_background_tasks
 
 
 @pytest.mark.parametrize(
-    "lease_dir_shape",
+    "record_dir_shape",
     [
         pytest.param("absent", id="no_working_dir"),
         pytest.param("empty", id="empty_working_dir"),
     ],
 )
-def test_work_state_reports_the_active_marker_whatever_shape_the_lease_dir_is_in(
-    test_agent: BaseAgent, lease_dir_shape: str
+def test_work_state_reports_the_active_marker_whatever_shape_the_record_dir_is_in(
+    test_agent: BaseAgent, record_dir_shape: str
 ) -> None:
-    """The marker must survive a lease read that finds nothing to read."""
+    """The marker must survive a record read that finds nothing to read."""
     agent_dir = get_agent_state_dir_path(test_agent.host.host_dir, test_agent.id)
-    if lease_dir_shape == "empty":
-        (agent_dir / WORK_LEASE_DIR_NAME).mkdir(parents=True)
+    if record_dir_shape == "empty":
+        (agent_dir / BACKGROUND_TASK_DIR_NAME).mkdir(parents=True)
 
     assert _read_work_state(test_agent) == (False, "")
 
@@ -1953,45 +1953,45 @@ def test_work_state_reports_the_active_marker_whatever_shape_the_lease_dir_is_in
     assert _read_work_state(test_agent) == (True, "")
 
 
-def test_work_state_reads_the_leases_alongside_the_marker(test_agent: BaseAgent) -> None:
+def test_work_state_reads_the_records_alongside_the_marker(test_agent: BaseAgent) -> None:
     """One read answers both questions the lifecycle decision asks of the agent's state dir."""
     agent_dir = get_agent_state_dir_path(test_agent.host.host_dir, test_agent.id)
-    lease_dir = agent_dir / WORK_LEASE_DIR_NAME
-    lease_dir.mkdir(parents=True)
-    (lease_dir / "task-one").write_text("until:2000000000\n")
-    (lease_dir / "task-two").write_text("pid:4821\n")
+    record_dir = agent_dir / BACKGROUND_TASK_DIR_NAME
+    record_dir.mkdir(parents=True)
+    (record_dir / "task-one").write_text("until:2000000000\n")
+    (record_dir / "task-two").write_text("pid:4821\n")
     (agent_dir / "active").write_text("")
 
     assert _read_work_state(test_agent) == (True, "task-one\tuntil:2000000000\ntask-two\tpid:4821")
 
 
 @pytest.mark.parametrize(
-    "unreadable_lease_shape",
+    "unreadable_record_shape",
     [
-        pytest.param("dangling_symlink", id="lease_cleared_mid_read"),
-        pytest.param("directory", id="lease_name_taken_by_a_directory"),
+        pytest.param("dangling_symlink", id="record_cleared_mid_read"),
+        pytest.param("directory", id="record_name_taken_by_a_directory"),
     ],
 )
-def test_work_state_keeps_the_leases_around_one_the_read_cannot_read(
-    test_agent: BaseAgent, unreadable_lease_shape: str
+def test_work_state_keeps_the_records_around_one_the_read_cannot_read(
+    test_agent: BaseAgent, unreadable_record_shape: str
 ) -> None:
     """A path the glob yielded but the read cannot read a line from must cost only itself.
 
-    Otherwise the scan loses every lease sorted after the bad one and the agent reads WAITING
-    while its work is in flight. Both shapes reach the read: a lease disappears between the
-    shell expanding the glob and the read reaching it, because the stop hook clears the lease
-    directory at each turn end; and a directory under a lease's name is what a writer leaves
+    Otherwise the scan loses every record sorted after the bad one and the agent reads WAITING
+    while its work is in flight. Both shapes reach the read: a record disappears between the
+    shell expanding the glob and the read reaching it, because the stop hook clears the record
+    directory at each turn end; and a directory under a record's name is what a writer leaves
     when it cannot remove one. awk survives the first on its own, and dies on the second with
     an i/o error, so the scan hands it regular files alone.
     """
     agent_dir = get_agent_state_dir_path(test_agent.host.host_dir, test_agent.id)
-    lease_dir = agent_dir / WORK_LEASE_DIR_NAME
-    lease_dir.mkdir(parents=True)
-    (lease_dir / "task-a").write_text("until:2000000000\n")
-    if unreadable_lease_shape == "directory":
-        (lease_dir / "task-b").mkdir()
+    record_dir = agent_dir / BACKGROUND_TASK_DIR_NAME
+    record_dir.mkdir(parents=True)
+    (record_dir / "task-a").write_text("until:2000000000\n")
+    if unreadable_record_shape == "directory":
+        (record_dir / "task-b").mkdir()
     else:
-        (lease_dir / "task-b").symlink_to(lease_dir / "already-gone")
-    (lease_dir / "task-c").write_text("pid:4821\n")
+        (record_dir / "task-b").symlink_to(record_dir / "already-gone")
+    (record_dir / "task-c").write_text("pid:4821\n")
 
     assert _read_work_state(test_agent) == (False, "task-a\tuntil:2000000000\ntask-c\tpid:4821")

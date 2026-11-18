@@ -48,6 +48,7 @@ from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ModalAuthError
 from imbue.mngr.errors import SnapshotNotFoundError
+from imbue.mngr.hosts.background_tasks import determine_agent_probe_result
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
 from imbue.mngr.hosts.common import resolve_expected_process_name
@@ -57,7 +58,6 @@ from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import derive_offline_host_state
 from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
-from imbue.mngr.hosts.work_leases import determine_agent_probe_result
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.cleanup_failures import collect_cleanup_failures
@@ -3367,7 +3367,7 @@ log "=== Shutdown script completed ==="
             create_time=create_time,
             start_on_boot=agent_data.get("start_on_boot", False),
             state=lifecycle.state,
-            background_tasks=lifecycle.leases,
+            background_tasks=lifecycle.background_tasks,
             pid=lifecycle.pid,
             url=agent_raw.get("url"),
             start_time=start_time,

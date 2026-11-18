@@ -66,6 +66,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import PublishedPortUnsupportedError
 from imbue.mngr.errors import SnapshotsNotSupportedError
+from imbue.mngr.hosts.background_tasks import determine_agent_probe_result
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
 from imbue.mngr.hosts.common import resolve_expected_process_name
@@ -74,7 +75,6 @@ from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.hosts.outer_host import OuterHost
-from imbue.mngr.hosts.work_leases import determine_agent_probe_result
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -1870,7 +1870,7 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
             create_time=create_time,
             start_on_boot=agent_data.get("start_on_boot", False),
             state=lifecycle.state,
-            background_tasks=lifecycle.leases,
+            background_tasks=lifecycle.background_tasks,
             pid=lifecycle.pid,
             url=agent_raw.get("url"),
             start_time=start_time,

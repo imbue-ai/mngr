@@ -14,7 +14,7 @@ from inline_snapshot import snapshot
 from imbue.mngr_claude.claude_config import COMPACTING_MARKER_FILENAME
 from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
-from imbue.mngr_claude.claude_config import HOOK_WORK_LEASE_NAME_PREFIX
+from imbue.mngr_claude.claude_config import HOOK_BACKGROUND_TASK_NAME_PREFIX
 from imbue.mngr_claude.claude_config import LAST_COMPACTION_FILENAME
 from imbue.mngr_claude.claude_config import MAIN_SESSION_ONLY_GUARD
 from imbue.mngr_claude.claude_config import acknowledge_cost_threshold
@@ -1329,59 +1329,61 @@ def test_build_readiness_hooks_config_session_start_startup_branch_removes_compa
     ) in command
 
 
-def test_hook_lease_prefix_matches_the_stop_hook_script() -> None:
+def test_hook_background_task_name_prefix_matches_the_stop_hook_script() -> None:
     """The Stop hook script spells the prefix as its own literal, which must equal the Python constant."""
     script = (Path(__file__).parent / "resources" / "wait_for_stop_hook.sh").read_text()
 
-    assert f'WORK_LEASE_NAME_PREFIX="{HOOK_WORK_LEASE_NAME_PREFIX}"' in script
+    assert f'BACKGROUND_TASK_NAME_PREFIX="{HOOK_BACKGROUND_TASK_NAME_PREFIX}"' in script
 
 
-def _write_work_leases(state_dir: Path) -> Path:
-    """Lay out one lease the stop hook owns and one a different writer owns."""
-    lease_dir = state_dir / "background_tasks"
-    lease_dir.mkdir()
-    (lease_dir / f"{HOOK_WORK_LEASE_NAME_PREFIX}b3tzesn7m").write_text(
+def _write_background_task_records(state_dir: Path) -> Path:
+    """Lay out one record the stop hook owns and one a different writer owns."""
+    record_dir = state_dir / "background_tasks"
+    record_dir.mkdir()
+    (record_dir / f"{HOOK_BACKGROUND_TASK_NAME_PREFIX}b3tzesn7m").write_text(
         "seen:1767355200 kind:SHELL native_type:shell\n"
     )
-    (lease_dir / "mngr-long-build").write_text("pid:4821\n")
-    return lease_dir
+    (record_dir / "mngr-long-build").write_text("pid:4821\n")
+    return record_dir
 
 
 @_REQUIRES_JQ
 @pytest.mark.parametrize("source", ["startup", "resume"])
-def test_session_start_clears_the_work_leases_of_the_process_that_died(tmp_path: Path, source: str) -> None:
+def test_session_start_clears_the_background_task_records_of_the_process_that_died(
+    tmp_path: Path, source: str
+) -> None:
     """A startup or resume removes the Stop hook's records and leaves another writer's."""
     state_dir, host_dir = _make_state_and_host_dirs(tmp_path)
     (state_dir / "active").write_text("")
-    lease_dir = _write_work_leases(state_dir)
+    record_dir = _write_background_task_records(state_dir)
     payload = json.dumps({"session_id": "sess-compaction-48213", "source": source})
 
     result = _run_hook_command(_readiness_hook_command("SessionStart", hook_index=4), payload, state_dir, host_dir)
 
     assert result.returncode == 0, f"hook failed: stdout={result.stdout!r} stderr={result.stderr!r}"
     assert not (state_dir / "active").exists()
-    assert [path.name for path in lease_dir.iterdir()] == ["mngr-long-build"]
+    assert [path.name for path in record_dir.iterdir()] == ["mngr-long-build"]
 
 
 @_REQUIRES_JQ
-def test_session_start_leaves_the_work_leases_alone_on_a_compaction(tmp_path: Path) -> None:
+def test_session_start_leaves_the_background_task_records_alone_on_a_compaction(tmp_path: Path) -> None:
     """Auto-compaction fires mid-turn, so the work it interrupts is still in flight."""
     state_dir, host_dir = _make_state_and_host_dirs(tmp_path)
-    lease_dir = _write_work_leases(state_dir)
+    record_dir = _write_background_task_records(state_dir)
     payload = json.dumps({"session_id": "sess-compaction-48213", "source": "compact"})
 
     result = _run_hook_command(_readiness_hook_command("SessionStart", hook_index=4), payload, state_dir, host_dir)
 
     assert result.returncode == 0, f"hook failed: stdout={result.stdout!r} stderr={result.stderr!r}"
-    assert sorted(path.name for path in lease_dir.iterdir()) == [
+    assert sorted(path.name for path in record_dir.iterdir()) == [
         "mngr-long-build",
-        f"{HOOK_WORK_LEASE_NAME_PREFIX}b3tzesn7m",
+        f"{HOOK_BACKGROUND_TASK_NAME_PREFIX}b3tzesn7m",
     ]
 
 
 @_REQUIRES_JQ
-def test_session_start_resets_an_agent_that_never_leased_any_work(tmp_path: Path) -> None:
-    """The ordinary restart: no lease directory at all, and the marker reset must still land."""
+def test_session_start_resets_an_agent_that_never_recorded_any_work(tmp_path: Path) -> None:
+    """The ordinary restart: no record directory at all, and the marker reset must still land."""
     state_dir, host_dir = _make_state_and_host_dirs(tmp_path)
     (state_dir / "active").write_text("")
     payload = json.dumps({"session_id": "sess-compaction-48213", "source": "startup"})

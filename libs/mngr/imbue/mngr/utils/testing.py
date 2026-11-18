@@ -55,10 +55,10 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.hosts.background_tasks import parse_background_tasks
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import build_tmux_capture_pane_command
-from imbue.mngr.hosts.work_leases import parse_work_leases
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CleanupFailure
@@ -70,6 +70,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import BackgroundTask
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
@@ -79,7 +80,6 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.primitives import SSHInfo
-from imbue.mngr.primitives import WorkLease
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_all_registries
@@ -1221,7 +1221,7 @@ def make_test_agent_details(
     idle_seconds: float | None = None,
     resource: HostResources | None = None,
     published_endpoints: Sequence[PublishedEndpoint] = (),
-    background_tasks: Sequence[WorkLease] = (),
+    background_tasks: Sequence[BackgroundTask] = (),
 ) -> AgentDetails:
     """Create a real AgentDetails for testing.
 
@@ -2082,13 +2082,13 @@ RAW_LINE_SEPARATOR_BY_NAME: Final[Mapping[str, str]] = {
 }
 
 
-def read_work_leases_in(lease_dir: Path) -> tuple[WorkLease, ...]:
-    """Every record under ``lease_dir``, in name order, parsed from each file's first line."""
-    if not lease_dir.is_dir():
+def read_background_task_records_in(record_dir: Path) -> tuple[BackgroundTask, ...]:
+    """Every record under ``record_dir``, in name order, parsed from each file's first line."""
+    if not record_dir.is_dir():
         return ()
     first_line_by_name = {
         path.name: path.read_bytes().decode().split("\n", 1)[0]
-        for path in lease_dir.iterdir()
+        for path in record_dir.iterdir()
         if path.is_file() and not path.name.startswith(".")
     }
-    return parse_work_leases("\n".join(f"{name}\t{line}" for name, line in sorted(first_line_by_name.items())))
+    return parse_background_tasks("\n".join(f"{name}\t{line}" for name, line in sorted(first_line_by_name.items())))

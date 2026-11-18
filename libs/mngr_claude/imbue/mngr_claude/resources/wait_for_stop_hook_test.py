@@ -15,17 +15,17 @@ import pytest
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr import resources as mngr_resources
-from imbue.mngr.primitives import WorkLeaseKind
+from imbue.mngr.primitives import BackgroundTaskKind
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import HOSTILE_NATIVE_TYPES
-from imbue.mngr.utils.testing import read_work_leases_in
+from imbue.mngr.utils.testing import read_background_task_records_in
 from imbue.mngr_claude.resources.testing import make_assistant_record
 from imbue.mngr_claude.resources.testing import make_user_record
 from imbue.mngr_claude.resources.testing import write_raw_transcript
-from imbue.mngr_claude.testing import WORK_LEASE_KIND_BY_CLAUDE_TASK_LABEL
+from imbue.mngr_claude.testing import BACKGROUND_TASK_KIND_BY_CLAUDE_TASK_LABEL
 
 _WAIT_FOR_STOP_HOOK_PATH: Final[Path] = Path(__file__).parent / "wait_for_stop_hook.sh"
-_WORK_LEASE_LIB_NAME: Final[str] = "mngr_work_lease_lib.sh"
+_BACKGROUND_TASK_RECORD_LIB_NAME: Final[str] = "mngr_background_task_lib.sh"
 _HOOK_TIMEOUT_SECONDS: Final[float] = 30.0
 # Long enough that the race test can append a record while the hook waits to re-check
 _SLOW_REQUEUE_RECHECK_DELAY_SECONDS: Final[float] = 2.0
@@ -42,7 +42,7 @@ class _StopHook(FrozenModel):
     active_marker: Path
     idle_since: Path
     activity_events: Path
-    lease_dir: Path
+    record_dir: Path
 
 
 def _queue_operation(operation: str, content: str = "", timestamp: str = "2026-01-01T00:00:03.000Z") -> dict[str, Any]:
@@ -89,17 +89,17 @@ def _queued_prompt_dequeued_ahead_of_api_error(content: str) -> list[dict[str, A
     ]
 
 
-def _install_work_lease_lib(agent_state_dir: Path) -> None:
-    """Stage the shared work-lease library where the hook sources it from.
+def _install_background_task_record_lib(agent_state_dir: Path) -> None:
+    """Stage the shared background task record library where the hook sources it from.
 
     Host._ensure_shared_shell_libs writes it into the agent's ``commands/`` dir at
-    provisioning time; this is that one file, so the hook under test declares leases the
+    provisioning time; this is that one file, so the hook under test writes records the
     way it does on a real agent rather than against a stand-in.
     """
     commands_dir = agent_state_dir / "commands"
     commands_dir.mkdir(parents=True, exist_ok=True)
-    (commands_dir / _WORK_LEASE_LIB_NAME).write_text(
-        importlib.resources.files(mngr_resources).joinpath(_WORK_LEASE_LIB_NAME).read_text()
+    (commands_dir / _BACKGROUND_TASK_RECORD_LIB_NAME).write_text(
+        importlib.resources.files(mngr_resources).joinpath(_BACKGROUND_TASK_RECORD_LIB_NAME).read_text()
     )
 
 
@@ -109,25 +109,25 @@ def _prepare_stop_hook(
     hook_event_name: str = "Stop",
     requeue_recheck_delay_seconds: float = 0.0,
     background_tasks: list[dict[str, Any]] | None = None,
-    is_work_lease_lib_installed: bool = True,
+    is_background_task_record_lib_installed: bool = True,
 ) -> _StopHook:
     """Set up the stop hook for the end of a turn that set the ``active`` marker.
 
     ``transcript_records`` is the session transcript the hook input points at; None
     sends no ``transcript_path``, as claude versions without the field do.
 
-    ``is_work_lease_lib_installed`` stages the shared work-lease library into the agent's
-    ``commands/`` dir the way ``Host._ensure_shared_shell_libs`` does, which is the state
-    every provisioned agent is in. Clearing it reproduces an agent provisioned before the
-    library existed.
+    ``is_background_task_record_lib_installed`` stages the shared background task record
+    library into the agent's ``commands/`` dir the way ``Host._ensure_shared_shell_libs``
+    does, which is the state every provisioned agent is in. Clearing it reproduces an agent
+    provisioned before the library existed.
     """
     agent_state_dir = tmp_path / "agent_state"
     agent_state_dir.mkdir()
     host_dir = tmp_path / "host"
     host_dir.mkdir()
     (agent_state_dir / "active").touch()
-    if is_work_lease_lib_installed:
-        _install_work_lease_lib(agent_state_dir)
+    if is_background_task_record_lib_installed:
+        _install_background_task_record_lib(agent_state_dir)
     transcript = tmp_path / "session.jsonl"
     hook_input: dict[str, Any] = {"hook_event_name": hook_event_name, "session_id": uuid4().hex}
     if transcript_records is not None:
@@ -150,7 +150,7 @@ def _prepare_stop_hook(
         active_marker=agent_state_dir / "active",
         idle_since=agent_state_dir / "idle_since",
         activity_events=host_dir / "events" / "mngr" / "activity" / "events.jsonl",
-        lease_dir=agent_state_dir / "background_tasks",
+        record_dir=agent_state_dir / "background_tasks",
     )
 
 
@@ -179,14 +179,14 @@ def _run_stop_hook_at_turn_end(
     transcript_records: list[dict[str, Any]] | None,
     hook_event_name: str = "Stop",
     background_tasks: list[dict[str, Any]] | None = None,
-    is_work_lease_lib_installed: bool = True,
+    is_background_task_record_lib_installed: bool = True,
 ) -> _StopHook:
     hook = _prepare_stop_hook(
         tmp_path,
         transcript_records,
         hook_event_name,
         background_tasks=background_tasks,
-        is_work_lease_lib_installed=is_work_lease_lib_installed,
+        is_background_task_record_lib_installed=is_background_task_record_lib_installed,
     )
     result = _run_prepared_stop_hook(hook, tmp_path)
     assert result.returncode == 0, result.stderr
@@ -366,15 +366,15 @@ def test_stop_hook_restores_the_marker_when_the_enqueue_lands_after_the_clear(tm
     _assert_left_active(hook)
 
 
-def test_stop_hook_leases_the_background_work_the_turn_leaves_running(tmp_path: Path) -> None:
+def test_stop_hook_records_the_background_work_the_turn_leaves_running(tmp_path: Path) -> None:
     hook = _run_stop_hook_at_turn_end(
         tmp_path,
         [_prompt("hello"), _reply("done")],
         background_tasks=[{"task_id": "abc-123"}, {"task_id": "def/456"}],
     )
 
-    leases = sorted(path.name for path in hook.lease_dir.iterdir())
-    assert leases == ["task-abc-123", "task-def_456"]
+    record_names = sorted(path.name for path in hook.record_dir.iterdir())
+    assert record_names == ["task-abc-123", "task-def_456"]
 
 
 def test_stop_hook_writes_a_record_mngr_reads_as_seen_at_the_turn_end(tmp_path: Path) -> None:
@@ -386,68 +386,70 @@ def test_stop_hook_writes_a_record_mngr_reads_as_seen_at_the_turn_end(tmp_path: 
         background_tasks=[{"task_id": "abc-123"}],
     )
 
-    leases = read_work_leases_in(hook.lease_dir)
+    records = read_background_task_records_in(hook.record_dir)
 
-    assert [(lease.name, lease.started_at) for lease in leases] == [("task-abc-123", None)]
-    assert leases[0].last_seen_at is not None
-    assert abs(leases[0].last_seen_at - started_at) <= _CLOCK_SLACK
-    line = (hook.lease_dir / "task-abc-123").read_text()
+    assert [(record.name, record.started_at) for record in records] == [("task-abc-123", None)]
+    assert records[0].last_seen_at is not None
+    assert abs(records[0].last_seen_at - started_at) <= _CLOCK_SLACK
+    line = (hook.record_dir / "task-abc-123").read_text()
     assert [token.partition(":")[0] for token in line.split()] == ["seen", "kind"]
 
 
-def test_stop_hook_leaves_the_turn_signal_alone_when_the_lease_library_is_missing(tmp_path: Path) -> None:
+def test_stop_hook_leaves_the_turn_signal_alone_when_the_background_task_record_library_is_missing(
+    tmp_path: Path,
+) -> None:
     """An agent provisioned before the library existed must still reach the end of its turn.
 
     The library is written at provisioning time, so an older agent simply has no writer. It
-    declares no leases and loses nothing else: the marker still clears, which is what anything
+    writes no records and loses nothing else: the marker still clears, which is what anything
     waiting on this agent is watching.
     """
     hook = _run_stop_hook_at_turn_end(
         tmp_path,
         [_prompt("hello"), _reply("done")],
         background_tasks=[{"task_id": "abc-123"}],
-        is_work_lease_lib_installed=False,
+        is_background_task_record_lib_installed=False,
     )
 
-    assert not hook.lease_dir.exists()
+    assert not hook.record_dir.exists()
     assert not hook.active_marker.exists()
 
 
-def test_stop_hook_writes_no_leases_when_no_background_work_is_in_flight(tmp_path: Path) -> None:
+def test_stop_hook_writes_no_records_when_no_background_work_is_in_flight(tmp_path: Path) -> None:
     hook = _run_stop_hook_at_turn_end(tmp_path, [_prompt("hello"), _reply("done")], background_tasks=[])
 
-    assert not hook.lease_dir.exists()
+    assert not hook.record_dir.exists()
 
 
-def test_stop_hook_drops_leases_for_work_that_has_since_finished(tmp_path: Path) -> None:
+def test_stop_hook_drops_records_for_work_that_has_since_finished(tmp_path: Path) -> None:
     hook = _prepare_stop_hook(tmp_path, [_prompt("hello"), _reply("done")], background_tasks=[])
-    hook.lease_dir.mkdir()
-    (hook.lease_dir / "task-stale").write_text("until:1\n")
+    hook.record_dir.mkdir()
+    (hook.record_dir / "task-stale").write_text("until:1\n")
 
     result = _run_prepared_stop_hook(hook, tmp_path)
 
     assert result.returncode == 0, result.stderr
-    assert list(hook.lease_dir.iterdir()) == []
+    assert list(hook.record_dir.iterdir()) == []
 
 
-def test_stop_hook_leaves_alone_a_lease_it_did_not_write(tmp_path: Path) -> None:
-    """The lease directory is the agent's, and a record under another prefix is another writer's to remove."""
+def test_stop_hook_leaves_alone_a_record_it_did_not_write(tmp_path: Path) -> None:
+    """The record directory is the agent's, and a record under another prefix is another writer's to remove."""
     hook = _prepare_stop_hook(tmp_path, [_prompt("hello"), _reply("done")], background_tasks=[])
-    hook.lease_dir.mkdir()
-    (hook.lease_dir / "task-stale").write_text("until:1\n")
-    someone_elses = hook.lease_dir / "mngr-long-build"
+    hook.record_dir.mkdir()
+    (hook.record_dir / "task-stale").write_text("until:1\n")
+    someone_elses = hook.record_dir / "mngr-long-build"
     someone_elses.write_text("pid:4821\n")
 
     result = _run_prepared_stop_hook(hook, tmp_path)
 
     assert result.returncode == 0, result.stderr
-    assert [path.name for path in hook.lease_dir.iterdir()] == ["mngr-long-build"]
+    assert [path.name for path in hook.record_dir.iterdir()] == ["mngr-long-build"]
     assert someone_elses.read_text() == "pid:4821\n"
 
 
-def test_stop_hook_leases_every_kind_of_background_task_claude_reports(tmp_path: Path) -> None:
+def test_stop_hook_records_every_kind_of_background_task_claude_reports(tmp_path: Path) -> None:
     """The entry shape Claude Code sends: the id field is `id`, and the type label is in `type`."""
-    kind_by_label = WORK_LEASE_KIND_BY_CLAUDE_TASK_LABEL
+    kind_by_label = BACKGROUND_TASK_KIND_BY_CLAUDE_TASK_LABEL
     hook = _run_stop_hook_at_turn_end(
         tmp_path,
         [_prompt("hello"), _reply("done")],
@@ -457,9 +459,9 @@ def test_stop_hook_leases_every_kind_of_background_task_claude_reports(tmp_path:
         ],
     )
 
-    assert [(lease.name, lease.kind, lease.native_type) for lease in read_work_leases_in(hook.lease_dir)] == [
-        (f"task-t{index:02d}", kind, label) for index, (label, kind) in enumerate(kind_by_label.items())
-    ]
+    assert [
+        (record.name, record.kind, record.native_type) for record in read_background_task_records_in(hook.record_dir)
+    ] == [(f"task-t{index:02d}", kind, label) for index, (label, kind) in enumerate(kind_by_label.items())]
 
 
 def test_stop_hook_writes_a_task_label_exactly_as_claude_sent_it(tmp_path: Path) -> None:
@@ -473,17 +475,17 @@ def test_stop_hook_writes_a_task_label_exactly_as_claude_sent_it(tmp_path: Path)
     )
 
     written = [
-        (hook.lease_dir / f"task-t{index:02d}").read_text().split(" ", 1)[1]
+        (hook.record_dir / f"task-t{index:02d}").read_text().split(" ", 1)[1]
         for index in range(len(HOSTILE_NATIVE_TYPES))
     ]
     assert written == [
-        f"kind:{WORK_LEASE_KIND_BY_CLAUDE_TASK_LABEL.get(label, WorkLeaseKind.OTHER)} "
+        f"kind:{BACKGROUND_TASK_KIND_BY_CLAUDE_TASK_LABEL.get(label, BackgroundTaskKind.OTHER)} "
         f"native_type:{quote(label, safe='')}\n"
         for label in HOSTILE_NATIVE_TYPES
     ]
 
 
-def test_stop_hook_leases_a_task_without_a_type_as_other_work(tmp_path: Path) -> None:
+def test_stop_hook_records_a_task_without_a_type_as_other_work(tmp_path: Path) -> None:
     hook = _run_stop_hook_at_turn_end(
         tmp_path,
         [_prompt("hello"), _reply("done")],
@@ -493,13 +495,15 @@ def test_stop_hook_leases_a_task_without_a_type_as_other_work(tmp_path: Path) ->
         ],
     )
 
-    assert [(lease.name, lease.kind, lease.native_type) for lease in read_work_leases_in(hook.lease_dir)] == [
-        ("task-a-labelled", WorkLeaseKind.SHELL, "shell"),
-        ("task-b-typeless", WorkLeaseKind.OTHER, ""),
+    assert [
+        (record.name, record.kind, record.native_type) for record in read_background_task_records_in(hook.record_dir)
+    ] == [
+        ("task-a-labelled", BackgroundTaskKind.SHELL, "shell"),
+        ("task-b-typeless", BackgroundTaskKind.OTHER, ""),
     ]
 
 
-def test_stop_hook_does_not_lease_a_task_that_names_no_id(tmp_path: Path) -> None:
+def test_stop_hook_does_not_record_a_task_that_names_no_id(tmp_path: Path) -> None:
     hook = _run_stop_hook_at_turn_end(
         tmp_path,
         [_prompt("hello"), _reply("done")],
@@ -509,13 +513,13 @@ def test_stop_hook_does_not_lease_a_task_that_names_no_id(tmp_path: Path) -> Non
         ],
     )
 
-    assert [(lease.name, lease.kind, lease.native_type) for lease in read_work_leases_in(hook.lease_dir)] == [
-        ("task-named", WorkLeaseKind.SHELL, "shell")
-    ]
+    assert [
+        (record.name, record.kind, record.native_type) for record in read_background_task_records_in(hook.record_dir)
+    ] == [("task-named", BackgroundTaskKind.SHELL, "shell")]
 
 
-def test_stop_hook_does_not_lease_a_schedule(tmp_path: Path) -> None:
-    """No writer leases ``session_crons`` yet."""
+def test_stop_hook_does_not_record_a_schedule(tmp_path: Path) -> None:
+    """No writer records ``session_crons`` yet."""
     hook = _prepare_stop_hook(
         tmp_path,
         [_prompt("hello"), _reply("done")],
@@ -530,20 +534,20 @@ def test_stop_hook_does_not_lease_a_schedule(tmp_path: Path) -> None:
     result = _run_prepared_stop_hook(hook, tmp_path, hook_input=json.dumps(hook_input))
 
     assert result.returncode == 0, result.stderr
-    assert sorted(path.name for path in hook.lease_dir.iterdir()) == ["task-bg-1"]
+    assert sorted(path.name for path in hook.record_dir.iterdir()) == ["task-bg-1"]
 
 
-def test_stop_hook_marks_the_turn_over_even_when_the_leases_cannot_be_recorded(tmp_path: Path) -> None:
-    """Recording leases runs ahead of the marker clear, so it must not be able to stop it.
+def test_stop_hook_marks_the_turn_over_even_when_the_records_cannot_be_written(tmp_path: Path) -> None:
+    """Writing records runs ahead of the marker clear, so it must not be able to stop it.
 
-    The hook runs under `set -e`, and the agent's lease directory is ordinary state that
+    The hook runs under `set -e`, and the agent's record directory is ordinary state that
     anything may have left in a shape the hook cannot clear. Were that failure to abort
     the hook, the `active` marker would never be removed and the agent would read RUNNING
-    for the rest of its life -- a worse outcome than recording no leases at all. A
-    directory under a lease's own name is the shape no `rm -f` can clear, at any uid.
+    for the rest of its life -- a worse outcome than writing no records at all. A
+    directory under a record's own name is the shape no `rm -f` can clear, at any uid.
     """
     hook = _prepare_stop_hook(tmp_path, [_prompt("hello"), _reply("done")], background_tasks=[])
-    (hook.lease_dir / "task-unclearable").mkdir(parents=True)
+    (hook.record_dir / "task-unclearable").mkdir(parents=True)
 
     result = _run_prepared_stop_hook(hook, tmp_path)
 
@@ -551,7 +555,7 @@ def test_stop_hook_marks_the_turn_over_even_when_the_leases_cannot_be_recorded(t
     _assert_marked_idle(hook)
 
 
-def test_stop_hook_does_not_lease_a_task_that_reports_a_terminal_status(tmp_path: Path) -> None:
+def test_stop_hook_does_not_record_a_task_that_reports_a_terminal_status(tmp_path: Path) -> None:
     """A task with a terminal status is not recorded, though Claude Code documents the list as in-flight only."""
     hook = _run_stop_hook_at_turn_end(
         tmp_path,
@@ -568,7 +572,7 @@ def test_stop_hook_does_not_lease_a_task_that_reports_a_terminal_status(tmp_path
         ],
     )
 
-    assert sorted(path.name for path in hook.lease_dir.iterdir()) == [
+    assert sorted(path.name for path in hook.record_dir.iterdir()) == [
         "task-paused-task",
         "task-queued",
         "task-still-running",

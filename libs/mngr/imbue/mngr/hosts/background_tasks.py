@@ -15,59 +15,59 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.hosts.common import determine_lifecycle_probe_result
 from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import BACKGROUND_TASK_NAME_PATTERN
+from imbue.mngr.primitives import BackgroundTask
+from imbue.mngr.primitives import BackgroundTaskKind
 from imbue.mngr.primitives import LifecycleProbeReading
 from imbue.mngr.primitives import LifecycleProbeResult
-from imbue.mngr.primitives import WORK_LEASE_NAME_PATTERN
-from imbue.mngr.primitives import WorkLease
-from imbue.mngr.primitives import WorkLeaseKind
 
 # Directory under an agent's state dir holding one record file per background task.
-WORK_LEASE_DIR_NAME: Final[str] = "background_tasks"
+BACKGROUND_TASK_DIR_NAME: Final[str] = "background_tasks"
 
 # The token keys of a record's line, e.g. `seen:1792575895 kind:SUBAGENT native_type:cloud%20session`.
-WORK_LEASE_SEEN_KEY: Final[str] = "seen"
-WORK_LEASE_KIND_KEY: Final[str] = "kind"
-WORK_LEASE_NATIVE_TYPE_KEY: Final[str] = "native_type"
-WORK_LEASE_SINCE_KEY: Final[str] = "since"
+BACKGROUND_TASK_SEEN_KEY: Final[str] = "seen"
+BACKGROUND_TASK_KIND_KEY: Final[str] = "kind"
+BACKGROUND_TASK_NATIVE_TYPE_KEY: Final[str] = "native_type"
+BACKGROUND_TASK_SINCE_KEY: Final[str] = "since"
 
 # The longest native type a record publishes, in characters.
-WORK_LEASE_NATIVE_TYPE_MAX_LENGTH: Final[int] = 200
+BACKGROUND_TASK_NATIVE_TYPE_MAX_LENGTH: Final[int] = 200
 _UNPRINTABLE_REPLACEMENT: Final[str] = "\ufffd"
 _LINE_SEPARATORS: Final[frozenset[str]] = frozenset({"\u2028", "\u2029"})
 # An epoch second with more digits than this is past what a datetime can hold.
 _EPOCH_SECONDS_MAX_DIGITS: Final[int] = 12
 
 # How long after a record was last seen the heartbeat counts it, and the environment variable that overrides it.
-WORK_LEASE_TTL_ENV_VAR: Final[str] = "HOOK_WORK_LEASE_TTL_SECONDS"
-DEFAULT_WORK_LEASE_TTL_SECONDS: Final[int] = 86400
+BACKGROUND_TASK_KEEPALIVE_ENV_VAR: Final[str] = "HOOK_BACKGROUND_TASK_KEEPALIVE_SECONDS"
+DEFAULT_BACKGROUND_TASK_KEEPALIVE_SECONDS: Final[int] = 86400
 
-# Marks each half of a work-state read, so one command collects the turn marker and the leases.
+# Marks each half of a work-state read, so one command collects the turn marker and the records.
 _ACTIVE_PREFIX: Final[str] = "ACTIVE="
-LEASE_PREFIX: Final[str] = "LEASE="
+BACKGROUND_TASK_PREFIX: Final[str] = "BACKGROUND_TASK="
 
 
 @pure
-def _build_work_lease_scan_program(lease_key_expression: str) -> str:
-    """Build the awk printing `LEASE=<key>\\t<first line>` per path on stdin, the key built from ``parts[1..n]``."""
+def _build_background_task_scan_program(record_key_expression: str) -> str:
+    """Build the awk printing `BACKGROUND_TASK=<key>\\t<first line>` per path on stdin, the key built from ``parts[1..n]``."""
     program = (
         '{ first_line = ""; if ((getline first_line < $0) >= 0) '
-        f'{{ n = split($0, parts, "/"); print "{LEASE_PREFIX}" {lease_key_expression} "\\t" first_line }} '
+        f'{{ n = split($0, parts, "/"); print "{BACKGROUND_TASK_PREFIX}" {record_key_expression} "\\t" first_line }} '
         "close($0) }"
     )
     return f"awk {shlex.quote(program)}"
 
 
-# Names a lease from its own path, for a scan over one agent's lease directory.
-_ONE_AGENT_LEASE_KEY_EXPRESSION: Final[str] = "parts[n]"
+# Names a record from its own path, for a scan over one agent's record directory.
+_ONE_AGENT_RECORD_KEY_EXPRESSION: Final[str] = "parts[n]"
 
 
 @pure
-def build_work_lease_scan(lease_glob: str, lease_key_expression: str) -> str:
-    """Build the scan that hands awk each regular file ``lease_glob`` matches."""
+def build_background_task_scan(record_glob: str, record_key_expression: str) -> str:
+    """Build the scan that hands awk each regular file ``record_glob`` matches."""
     return (
-        f"for mngr_lease in {lease_glob}; do "
-        f"""if [ -f "$mngr_lease" ]; then printf '%s\\n' "$mngr_lease"; fi; done """
-        f"| {_build_work_lease_scan_program(lease_key_expression)}"
+        f"for mngr_task_record in {record_glob}; do "
+        f"""if [ -f "$mngr_task_record" ]; then printf '%s\\n' "$mngr_task_record"; fi; done """
+        f"| {_build_background_task_scan_program(record_key_expression)}"
     )
 
 
@@ -75,12 +75,12 @@ def build_work_lease_scan(lease_glob: str, lease_key_expression: str) -> str:
 def build_lifecycle_probe_read_command(agent_dir: str) -> str:
     """Build the command printing one agent's turn marker, as `ACTIVE=true` or `ACTIVE=`, and its record lines."""
     quoted_agent_dir = shlex.quote(agent_dir)
-    quoted_lease_dir = shlex.quote(f"{agent_dir}/{WORK_LEASE_DIR_NAME}")
-    lease_scan = build_work_lease_scan(f"{quoted_lease_dir}/*", _ONE_AGENT_LEASE_KEY_EXPRESSION)
+    quoted_record_dir = shlex.quote(f"{agent_dir}/{BACKGROUND_TASK_DIR_NAME}")
+    record_scan = build_background_task_scan(f"{quoted_record_dir}/*", _ONE_AGENT_RECORD_KEY_EXPRESSION)
     return (
         f'if [ -f {quoted_agent_dir}/active ]; then echo "{_ACTIVE_PREFIX}true"; '
         f'else echo "{_ACTIVE_PREFIX}"; fi; '
-        f"if [ -d {quoted_lease_dir} ]; then {lease_scan} 2>/dev/null; fi; :"
+        f"if [ -d {quoted_record_dir} ]; then {record_scan} 2>/dev/null; fi; :"
     )
 
 
@@ -88,20 +88,20 @@ def build_lifecycle_probe_read_command(agent_dir: str) -> str:
 def parse_lifecycle_probe_reading(stdout: str) -> LifecycleProbeReading:
     """Read probe output into the turn marker, absent as `ACTIVE=` or `ACTIVE=false`, and the raw record lines."""
     is_active = False
-    lease_lines: list[str] = []
+    record_lines: list[str] = []
     for line in stdout.split("\n"):
         if line.startswith(_ACTIVE_PREFIX):
             marker = line[len(_ACTIVE_PREFIX) :].strip()
             is_active = marker != "" and marker != "false"
-        elif line.startswith(LEASE_PREFIX):
-            lease_lines.append(line[len(LEASE_PREFIX) :])
+        elif line.startswith(BACKGROUND_TASK_PREFIX):
+            record_lines.append(line[len(BACKGROUND_TASK_PREFIX) :])
         else:
             pass
-    return LifecycleProbeReading(is_active=is_active, raw_leases="\n".join(lease_lines))
+    return LifecycleProbeReading(is_active=is_active, raw_background_tasks="\n".join(record_lines))
 
 
 @pure
-def _parse_lease_tokens(first_line: str) -> dict[str, str]:
+def _parse_record_tokens(first_line: str) -> dict[str, str]:
     """The space-separated `<key>:<value>` tokens of a record line, keeping the first value given for a key."""
     tokens: dict[str, str] = {}
     for token in first_line.rstrip("\r").split(" "):
@@ -112,20 +112,20 @@ def _parse_lease_tokens(first_line: str) -> dict[str, str]:
 
 
 @pure
-def _parse_lease_kind(raw_kind: str) -> WorkLeaseKind:
+def _parse_record_kind(raw_kind: str) -> BackgroundTaskKind:
     if not raw_kind:
-        return WorkLeaseKind.OTHER
+        return BackgroundTaskKind.OTHER
     try:
-        return WorkLeaseKind(raw_kind)
+        return BackgroundTaskKind(raw_kind)
     except ValueError:
         logger.trace("Reading background task kind {!r} as OTHER: this reader does not know it", raw_kind)
-        return WorkLeaseKind.OTHER
+        return BackgroundTaskKind.OTHER
 
 
 @pure
-def _parse_lease_native_type(raw_native_type: str) -> str:
+def _parse_record_native_type(raw_native_type: str) -> str:
     """A native type as published: decoded, capped, and with every control character replaced."""
-    native_type = unquote(raw_native_type)[:WORK_LEASE_NATIVE_TYPE_MAX_LENGTH]
+    native_type = unquote(raw_native_type)[:BACKGROUND_TASK_NATIVE_TYPE_MAX_LENGTH]
     return "".join(
         _UNPRINTABLE_REPLACEMENT
         if unicodedata.category(character) == "Cc" or character in _LINE_SEPARATORS
@@ -135,7 +135,7 @@ def _parse_lease_native_type(raw_native_type: str) -> str:
 
 
 @pure
-def _parse_lease_instant(raw_epoch_seconds: str) -> datetime | None:
+def _parse_record_instant(raw_epoch_seconds: str) -> datetime | None:
     """The instant an epoch-seconds token names, or None when it is not a number a datetime can hold."""
     is_epoch_seconds = (
         raw_epoch_seconds.isascii()
@@ -146,28 +146,28 @@ def _parse_lease_instant(raw_epoch_seconds: str) -> datetime | None:
 
 
 @pure
-def parse_work_leases(raw_leases: str) -> tuple[WorkLease, ...]:
+def parse_background_tasks(raw_background_tasks: str) -> tuple[BackgroundTask, ...]:
     """Parse ``<name>\\t<first line>`` lines into background tasks, one per validly named record whatever its fields."""
-    leases: list[WorkLease] = []
-    for line in raw_leases.split("\n"):
+    background_tasks: list[BackgroundTask] = []
+    for line in raw_background_tasks.split("\n"):
         if not line:
             continue
         raw_name, _, first_line = line.partition("\t")
         name = raw_name.strip()
-        if WORK_LEASE_NAME_PATTERN.match(name) is None:
+        if BACKGROUND_TASK_NAME_PATTERN.match(name) is None:
             logger.trace("Dropping background task record {!r}: its name is not a record name", line)
             continue
-        tokens = _parse_lease_tokens(first_line)
-        leases.append(
-            WorkLease(
+        tokens = _parse_record_tokens(first_line)
+        background_tasks.append(
+            BackgroundTask(
                 name=name,
-                kind=_parse_lease_kind(tokens.get(WORK_LEASE_KIND_KEY, "")),
-                native_type=_parse_lease_native_type(tokens.get(WORK_LEASE_NATIVE_TYPE_KEY, "")),
-                started_at=_parse_lease_instant(tokens.get(WORK_LEASE_SINCE_KEY, "")),
-                last_seen_at=_parse_lease_instant(tokens.get(WORK_LEASE_SEEN_KEY, "")),
+                kind=_parse_record_kind(tokens.get(BACKGROUND_TASK_KIND_KEY, "")),
+                native_type=_parse_record_native_type(tokens.get(BACKGROUND_TASK_NATIVE_TYPE_KEY, "")),
+                started_at=_parse_record_instant(tokens.get(BACKGROUND_TASK_SINCE_KEY, "")),
+                last_seen_at=_parse_record_instant(tokens.get(BACKGROUND_TASK_SEEN_KEY, "")),
             )
         )
-    return tuple(leases)
+    return tuple(background_tasks)
 
 
 @pure
@@ -192,10 +192,10 @@ def determine_agent_probe_result(
     # An agent a dialog holds reads WAITING whatever it has recorded.
     if probe.state is not AgentLifecycleState.WAITING or is_blocked_on_dialog:
         return probe
-    leases = parse_work_leases(reading.raw_leases)
-    if not leases:
+    background_tasks = parse_background_tasks(reading.raw_background_tasks)
+    if not background_tasks:
         return probe
     return probe.model_copy_update(
         to_update(probe.field_ref().state, AgentLifecycleState.RUNNING_BACKGROUND),
-        to_update(probe.field_ref().leases, leases),
+        to_update(probe.field_ref().background_tasks, background_tasks),
     )

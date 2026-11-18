@@ -3191,7 +3191,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         "mngr_log.sh",
         "mngr_transcript_lib.sh",
         "mngr_common_transcript_lib.sh",
-        "mngr_work_lease_lib.sh",
+        "mngr_background_task_lib.sh",
     )
 
     def _ensure_shared_shell_libs(self, agent: AgentInterface) -> None:
@@ -3213,9 +3213,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
           by per-agent ``common_transcript.sh`` converters and the turn-end
           hooks that flush them (claude's ``wait_for_stop_hook.sh``,
           antigravity's ``statusline.sh``).
-        - ``mngr_work_lease_lib.sh`` provides the work-lease writers, by which a
-          turn-end hook declares the work its turn left running so the agent
-          reads RUNNING_BACKGROUND rather than WAITING.
+        - ``mngr_background_task_lib.sh`` provides the background task record
+          writers, by which a turn-end hook records the work its turn left
+          running so the agent reads RUNNING_BACKGROUND rather than WAITING.
         """
         host_commands = self.host_dir / "commands"
         agent_commands = self._get_agent_state_dir(agent) / "commands"

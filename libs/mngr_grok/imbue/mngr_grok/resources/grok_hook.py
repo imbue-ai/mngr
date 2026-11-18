@@ -101,16 +101,16 @@ _END_TURN_REASON: Final[str] = "end_turn"
 _SUBAGENT_TASK_TYPE: Final[str] = "subagent"
 
 # One record file per in-flight background task, under the agent's own state dir, in the format mngr reads.
-WORK_LEASE_DIRNAME: Final[str] = "background_tasks"
-WORK_LEASE_NAME_PREFIX: Final[str] = "task-"
-_LEASE_NAME_DISALLOWED_PATTERN: Final[re.Pattern[str]] = re.compile(r"[^A-Za-z0-9_.-]")
-# grok's task types as the WorkLeaseKind names they stand for.
-LEASE_KIND_BY_TASK_TYPE: Final[Mapping[str, str]] = {
+BACKGROUND_TASK_DIRNAME: Final[str] = "background_tasks"
+BACKGROUND_TASK_NAME_PREFIX: Final[str] = "task-"
+_RECORD_NAME_DISALLOWED_PATTERN: Final[re.Pattern[str]] = re.compile(r"[^A-Za-z0-9_.-]")
+# grok's task types as the BackgroundTaskKind names they stand for.
+BACKGROUND_TASK_KIND_BY_TASK_TYPE: Final[Mapping[str, str]] = {
     "shell": "SHELL",
     _SUBAGENT_TASK_TYPE: "SUBAGENT",
     "monitor": "MONITOR",
 }
-OTHER_LEASE_KIND: Final[str] = "OTHER"
+OTHER_BACKGROUND_TASK_KIND: Final[str] = "OTHER"
 # grok's task statuses that end a task; one with any other status is recorded.
 _TERMINAL_TASK_STATUSES: Final[frozenset[str]] = frozenset({"completed", "failed", "killed", "cancelled"})
 
@@ -392,7 +392,7 @@ def _end_subagent_session(state_dir: Path, host_dir: str, subagent_id: str, now:
     _remove_file(subagent_path)
     _remove_file(_turn_path(state_dir, subagent_id))
     _remove_file(_pending_wake_path(state_dir, subagent_id))
-    _drop_lease(state_dir, subagent_id)
+    _drop_background_task_record(state_dir, subagent_id)
     _clear_session_permission_waiting(state_dir, subagent_id)
     return f"subagent:end {wake}" + _recompute_active_marker(state_dir, host_dir, now)
 
@@ -411,7 +411,7 @@ def _end_root_session(state_dir: Path, host_dir: str, session_id: str, now: date
     _remove_file(_pending_wake_path(state_dir, session_id))
     removed_subagent_count = _remove_subagents_of_parent(state_dir, session_id)
     # The records this session wrote name tasks inside it.
-    _clear_work_leases(state_dir)
+    _clear_background_task_records(state_dir)
     _clear_session_permission_waiting(state_dir, session_id)
     outcome = f"root:end turn-removed={str(is_turn_removed).lower()} subagents-removed={removed_subagent_count}"
     return outcome + _recompute_active_marker(state_dir, host_dir, now)
@@ -425,17 +425,17 @@ def _running_subagent_ids(background_tasks: Sequence[Any]) -> frozenset[str]:
     )
 
 
-def _lease_dir(state_dir: Path) -> Path:
-    return state_dir / WORK_LEASE_DIRNAME
+def _record_dir(state_dir: Path) -> Path:
+    return state_dir / BACKGROUND_TASK_DIRNAME
 
 
-def _lease_name_of(task_id: str) -> str:
-    return WORK_LEASE_NAME_PREFIX + _LEASE_NAME_DISALLOWED_PATTERN.sub("_", task_id)
+def _record_name_of(task_id: str) -> str:
+    return BACKGROUND_TASK_NAME_PREFIX + _RECORD_NAME_DISALLOWED_PATTERN.sub("_", task_id)
 
 
-def _drop_lease(state_dir: Path, task_id: str) -> None:
+def _drop_background_task_record(state_dir: Path, task_id: str) -> None:
     """Remove the record of a task that has ended."""
-    _remove_file(_lease_dir(state_dir) / _lease_name_of(task_id))
+    _remove_file(_record_dir(state_dir) / _record_name_of(task_id))
 
 
 def _in_flight_tasks(background_tasks: Sequence[Any]) -> list[dict[str, Any]]:
@@ -450,34 +450,34 @@ def _in_flight_tasks(background_tasks: Sequence[Any]) -> list[dict[str, Any]]:
     return tasks
 
 
-def _lease_line_of(task: Mapping[str, Any], seen_at: int) -> str:
+def _record_line_of(task: Mapping[str, Any], seen_at: int) -> str:
     """A record's first line, e.g. ``seen:1792575895 kind:SHELL native_type:shell``."""
     task_type = str(task.get("type") or "")
-    line = f"seen:{seen_at} kind:{LEASE_KIND_BY_TASK_TYPE.get(task_type, OTHER_LEASE_KIND)}"
+    line = f"seen:{seen_at} kind:{BACKGROUND_TASK_KIND_BY_TASK_TYPE.get(task_type, OTHER_BACKGROUND_TASK_KIND)}"
     native_type = quote(task_type, safe="", errors="replace")
     return f"{line} native_type:{native_type}" if native_type else line
 
 
-def _clear_work_leases(state_dir: Path) -> str:
+def _clear_background_task_records(state_dir: Path) -> str:
     """Drop every record under this writer's own prefix."""
-    lease_dir = _lease_dir(state_dir)
-    for lease_name in _visible_entry_names(lease_dir):
-        if lease_name.startswith(WORK_LEASE_NAME_PREFIX):
-            _remove_file(lease_dir / lease_name)
-    return " leases=0"
+    record_dir = _record_dir(state_dir)
+    for record_name in _visible_entry_names(record_dir):
+        if record_name.startswith(BACKGROUND_TASK_NAME_PREFIX):
+            _remove_file(record_dir / record_name)
+    return " background_tasks=0"
 
 
-def _write_work_leases(state_dir: Path, background_tasks: Sequence[Any], now: datetime) -> str:
+def _write_background_task_records(state_dir: Path, background_tasks: Sequence[Any], now: datetime) -> str:
     """Rewrite this writer's whole record set, one per in-flight task, each seen now."""
-    cleared_outcome = _clear_work_leases(state_dir)
+    cleared_outcome = _clear_background_task_records(state_dir)
     tasks = _in_flight_tasks(background_tasks)
     if not tasks:
         return cleared_outcome
     seen_at = int(now.timestamp())
-    lease_dir = _lease_dir(state_dir)
+    record_dir = _record_dir(state_dir)
     for task in tasks:
-        _write_text_atomically(lease_dir / _lease_name_of(task["id"]), _lease_line_of(task, seen_at) + "\n")
-    return f" leases={len(tasks)}"
+        _write_text_atomically(record_dir / _record_name_of(task["id"]), _record_line_of(task, seen_at) + "\n")
+    return f" background_tasks={len(tasks)}"
 
 
 def _reconcile_subagents_with_snapshot(state_dir: Path, parent_id: str, running_subagent_ids: frozenset[str]) -> str:
@@ -514,8 +514,8 @@ def _handle_session_start(state_dir: Path, host_dir: str, payload: Mapping[str, 
     _remove_file(plugin_dir / _FORK_FROM_FILENAME)
     _touch(state_dir / SESSION_STARTED_FILENAME)
     # The tasks these stood for were processes the restart killed.
-    lease_outcome = _clear_work_leases(state_dir)
-    return ("root:new" if is_new_root else "root:known") + lease_outcome
+    record_outcome = _clear_background_task_records(state_dir)
+    return ("root:new" if is_new_root else "root:known") + record_outcome
 
 
 def _handle_user_prompt_submit(state_dir: Path, host_dir: str, payload: Mapping[str, Any], now: datetime) -> str:
@@ -551,13 +551,13 @@ def _handle_stop(state_dir: Path, host_dir: str, payload: Mapping[str, Any], now
         state_dir, session_id, _running_subagent_ids(background_tasks)
     )
     # Ahead of the recompute, so no probe sees the marker off before the records land.
-    lease_outcome = _write_work_leases(state_dir, background_tasks, now)
-    return f"stop {reconcile_outcome}" + lease_outcome + _recompute_active_marker(state_dir, host_dir, now)
+    record_outcome = _write_background_task_records(state_dir, background_tasks, now)
+    return f"stop {reconcile_outcome}" + record_outcome + _recompute_active_marker(state_dir, host_dir, now)
 
 
 def _end_stopped_subagent(state_dir: Path, host_dir: str, subagent_id: str, now: datetime) -> str:
     is_removed = _remove_file(_subagent_path(state_dir, subagent_id))
-    _drop_lease(state_dir, subagent_id)
+    _drop_background_task_record(state_dir, subagent_id)
     _clear_session_permission_waiting(state_dir, subagent_id)
     outcome = "subagent:end" if is_removed else "ignored:unknown-subagent"
     return outcome + _recompute_active_marker(state_dir, host_dir, now)

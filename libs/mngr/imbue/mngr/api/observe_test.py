@@ -67,14 +67,14 @@ from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import BackgroundTask
+from imbue.mngr.primitives import BackgroundTaskKind
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.primitives import WorkLease
-from imbue.mngr.primitives import WorkLeaseKind
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import capture_loguru
@@ -1087,9 +1087,9 @@ def test_parse_observe_event_line_round_trips_agent_state() -> None:
 
 
 def test_parse_observe_event_line_round_trips_an_agents_background_tasks() -> None:
-    background_task = WorkLease(
+    background_task = BackgroundTask(
         name="task-abc",
-        kind=WorkLeaseKind.SUBAGENT,
+        kind=BackgroundTaskKind.SUBAGENT,
         native_type="cloud session",
         started_at=datetime(2026, 1, 2, 11, 0, 0, tzinfo=timezone.utc),
         last_seen_at=datetime(2026, 1, 2, 12, 0, 0, tzinfo=timezone.utc),
@@ -1889,7 +1889,7 @@ def test_follower_seeded_from_a_snapshot_carrying_the_retired_leases_key_folds_a
     events_path = get_observe_events_path(temp_host_dir)
     events_path.parent.mkdir(parents=True)
     events_path.write_text(_full_state_line_with_retired_leases_keys() + "\n")
-    background_task = WorkLease(name="task-abc", kind=WorkLeaseKind.SHELL, native_type="shell")
+    background_task = BackgroundTask(name="task-abc", kind=BackgroundTaskKind.SHELL, native_type="shell")
     later = make_test_agent_details(
         name="later", state=AgentLifecycleState.RUNNING_BACKGROUND, background_tasks=(background_task,)
     )

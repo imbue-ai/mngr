@@ -13,15 +13,15 @@ from typing import Final
 
 import pytest
 
+from imbue.mngr.hosts.background_tasks import build_lifecycle_probe_read_command
+from imbue.mngr.hosts.background_tasks import determine_agent_probe_result
+from imbue.mngr.hosts.background_tasks import parse_background_tasks
+from imbue.mngr.hosts.background_tasks import parse_lifecycle_probe_reading
 from imbue.mngr.hosts.tmux import AGENT_ID_OPTION
-from imbue.mngr.hosts.work_leases import build_lifecycle_probe_read_command
-from imbue.mngr.hosts.work_leases import determine_agent_probe_result
-from imbue.mngr.hosts.work_leases import parse_lifecycle_probe_reading
-from imbue.mngr.hosts.work_leases import parse_work_leases
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import BackgroundTask
+from imbue.mngr.primitives import BackgroundTaskKind
 from imbue.mngr.primitives import LifecycleProbeReading
-from imbue.mngr.primitives import WorkLease
-from imbue.mngr.primitives import WorkLeaseKind
 from imbue.mngr.providers.listing_utils import SEP_AGENT_END
 from imbue.mngr.providers.listing_utils import _build_agents_section_script
 from imbue.mngr.providers.listing_utils import build_lifecycle_probe_reading
@@ -646,7 +646,7 @@ def test_extract_agent_data_returns_data_dicts_and_skips_malformed(log_warnings:
 def _run_agents_section_script(host_dir: Path) -> dict[str, Any]:
     """Execute just the agents section against a real tree and parse what it emitted.
 
-    The section is shell, and the lease scan's one awk derives each lease's owner from the
+    The section is shell, and the record scan's one awk derives each record's owner from the
     path it was handed, so running it against a real tree is what proves the attribution.
     """
     script = f"HOST_DIR={shlex.quote(str(host_dir))}\n{_build_agents_section_script(is_host_running=True)}"
@@ -662,11 +662,11 @@ def _write_agent(host_dir: Path, agent_id: str) -> Path:
     return agent_dir
 
 
-def test_listing_script_gives_each_agent_the_leases_under_its_own_lease_dir(tmp_path: Path) -> None:
-    """One awk covers every agent's leases, so each lease must carry its owner's id back.
+def test_listing_script_gives_each_agent_the_records_under_its_own_record_dir(tmp_path: Path) -> None:
+    """One awk covers every agent's records, so each record must carry its owner's id back.
 
     Attribution is the whole load the scan bears: read the wrong path component and every
-    lease lands under the literal ``background_tasks``, no agent ever holds one, and the listing
+    record lands under the literal ``background_tasks``, no agent ever holds one, and the listing
     silently never reports RUNNING_BACKGROUND.
     """
     host_dir = tmp_path / "mngr"
@@ -674,22 +674,22 @@ def test_listing_script_gives_each_agent_the_leases_under_its_own_lease_dir(tmp_
     (busy / "background_tasks").mkdir()
     (busy / "background_tasks" / "task-one").write_text("seen:1767355200 kind:SHELL native_type:shell\n")
     (busy / "background_tasks" / "task-two").write_text("")
-    _write_agent(host_dir, "agent-never-leased")
+    _write_agent(host_dir, "agent-never-recorded")
     (_write_agent(host_dir, "agent-finished") / "background_tasks").mkdir()
 
     agents = {agent["data"]["id"]: agent for agent in _run_agents_section_script(host_dir)["agents"]}
 
-    assert parse_work_leases(agents["agent-busy"]["raw_work_leases"]) == (
-        WorkLease(
+    assert parse_background_tasks(agents["agent-busy"]["raw_background_tasks"]) == (
+        BackgroundTask(
             name="task-one",
-            kind=WorkLeaseKind.SHELL,
+            kind=BackgroundTaskKind.SHELL,
             native_type="shell",
             last_seen_at=datetime(2026, 1, 2, 12, 0, 0, tzinfo=timezone.utc),
         ),
-        WorkLease(name="task-two"),
+        BackgroundTask(name="task-two"),
     )
-    assert agents["agent-never-leased"]["raw_work_leases"] == ""
-    assert agents["agent-finished"]["raw_work_leases"] == ""
+    assert agents["agent-never-recorded"]["raw_background_tasks"] == ""
+    assert agents["agent-finished"]["raw_background_tasks"] == ""
 
 
 @pytest.mark.parametrize(
@@ -716,7 +716,10 @@ def test_listing_script_reads_the_records_under_background_tasks_and_no_other_di
         ps_output="",
         reading=build_lifecycle_probe_reading(agent),
     )
-    assert (probe.state, [lease.name for lease in probe.leases]) == (expected_state, expected_names)
+    assert (probe.state, [background_task.name for background_task in probe.background_tasks]) == (
+        expected_state,
+        expected_names,
+    )
 
 
 @pytest.mark.parametrize("separator", RAW_LINE_SEPARATOR_BY_NAME.values(), ids=RAW_LINE_SEPARATOR_BY_NAME.keys())
@@ -728,17 +731,17 @@ def test_listing_script_reads_a_record_holding_a_raw_line_separator_as_one_recor
     (writer / "background_tasks").mkdir()
     (writer / "background_tasks" / "task-real").write_bytes(
         f"seen:1767355200 kind:SHELL native_type:a{separator}"
-        "LEASE=agent-zzz-bystander\ttask-forged\tseen:1 since:1767351600\n".encode()
+        "BACKGROUND_TASK=agent-zzz-bystander\ttask-forged\tseen:1 since:1767351600\n".encode()
     )
     _write_agent(host_dir, "agent-zzz-bystander")
 
     agents = {agent["data"]["id"]: agent for agent in _run_agents_section_script(host_dir)["agents"]}
 
-    leases = parse_work_leases(agents["agent-aaa-writer"]["raw_work_leases"])
-    assert [(lease.name, lease.started_at) for lease in leases] == [
+    background_tasks = parse_background_tasks(agents["agent-aaa-writer"]["raw_background_tasks"])
+    assert [(background_task.name, background_task.started_at) for background_task in background_tasks] == [
         ("task-real", datetime(2026, 1, 2, 11, 0, 0, tzinfo=timezone.utc))
     ]
-    assert agents["agent-zzz-bystander"]["raw_work_leases"] == ""
+    assert agents["agent-zzz-bystander"]["raw_background_tasks"] == ""
 
 
 @pytest.mark.parametrize(
@@ -766,14 +769,14 @@ def test_listing_script_reads_the_last_record_line_on_the_host_as_the_one_agent_
 
     (agent,) = _run_agents_section_script(host_dir)["agents"]
 
-    assert agent["raw_work_leases"] == parse_lifecycle_probe_reading(probe.stdout.decode()).raw_leases
-    assert parse_work_leases(agent["raw_work_leases"]) == (
-        WorkLease(name="task-last", started_at=datetime(2026, 1, 2, 11, 0, 0, tzinfo=timezone.utc)),
+    assert agent["raw_background_tasks"] == parse_lifecycle_probe_reading(probe.stdout.decode()).raw_background_tasks
+    assert parse_background_tasks(agent["raw_background_tasks"]) == (
+        BackgroundTask(name="task-last", started_at=datetime(2026, 1, 2, 11, 0, 0, tzinfo=timezone.utc)),
     )
 
 
-def test_listing_script_reports_every_agent_when_the_host_holds_no_lease_at_all(tmp_path: Path) -> None:
-    """The ordinary state of a host: the lease glob matches nothing and must not cost the listing."""
+def test_listing_script_reports_every_agent_when_the_host_holds_no_record_at_all(tmp_path: Path) -> None:
+    """The ordinary state of a host: the record glob matches nothing and must not cost the listing."""
     host_dir = tmp_path / "mngr"
     _write_agent(host_dir, "agent-one")
     _write_agent(host_dir, "agent-two")
@@ -781,33 +784,33 @@ def test_listing_script_reports_every_agent_when_the_host_holds_no_lease_at_all(
     agents = {agent["data"]["id"]: agent for agent in _run_agents_section_script(host_dir)["agents"]}
 
     assert sorted(agents) == ["agent-one", "agent-two"]
-    assert [agent["raw_work_leases"] for agent in agents.values()] == ["", ""]
+    assert [agent["raw_background_tasks"] for agent in agents.values()] == ["", ""]
 
 
 @pytest.mark.parametrize(
-    "unreadable_lease_shape",
+    "unreadable_record_shape",
     [
-        pytest.param("dangling_symlink", id="lease_cleared_mid_scan"),
-        pytest.param("directory", id="lease_name_taken_by_a_directory"),
+        pytest.param("dangling_symlink", id="record_cleared_mid_scan"),
+        pytest.param("directory", id="record_name_taken_by_a_directory"),
     ],
 )
-def test_listing_script_keeps_one_agents_leases_when_another_holds_one_it_cannot_read(
-    tmp_path: Path, unreadable_lease_shape: str
+def test_listing_script_keeps_one_agents_records_when_another_holds_one_it_cannot_read(
+    tmp_path: Path, unreadable_record_shape: str
 ) -> None:
     """One scan carries the whole host, so a path it cannot read must cost only that path.
 
-    Otherwise it takes down the leases of every agent sorted after the bad one -- each
+    Otherwise it takes down the records of every agent sorted after the bad one -- each
     reading WAITING while its work is in flight, with nothing in the output to say so. Both
-    shapes reach the scan: a lease disappears between the shell expanding the glob and the
-    scan reaching it, because the stop hook clears an agent's lease directory at each turn
-    end; and a directory under a lease's name is what a writer leaves when it cannot remove
+    shapes reach the scan: a record disappears between the shell expanding the glob and the
+    scan reaching it, because the stop hook clears an agent's record directory at each turn
+    end; and a directory under a record's name is what a writer leaves when it cannot remove
     one. awk survives the first on its own, and dies on the second with an i/o error, so the
     scan hands it regular files alone.
     """
     host_dir = tmp_path / "mngr"
     broken = _write_agent(host_dir, "agent-aaa-broken")
     (broken / "background_tasks").mkdir()
-    if unreadable_lease_shape == "directory":
+    if unreadable_record_shape == "directory":
         (broken / "background_tasks" / "task-gone").mkdir()
     else:
         (broken / "background_tasks" / "task-gone").symlink_to(broken / "background_tasks" / "already-gone")
@@ -817,12 +820,12 @@ def test_listing_script_keeps_one_agents_leases_when_another_holds_one_it_cannot
 
     agents = {agent["data"]["id"]: agent for agent in _run_agents_section_script(host_dir)["agents"]}
 
-    assert agents["agent-aaa-broken"]["raw_work_leases"] == ""
-    assert agents["agent-zzz-later"]["raw_work_leases"] == "task-one\tseen:1767355260"
+    assert agents["agent-aaa-broken"]["raw_background_tasks"] == ""
+    assert agents["agent-zzz-later"]["raw_background_tasks"] == "task-one\tseen:1767355260"
 
 
 def test_listing_script_reports_the_turn_marker_of_each_agent(tmp_path: Path) -> None:
-    """The batched read's other half, which the lifecycle decision needs alongside the leases.
+    """The batched read's other half, which the lifecycle decision needs alongside the records.
 
     An agent whose marker went unread would report WAITING mid-turn, and one credited with
     another agent's marker would report RUNNING between turns.

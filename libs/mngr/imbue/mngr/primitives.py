@@ -441,21 +441,21 @@ class LifecycleProbeReading(FrozenModel):
         default=False,
         description="Whether the agent's turn marker is present, which is what having a turn open means",
     )
-    raw_leases: str = Field(
+    raw_background_tasks: str = Field(
         default="",
         description="The collected `<name>\\t<first line>` record lines, one per line, still to be parsed",
     )
 
 
-class InvalidWorkLeaseError(ValueError):
+class InvalidBackgroundTaskError(ValueError):
     """Raised when a background task record has no valid name."""
 
 
 # What a record's file name may be: no leading dot, and only characters that survive the tab-delimited scan.
-WORK_LEASE_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"\A[A-Za-z0-9_-][A-Za-z0-9_.-]*\Z")
+BACKGROUND_TASK_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"\A[A-Za-z0-9_-][A-Za-z0-9_.-]*\Z")
 
 
-class WorkLeaseKind(UpperCaseStrEnum):
+class BackgroundTaskKind(UpperCaseStrEnum):
     """mngr's category for a background task."""
 
     # A command the agent started and left running.
@@ -470,11 +470,11 @@ class WorkLeaseKind(UpperCaseStrEnum):
     OTHER = auto()
 
 
-class WorkLease(FrozenModel):
+class BackgroundTask(FrozenModel):
     """One background task an agent left running after its turn, as read from its record file."""
 
     name: str = Field(description="Record file name, e.g. `task-b09b409g6`")
-    kind: WorkLeaseKind = Field(default=WorkLeaseKind.OTHER, description="mngr's category for the task")
+    kind: BackgroundTaskKind = Field(default=BackgroundTaskKind.OTHER, description="mngr's category for the task")
     native_type: str = Field(
         default="",
         description=(
@@ -493,9 +493,9 @@ class WorkLease(FrozenModel):
 
     @model_validator(mode="after")
     def _check_is_named(self) -> Self:
-        if WORK_LEASE_NAME_PATTERN.match(self.name) is None:
-            raise InvalidWorkLeaseError(
-                f"Background task record name {self.name!r} must match {WORK_LEASE_NAME_PATTERN.pattern}"
+        if BACKGROUND_TASK_NAME_PATTERN.match(self.name) is None:
+            raise InvalidBackgroundTaskError(
+                f"Background task record name {self.name!r} must match {BACKGROUND_TASK_NAME_PATTERN.pattern}"
             )
         return self
 
@@ -515,7 +515,7 @@ class LifecycleProbeResult(FrozenModel):
             "Only watchable in-process (e.g. via psutil) when the probed host is the local machine."
         ),
     )
-    leases: tuple[WorkLease, ...] = Field(
+    background_tasks: tuple[BackgroundTask, ...] = Field(
         default=(),
         description=(
             "The agent's background task records, in the order read; non-empty exactly where the state "

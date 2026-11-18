@@ -264,7 +264,7 @@ def _build_agent_details_from_online_agent(
         create_time=agent.create_time,
         start_on_boot=agent.get_is_start_on_boot(),
         state=lifecycle.state,
-        background_tasks=lifecycle.leases,
+        background_tasks=lifecycle.background_tasks,
         pid=lifecycle.pid,
         url=agent.get_reported_url(),
         start_time=start_time,

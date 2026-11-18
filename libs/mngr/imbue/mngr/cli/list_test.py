@@ -51,12 +51,12 @@ from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import BackgroundTask
+from imbue.mngr.primitives import BackgroundTaskKind
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
-from imbue.mngr.primitives import WorkLease
-from imbue.mngr.primitives import WorkLeaseKind
 from imbue.mngr.utils.cel_utils import compile_cel_sort_keys
 from imbue.mngr.utils.testing import make_test_agent_details
 from imbue.mngr.utils.testing import record_host_name
@@ -185,14 +185,14 @@ def test_get_field_value_names_the_background_tasks_of_an_agent() -> None:
     agent = make_test_agent_details(
         state=AgentLifecycleState.RUNNING_BACKGROUND,
         background_tasks=(
-            WorkLease(
+            BackgroundTask(
                 name="task-abc",
-                kind=WorkLeaseKind.SUBAGENT,
+                kind=BackgroundTaskKind.SUBAGENT,
                 native_type="cloud session",
                 started_at=started_at,
                 last_seen_at=last_seen_at,
             ),
-            WorkLease(name="task-def"),
+            BackgroundTask(name="task-def"),
         ),
     )
 
@@ -1367,9 +1367,9 @@ def test_list_command_json_format_publishes_exactly_the_five_fields_of_a_backgro
     plugin_manager: pluggy.PluginManager,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    background_task = WorkLease(
+    background_task = BackgroundTask(
         name="task-abc",
-        kind=WorkLeaseKind.SUBAGENT,
+        kind=BackgroundTaskKind.SUBAGENT,
         native_type="cloud session",
         started_at=datetime(2026, 1, 2, 11, 0, 0, tzinfo=timezone.utc),
         last_seen_at=datetime(2026, 1, 2, 12, 0, 0, tzinfo=timezone.utc),
@@ -1380,7 +1380,7 @@ def test_list_command_json_format_publishes_exactly_the_five_fields_of_a_backgro
             make_test_agent_details(
                 name="alpha",
                 state=AgentLifecycleState.RUNNING_BACKGROUND,
-                background_tasks=(background_task, WorkLease(name="task-def")),
+                background_tasks=(background_task, BackgroundTask(name="task-def")),
             )
         ],
     )

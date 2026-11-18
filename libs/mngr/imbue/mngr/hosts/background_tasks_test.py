@@ -6,32 +6,32 @@ from typing import Final
 
 import pytest
 
-from imbue.mngr.hosts.work_leases import WORK_LEASE_DIR_NAME
-from imbue.mngr.hosts.work_leases import WORK_LEASE_NATIVE_TYPE_MAX_LENGTH
-from imbue.mngr.hosts.work_leases import build_lifecycle_probe_read_command
-from imbue.mngr.hosts.work_leases import determine_agent_probe_result
-from imbue.mngr.hosts.work_leases import parse_lifecycle_probe_reading
-from imbue.mngr.hosts.work_leases import parse_work_leases
+from imbue.mngr.hosts.background_tasks import BACKGROUND_TASK_DIR_NAME
+from imbue.mngr.hosts.background_tasks import BACKGROUND_TASK_NATIVE_TYPE_MAX_LENGTH
+from imbue.mngr.hosts.background_tasks import build_lifecycle_probe_read_command
+from imbue.mngr.hosts.background_tasks import determine_agent_probe_result
+from imbue.mngr.hosts.background_tasks import parse_background_tasks
+from imbue.mngr.hosts.background_tasks import parse_lifecycle_probe_reading
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import BackgroundTask
+from imbue.mngr.primitives import BackgroundTaskKind
 from imbue.mngr.primitives import LifecycleProbeReading
 from imbue.mngr.primitives import LifecycleProbeResult
-from imbue.mngr.primitives import WorkLease
-from imbue.mngr.primitives import WorkLeaseKind
 from imbue.mngr.utils.testing import RAW_LINE_SEPARATOR_BY_NAME
 
 # More empty records than the scan is given file descriptors.
-_EMPTY_LEASE_COUNT: Final[int] = 60
+_EMPTY_RECORD_COUNT: Final[int] = 60
 _SCAN_FILE_DESCRIPTOR_LIMIT: Final[int] = 40
 
 
-def test_parse_lifecycle_probe_reading_splits_the_turn_from_the_leases() -> None:
+def test_parse_lifecycle_probe_reading_splits_the_turn_from_the_records() -> None:
     reading = parse_lifecycle_probe_reading(
-        "ACTIVE=true\nLEASE=bg-1\tseen:1767355200\nLEASE=wake-2\tseen:1767355260\n"
+        "ACTIVE=true\nBACKGROUND_TASK=bg-1\tseen:1767355200\nBACKGROUND_TASK=wake-2\tseen:1767355260\n"
     )
 
     assert reading == LifecycleProbeReading(
         is_active=True,
-        raw_leases="bg-1\tseen:1767355200\nwake-2\tseen:1767355260",
+        raw_background_tasks="bg-1\tseen:1767355200\nwake-2\tseen:1767355260",
     )
 
 
@@ -44,13 +44,13 @@ def test_parse_lifecycle_probe_reading_splits_the_turn_from_the_leases() -> None
         pytest.param("awk: cannot open /agents/a/background_tasks/*\n", id="only_noise"),
     ],
 )
-def test_parse_lifecycle_probe_reading_reads_no_turn_and_no_lease(stdout: str) -> None:
-    """Anything the read did not label is not a marker and not a lease."""
+def test_parse_lifecycle_probe_reading_reads_no_turn_and_no_record(stdout: str) -> None:
+    """Anything the read did not label is not a marker and not a record."""
     assert parse_lifecycle_probe_reading(stdout) == LifecycleProbeReading()
 
 
-def test_build_probe_read_command_reads_the_marker_and_the_leases_of_one_agent() -> None:
-    """One call collects both halves, and survives a lease read that exits non-zero."""
+def test_build_probe_read_command_reads_the_marker_and_the_records_of_one_agent() -> None:
+    """One call collects both halves, and survives a record read that exits non-zero."""
     command = build_lifecycle_probe_read_command("/state/agents/a")
 
     assert "/state/agents/a/active" in command
@@ -64,40 +64,40 @@ def test_build_probe_read_command_quotes_a_directory_that_needs_it() -> None:
     assert "'/state/with a space'/active" in command
 
 
-def test_build_probe_read_command_reads_a_lease_that_sorts_after_many_empty_ones(tmp_path: Path) -> None:
+def test_build_probe_read_command_reads_a_record_that_sorts_after_many_empty_ones(tmp_path: Path) -> None:
     """The scan closes every file it opens, so empty records do not use up its descriptors."""
-    lease_dir = tmp_path / WORK_LEASE_DIR_NAME
-    lease_dir.mkdir()
-    for index in range(_EMPTY_LEASE_COUNT):
-        (lease_dir / f"empty-{index}").touch()
-    (lease_dir / "zz-task").write_text("seen:1767358800\n")
+    record_dir = tmp_path / BACKGROUND_TASK_DIR_NAME
+    record_dir.mkdir()
+    for index in range(_EMPTY_RECORD_COUNT):
+        (record_dir / f"empty-{index}").touch()
+    (record_dir / "zz-task").write_text("seen:1767358800\n")
 
     command = f"ulimit -n {_SCAN_FILE_DESCRIPTOR_LIMIT}; {build_lifecycle_probe_read_command(str(tmp_path))}"
     result = subprocess.run(["sh", "-c", command], capture_output=True, text=True, timeout=30)
 
-    leases = parse_work_leases(parse_lifecycle_probe_reading(result.stdout).raw_leases)
-    assert len(leases) == _EMPTY_LEASE_COUNT + 1, result.stderr
-    assert (leases[-1].name, leases[-1].last_seen_at) == (
+    background_tasks = parse_background_tasks(parse_lifecycle_probe_reading(result.stdout).raw_background_tasks)
+    assert len(background_tasks) == _EMPTY_RECORD_COUNT + 1, result.stderr
+    assert (background_tasks[-1].name, background_tasks[-1].last_seen_at) == (
         "zz-task",
         datetime(2026, 1, 2, 13, 0, 0, tzinfo=timezone.utc),
     )
 
 
-def _scan_leases_in(tmp_path: Path, content_by_name: dict[str, bytes]) -> tuple[WorkLease, ...]:
+def _scan_records_in(tmp_path: Path, content_by_name: dict[str, bytes]) -> tuple[BackgroundTask, ...]:
     """Write each record file, then read the directory back through the production scan."""
-    lease_dir = tmp_path / WORK_LEASE_DIR_NAME
-    lease_dir.mkdir(exist_ok=True)
+    record_dir = tmp_path / BACKGROUND_TASK_DIR_NAME
+    record_dir.mkdir(exist_ok=True)
     for name, content in content_by_name.items():
-        (lease_dir / name).write_bytes(content)
+        (record_dir / name).write_bytes(content)
     result = subprocess.run(
         ["sh", "-c", build_lifecycle_probe_read_command(str(tmp_path))], capture_output=True, timeout=30
     )
     assert result.returncode == 0, result.stderr
-    return parse_work_leases(parse_lifecycle_probe_reading(result.stdout.decode()).raw_leases)
+    return parse_background_tasks(parse_lifecycle_probe_reading(result.stdout.decode()).raw_background_tasks)
 
 
 def test_a_scanned_record_counts_whatever_its_file_holds(tmp_path: Path) -> None:
-    leases = _scan_leases_in(
+    records = _scan_records_in(
         tmp_path,
         {
             "task-a-empty": b"",
@@ -110,25 +110,25 @@ def test_a_scanned_record_counts_whatever_its_file_holds(tmp_path: Path) -> None
     )
 
     seen_at = datetime(2026, 1, 2, 12, 0, 0, tzinfo=timezone.utc)
-    assert leases == (
-        WorkLease(name="task-a-empty"),
-        WorkLease(name="task-b-blank-line"),
-        WorkLease(name="task-c-no-token"),
-        WorkLease(name="task-d-unknown-fields"),
-        WorkLease(name="task-e-no-newline", kind=WorkLeaseKind.SHELL, last_seen_at=seen_at),
-        WorkLease(
-            name="task-f-current", kind=WorkLeaseKind.SUBAGENT, native_type="cloud session", last_seen_at=seen_at
+    assert records == (
+        BackgroundTask(name="task-a-empty"),
+        BackgroundTask(name="task-b-blank-line"),
+        BackgroundTask(name="task-c-no-token"),
+        BackgroundTask(name="task-d-unknown-fields"),
+        BackgroundTask(name="task-e-no-newline", kind=BackgroundTaskKind.SHELL, last_seen_at=seen_at),
+        BackgroundTask(
+            name="task-f-current", kind=BackgroundTaskKind.SUBAGENT, native_type="cloud session", last_seen_at=seen_at
         ),
     )
 
 
 @pytest.mark.parametrize("separator", RAW_LINE_SEPARATOR_BY_NAME.values(), ids=RAW_LINE_SEPARATOR_BY_NAME.keys())
 def test_a_scanned_record_holding_a_raw_line_separator_is_one_record(separator: str, tmp_path: Path) -> None:
-    line = f"seen:1767355200 kind:SHELL native_type:a{separator}LEASE=task-forged\tseen:1 since:1767351600\n"
+    line = f"seen:1767355200 kind:SHELL native_type:a{separator}BACKGROUND_TASK=task-forged\tseen:1 since:1767351600\n"
 
-    leases = _scan_leases_in(tmp_path, {"task-real": line.encode()})
+    records = _scan_records_in(tmp_path, {"task-real": line.encode()})
 
-    assert [(lease.name, lease.started_at) for lease in leases] == [
+    assert [(record.name, record.started_at) for record in records] == [
         ("task-real", datetime(2026, 1, 2, 11, 0, 0, tzinfo=timezone.utc))
     ]
 
@@ -152,24 +152,29 @@ def test_the_probe_command_reads_the_records_under_background_tasks_and_no_other
 
     assert result.returncode == 0, result.stderr
     probe = _probe(parse_lifecycle_probe_reading(result.stdout))
-    assert (probe.state, [lease.name for lease in probe.leases]) == (expected_state, expected_names)
+    assert (probe.state, [background_task.name for background_task in probe.background_tasks]) == (
+        expected_state,
+        expected_names,
+    )
 
 
 def test_a_scan_counts_neither_a_dot_named_file_nor_a_directory(tmp_path: Path) -> None:
-    (tmp_path / WORK_LEASE_DIR_NAME / "task-directory").mkdir(parents=True)
+    (tmp_path / BACKGROUND_TASK_DIR_NAME / "task-directory").mkdir(parents=True)
 
-    leases = _scan_leases_in(tmp_path, {".task-abc.4821.0.tmp": b"seen:1767355200\n", "task-abc": b""})
+    records = _scan_records_in(tmp_path, {".task-abc.4821.0.tmp": b"seen:1767355200\n", "task-abc": b""})
 
-    assert leases == (WorkLease(name="task-abc"),)
+    assert records == (BackgroundTask(name="task-abc"),)
 
 
-def test_parse_work_leases_reads_every_field_a_record_states() -> None:
-    leases = parse_work_leases("task-1\tseen:1767355200 kind:SUBAGENT native_type:cloud%20session since:1767351600\n")
+def test_parse_background_tasks_reads_every_field_a_record_states() -> None:
+    background_tasks = parse_background_tasks(
+        "task-1\tseen:1767355200 kind:SUBAGENT native_type:cloud%20session since:1767351600\n"
+    )
 
-    assert leases == (
-        WorkLease(
+    assert background_tasks == (
+        BackgroundTask(
             name="task-1",
-            kind=WorkLeaseKind.SUBAGENT,
+            kind=BackgroundTaskKind.SUBAGENT,
             native_type="cloud session",
             started_at=datetime(2026, 1, 2, 11, 0, 0, tzinfo=timezone.utc),
             last_seen_at=datetime(2026, 1, 2, 12, 0, 0, tzinfo=timezone.utc),
@@ -186,15 +191,15 @@ def test_parse_work_leases_reads_every_field_a_record_states() -> None:
         pytest.param("task-1\tforever\n", id="no_token_at_all"),
     ],
 )
-def test_parse_work_leases_counts_a_record_that_states_no_field_it_knows(raw: str) -> None:
-    assert parse_work_leases(raw) == (WorkLease(name="task-1"),)
+def test_parse_background_tasks_counts_a_record_that_states_no_field_it_knows(raw: str) -> None:
+    assert parse_background_tasks(raw) == (BackgroundTask(name="task-1"),)
 
 
-def test_parse_work_leases_keeps_the_first_value_given_for_a_key() -> None:
-    leases = parse_work_leases("task-1\tseen:1767355200 kind:SHELL seen:1767358800 kind:MONITOR\n")
+def test_parse_background_tasks_keeps_the_first_value_given_for_a_key() -> None:
+    background_tasks = parse_background_tasks("task-1\tseen:1767355200 kind:SHELL seen:1767358800 kind:MONITOR\n")
 
-    assert [(lease.kind, lease.last_seen_at) for lease in leases] == [
-        (WorkLeaseKind.SHELL, datetime(2026, 1, 2, 12, 0, 0, tzinfo=timezone.utc))
+    assert [(background_task.kind, background_task.last_seen_at) for background_task in background_tasks] == [
+        (BackgroundTaskKind.SHELL, datetime(2026, 1, 2, 12, 0, 0, tzinfo=timezone.utc))
     ]
 
 
@@ -208,10 +213,10 @@ def test_parse_work_leases_keeps_the_first_value_given_for_a_key() -> None:
         pytest.param("\u2028", id="line_separator"),
     ],
 )
-def test_parse_work_leases_ends_a_token_only_at_a_space(whitespace: str) -> None:
-    leases = parse_work_leases(f"task-1\tnative_type:a{whitespace}seen:1767355200 since:1767351600\n")
+def test_parse_background_tasks_ends_a_token_only_at_a_space(whitespace: str) -> None:
+    background_tasks = parse_background_tasks(f"task-1\tnative_type:a{whitespace}seen:1767355200 since:1767351600\n")
 
-    assert [(lease.last_seen_at, lease.started_at) for lease in leases] == [
+    assert [(background_task.last_seen_at, background_task.started_at) for background_task in background_tasks] == [
         (None, datetime(2026, 1, 2, 11, 0, 0, tzinfo=timezone.utc))
     ]
 
@@ -231,16 +236,18 @@ def test_parse_work_leases_ends_a_token_only_at_a_space(whitespace: str) -> None
             id="control_characters_are_replaced",
         ),
         pytest.param("a%E2%80%A8b%E2%80%A9c", "a\ufffdb\ufffdc", id="line_separators_are_replaced"),
-        pytest.param("x" * 2000, "x" * WORK_LEASE_NATIVE_TYPE_MAX_LENGTH, id="a_long_native_type_is_cut"),
-        pytest.param("%C3%A9" * 2000, "\u00e9" * WORK_LEASE_NATIVE_TYPE_MAX_LENGTH, id="the_cut_counts_characters"),
+        pytest.param("x" * 2000, "x" * BACKGROUND_TASK_NATIVE_TYPE_MAX_LENGTH, id="a_long_native_type_is_cut"),
+        pytest.param(
+            "%C3%A9" * 2000, "\u00e9" * BACKGROUND_TASK_NATIVE_TYPE_MAX_LENGTH, id="the_cut_counts_characters"
+        ),
     ],
 )
-def test_parse_work_leases_publishes_a_native_type_decoded_and_safe_to_print(
+def test_parse_background_tasks_publishes_a_native_type_decoded_and_safe_to_print(
     raw_native_type: str, native_type: str
 ) -> None:
-    leases = parse_work_leases(f"task-1\tseen:1767355200 kind:OTHER native_type:{raw_native_type}\n")
+    background_tasks = parse_background_tasks(f"task-1\tseen:1767355200 kind:OTHER native_type:{raw_native_type}\n")
 
-    assert [lease.native_type for lease in leases] == [native_type]
+    assert [background_task.native_type for background_task in background_tasks] == [native_type]
 
 
 @pytest.mark.parametrize("key", ["seen", "since"])
@@ -258,10 +265,12 @@ def test_parse_work_leases_publishes_a_native_type_decoded_and_safe_to_print(
         pytest.param("9" * 5000, id="longer_than_int_parses"),
     ],
 )
-def test_parse_work_leases_reads_an_instant_that_is_not_a_valid_number_as_none(key: str, raw_instant: str) -> None:
-    leases = parse_work_leases(f"task-1\tkind:SHELL {key}:{raw_instant}\n")
+def test_parse_background_tasks_reads_an_instant_that_is_not_a_valid_number_as_none(
+    key: str, raw_instant: str
+) -> None:
+    background_tasks = parse_background_tasks(f"task-1\tkind:SHELL {key}:{raw_instant}\n")
 
-    assert leases == (WorkLease(name="task-1", kind=WorkLeaseKind.SHELL),)
+    assert background_tasks == (BackgroundTask(name="task-1", kind=BackgroundTaskKind.SHELL),)
 
 
 @pytest.mark.parametrize(
@@ -273,17 +282,20 @@ def test_parse_work_leases_reads_an_instant_that_is_not_a_valid_number_as_none(k
         pytest.param("seen:1767355200 kind:subagent", id="a_kind_name_in_another_case"),
     ],
 )
-def test_parse_work_leases_reads_a_kind_it_cannot_place_as_other(first_line: str) -> None:
-    leases = parse_work_leases(f"task-1\t{first_line}\n")
+def test_parse_background_tasks_reads_a_kind_it_cannot_place_as_other(first_line: str) -> None:
+    background_tasks = parse_background_tasks(f"task-1\t{first_line}\n")
 
-    assert [(lease.name, lease.kind, lease.native_type) for lease in leases] == [("task-1", WorkLeaseKind.OTHER, "")]
+    assert [
+        (background_task.name, background_task.kind, background_task.native_type)
+        for background_task in background_tasks
+    ] == [("task-1", BackgroundTaskKind.OTHER, "")]
 
 
-@pytest.mark.parametrize("kind", list(WorkLeaseKind))
-def test_parse_work_leases_reads_a_kind_by_its_exact_name(kind: WorkLeaseKind) -> None:
-    leases = parse_work_leases(f"task-1\tkind:{kind.value}\n")
+@pytest.mark.parametrize("kind", list(BackgroundTaskKind))
+def test_parse_background_tasks_reads_a_kind_by_its_exact_name(kind: BackgroundTaskKind) -> None:
+    background_tasks = parse_background_tasks(f"task-1\tkind:{kind.value}\n")
 
-    assert [lease.kind for lease in leases] == [kind]
+    assert [background_task.kind for background_task in background_tasks] == [kind]
 
 
 @pytest.mark.parametrize(
@@ -295,8 +307,8 @@ def test_parse_work_leases_reads_a_kind_by_its_exact_name(kind: WorkLeaseKind) -
         pytest.param(".task-1.4821.0.tmp\tseen:1767355200\n", id="dot_named_staging_file"),
     ],
 )
-def test_parse_work_leases_drops_a_line_whose_name_is_not_a_record_name(raw: str) -> None:
-    assert parse_work_leases(raw) == ()
+def test_parse_background_tasks_drops_a_line_whose_name_is_not_a_record_name(raw: str) -> None:
+    assert parse_background_tasks(raw) == ()
 
 
 @pytest.mark.parametrize(
@@ -307,9 +319,9 @@ def test_parse_work_leases_drops_a_line_whose_name_is_not_a_record_name(raw: str
         pytest.param(".bg-1", id="starts_with_a_dot"),
     ],
 )
-def test_work_lease_refuses_a_name_no_record_file_can_have(name: str) -> None:
+def test_background_task_refuses_a_name_no_record_file_can_have(name: str) -> None:
     with pytest.raises(ValueError):
-        WorkLease(name=name)
+        BackgroundTask(name=name)
 
 
 def _probe(
@@ -337,35 +349,35 @@ def _probe(
     ],
 )
 def test_a_turn_that_ended_with_a_record_is_running_background_whatever_the_record_says(first_line: str) -> None:
-    probe = _probe(LifecycleProbeReading(is_active=False, raw_leases=f"task-1\t{first_line}"))
+    probe = _probe(LifecycleProbeReading(is_active=False, raw_background_tasks=f"task-1\t{first_line}"))
 
     assert probe.state == AgentLifecycleState.RUNNING_BACKGROUND
-    assert [lease.name for lease in probe.leases] == ["task-1"]
+    assert [background_task.name for background_task in probe.background_tasks] == ["task-1"]
 
 
 def test_a_background_working_probe_publishes_what_each_record_states() -> None:
     probe = _probe(
         LifecycleProbeReading(
             is_active=False,
-            raw_leases="task-1\tseen:1767358800 kind:MONITOR native_type:monitor\ntask-2\tpid:4821",
+            raw_background_tasks="task-1\tseen:1767358800 kind:MONITOR native_type:monitor\ntask-2\tpid:4821",
         )
     )
 
     assert probe.state is AgentLifecycleState.RUNNING_BACKGROUND
-    assert probe.leases == (
-        WorkLease(
+    assert probe.background_tasks == (
+        BackgroundTask(
             name="task-1",
-            kind=WorkLeaseKind.MONITOR,
+            kind=BackgroundTaskKind.MONITOR,
             native_type="monitor",
             last_seen_at=datetime(2026, 1, 2, 13, 0, 0, tzinfo=timezone.utc),
         ),
-        WorkLease(name="task-2"),
+        BackgroundTask(name="task-2"),
     )
 
 
 def test_a_background_working_probe_carries_the_pid_the_process_table_gave_it() -> None:
     probe = _probe(
-        LifecycleProbeReading(is_active=False, raw_leases="task-1\tseen:1767358800"),
+        LifecycleProbeReading(is_active=False, raw_background_tasks="task-1\tseen:1767358800"),
         ps_output="123 1 claude\n",
     )
 
@@ -380,39 +392,41 @@ def test_a_live_agent_whose_type_is_unknown_keeps_the_state_the_marker_gave_it()
         is_blocked_on_dialog=False,
         expected_process_name="claude",
         ps_output="",
-        reading=LifecycleProbeReading(is_active=True, raw_leases="task-1\tseen:1767358800"),
+        reading=LifecycleProbeReading(is_active=True, raw_background_tasks="task-1\tseen:1767358800"),
         is_agent_type_known=False,
     )
 
     assert probe.state == AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE
-    assert probe.leases == ()
+    assert probe.background_tasks == ()
 
 
 def test_an_open_turn_is_running_whatever_it_left_outstanding() -> None:
-    probe = _probe(LifecycleProbeReading(is_active=True, raw_leases="task-1\tseen:1767358800"))
+    probe = _probe(LifecycleProbeReading(is_active=True, raw_background_tasks="task-1\tseen:1767358800"))
 
     assert probe.state == AgentLifecycleState.RUNNING
 
 
 def test_a_dialog_outranks_work_the_agent_left_running() -> None:
     """An agent a dialog holds reads WAITING and reports no background tasks."""
-    reading = LifecycleProbeReading(is_active=True, raw_leases="task-1\tseen:1767358800")
+    reading = LifecycleProbeReading(is_active=True, raw_background_tasks="task-1\tseen:1767358800")
 
     probe = _probe(reading, is_blocked_on_dialog=True)
 
     assert probe.state == AgentLifecycleState.WAITING
-    assert probe.leases == ()
+    assert probe.background_tasks == ()
 
 
 def test_a_turn_that_ended_with_nothing_outstanding_is_waiting() -> None:
     probe = _probe(LifecycleProbeReading(is_active=False))
 
     assert probe.state == AgentLifecycleState.WAITING
-    assert probe.leases == ()
+    assert probe.background_tasks == ()
 
 
 def test_a_record_holds_without_a_process_table() -> None:
-    probe = _probe(LifecycleProbeReading(is_active=False, raw_leases="task-1\tseen:1767358800"), ps_output=None)
+    probe = _probe(
+        LifecycleProbeReading(is_active=False, raw_background_tasks="task-1\tseen:1767358800"), ps_output=None
+    )
 
     assert probe.state == AgentLifecycleState.RUNNING_BACKGROUND
 
@@ -424,14 +438,14 @@ def test_a_record_holds_without_a_process_table() -> None:
         pytest.param("1|bash|4242", AgentLifecycleState.DONE, id="pane_process_exited"),
     ],
 )
-def test_a_lease_cannot_revive_an_agent_that_is_not_live(
+def test_a_record_cannot_revive_an_agent_that_is_not_live(
     tmux_info: str | None, expected_state: AgentLifecycleState
 ) -> None:
     """Whatever its directory still holds, an agent whose process is gone is carrying nothing."""
     probe = _probe(
-        LifecycleProbeReading(is_active=False, raw_leases="task-1\tseen:1767358800"),
+        LifecycleProbeReading(is_active=False, raw_background_tasks="task-1\tseen:1767358800"),
         tmux_info=tmux_info,
     )
 
     assert probe.state == expected_state
-    assert probe.leases == ()
+    assert probe.background_tasks == ()
