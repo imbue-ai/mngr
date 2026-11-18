@@ -3,15 +3,20 @@
 import json
 import threading
 from collections.abc import Callable
+from collections.abc import Sequence
 from pathlib import Path
+from typing import NoReturn
 
+import paramiko
 import pytest
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 from pydantic import SecretStr
+from pyinfra.api.exceptions import ConnectError
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
@@ -22,6 +27,7 @@ from imbue.minds.desktop_client.latchkey.testing import leave_permissions_on_thi
 from imbue.minds.desktop_client.latchkey_auto_register import LatchkeyAutoRegister
 from imbue.minds.desktop_client.latchkey_auto_register import _PendingCarry
 from imbue.minds.desktop_client.latchkey_auto_register import _coalesced_carry
+from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
@@ -29,6 +35,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.polling import poll_until
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_latchkey.agent_setup import register_agent_for_host
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
@@ -165,6 +172,16 @@ class _FakeMachine(MutableModel):
     read_counts_at_push: list[int] = Field(
         default_factory=list, description="How many reads the machine had taken when each push arrived."
     )
+    read_failures: list[MachineOperationError] = Field(
+        default_factory=list, description="Raised by the next reads, one each, before reads succeed again."
+    )
+    push_failures: list[MachineOperationError] = Field(
+        default_factory=list, description="Raised by the next pushes, one each, before pushes succeed again."
+    )
+    before_failing: Callable[[], None] | None = Field(
+        default=None,
+        description="Run just before a queued read or push failure is raised: what another thread does meanwhile.",
+    )
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     def refresh(self, workspace_agent_id: str) -> None:
@@ -172,6 +189,10 @@ class _FakeMachine(MutableModel):
             self.refreshed_workspace_agent_ids.append(workspace_agent_id)
             if workspace_agent_id in self.unreadable_workspace_agent_ids:
                 raise MachineOperationError(f"machine of {workspace_agent_id} could not be read", None)
+            if self.read_failures:
+                if self.before_failing is not None:
+                    self.before_failing()
+                raise self.read_failures.pop(0)
             if self.during_read is not None:
                 self.during_read()
             if self.policy_json is None:
@@ -185,6 +206,10 @@ class _FakeMachine(MutableModel):
             self.read_counts_at_push.append(len(self.refreshed_workspace_agent_ids))
             if workspace_agent_id in self.failing_workspace_agent_ids:
                 raise MachineOperationError(f"machine of {workspace_agent_id} refused the snapshot", None)
+            if self.push_failures:
+                if self.before_failing is not None:
+                    self.before_failing()
+                raise self.push_failures.pop(0)
             self.policy_json = read_host_permissions(self.latchkey.plugin_data_dir, self.host_id)
 
     def pushed_count(self) -> int:
@@ -231,7 +256,7 @@ def _build_auto_register_carrying_to(
     resolver: MngrCliBackendResolver,
     latchkey: Latchkey,
     machine: _FakeMachine,
-    **fields: float,
+    **fields: float | tuple[float, ...],
 ) -> LatchkeyAutoRegister:
     """An auto-register that reads from and pushes to ``machine``, for tests about the carry."""
     return build(
@@ -731,6 +756,256 @@ def test_a_refused_push_is_logged_and_does_not_stop_later_pushes_for_the_host(
     assert len(machine.pushed_workspace_agent_ids) == 2
     assert machine.pushed_workspace_agent_ids[0] == str(first_agent)
     assert machine.pushed_workspace_agent_ids[1] in {str(first_agent), str(second_agent)}
+
+
+def _raise_pyinfra_connect_error(message: str, error: Exception) -> NoReturn:
+    """Raise ``ConnectError`` the way pyinfra's ``raise_connect_error`` does: plainly, from inside its caller's
+    ``except``, so the error it caught is only the implicit context."""
+    raise ConnectError(f"{message} ({error})")
+
+
+def _machine_operation_error_from_ssh_authentication(paramiko_message: str) -> MachineOperationError:
+    """A ``MachineOperationError`` chained the way opening a machine chains a paramiko authentication failure.
+
+    pyinfra raises its ``ConnectError`` inside the ``except`` that caught
+    paramiko's exception (an implicit context), ``OuterHost._ensure_connected``
+    raises ``HostAuthenticationError`` from that, and ``MachineOperator``
+    raises its own error from whatever opening the machine raised.
+    """
+    try:
+        try:
+            try:
+                raise paramiko.AuthenticationException(paramiko_message)
+            except paramiko.AuthenticationException as paramiko_error:
+                _raise_pyinfra_connect_error("Authentication error (username=root)", paramiko_error)
+        except ConnectError as connect_error:
+            raise HostAuthenticationError(f"Authentication failed when connecting to host: {connect_error}") from (
+                connect_error
+            )
+    except HostAuthenticationError as authentication_error:
+        try:
+            raise MachineOperationError(f"Could not apply the change: {authentication_error}", None) from (
+                authentication_error
+            )
+        except MachineOperationError as error:
+            return error
+
+
+def _machine_operation_error_from_ssh_auth_timeout() -> MachineOperationError:
+    """The failure of a machine whose sshd did not answer authentication in time: a slow host, not a refusal."""
+    return _machine_operation_error_from_ssh_authentication("Authentication timeout.")
+
+
+def _machine_operation_error_from_rejected_ssh_key() -> MachineOperationError:
+    """The failure of a machine whose sshd refused every key: retrying cannot fix it."""
+    return _machine_operation_error_from_ssh_authentication("Authentication failed.")
+
+
+# Retries without waiting, so the tests about the transient retry do not sleep out the production backoff.
+_IMMEDIATE_RETRY_DELAYS_SECONDS: tuple[float, ...] = (0.0, 0.0)
+
+
+class _CarryOfANewAgent(FrozenModel):
+    """An auto-register, not yet started, about to carry a newly discovered agent to a machine that fails first."""
+
+    auto_register: LatchkeyAutoRegister = Field(description="The auto-register that carries the agent.")
+    machine: _FakeMachine = Field(description="The machine the agent is carried to.")
+    host_id: HostId = Field(description="The host the agent runs on.")
+    new_agent: AgentId = Field(description="The agent discovery newly reports on the host.")
+
+
+def _carry_of_a_new_agent_through_failures(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build: Callable[..., LatchkeyAutoRegister],
+    read_failures: Sequence[MachineOperationError] = (),
+    push_failures: Sequence[MachineOperationError] = (),
+    retry_delays_seconds: tuple[float, ...] = _IMMEDIATE_RETRY_DELAYS_SECONDS,
+) -> _CarryOfANewAgent:
+    """Discovery reporting a new agent on a provisioned host whose machine raises ``read_failures`` and
+    ``push_failures`` before it succeeds; the auto-register is left for the test to start."""
+    host_id = HostId.generate()
+    new_agent = AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
+    _provision_machine(latchkey, host_id)
+    machine = _machine_seeded_from_this_computer(latchkey, host_id)
+    machine.read_failures.extend(read_failures)
+    machine.push_failures.extend(push_failures)
+    _push_agents(resolver, _make_discovered(host_id, new_agent))
+    auto_register = _build_auto_register_carrying_to(
+        build, resolver, latchkey, machine, transient_failure_retry_delays_seconds=retry_delays_seconds
+    )
+    return _CarryOfANewAgent(auto_register=auto_register, machine=machine, host_id=host_id, new_agent=new_agent)
+
+
+def test_a_push_that_timed_out_in_ssh_authentication_is_retried_on_a_fresh_read(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """A machine whose sshd was too slow to answer authentication is read again and pushed again, not dropped.
+
+    The retry reads the machine before it pins and pushes, since a push
+    carries the whole copy and must not put back what the machine held
+    before another computer's grant reached it.
+    """
+    carry = _carry_of_a_new_agent_through_failures(
+        tmp_path,
+        resolver,
+        build_latchkey_auto_register,
+        push_failures=(_machine_operation_error_from_ssh_auth_timeout(),),
+    )
+    with capture_loguru(level="ERROR") as log_output:
+        carry.auto_register.start()
+        _wait_for_pushes(carry.machine, 2)
+        _wait_until_pushes_settle(carry.auto_register)
+
+    assert carry.machine.read_counts_at_push == [1, 2]
+    assert str(carry.new_agent) in carry.machine.registered_agent_ids()
+    assert log_output.getvalue() == ""
+
+
+def test_a_read_that_timed_out_in_ssh_authentication_is_retried(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """The read before the push rides out a slow sshd the same way the push does."""
+    carry = _carry_of_a_new_agent_through_failures(
+        tmp_path,
+        resolver,
+        build_latchkey_auto_register,
+        read_failures=(_machine_operation_error_from_ssh_auth_timeout(),),
+    )
+    with capture_loguru(level="ERROR") as log_output:
+        carry.auto_register.start()
+        _wait_for_pushes(carry.machine, 1)
+        _wait_until_pushes_settle(carry.auto_register)
+
+    assert carry.machine.read_counts_at_push == [2]
+    assert str(carry.new_agent) in carry.machine.registered_agent_ids()
+    assert log_output.getvalue() == ""
+
+
+def test_a_push_refused_for_a_rejected_ssh_key_is_not_retried(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """A rejected key is no slow host: retrying cannot fix it, so it is reported at once."""
+    carry = _carry_of_a_new_agent_through_failures(
+        tmp_path,
+        resolver,
+        build_latchkey_auto_register,
+        push_failures=(_machine_operation_error_from_rejected_ssh_key(),),
+    )
+    with capture_loguru(level="ERROR") as log_output:
+        carry.auto_register.start()
+        _wait_for_pushes(carry.machine, 1)
+        _wait_until_pushes_settle(carry.auto_register)
+
+    assert carry.machine.pushed_workspace_agent_ids == [str(carry.new_agent)]
+    assert carry.machine.refreshed_count() == 1
+    assert f"Failed to push the latchkey permissions of host {carry.host_id}" in log_output.getvalue()
+
+
+def test_a_push_that_keeps_timing_out_in_ssh_authentication_is_reported_once_the_retries_run_out(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """A host that stays too slow through every retry still reports the lost change as an error, once."""
+    attempt_count = len(_IMMEDIATE_RETRY_DELAYS_SECONDS) + 1
+    carry = _carry_of_a_new_agent_through_failures(
+        tmp_path,
+        resolver,
+        build_latchkey_auto_register,
+        push_failures=tuple(_machine_operation_error_from_ssh_auth_timeout() for _ in range(attempt_count)),
+    )
+    with capture_loguru(level="ERROR") as log_output:
+        carry.auto_register.start()
+        _wait_for_pushes(carry.machine, attempt_count)
+        _wait_until_pushes_settle(carry.auto_register)
+
+    assert carry.machine.read_counts_at_push == list(range(1, attempt_count + 1))
+    assert log_output.getvalue().count(f"Failed to push the latchkey permissions of host {carry.host_id}") == 1
+
+
+def test_stopping_ends_the_wait_before_a_transient_retry(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """A carry waiting to retry a slow host gives up when the subscription stops, rather than holding up the app."""
+    carry = _carry_of_a_new_agent_through_failures(
+        tmp_path,
+        resolver,
+        build_latchkey_auto_register,
+        push_failures=(_machine_operation_error_from_ssh_auth_timeout(),),
+        retry_delays_seconds=(3600.0,),
+    )
+    with capture_loguru(level="ERROR") as log_output:
+        carry.auto_register.start()
+        _wait_for_pushes(carry.machine, 1)
+        carry.auto_register.stop()
+        _wait_until_pushes_settle(carry.auto_register)
+
+    assert carry.machine.pushed_count() == 1
+    assert f"Failed to push the latchkey permissions of host {carry.host_id}" in log_output.getvalue()
+
+
+def test_a_carry_whose_host_goes_down_while_it_waits_to_retry_is_held_for_the_host(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """A host discovery reports stopped during the wait has its carry held, and carried once it runs again."""
+    carry = _carry_of_a_new_agent_through_failures(
+        tmp_path,
+        resolver,
+        build_latchkey_auto_register,
+        push_failures=(_machine_operation_error_from_ssh_auth_timeout(),),
+    )
+    agent = _make_discovered(carry.host_id, carry.new_agent)
+    carry.machine.before_failing = lambda: _push_agents(resolver, agent, host_state=HostState.STOPPED)
+    with capture_loguru(level="ERROR") as log_output:
+        carry.auto_register.start()
+        _wait_until_push_is_held(carry.auto_register, carry.host_id)
+        _wait_until_pushes_settle(carry.auto_register)
+        assert carry.machine.pushed_count() == 1
+
+        _push_agents(resolver, agent, host_state=HostState.RUNNING)
+        _wait_for_pushes(carry.machine, 2)
+        _wait_until_pushes_settle(carry.auto_register)
+
+    assert str(carry.new_agent) in carry.machine.registered_agent_ids()
+    assert carry.host_id not in carry.auto_register._hosts_awaiting_machine
+    assert log_output.getvalue() == ""
+
+
+def test_a_carry_scheduled_while_another_waits_to_retry_is_carried_by_the_retry(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """A registration discovery reports during the wait rides along with the retry, rather than following it."""
+    carry = _carry_of_a_new_agent_through_failures(
+        tmp_path,
+        resolver,
+        build_latchkey_auto_register,
+        push_failures=(_machine_operation_error_from_ssh_auth_timeout(),),
+    )
+    later_agent = AgentId.generate()
+    carry.machine.before_failing = lambda: _push_agents(
+        resolver, _make_discovered(carry.host_id, carry.new_agent), _make_discovered(carry.host_id, later_agent)
+    )
+    carry.auto_register.start()
+    _wait_for_pushes(carry.machine, 2)
+    _wait_until_pushes_settle(carry.auto_register)
+
+    assert carry.machine.pushed_count() == 2
+    assert {str(carry.new_agent), str(later_agent)} <= carry.machine.registered_agent_ids()
 
 
 def test_a_registration_made_before_the_machine_is_provisioned_is_pushed_once_it_is(
