@@ -15,6 +15,7 @@ from imbue.mngr.agents.common_transcript_records import PINNED_ATIF_SCHEMA_VERSI
 from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
 from imbue.mngr_claude.resources import common_transcript_convert
 from imbue.mngr_claude.resources.testing import DEFAULT_PROMPT_TOKENS
+from imbue.mngr_claude.resources.testing import anthropic_thinking_block_signature
 from imbue.mngr_claude.resources.testing import make_absorbed_mid_turn_record
 from imbue.mngr_claude.resources.testing import make_assistant_record
 from imbue.mngr_claude.resources.testing import make_queued_command_record
@@ -222,6 +223,60 @@ def test_multiple_thinking_blocks_are_joined_with_a_blank_line(tmp_path: Path) -
     )
     _convert_complete(input_file, output_file)
     assert read_steps(output_file, "agent")[0]["reasoning_content"] == "first\n\nsecond"
+
+
+def test_a_progress_update_is_the_steps_message_and_reasoning_stays_reasoning(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    write_raw_transcript(
+        input_file,
+        [
+            make_assistant_record(
+                "u1",
+                thinking="Weighing which source to read first.",
+                thinking_signature=anthropic_thinking_block_signature("thinking"),
+                message_id="msg_1",
+                timestamp="2026-01-01T00:00:01Z",
+            ),
+            make_assistant_record(
+                "u2",
+                thinking="The data is in. Matching by topic next.\n\n",
+                thinking_signature=anthropic_thinking_block_signature("narration"),
+                message_id="msg_1",
+                timestamp="2026-01-01T00:00:02Z",
+            ),
+            make_assistant_record(
+                "u3",
+                tool_uses=[{"id": "t1", "name": "Bash", "input": {"cmd": "ls"}}],
+                message_id="msg_1",
+                timestamp="2026-01-01T00:00:03Z",
+            ),
+        ],
+    )
+    _convert_complete(input_file, output_file)
+    step = read_steps(output_file, "agent")[0]
+    assert step["message"] == "The data is in. Matching by topic next."
+    assert step["reasoning_content"] == "Weighing which source to read first."
+
+
+def test_a_thinking_block_whose_kind_cannot_be_read_is_the_steps_message(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    write_raw_transcript(
+        input_file, [make_assistant_record("u1", thinking="Checking the skills next.", thinking_signature="sig")]
+    )
+    _convert_complete(input_file, output_file)
+    step = read_steps(output_file, "agent")[0]
+    assert step["message"] == "Checking the skills next."
+    assert "reasoning_content" not in step
+
+
+def test_an_empty_progress_update_leaves_the_step_without_content(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    write_raw_transcript(
+        input_file,
+        [make_assistant_record("u1", thinking="", thinking_signature=anthropic_thinking_block_signature("narration"))],
+    )
+    _convert_complete(input_file, output_file)
+    assert read_steps(output_file, "agent") == []
 
 
 def test_parallel_tool_calls_interleaved_with_their_results_stay_one_step(tmp_path: Path) -> None:

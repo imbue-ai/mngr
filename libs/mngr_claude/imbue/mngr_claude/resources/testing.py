@@ -9,6 +9,7 @@ for the deliberately malformed lines).
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -35,11 +36,29 @@ DEFAULT_USAGE: Mapping[str, int] = {
 DEFAULT_PROMPT_TOKENS = 200
 
 
+def _protobuf_bytes_field(field_number: int, value: bytes) -> bytes:
+    # Every length here is under 128, so the length is a single varint byte.
+    assert len(value) < 0x80
+    return bytes([(field_number << 3) | 2, len(value)]) + value
+
+
+def anthropic_thinking_block_signature(block_kind: str) -> str:
+    """A minimal stand-in for an Anthropic Messages API thinking-block signature carrying ``block_kind``.
+
+    Only the nesting the converter reads is real (field 2, then 1, then 8 holds the kind, beside
+    a varint and opaque bytes like a real one); the rest of a real signature is encrypted.
+    """
+    kind_message = bytes([0x08, 19]) + _protobuf_bytes_field(8, block_kind.encode())
+    envelope = _protobuf_bytes_field(1, kind_message) + _protobuf_bytes_field(5, b"\x00" * 16)
+    return base64.b64encode(bytes([0x08, 4]) + _protobuf_bytes_field(2, envelope)).decode()
+
+
 def make_assistant_record(
     uuid: str,
     *,
     text: str = "",
     thinking: str | None = None,
+    thinking_signature: str | None = None,
     tool_uses: Sequence[Mapping[str, Any]] | None = None,
     timestamp: str = DEFAULT_ASSISTANT_TIMESTAMP,
     message_id: str | None = None,
@@ -58,7 +77,10 @@ def make_assistant_record(
     """
     content: list[dict[str, Any]] = []
     if thinking is not None:
-        content.append({"type": "thinking", "thinking": thinking, "signature": "sig"})
+        signature = (
+            anthropic_thinking_block_signature("thinking") if thinking_signature is None else thinking_signature
+        )
+        content.append({"type": "thinking", "thinking": thinking, "signature": signature})
     if text:
         content.append({"type": "text", "text": text})
     for tool_use in tool_uses or []:

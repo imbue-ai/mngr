@@ -1,19 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
 import pytest
 
-from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
 from imbue.mngr.agents.agent_release_testing import send_expecting_success
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr_claude.testing import AGENT_DESTROY_TIMEOUT_SECONDS
 from imbue.mngr_claude.testing import ClaudeReleaseProfile
 from imbue.mngr_claude.testing import NOTIFICATION_HOOK_EVENT
-from imbue.mngr_claude.testing import RELEASE_TEST_MODEL
 from imbue.mngr_claude.testing import TURN_PROGRESS_TIMEOUT_SECONDS
 from imbue.mngr_claude.testing import commit_hook_payload_saver
 from imbue.mngr_claude.testing import created_agent
@@ -34,8 +31,7 @@ _STOP_FAILURE_CONSUMER: Final[str] = (
 class _UnavailableModelClaudeReleaseProfile(ClaudeReleaseProfile):
     """A claude release profile whose agent asks the API for a model it does not have."""
 
-    def create_extra_args(self, ctx: AgentReleaseContext) -> Sequence[str]:
-        return [_UNAVAILABLE_MODEL if arg == RELEASE_TEST_MODEL else arg for arg in super().create_extra_args(ctx)]
+    model = _UNAVAILABLE_MODEL
 
 
 @pytest.mark.release
