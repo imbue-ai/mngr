@@ -1,0 +1,1 @@
+The minds-v0.10.5 release record and the next-deploy checklist carry production's pool after 12 unleased `minds-v0.10.4` rows were retired and 12 baked at `minds-v0.10.5` in their place: 31 available at `minds-v0.10.5`, 4 at `minds-v0.10.4`.
