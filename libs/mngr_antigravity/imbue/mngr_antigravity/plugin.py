@@ -201,6 +201,8 @@ _INSTRUCTIONS_SEPARATOR: Final[str] = "\n\n"
 # against stricter future agy versions, not a known failure).
 _RULES_FILE_SOFT_LIMIT: Final[int] = 12_000
 
+_HELP_SCREEN_KEY: Final[str] = "?"
+
 _COMMON_TRANSCRIPT_SCRIPT_NAME: Final[str] = "common_transcript.sh"
 # The python converter common_transcript.sh invokes (python3
 # <dir>/common_transcript_convert.py); provisioned alongside the .sh.
@@ -603,6 +605,14 @@ class AntigravityAgent(
 
     # agy shows a pasted message as e.g. ``[Pasted text #1 +20 lines]`` or ``[Pasted text #1 1500 chars]``.
     PASTE_PLACEHOLDER_PREFIXES: ClassVar[tuple[str, ...]] = ("[Pasted text ",)
+
+    def _is_message_delivered_as_paste(self, message: str) -> bool:
+        """Paste a message starting with ``?``: typed into an empty input box, agy reads the ``?`` as its help key.
+
+        agy handles typed input one key at a time, so the help screen that opens also swallows
+        the rest of the message.
+        """
+        return message.startswith(_HELP_SCREEN_KEY) or super()._is_message_delivered_as_paste(message)
 
     def _build_enter_retry_gate(self, message: str) -> EnterRetryGate | None:
         return build_unsubmitted_message_retry_gate(

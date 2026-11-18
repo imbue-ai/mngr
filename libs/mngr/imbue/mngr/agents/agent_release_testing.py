@@ -38,9 +38,11 @@ import abc
 import json
 import subprocess
 from collections import Counter
+from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from typing import Callable
@@ -631,6 +633,40 @@ def send_expecting_success(
     assert result.returncode == 0, f"message send failed for {message!r}:\n{result.stdout}\n{result.stderr}"
 
 
+@contextmanager
+def _created_release_agent(
+    profile: AgentReleaseProfile, ctx: AgentReleaseContext, agent_name: str
+) -> Generator[None, None, None]:
+    """Create ``agent_name`` for the block, then destroy it and tear down ``ctx``, even if the block fails.
+
+    A clean exit asserts the destroy succeeded; after a failure the destroy is best-effort.
+    """
+    is_destroyed = False
+    try:
+        create = profile.run_mngr(
+            ctx,
+            "create",
+            agent_name,
+            profile.agent_type,
+            "--no-connect",
+            "--yes",
+            *profile.create_extra_args(ctx),
+            timeout=_CREATE_TIMEOUT_SECONDS,
+        )
+        assert create.returncode == 0, f"create failed:\n{create.stdout}\n{create.stderr}"
+        yield
+        destroy = profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_LIFECYCLE_TIMEOUT_SECONDS)
+        assert destroy.returncode == 0, f"destroy failed:\n{destroy.stdout}\n{destroy.stderr}"
+        is_destroyed = True
+    finally:
+        try:
+            if not is_destroyed:
+                profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_LIFECYCLE_TIMEOUT_SECONDS)
+        finally:
+            if ctx.teardown is not None:
+                ctx.teardown()
+
+
 def run_message_delivery_journey(profile: AgentReleaseProfile, tmp_path: Path) -> None:
     """Drive the evidence-confirmed send pipeline through its racey delivery scenarios.
 
@@ -653,21 +689,8 @@ def run_message_delivery_journey(profile: AgentReleaseProfile, tmp_path: Path) -
     subdir = profile.common_transcript_subdir
     agent_name = f"{profile.agent_type.replace('-', '')}-msgs-{get_short_random_string()}"
     run_id = get_short_random_string()
-    destroyed = False
 
-    try:
-        create = profile.run_mngr(
-            ctx,
-            "create",
-            agent_name,
-            profile.agent_type,
-            "--no-connect",
-            "--yes",
-            *profile.create_extra_args(ctx),
-            timeout=_CREATE_TIMEOUT_SECONDS,
-        )
-        assert create.returncode == 0, f"create failed:\n{create.stdout}\n{create.stderr}"
-
+    with _created_release_agent(profile, ctx, agent_name):
         # 1. Idle delivery: the agent is WAITING; the send must confirm and the
         #    message must land in the durable transcript.
         idle_token = f"IDLE-{run_id}"
@@ -757,16 +780,56 @@ def run_message_delivery_journey(profile: AgentReleaseProfile, tmp_path: Path) -
                     f"expected exactly one delivery of {token}, found no user step and {injected} injected deliveries"
                 )
 
-        destroy = profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_LIFECYCLE_TIMEOUT_SECONDS)
-        assert destroy.returncode == 0, f"destroy failed:\n{destroy.stdout}\n{destroy.stderr}"
-        destroyed = True
-    finally:
-        try:
-            if not destroyed:
-                profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_LIFECYCLE_TIMEOUT_SECONDS)
-        finally:
-            if ctx.teardown is not None:
-                ctx.teardown()
+
+def _count_user_steps_reading(records: Sequence[Mapping[str, Any]], text: str) -> int:
+    return sum(1 for record in records if is_step_from(record, "user") and step_message(record).strip() == text)
+
+
+def run_question_mark_message_delivery(profile: AgentReleaseProfile, tmp_path: Path) -> None:
+    """Deliver messages starting with ``?``, which agent TUIs bind as a help key, and assert each lands whole.
+
+    A lone ``?`` and a longer message starting with ``?`` must each be confirmed and recorded
+    exactly once as a user turn carrying the message's full text: a TUI that took the ``?`` as
+    its help key would drop the lone one entirely, and could swallow the rest of the longer one.
+    """
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    ctx = profile.setup(tmp_path)
+    host_dir = ctx.host_dir
+    subdir = profile.common_transcript_subdir
+    agent_name = f"{profile.agent_type.replace('-', '')}-qmark-{get_short_random_string()}"
+    run_id = get_short_random_string()
+
+    with _created_release_agent(profile, ctx, agent_name):
+        # A lone `?`: confirmed, and recorded as a turn reading exactly `?`.
+        send_expecting_success(profile, ctx, agent_name, "?")
+        wait_for_records(
+            host_dir,
+            subdir,
+            lambda records: _count_user_steps_reading(records, "?") >= 1,
+            timeout=_RESPONSE_TIMEOUT_SECONDS,
+            description="a lone `?` message was not recorded as a user turn",
+        )
+
+        # A longer message starting with `?`: recorded with its `?` and everything after it.
+        assert poll_until(lambda: not profile.is_reporting_running(host_dir), timeout=_RESPONSE_TIMEOUT_SECONDS), (
+            "agent was still running the `?` turn before the next message"
+        )
+        leading_token = f"QMARK-{run_id}"
+        leading_message = f"?Remember this exact value: {leading_token}. Reply with just OK."
+        send_expecting_success(profile, ctx, agent_name, leading_message)
+        wait_for_user_message(
+            host_dir, subdir, leading_token, description="a message starting with `?` was not recorded whole"
+        )
+
+        final_records = read_common_records(host_dir, subdir)
+        assert _count_user_steps_reading(final_records, "?") == 1, "expected the lone `?` to be recorded exactly once"
+        assert _count_user_steps_reading(final_records, leading_message) == 1, (
+            f"expected exactly one user turn reading {leading_message!r}, got: "
+            f"{[step_message(r) for r in final_records if is_step_from(r, 'user')]}"
+        )
 
 
 def run_concurrent_message_delivery(profile: AgentReleaseProfile, tmp_path: Path) -> None:

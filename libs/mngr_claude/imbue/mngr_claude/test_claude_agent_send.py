@@ -4,6 +4,8 @@ import json
 import shlex
 import shutil
 import sys
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
 
@@ -17,6 +19,7 @@ from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import make_local_host_of_class
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.dialogs import has_input_prompt_line
+from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin_test import make_claude_agent
 
 _FAKE_CLAUDE_TUI_SCRIPT_PATH: Final[Path] = (
@@ -25,21 +28,16 @@ _FAKE_CLAUDE_TUI_SCRIPT_PATH: Final[Path] = (
 
 _EXPECTED_HOST_COMMANDS_PER_SEND: Final[int] = 6
 
-
-@pytest.mark.tmux
-@pytest.mark.timeout(60)
-@pytest.mark.skipif(
+_requires_jq = pytest.mark.skipif(
     shutil.which("jq") is None, reason="jq not installed; required by the Claude submission-evidence probes"
 )
-def test_send_delivers_to_claude_tui_within_its_host_command_budget(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """A send reaches Claude's transcript, confirmed, with one process spawn per step that needs one.
 
-    Every host command is a process spawn, and under gVisor each costs tens of milliseconds, so
-    the count is the send's latency budget: a step that starts resolving the pane or capturing
-    the screen again shows up here.
-    """
+
+@contextmanager
+def _claude_agent_on_fake_tui(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> Generator[tuple[ClaudeAgent, CommandCountingHost, Path], None, None]:
+    """Run the fake Claude TUI as a Claude agent's pane; yield the agent, its host and its transcript path."""
     host = make_local_host_of_class(local_provider, CommandCountingHost)
     agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, host=host)
     state_dir = agent._get_agent_dir()
@@ -63,14 +61,46 @@ def test_send_delivers_to_claude_tui_within_its_host_command_budget(
     )
     try:
         wait_for(lambda: has_input_prompt_line(agent.capture_pane_content() or ""), timeout=10.0)
-        host.executed_commands.clear()
-
-        agent.send_message("please run the full test suite 36284")
-
-        last_record = json.loads(transcript_path.read_text().splitlines()[-1])
-        assert last_record["message"]["content"] == "please run the full test suite 36284"
-        assert len(host.executed_commands) == _EXPECTED_HOST_COMMANDS_PER_SEND, host.executed_commands
+        yield agent, host, transcript_path
     finally:
         host.execute_idempotent_command(
             f"tmux kill-session -t {shlex.quote(f'={agent.session_name}')}", timeout_seconds=5.0
         )
+
+
+def _read_last_transcript_message(transcript_path: Path) -> str:
+    return json.loads(transcript_path.read_text().splitlines()[-1])["message"]["content"]
+
+
+@pytest.mark.tmux
+@pytest.mark.timeout(60)
+@_requires_jq
+def test_send_delivers_to_claude_tui_within_its_host_command_budget(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A send reaches Claude's transcript, confirmed, with one process spawn per step that needs one.
+
+    Every host command is a process spawn, and under gVisor each costs tens of milliseconds, so
+    the count is the send's latency budget: a step that starts resolving the pane or capturing
+    the screen again shows up here.
+    """
+    with _claude_agent_on_fake_tui(local_provider, tmp_path, temp_mngr_ctx) as (agent, host, transcript_path):
+        host.executed_commands.clear()
+
+        agent.send_message("please run the full test suite 36284")
+
+        assert _read_last_transcript_message(transcript_path) == "please run the full test suite 36284"
+        assert len(host.executed_commands) == _EXPECTED_HOST_COMMANDS_PER_SEND, host.executed_commands
+
+
+@pytest.mark.tmux
+@pytest.mark.timeout(60)
+@_requires_jq
+def test_send_of_lone_question_mark_reaches_claude_transcript(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A lone ``?`` is delivered as a message, not taken by Claude as its shortcuts-panel key."""
+    with _claude_agent_on_fake_tui(local_provider, tmp_path, temp_mngr_ctx) as (agent, _, transcript_path):
+        agent.send_message("?")
+
+        assert _read_last_transcript_message(transcript_path) == "?"

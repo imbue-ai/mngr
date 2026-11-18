@@ -30,6 +30,7 @@ from imbue.mngr.agents.agent_release_testing import read_common_records
 from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
 from imbue.mngr.agents.agent_release_testing import run_concurrent_message_delivery
 from imbue.mngr.agents.agent_release_testing import run_message_delivery_journey
+from imbue.mngr.agents.agent_release_testing import run_question_mark_message_delivery
 from imbue.mngr.agents.agent_release_testing import send_expecting_success
 from imbue.mngr.agents.agent_release_testing import wait_for_user_message
 from imbue.mngr.utils.polling import poll_until
@@ -530,13 +531,13 @@ def _local_claude_login_present() -> bool:
     return False
 
 
-class _BangShellModeProfile(ClaudeReleaseProfile):
+class _LocalLoginClaudeProfile(ClaudeReleaseProfile):
     """A Claude release profile that also runs on a locally-logged-in (no API key) machine.
 
     Reuses ``ClaudeReleaseProfile``'s workspace/config plumbing, but widens the
     availability gate to accept a local Claude login. With an ``ANTHROPIC_API_KEY``
     set it behaves exactly like the parent profile (isolated config dir, key passed
-    into the agent), so the reproduction still runs in the key-based release
+    into the agent), so its tests still run in the key-based release
     pipeline. Without one it authenticates from the developer's existing local
     Claude login (a subscription/OAuth login, as minds users have):
 
@@ -547,18 +548,17 @@ class _BangShellModeProfile(ClaudeReleaseProfile):
       (``isolate_local_config_dir = false``) so it reuses that login directly. This
       is the mode mngr itself recommends for macOS subscription users (isolated
       mode copies the credentials into a separate keychain entry that goes stale).
-      As a result the agent shares the developer's ``~/.claude`` while it runs; the
-      bare ``!`` reproduction never reaches the model, so this leaves at most a
-      short empty session behind. mngr's own state stays isolated via
-      ``MNGR_HOST_DIR`` and the per-test tmux server.
+      As a result the agent shares the developer's ``~/.claude`` while it runs, and
+      whatever session a test drives stays behind there. mngr's own state stays
+      isolated via ``MNGR_HOST_DIR`` and the per-test tmux server.
     """
 
     def unavailable_reason(self) -> str | None:
         if shutil.which("claude") is None:
-            return "Reproduction requires `claude` on PATH."
+            return "Requires `claude` on PATH."
         if os.environ.get("ANTHROPIC_API_KEY") or _local_claude_login_present():
             return None
-        return "Reproduction requires ANTHROPIC_API_KEY or a local Claude login (~/.claude credentials or macOS keychain)."
+        return "Requires ANTHROPIC_API_KEY or a local Claude login (~/.claude credentials or macOS keychain)."
 
     def setup(self, tmp_path: Path) -> AgentReleaseContext:
         ctx = super().setup(tmp_path)
@@ -629,7 +629,7 @@ def test_claude_bang_prefix_does_not_strand_agent_in_shell_mode(tmp_path: Path) 
     later follow-up is the only turn), and the agent is ready for the next message
     (the ``❯`` prompt is back and a normal follow-up is delivered and recorded).
     """
-    profile = _BangShellModeProfile()
+    profile = _LocalLoginClaudeProfile()
     reason = profile.unavailable_reason()
     if reason is not None:
         pytest.skip(reason)
@@ -704,7 +704,7 @@ def test_claude_bang_command_runs_and_leaves_agent_ready(tmp_path: Path) -> None
     and the ``❯`` prompt afterward, which is what this asserts (via the pane the interactive
     client sees), not any mngr terminal internal.
     """
-    profile = _BangShellModeProfile()
+    profile = _LocalLoginClaudeProfile()
     reason = profile.unavailable_reason()
     if reason is not None:
         pytest.skip(reason)
@@ -735,3 +735,22 @@ def test_claude_bang_command_runs_and_leaves_agent_ready(tmp_path: Path) -> None
         assert has_input_prompt_line(pane), (
             f"after a `!echo` command the agent is not ready -- the ❯ input prompt is gone:\n{pane}"
         )
+
+
+@pytest.mark.witnesses("message-delivery.lone-question-mark")
+@pytest.mark.witnesses("message-delivery.leading-question-mark")
+@pytest.mark.witnesses(
+    "message-delivery.stays-ready",
+    partial="witnesses only the lone-`?` instance: a further message is delivered after a lone `?`",
+)
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(1500)
+def test_claude_question_mark_messages_are_delivered_whole(tmp_path: Path) -> None:
+    """A lone ``?`` and a message starting with ``?`` each land as one whole turn.
+
+    Claude Code takes a lone ``?`` typed into an empty input box as its shortcuts-panel key, so a
+    send that typed it would leave nothing to submit.
+    """
+    run_question_mark_message_delivery(_LocalLoginClaudeProfile(), tmp_path)

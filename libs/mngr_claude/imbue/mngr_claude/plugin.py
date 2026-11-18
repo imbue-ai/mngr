@@ -183,6 +183,8 @@ _MODEL_STATE_FILE_NAME: Final[str] = "model_state.json"
 _SHELL_MODE_EXIT_MAX_ATTEMPTS: Final[int] = 3
 _SHELL_MODE_EXIT_POLL_SECONDS: Final[float] = 2.0
 
+_SHORTCUTS_PANEL_KEY: Final[str] = "?"
+
 # How long to wait for the input row to empty after pressing ``_INPUT_LINE_CLEAR_KEYS``.
 _INPUT_LINE_CLEAR_POLL_SECONDS: Final[float] = 2.0
 
@@ -2523,14 +2525,16 @@ class ClaudeAgent(
     def _build_any_accepted_record_probe(self, name: str, file_path_expression: str) -> SubmissionEvidenceProbe:
         """Probe confirming when ANY accepted-message record is appended past the baseline.
 
-        Used when the message itself carries no matchable content (an
-        emoji-only message, or a slash command under the relaxed policy).
+        Used when the message itself carries no matchable content (a punctuation- or
+        emoji-only message, or a slash command under the relaxed policy). A record counts
+        once its text has anything but whitespace: a tool result's text is blank, and the
+        message's own text may hold no letters or digits at all.
         """
         env_command_prefix = self.host.build_source_env_prefix(self)
         poll_command = (
             f"{env_command_prefix} tail -c +$(( ${{base:-0}} + 1 )) {file_path_expression} 2>/dev/null "
             f"| jq -R -r {shlex.quote(self._ACCEPTED_MESSAGE_TEXT_JQ_FILTER)} 2>/dev/null "
-            "| grep -q '[[:alnum:]]' && echo found"
+            "| grep -q '[^[:space:]]' && echo found"
         )
         return SubmissionEvidenceProbe(
             name=name,
@@ -2856,6 +2860,14 @@ class ClaudeAgent(
     def _press_enter(self, tmux_target: TmuxWindowTarget | str) -> None:
         """Send a single Enter keystroke to the agent's pane (accepts a selector's highlighted default)."""
         send_enter_keystroke(self, tmux_target)
+
+    def _is_message_delivered_as_paste(self, message: str) -> bool:
+        """Paste a lone ``?``, which typed into an empty input box opens the shortcuts panel instead.
+
+        Only the lone keystroke is a shortcut: a longer message starting with ``?`` reaches Claude
+        as one chunk and is inserted as text.
+        """
+        return message == _SHORTCUTS_PANEL_KEY or super()._is_message_delivered_as_paste(message)
 
     def _determine_confirmation_policy(self, message: str) -> SubmissionConfirmationPolicy:
         """Confirm a leading-``!`` shell command under the relaxed policy, like a slash command.

@@ -38,6 +38,7 @@ from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
 from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
 from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
 from imbue.mngr.agents.agent_release_testing import run_message_delivery_journey
+from imbue.mngr.agents.agent_release_testing import run_question_mark_message_delivery
 from imbue.mngr.hosts.common import is_macos
 from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import init_git_repo
@@ -198,3 +199,17 @@ def test_antigravity_message_delivery_journey(tmp_path: Path) -> None:
     shares its infrastructure-level startup variance.
     """
     run_message_delivery_journey(_AntigravityReleaseProfile(), tmp_path)
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.flaky
+@pytest.mark.timeout(900)
+def test_antigravity_question_mark_messages_are_delivered_whole(tmp_path: Path) -> None:
+    """A lone ``?`` and a message starting with ``?`` each land as one whole turn.
+
+    Typed into an empty input box, agy takes a ``?`` as its help key and the help screen
+    swallows the keys after it, so these messages are pasted.
+    """
+    run_question_mark_message_delivery(_AntigravityReleaseProfile(), tmp_path)

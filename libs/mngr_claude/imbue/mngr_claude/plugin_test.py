@@ -1801,6 +1801,35 @@ def test_any_record_probe_on_missing_transcript_stays_quiet_and_confirms_once_it
     assert host.execute_stateful_command(f"bash -c {shlex.quote(poll_script)}", env=env).stdout.strip() == "found"
 
 
+@pytest.mark.skipif(
+    shutil.which("jq") is None, reason="jq not installed; required by the Claude submission-evidence probes"
+)
+def test_any_record_probe_confirms_a_punctuation_only_message_but_not_a_tool_result(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    raw_probe = agent._build_submission_evidence_probes("?", SubmissionConfirmationPolicy.STRICT)[1]
+    assert raw_probe.name == "any-record-raw-transcript"
+
+    state_dir = tmp_path / "agent-state"
+    log_path = state_dir / "logs" / "claude_transcript" / "events.jsonl"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text("")
+    env = {"MNGR_AGENT_STATE_DIR": str(state_dir)}
+    poll_script = f"base=0; {raw_probe.poll_command}"
+
+    tool_results = [
+        {"type": "tool_result", "tool_use_id": f"toolu_{index}", "content": "ok 200"} for index in range(2)
+    ]
+    with log_path.open("a") as log_file:
+        log_file.write(json.dumps({"type": "user", "message": {"role": "user", "content": tool_results}}) + "\n")
+    assert host.execute_stateful_command(f"bash -c {shlex.quote(poll_script)}", env=env).stdout.strip() == ""
+
+    with log_path.open("a") as log_file:
+        log_file.write(json.dumps({"type": "user", "message": {"role": "user", "content": "?"}}) + "\n")
+    assert host.execute_stateful_command(f"bash -c {shlex.quote(poll_script)}", env=env).stdout.strip() == "found"
+
+
 def test_low_content_messages_fall_back_to_any_record_probes(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:

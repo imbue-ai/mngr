@@ -919,16 +919,24 @@ class SendKeysAgent(InteractiveAgentMixin, SupportsKeyChordMixin, BaseAgent[Agen
         """
         return None
 
+    def _is_message_delivered_as_paste(self, message: str) -> bool:
+        """Whether to deliver ``message`` as one bracketed paste rather than as typed keystrokes.
+
+        Default: only a message too long for a single ``tmux send-keys`` command. A TUI that reads
+        some typed input as a keyboard shortcut instead of text overrides this to paste that input,
+        which the TUI inserts as text.
+        """
+        return len(message) >= LONG_MESSAGE_THRESHOLD
+
     def _send_tmux_literal_keys(self, tmux_target: TmuxWindowTarget | str, message: str) -> str:
-        """Send literal text to a tmux pane, choosing the best method by length.
+        """Send literal text to a tmux pane, typed or pasted per ``_is_message_delivered_as_paste``.
 
         Returns the resolved tmux target it sent to, so a caller following up with Enter can
         reuse it rather than paying for a second lookup of the same pane.
 
-        For short messages (< 1024 chars), uses ``tmux send-keys -l``.
-        For long messages (>= 1024 chars), writes the text to a temp file on
-        the host and uses ``tmux load-buffer`` + ``tmux paste-buffer`` to avoid
-        the tmux "command too long" error.
+        A typed message goes through ``tmux send-keys -l``. A pasted one is written to a temp file
+        on the host and delivered with ``tmux load-buffer`` + ``tmux paste-buffer``, which also
+        avoids the tmux "command too long" error for long messages.
 
         The paste carries ``-p``, so tmux wraps it in the bracketed-paste markers that tell the
         pane's program one paste begins and ends. A TUI reads its pty in chunks of a few
@@ -944,7 +952,7 @@ class SendKeysAgent(InteractiveAgentMixin, SupportsKeyChordMixin, BaseAgent[Agen
         """
         target_arg = self._send_target_arg(tmux_target)
         clear_pane_modes = build_clear_pane_modes_tmux_subcommand(target_arg)
-        if len(message) < LONG_MESSAGE_THRESHOLD:
+        if not self._is_message_delivered_as_paste(message):
             self._run_send_command(
                 f"tmux {clear_pane_modes} \\; send-keys -t {target_arg} -l -- {quote_tmux_text_argument(message)}",
                 "tmux send-keys",

@@ -2,12 +2,14 @@
 
 This script is NOT imported as a module -- it is read as a resource file by
 test_claude_agent_send.py and run in a tmux pane. It draws Claude's column-0
-input prompt, echoes what is typed after it, and on Enter appends the ``user``
-record Claude writes to its session transcript (the file named by its first
-argument), so a send confirms only if the typed text and the Enter genuinely
-reached the pane. It draws straight to its terminal, which is the whole point
-of it, so it is excluded from the bare-print ratchet. It exits when its input
-closes.
+input prompt, echoes what is typed or pasted after it, and on Enter appends the
+``user`` record Claude writes to its session transcript (the file named by its
+first argument), so a send confirms only if the text and the Enter genuinely
+reached the pane. Like Claude, it turns on bracketed paste, ignores Enter on an
+empty input box, and takes a lone ``?`` keystroke on an empty input box as the
+shortcuts-panel key rather than text. It draws straight to its terminal, which
+is the whole point of it, so it is excluded from the bare-print ratchet. It
+exits when its input closes.
 """
 
 import json
@@ -17,6 +19,10 @@ import tty
 
 INPUT_PROMPT = "❯ "
 READ_SIZE_BYTES = 4096
+ENABLE_BRACKETED_PASTE = "\x1b[?2004h"
+PASTE_START_MARKER = "\x1b[200~"
+PASTE_END_MARKER = "\x1b[201~"
+SHORTCUTS_PANEL_KEY = "?"
 
 transcript_path = sys.argv[1]
 file_descriptor = sys.stdin.fileno()
@@ -35,12 +41,17 @@ def append_user_record(typed_text: str) -> None:
 
 # Raw before drawing: setraw discards pending input, so a send that sees the prompt has nothing to lose.
 tty.setraw(file_descriptor)
-sys.stdout.write("fake claude\r\n\r\n")
+sys.stdout.write(ENABLE_BRACKETED_PASTE + "fake claude\r\n\r\n")
 draw_input_row("")
 typed = ""
 while chunk := os.read(file_descriptor, READ_SIZE_BYTES):
-    for char in chunk.decode(errors="ignore"):
+    text = chunk.decode(errors="ignore")
+    if text == SHORTCUTS_PANEL_KEY and typed == "":
+        continue
+    for char in text.replace(PASTE_START_MARKER, "").replace(PASTE_END_MARKER, ""):
         if char == "\r":
+            if typed == "":
+                continue
             append_user_record(typed)
             sys.stdout.write("\r\n")
             typed = ""

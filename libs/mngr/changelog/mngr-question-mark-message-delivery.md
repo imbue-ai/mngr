@@ -1,0 +1,1 @@
+An agent type can now have a message pasted into its pane (bracketed paste) instead of typed, by overriding `SendKeysAgent._is_message_delivered_as_paste`. By default only messages too long for one `tmux send-keys` call are pasted, as before. The Claude and Antigravity agents use this to deliver messages their TUIs would otherwise read as a keyboard shortcut.
