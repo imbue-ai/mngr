@@ -1,0 +1,1 @@
+The release runbook keeps the channels ordered, alpha ≥ beta ≥ stable: promoting a channel also moves any channel that must be ahead of it and is behind to the same build in the same pull request, unless the deploying user says otherwise.
