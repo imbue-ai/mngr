@@ -15,11 +15,10 @@ loopback only, and the bridge from reaching anything else on the VPS); its
 bundled forwarding extension proxies `/permissions`, `/permission-requests`, and
 `/minds-api-proxy` requests back to a desktop gateway over that desktop's own
 SSH tunnel (see [Desktops](#desktops) for how a request picks one when the
-user has several). (A
-remote workspace whose container predates the `host.docker.internal` mapping,
-such as one adopted from a pool host baked by an older mngr, is pointed at
-`http://127.0.0.1:1989` when it is created and reaches the same VPS-resident
-gateway over a reverse SSH tunnel instead.) This keeps the permission queue,
+user has several). (An existing
+remote workspace whose container predates the `host.docker.internal` mapping
+was pointed at `http://127.0.0.1:1989` when it was created and reaches the same
+VPS-resident gateway over a reverse SSH tunnel instead.) This keeps the permission queue,
 permissions files, and the Imbue Studio API on the user's computer without requiring a
 second gateway URL or a different agent skill.
 

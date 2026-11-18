@@ -1,0 +1,1 @@
+A new remote workspace is no longer pointed at `http://127.0.0.1:1989` when its container lacks the `host.docker.internal` mapping, so a pool host has to be baked by an mngr that creates containers with it. Existing workspaces that were pointed there keep reaching their gateway over the reverse SSH tunnel. The latchkey permissions doc says so.

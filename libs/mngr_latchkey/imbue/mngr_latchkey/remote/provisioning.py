@@ -15,15 +15,13 @@ before either bridge-bound service starts keeps it the only route (see
 An agent whose ``LATCHKEY_GATEWAY`` names its own ``127.0.0.1`` instead still
 reaches the gateway over a VPS->container reverse SSH tunnel the package runs
 as a second ``supervisord`` program. That is every agent in a container
-created without the mapping (``mngr create`` points such an agent at its
-loopback whatever client runs it; see
-:func:`imbue.mngr_latchkey.agent_setup.fall_back_to_reverse_tunneled_gateway_url`),
-and every agent whose host was created by an older client while its container
-already carried the mapping. Provisioning recognizes the first kind by the
-missing ``--add-host`` mapping and the second by the tunnel keypair that client
-had minted, so a tunnel once wired is never dropped (only re-pointed at the
-address the gateway binds) and none is ever wired for a container that
-resolves the outer host (see :func:`_does_container_need_reverse_tunnel`).
+created without the mapping, and every agent whose host was created by an
+older client while its container already carried the mapping. Provisioning
+recognizes the first kind by the missing ``--add-host`` mapping and the second
+by the tunnel keypair that client had minted, so a tunnel once wired is never
+dropped (only re-pointed at the address the gateway binds) and none is ever
+wired for a container that resolves the outer host (see
+:func:`_does_container_need_reverse_tunnel`).
 
 Everything the machine needs, other than its data, is one Debian package
 (:mod:`imbue.mngr_latchkey.remote.package`), so the gateway's share of a
@@ -398,13 +396,10 @@ def _does_container_need_reverse_tunnel(host: OuterHostInterface, host_id: HostI
     The agent's ``LATCHKEY_GATEWAY`` was decided by the client that created its
     host and cannot change for the life of the container, while the container's
     ``host.docker.internal`` mapping is decided by the outer host it was created
-    on. A current client makes the two agree at create time (an agent in a
-    container without the mapping names its own loopback; see
-    :func:`imbue.mngr_latchkey.agent_setup.fall_back_to_reverse_tunneled_gateway_url`),
-    leaving one exception: a host an older client created in a container that
-    already carried the mapping. Its agent names its own loopback, and that
-    client wired the tunnel for it, minting the keypair the tunnel presents.
-    So the tunnel is needed when the container cannot resolve the outer host at
+    on. An agent in a container without the mapping names its own loopback,
+    and so does one whose host an older client created in a container that
+    already carried the mapping; that client wired the tunnel for it, minting
+    the keypair the tunnel presents. So the tunnel is needed when the container cannot resolve the outer host at
     all (the read found no such mapping among the ones it was created with),
     or when the machine holds a tunnel keypair; a tunnel once wired is never
     dropped (a container recreated on the same VPS keeps a redundant one, which

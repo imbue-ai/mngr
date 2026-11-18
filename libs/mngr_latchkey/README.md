@@ -22,13 +22,6 @@ mngr latchkey admin-jwt          # mint a wildcard permissions-override JWT for 
 mngr latchkey gateway-info       # print the running gateway's URL + listen password as JSON
 ```
 
-The plugin also hooks `mngr create`: once a new host's env is written and
-before any agent starts, a host whose `LATCHKEY_GATEWAY` names
-`host.docker.internal` but whose container cannot resolve that name (one
-created before containers carried the mapping) is pointed at
-`http://127.0.0.1:1989` instead, where the reverse SSH tunnel serves the
-gateway.
-
 `mngr latchkey forward` spawns the shared gateway eagerly on startup
 and stops it on `SIGINT`/`SIGTERM` (coupled lifetime). It announces this
 computer to every remote host's machine under a device id (`--device-id`, or
