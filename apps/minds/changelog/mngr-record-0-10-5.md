@@ -1,0 +1,1 @@
+The minds-v0.10.5 release is recorded (`docs/deploy/history/minds-v0.10.5.md`) and the next-deploy checklist reset: 0.10.5 was cut from the `minds-v0.10.4` tag on release branches and promoted to alpha and stable. The release runbook gains a section on cutting a patch from a tag, and its post-promotion smoke example names the promoted channel.
