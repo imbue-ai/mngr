@@ -1,9 +1,13 @@
-// The create form's email-verification gate: the connector refuses a cloud
+// The create pages' email-verification gate: the connector refuses a cloud
 // create for an unverified email, so the create waits on the emailed link
 // instead of being sent off to fail.
 
 import type { ResendOutcome } from "../../../models/emailVerification";
+import type { CreateFormModel } from "./form-model";
 import { VERIFICATION_POLL_MS, fetchIsEmailVerified, resendVerificationEmail } from "../../../models/emailVerification";
+
+export const VERIFICATION_CHECK_FAILED_MESSAGE = "Could not check whether your email is verified. Please try again.";
+export const VERIFICATION_WAITING_LABEL = "Waiting for email verification...";
 
 export interface VerificationWaitDeps {
   isEmailVerified: (email: string) => Promise<boolean>;
@@ -103,4 +107,27 @@ export class VerificationWait {
     onVerified();
     this.deps.redraw();
   }
+}
+
+/**
+ * Run `create` once the form's account may create: at once unless the form
+ * launches on Imbue Cloud, whose connector refuses an unverified email, so
+ * the create waits on the emailed link rather than failing on the creating page.
+ */
+export function createOnceVerified(
+  wait: VerificationWait,
+  form: Pick<CreateFormModel, "launchSelection" | "selectedAccountEmail">,
+  create: () => void,
+  onUnchecked: () => void,
+): void {
+  if (form.launchSelection().mode !== "IMBUE_CLOUD") {
+    create();
+    return;
+  }
+  const email = form.selectedAccountEmail();
+  if (email === "") {
+    onUnchecked();
+    return;
+  }
+  wait.require(email, create, onUnchecked);
 }

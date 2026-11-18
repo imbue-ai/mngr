@@ -42,6 +42,7 @@ from imbue.minds.errors import MindError
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
+from imbue.mngr_imbue_cloud.data_types import VerificationEmailSendResult
 from imbue.mngr_imbue_cloud.errors import CLIENT_TOO_OLD_FALLBACK_MESSAGE
 from imbue.mngr_imbue_cloud.errors import GRANTS_REFUSED_CODE
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
@@ -942,17 +943,20 @@ class ImbueCloudCli(MutableModel):
             return AuthRefreshOutcome.TRANSIENT_FAILURE
         return AuthRefreshOutcome.REFRESHED
 
-    def auth_resend_verification(self, account: str) -> bool:
-        """Re-send ``account``'s verification email; False when the server cooldown suppressed it."""
+    def auth_resend_verification(self, account: str) -> VerificationEmailSendResult:
+        """Re-send ``account``'s verification email and report what became of it."""
         result = self._run(
             ["auth", "resend-verification", "--account", account],
             cg_name="imbue-cloud-auth-resend-verification",
         )
         body = self._expect_success(result, "auth resend-verification")
-        # A missing/non-bool ``sent`` is a broken plugin contract; raising
+        # A missing/non-bool field is a broken plugin contract; raising
         # (rather than defaulting to False) keeps the UI from claiming an
         # email "was sent recently" when nothing of the sort is known.
-        return _expect_bool_field(body, "sent", "auth resend-verification")
+        return VerificationEmailSendResult(
+            is_sent=_expect_bool_field(body, "sent", "auth resend-verification"),
+            is_already_verified=_expect_bool_field(body, "already_verified", "auth resend-verification"),
+        )
 
     def auth_is_email_verified(self, account: str) -> bool:
         """Whether ``account``'s email is verified; a plain status query, safe to poll."""

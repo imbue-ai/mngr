@@ -23,6 +23,13 @@ from imbue.mngr_imbue_cloud.primitives import is_box_exclusive_to_tier
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import SlicePublishedPort
 
 
+class VerificationEmailSendResult(FrozenModel):
+    """What became of a request to send an account's verification email."""
+
+    is_sent: bool = Field(description="Whether the email was handed to delivery")
+    is_already_verified: bool = Field(description="Whether nothing was sent because the address needs no link")
+
+
 class BoxManagementTrust(FrozenModel):
     """What a box's slice service user trusts for management SSH, read over SSH."""
 

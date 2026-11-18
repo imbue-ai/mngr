@@ -228,6 +228,7 @@ from imbue.minds.desktop_client.host_names import resolve_create_host_name
 from imbue.minds.desktop_client.host_timezone import read_host_timezone
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudShareRefusedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import MACHINES_RESIZE_COMMAND_REPR
@@ -4105,6 +4106,11 @@ def _handle_workspace_sharing_delete(workspace_id: str) -> MachineSharingRespons
     return _unpublish_workspace_core(host_id)
 
 
+def _email_not_verified_response(exc: ImbueCloudEmailNotVerifiedCliError) -> Response:
+    """The 409 for a send the connector refused until the account's email is verified."""
+    return _json_response({"error": "email_not_verified", "message": str(exc), "email": exc.email}, status_code=409)
+
+
 @require_api_or_cookie_auth
 @API_SPEC.validate(json=InviteGranteeRequest, resp=json_response_model(InvitationResultResponse))
 def _handle_workspace_sharing_invite(workspace_id: str) -> InvitationResultResponse | Response:
@@ -4121,6 +4127,8 @@ def _handle_workspace_sharing_invite(workspace_id: str) -> InvitationResultRespo
             result = invite_grantee_for_workspace(host_id, body.user_id, body.email, body.app, state.backend_resolver)
     except ImbueCloudShareRefusedCliError as exc:
         return _json_response({"error": exc.code, "message": str(exc)}, status_code=409)
+    except ImbueCloudEmailNotVerifiedCliError as exc:
+        return _email_not_verified_response(exc)
     except SharingError as exc:
         return _sharing_error_response(exc)
     return InvitationResultResponse(outcome=result.outcome, invited_at=result.invited_at)
@@ -4169,6 +4177,8 @@ def _handle_workspace_sharing_mobile_access_link(workspace_id: str) -> MobileAcc
             result = send_mobile_access_link_for_workspace(host_id, state.backend_resolver)
     except ImbueCloudShareRefusedCliError as exc:
         return _json_response({"error": exc.code, "message": str(exc)}, status_code=409)
+    except ImbueCloudEmailNotVerifiedCliError as exc:
+        return _email_not_verified_response(exc)
     except SharingError as exc:
         return _sharing_error_response(exc)
     return MobileAccessLinkResponse(

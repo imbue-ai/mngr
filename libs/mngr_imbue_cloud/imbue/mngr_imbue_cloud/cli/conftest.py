@@ -63,7 +63,7 @@ def local_connector_stub() -> Iterator[tuple[str, list[str]]]:
 def running_callback_server() -> Iterator[tuple[_CallbackCaptureBox, int]]:
     box = _CallbackCaptureBox()
     # No outcome is published in these tests, so the page must not hold its response.
-    handler_class = _make_callback_handler_class(box, None, 0.0)
+    handler_class = _make_callback_handler_class(box, None, 0.0, "https://accounts.example.test/manage")
     # Bind to port 0 and read back the kernel-assigned port from the live
     # server. Picking a port via a separate socket and rebinding leaves a
     # TOCTOU window where a parallel xdist worker can steal the port.
@@ -79,7 +79,22 @@ def running_callback_server() -> Iterator[tuple[_CallbackCaptureBox, int]]:
         thread.join(timeout=5.0)
 
 
-class _DeviceLoginConnectorStubHandler(http.server.BaseHTTPRequestHandler):
+class _JsonConnectorStubHandler(http.server.BaseHTTPRequestHandler):
+    """A quiet loopback connector stub that answers in JSON."""
+
+    def _send_json(self, status_code: int, payload: dict[str, object]) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: object) -> None:
+        del format, args
+
+
+class _DeviceLoginConnectorStubHandler(_JsonConnectorStubHandler):
     """Answers the connector routes ``auth login`` calls, recording each request as ``"METHOD /path"``.
 
     Those are the accounts-config probe, the listener-lease renewals and
@@ -117,25 +132,65 @@ class _DeviceLoginConnectorStubHandler(http.server.BaseHTTPRequestHandler):
         else:
             self._send_json(self.device_token_status_code, {"detail": "Invalid, expired, or already-used code"})
 
-    def _send_json(self, status_code: int, payload: dict[str, object]) -> None:
-        body = json.dumps(payload).encode("utf-8")
-        self.send_response(status_code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
 
-    def log_message(self, format: str, *args: object) -> None:
-        del format, args
+class _SendVerificationConnectorStubHandler(_JsonConnectorStubHandler):
+    """Answers the token refresh a stored session needs, and the send-verification route with ``send_answer``."""
+
+    send_answer: dict[str, object] = {}
+
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        if self.path == "/auth/session/refresh":
+            payload: dict[str, object] = {"status": "OK", "tokens": {"access_token": "at-2", "refresh_token": "rt-2"}}
+        elif self.path == "/auth/email/send-verification":
+            payload = {"status": "OK", **self.send_answer}
+        else:
+            raise AssertionError(f"unexpected path {self.path}")
+        self._send_json(200, payload)
 
 
 @pytest.fixture
-def device_login_connector_stub() -> Iterator[Callable[..., tuple[str, list[str]]]]:
+def start_loopback_stub() -> Iterator[Callable[[type[http.server.BaseHTTPRequestHandler], str], str]]:
+    """A starter that serves a handler class on a loopback port and returns its URL; every server stops at teardown."""
+    servers: list[http.server.HTTPServer] = []
+
+    def start(handler_class: type[http.server.BaseHTTPRequestHandler], thread_name: str) -> str:
+        server = http.server.HTTPServer(("127.0.0.1", 0), handler_class)
+        servers.append(server)
+        threading.Thread(target=server.serve_forever, daemon=True, name=thread_name).start()
+        return f"http://127.0.0.1:{server.server_address[1]}"
+
+    yield start
+    for server in servers:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.fixture
+def send_verification_connector_stub(
+    start_loopback_stub: Callable[[type[http.server.BaseHTTPRequestHandler], str], str],
+) -> Callable[[dict[str, object]], str]:
+    """Start a loopback connector stub whose send-verification route answers with the given fields; returns its URL."""
+
+    def start(send_answer: dict[str, object]) -> str:
+        handler_class = type(
+            "_ScopedSendVerificationConnectorStubHandler",
+            (_SendVerificationConnectorStubHandler,),
+            {"send_answer": send_answer},
+        )
+        return start_loopback_stub(handler_class, "send-verification-stub-test")
+
+    return start
+
+
+@pytest.fixture
+def device_login_connector_stub(
+    start_loopback_stub: Callable[[type[http.server.BaseHTTPRequestHandler], str], str],
+) -> Callable[..., tuple[str, list[str]]]:
     """Start a loopback connector stub for ``auth login`` with the given status codes for the exchange and the lease.
 
     Returns ``(base_url, recorded_requests)``; the list fills with ``"METHOD /path"`` as requests arrive.
     """
-    servers: list[http.server.HTTPServer] = []
 
     def start(device_token_status_code: int, device_attempts_status_code: int = 200) -> tuple[str, list[str]]:
         recorded_requests: list[str] = []
@@ -148,12 +203,6 @@ def device_login_connector_stub() -> Iterator[Callable[..., tuple[str, list[str]
                 "recorded_requests": recorded_requests,
             },
         )
-        server = http.server.HTTPServer(("127.0.0.1", 0), handler_class)
-        servers.append(server)
-        threading.Thread(target=server.serve_forever, daemon=True, name="device-login-stub-test").start()
-        return f"http://127.0.0.1:{server.server_address[1]}", recorded_requests
+        return start_loopback_stub(handler_class, "device-login-stub-test"), recorded_requests
 
-    yield start
-    for server in servers:
-        server.shutdown()
-        server.server_close()
+    return start

@@ -29,6 +29,7 @@ from imbue.minds.desktop_client.supertokens_routes import _WEB_LOGIN_FLOW_TTL_SE
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.minds.utils.testing import ScriptedMngrCaller
+from imbue.mngr_imbue_cloud.data_types import VerificationEmailSendResult
 
 
 def test_expect_success_keeps_traceback_out_of_message_but_on_stderr() -> None:
@@ -346,19 +347,30 @@ def test_list_share_relays_raises_on_malformed_output(malformed_body: dict[str, 
         cli.list_share_relays(account="owner@example.com")
 
 
-def test_auth_resend_verification_reports_cooldown_suppression() -> None:
+@pytest.mark.parametrize("is_already_verified", [False, True], ids=["cooldown", "already_verified"])
+def test_auth_resend_verification_reports_why_nothing_was_sent(is_already_verified: bool) -> None:
     caller = RecordingMngrCaller(
-        result=MngrCallResult(returncode=0, stdout=json.dumps({"sent": False, "email": "a@b.com"}))
+        result=MngrCallResult(
+            returncode=0,
+            stdout=json.dumps({"sent": False, "already_verified": is_already_verified, "email": "a@b.com"}),
+        )
     )
     cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
 
-    assert cli.auth_resend_verification("a@b.com") is False
+    assert cli.auth_resend_verification("a@b.com") == VerificationEmailSendResult(
+        is_sent=False, is_already_verified=is_already_verified
+    )
     assert caller.recorded_calls[0].argv == ("imbue_cloud", "auth", "resend-verification", "--account", "a@b.com")
 
 
-def test_auth_resend_verification_raises_on_malformed_output() -> None:
-    """A body without a 'sent' bool is a broken plugin contract, not a cooldown suppression."""
-    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps({"email": "a@b.com"})))
+@pytest.mark.parametrize(
+    "malformed_body",
+    [{"already_verified": False, "email": "a@b.com"}, {"sent": False, "email": "a@b.com"}],
+    ids=["missing_sent", "missing_already_verified"],
+)
+def test_auth_resend_verification_raises_on_malformed_output(malformed_body: dict[str, object]) -> None:
+    """A body without either bool is a broken plugin contract, not a cooldown suppression."""
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps(malformed_body)))
     cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
 
     with pytest.raises(ImbueCloudCliError, match="Malformed auth resend-verification output"):

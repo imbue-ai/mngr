@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ResendOutcome } from "../../../models/emailVerification";
-import { VerificationWait } from "./verification-wait";
+import { VerificationWait, createOnceVerified } from "./verification-wait";
 
 const POLL_MS = 100;
 
@@ -157,5 +157,42 @@ describe("VerificationWait", () => {
     expect(state.resent).toEqual(["new@example.com"]);
     expect(state.wait.resendOutcome).toBe("suppressed");
     state.wait.cancel();
+  });
+});
+
+describe("createOnceVerified", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function form(mode: "IMBUE_CLOUD" | "LIMA", email: string) {
+    return { launchSelection: () => ({ mode }) as never, selectedAccountEmail: () => email };
+  }
+
+  it("creates at once when the form does not launch on Imbue Cloud", () => {
+    const h = harness([false]);
+    createOnceVerified(h.wait, form("LIMA", "a@b.com"), () => (h.created += 1), () => (h.unchecked += 1));
+    expect(h.created).toBe(1);
+    expect(h.wait.email).toBeNull();
+  });
+
+  it("refuses a cloud create with no account address to check", () => {
+    const h = harness([true]);
+    createOnceVerified(h.wait, form("IMBUE_CLOUD", ""), () => (h.created += 1), () => (h.unchecked += 1));
+    expect(h.created).toBe(0);
+    expect(h.unchecked).toBe(1);
+  });
+
+  it("holds a cloud create until the address is verified", async () => {
+    const h = harness([false, true]);
+    createOnceVerified(h.wait, form("IMBUE_CLOUD", "a@b.com"), () => (h.created += 1), () => (h.unchecked += 1));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.wait.email).toBe("a@b.com");
+    expect(h.created).toBe(0);
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(h.created).toBe(1);
   });
 });

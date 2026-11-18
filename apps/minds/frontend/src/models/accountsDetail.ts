@@ -29,6 +29,8 @@ import {
   responseDetails,
 } from "./errors";
 import { isReconnectNeeded } from "./reconnect";
+import { resendOutcomeOf } from "./emailVerification";
+import type { ResendOutcome } from "./emailVerification";
 
 export interface PlanUsageRow {
   label: string;
@@ -98,14 +100,15 @@ export interface AccountPlanState {
 
 /** The contextual "verify your email" prompt shown after a plan switch was
  * refused with the connector's structured email_not_verified 403. The server
- * tries to auto-send the first verification email as part of that refusal;
+ * tries to auto-send a verification email as part of that refusal;
  * `wasAutoSent` is false when a cooldown suppressed that send (or it failed),
  * so the prompt must not claim a link was just sent. */
 export interface VerifyEmailPrompt {
   email: string;
   wasAutoSent: boolean;
   isResending: boolean;
-  wasResent: boolean;
+  /** How the last press of the prompt's resend ended, once it has. */
+  resendOutcome: ResendOutcome | null;
 }
 
 interface CachedAccountPlan {
@@ -429,7 +432,7 @@ export class AccountsDetailModel {
             email: refusal.email,
             wasAutoSent: refusal.wasAutoSent,
             isResending: false,
-            wasResent: false,
+            resendOutcome: null,
           });
           return true;
         },
@@ -452,28 +455,15 @@ export class AccountsDetailModel {
     this.verifyEmailPromptByUserId.set(userId, {
       ...prompt,
       isResending: true,
-      wasResent: false,
+      resendOutcome: null,
     });
     this.redraw();
-    let wasResent = false;
-    try {
-      const response = await this.fetchImpl(
+    const resendOutcome = await resendOutcomeOf(() =>
+      this.fetchImpl(
         `/accounts/${encodeURIComponent(userId)}/resend-verification`,
         { method: "POST", credentials: "same-origin" },
-      );
-      // The route answers 200 even when the connector's cooldown (or a CLI
-      // failure) suppressed the send -- the body's `sent` flag is the truth,
-      // and the prompt must not claim a link the server did not confirm.
-      if (response.ok) {
-        const body: unknown = await response.json();
-        wasResent =
-          typeof body === "object" &&
-          body !== null &&
-          (body as { sent?: unknown }).sent === true;
-      }
-    } catch {
-      // A network or parse failure counts as not resent; wasResent stays false.
-    }
+      ),
+    );
     // The prompt may have been removed while the request was in flight (a
     // concurrent plan switch deletes it first); a deleted prompt must not be
     // resurrected here.
@@ -482,7 +472,7 @@ export class AccountsDetailModel {
       this.verifyEmailPromptByUserId.set(userId, {
         ...current,
         isResending: false,
-        wasResent,
+        resendOutcome,
       });
     }
     this.redraw();

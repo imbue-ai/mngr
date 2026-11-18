@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   accountEntry,
   jsonResponse,
+  planRefusedAsUnverified,
   secondAccountEntry,
   settle,
   withReceiverGuardedGlobalFetch,
@@ -362,16 +363,8 @@ describe("verify-email prompt", () => {
   }
 
   it("shows the prompt on a structured email_not_verified 403 instead of the page error", async () => {
-    const model = makeModelWithPlanResponse(
-      () =>
-        new Response(
-          JSON.stringify({
-            code: "email_not_verified",
-            email: "alice@example.com",
-            sent: true,
-          }),
-          { status: 403 },
-        ),
+    const model = makeModelWithPlanResponse(() =>
+      planRefusedAsUnverified("alice@example.com", true),
     );
 
     await model.switchPlan("user-1", "alice@example.com", "ally", "Ally");
@@ -381,21 +374,13 @@ describe("verify-email prompt", () => {
       email: "alice@example.com",
       wasAutoSent: true,
       isResending: false,
-      wasResent: false,
+      resendOutcome: null,
     });
   });
 
   it("records a suppressed auto-send so the prompt does not claim a link was sent", async () => {
-    const model = makeModelWithPlanResponse(
-      () =>
-        new Response(
-          JSON.stringify({
-            code: "email_not_verified",
-            email: "alice@example.com",
-            sent: false,
-          }),
-          { status: 403 },
-        ),
+    const model = makeModelWithPlanResponse(() =>
+      planRefusedAsUnverified("alice@example.com", false),
     );
 
     await model.switchPlan("user-1", "alice@example.com", "ally", "Ally");
@@ -404,7 +389,7 @@ describe("verify-email prompt", () => {
       email: "alice@example.com",
       wasAutoSent: false,
       isResending: false,
-      wasResent: false,
+      resendOutcome: null,
     });
   });
 
@@ -443,51 +428,42 @@ describe("verify-email prompt", () => {
     );
   });
 
-  it("does not claim a resend the server suppressed (200 with sent: false)", async () => {
-    const model = makeModelWithPlanResponse(
-      () =>
-        new Response(
-          JSON.stringify({
-            code: "email_not_verified",
-            email: "alice@example.com",
-            sent: true,
-          }),
-          { status: 403 },
-        ),
-      () => jsonResponse({ sent: false, email: "alice@example.com" }),
-    );
-    await model.switchPlan("user-1", "alice@example.com", "ally", "Ally");
+  it.each([
+    ["suppressed", () => jsonResponse({ sent: false, email: "a@b.com" })],
+    ["failed", () => new Response("Could not send", { status: 502 })],
+  ] as const)(
+    "keeps a resend that ended %s apart from one that went out",
+    async (outcome, onResend) => {
+      const model = makeModelWithPlanResponse(
+        () => planRefusedAsUnverified("alice@example.com", true),
+        onResend,
+      );
+      await model.switchPlan("user-1", "alice@example.com", "ally", "Ally");
 
-    await model.resendVerification("user-1");
+      await model.resendVerification("user-1");
 
-    expect(model.verifyEmailPromptFor("user-1")?.wasResent).toBe(false);
-    expect(model.verifyEmailPromptFor("user-1")?.isResending).toBe(false);
-  });
+      expect(model.verifyEmailPromptFor("user-1")?.resendOutcome).toBe(outcome);
+      expect(model.verifyEmailPromptFor("user-1")?.isResending).toBe(false);
+    },
+  );
 
   it("clears the prompt on the next switch attempt and marks a resend", async () => {
     let planCalls = 0;
     const model = makeModelWithPlanResponse(
       () => {
         planCalls += 1;
-        return new Response(
-          JSON.stringify({
-            code: "email_not_verified",
-            email: "alice@example.com",
-            sent: true,
-          }),
-          { status: 403 },
-        );
+        return planRefusedAsUnverified("alice@example.com", true);
       },
       () => jsonResponse({ sent: true, email: "alice@example.com" }),
     );
     await model.switchPlan("user-1", "alice@example.com", "ally", "Ally");
 
     await model.resendVerification("user-1");
-    expect(model.verifyEmailPromptFor("user-1")?.wasResent).toBe(true);
+    expect(model.verifyEmailPromptFor("user-1")?.resendOutcome).toBe("sent");
 
     await model.switchPlan("user-1", "alice@example.com", "ally", "Ally");
     expect(planCalls).toBe(2);
-    expect(model.verifyEmailPromptFor("user-1")?.wasResent).toBe(false);
+    expect(model.verifyEmailPromptFor("user-1")?.resendOutcome).toBeNull();
   });
 });
 

@@ -8,6 +8,7 @@
 // renders it above its own turns when it is reached from the flow in the same
 // session, and a reload simply starts over (nothing is persisted).
 
+import { RESEND_EMAIL_LABEL, verificationEmailSentNote } from "./emailVerification";
 import type { ResendOutcome } from "./emailVerification";
 
 /** The agent speaks first, and names the thing the rest of the exchange is about. */
@@ -202,7 +203,6 @@ const WHERE_TO_RUN_CHOICES: Pick<FlowStep, "choices" | "minorChoices"> = {
 
 /** The start flow's title-bar way back in for a returning user, offered for the whole flow. */
 export const EXISTING_LOGIN_LABEL = "Already set up? Log in";
-export const RESEND_EMAIL_LABEL = "Send the email again";
 export const VERIFIED_LABEL = "I verified it";
 
 const SIGNUP_CHOICE: FlowChoice = {
@@ -302,18 +302,6 @@ export function stepText(step: FlowStep, ack: string): { lead: string; body: str
 
 export function verificationAsk(email: string): string {
   return `(click the link emailed to ${email} when you created your account)`;
-}
-
-/** Only an outcome the server confirmed may point the user at an inbox. */
-export function verificationEmailSentNote(email: string, outcome: ResendOutcome): string {
-  switch (outcome) {
-    case "sent":
-      return `Sent another email to ${email}.`;
-    case "suppressed":
-      return `An email went out to ${email} moments ago. Check your inbox and spam folder.`;
-    case "failed":
-      return `Could not send the email to ${email}. Please try again.`;
-  }
 }
 
 export const SIGN_IN_INTRO_BY_CHOICE: Record<"signup" | "signin", string> = {

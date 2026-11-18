@@ -107,6 +107,7 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_imbue_cloud.data_types import VerificationEmailSendResult
 from imbue.mngr_imbue_cloud.errors import GRANTS_REFUSED_CODE
 from imbue.mngr_imbue_cloud.errors import SHARED_WITH_ME_UNAVAILABLE_CODE
 
@@ -198,6 +199,12 @@ class FakeImbueCloudCli(ImbueCloudCli):
     is_resend_suppressed: bool = Field(
         default=False, description="When True, auth_resend_verification reports the server cooldown (sent=False)"
     )
+    is_resend_already_verified: bool = Field(
+        default=False, description="When True, auth_resend_verification reports the address as already verified"
+    )
+    resend_error_to_raise: ImbueCloudCliError | None = Field(
+        default=None, description="When set, auth_resend_verification raises it instead of answering"
+    )
     verified_emails: set[str] = Field(
         default_factory=set, description="Accounts auth_is_email_verified reports as verified"
     )
@@ -242,9 +249,14 @@ class FakeImbueCloudCli(ImbueCloudCli):
     def remove_account_by_email(self, email: str) -> None:
         self.accounts_to_return = [a for a in self.accounts_to_return if a.email != email]
 
-    def auth_resend_verification(self, account: str) -> bool:
+    def auth_resend_verification(self, account: str) -> VerificationEmailSendResult:
         self.resent_verification_emails.append(account)
-        return not self.is_resend_suppressed
+        if self.resend_error_to_raise is not None:
+            raise self.resend_error_to_raise
+        return VerificationEmailSendResult(
+            is_sent=not self.is_resend_suppressed and not self.is_resend_already_verified,
+            is_already_verified=self.is_resend_already_verified,
+        )
 
     def auth_is_email_verified(self, account: str) -> bool:
         self.is_verified_checks.append(account)

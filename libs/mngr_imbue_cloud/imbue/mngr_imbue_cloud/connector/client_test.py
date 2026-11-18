@@ -33,6 +33,7 @@ from imbue.mngr_imbue_cloud.connector.client import create_litellm_key_rotating_
 from imbue.mngr_imbue_cloud.connector.testing import make_jwt_expiring_in
 from imbue.mngr_imbue_cloud.connector.testing import make_jwt_with_payload
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
+from imbue.mngr_imbue_cloud.data_types import VerificationEmailSendResult
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountDeletedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountSuspendedError
@@ -345,15 +346,23 @@ def test_auth_is_email_verified_sends_bearer_token_and_parses_verified() -> None
     assert client.auth_is_email_verified(SecretStr("at-secret"), "alice@imbue.com") is True
 
 
-def test_auth_send_verification_email_reports_cooldown_suppression() -> None:
+@pytest.mark.parametrize(
+    ("answered_fields", "is_already_verified"),
+    [({}, False), ({"already_verified": True}, True)],
+    ids=["cooldown", "already_verified"],
+)
+def test_auth_send_verification_email_reports_why_nothing_was_sent(
+    answered_fields: dict[str, bool], is_already_verified: bool
+) -> None:
     def handler(request: httpx2.Request) -> httpx2.Response:
         assert request.url.path == "/auth/email/send-verification"
         assert request.headers["Authorization"] == "Bearer at-secret"
         assert _json.loads(request.content) == {"email": "alice@imbue.com"}
-        return httpx2.Response(200, json={"status": "OK", "sent": False})
+        return httpx2.Response(200, json={"status": "OK", "sent": False, **answered_fields})
 
     client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx2.MockTransport(handler))
-    assert client.auth_send_verification_email(SecretStr("at-secret"), "alice@imbue.com") is False
+    result = client.auth_send_verification_email(SecretStr("at-secret"), "alice@imbue.com")
+    assert result == VerificationEmailSendResult(is_sent=False, is_already_verified=is_already_verified)
 
 
 def test_auth_send_verification_email_raises_on_missing_sent() -> None:

@@ -106,9 +106,11 @@ sends them an email from Imbue naming what you shared -- the app, by the
 name you read for it, or the whole workspace -- with its link, and naming
 you by the verified email address on your account rather than by your
 display name, so that nobody can dress an invitation up as mail from
-someone else. Inviting is the one thing here that needs your own address
-verified, for the same reason; everything else about sharing works
-without it. The row then reads "Invited" with when, or "Could not
+someone else. Inviting needs your own address verified, for the same
+reason, and so does "Email me a Mobile Access Link"; everything else
+about sharing works without it. If yours is not verified yet, the row or
+the link's control says so and offers "Send the email again". Once you
+have invited someone the row reads "Invited" with when, or "Could not
 invite". Once they
 have opened the link the row reads "Joined". A domain grant notifies
 nobody: pass the link on yourself. Invite appears only while the workspace

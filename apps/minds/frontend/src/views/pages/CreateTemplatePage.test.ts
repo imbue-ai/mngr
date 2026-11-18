@@ -23,7 +23,12 @@ import type {
 } from "../../models/create";
 import { CreateTemplatePage } from "./CreateTemplatePage";
 import { SLOW_START_WARNING } from "./create/ComputeNotices";
+import { ButtonSubmit } from "../components/Button";
+import { ErrorNotice } from "../components/ErrorDisplay";
 import { PresetCards } from "./create/PresetCards";
+import { VerificationWaitNotice } from "./create/VerificationWaitNotice";
+import { VERIFICATION_CHECK_FAILED_MESSAGE } from "./create/verification-wait";
+import type { VerificationWait } from "./create/verification-wait";
 import type { PresetName } from "./create/form-model";
 
 afterEach(() => {
@@ -160,7 +165,14 @@ describe("CreateTemplatePage's sign-in for Imbue Cloud", () => {
     is_connection_owner_eligible: true,
   };
 
-  it("takes up the account signed in here when a device window creates on Imbue Cloud, then posts the create under it", async () => {
+  const VERIFICATION_URL = `/accounts/verification?email=${encodeURIComponent(BOB.email)}`;
+
+  /**
+   * Press the stepper's Create on Imbue Cloud in a device window with Bob
+   * signed in on the install. A null `isVerified` leaves the verification
+   * check unanswered; a failing `checkStatus` makes the check itself fail.
+   */
+  async function submitOnImbueCloud(isVerified: boolean | null, checkStatus = 200) {
     // The window is the device's, with Bob signed in on the install: the
     // stepper's Create must not send the user to the accounts page they are
     // already listed on, but take Bob up into the window and create.
@@ -181,6 +193,10 @@ describe("CreateTemplatePage's sign-in for Imbue Cloud", () => {
     const requests: [string, RequestInit | undefined][] = [];
     vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
       requests.push([url, init]);
+      if (url.startsWith("/accounts/verification"))
+        return isVerified === null
+          ? new Promise(() => undefined)
+          : Promise.resolve(jsonResponse({ verified: isVerified, email: BOB.email }, checkStatus));
       if (url === "/api/v1/workspaces")
         return Promise.resolve(jsonResponse({ operation_id: "op-1" }, 202));
       const account = url.endsWith(`account=${BOB.user_id}`)
@@ -195,10 +211,7 @@ describe("CreateTemplatePage's sign-in for Imbue Cloud", () => {
     const render = (): AnyVnode[] => collectVnodes(page.view.call(page, vnode));
 
     pick(render(), "remote");
-    const trust = render().find(
-      (node) => attrsOf(node).type === "checkbox",
-    ) as AnyVnode;
-    (attrsOf(trust).onchange as (event: unknown) => void)({
+    (attrsOf(trustCheckbox(render())).onchange as (event: unknown) => void)({
       target: { checked: true },
     });
     const form = render().find((node) => node.tag === "form") as AnyVnode;
@@ -206,18 +219,97 @@ describe("CreateTemplatePage's sign-in for Imbue Cloud", () => {
       preventDefault: () => undefined,
     });
     await settle();
+    return { shell, requests, routeSet, render, page };
+  }
+
+  function trustCheckbox(nodes: AnyVnode[]): AnyVnode {
+    return nodes.find((node) => attrsOf(node).type === "checkbox") as AnyVnode;
+  }
+
+  function heldNotice(nodes: AnyVnode[]) {
+    return attrsOf(nodes.find((node) => node.tag === VerificationWaitNotice) as AnyVnode) as unknown as {
+      wait: VerificationWait;
+      onCancel: () => void;
+    };
+  }
+
+  function earlierStepHeading(nodes: AnyVnode[]): AnyVnode {
+    return nodes.find((node) => node.tag === "h2" && attrsOf(node).onclick !== undefined) as AnyVnode;
+  }
+
+  it("takes up the account signed in here when a device window creates on Imbue Cloud, then posts the create under it", async () => {
+    const { shell, requests, routeSet } = await submitOnImbueCloud(true);
 
     expect(shell.accountId).toBe(BOB.user_id);
     expect(requests.map(([url]) => url)).toEqual([
       "/ui/api/create/form-defaults?account=local",
       `/ui/api/create/form-defaults?account=${BOB.user_id}`,
+      VERIFICATION_URL,
       "/api/v1/workspaces",
     ]);
-    const createInit = requests[2]?.[1] as RequestInit;
+    const createInit = requests[3]?.[1] as RequestInit;
     expect(JSON.parse(String(createInit.body))).toMatchObject({
       account_id: BOB.user_id,
       launch_mode: "IMBUE_CLOUD",
     });
     expect(routeSet).toHaveBeenCalledWith("/creating/op-1");
+  });
+
+  it("holds the create on an unverified account's emailed link, and Cancel lets the form go again", async () => {
+    const { requests, render, page } = await submitOnImbueCloud(false);
+
+    expect(requests.map(([url]) => url)).not.toContain("/api/v1/workspaces");
+    const noticeAttrs = heldNotice(render());
+    expect(noticeAttrs.wait.email).toBe(BOB.email);
+    expect(attrsOf(trustCheckbox(render())).disabled).toBe(true);
+
+    noticeAttrs.onCancel();
+
+    expect(noticeAttrs.wait.email).toBeNull();
+    expect(attrsOf(trustCheckbox(render())).disabled).toBe(false);
+    const submit = render().find((node) => node.tag === ButtonSubmit) as AnyVnode;
+    expect(attrsOf(submit).disabled).toBe(false);
+    page.onremove?.call(page, {} as m.VnodeDOM);
+  });
+
+  it("drops a create held on the emailed link when the user steps back from the step showing it", async () => {
+    const { render, page } = await submitOnImbueCloud(false);
+    const noticeAttrs = heldNotice(render());
+
+    (attrsOf(earlierStepHeading(render())).onclick as () => void)();
+
+    expect(noticeAttrs.wait.email).toBeNull();
+    expect(render().find((node) => node.tag === ButtonSubmit)).toBeUndefined();
+    page.onremove?.call(page, {} as m.VnodeDOM);
+  });
+
+  it("reports a verification check it could not make, and lets the form go again", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { requests, render, page } = await submitOnImbueCloud(false, 502);
+
+    expect(requests.map(([url]) => url)).not.toContain("/api/v1/workspaces");
+    const notice = render().find((node) => node.tag === ErrorNotice) as AnyVnode;
+    expect(attrsOf(notice).error).toEqual({ message: VERIFICATION_CHECK_FAILED_MESSAGE, details: "" });
+    const submit = render().find((node) => node.tag === ButtonSubmit) as AnyVnode;
+    expect(attrsOf(submit).disabled).toBe(false);
+    page.onremove?.call(page, {} as m.VnodeDOM);
+  });
+
+  it("stays on the step while the first verification check is still out", async () => {
+    const { render, page } = await submitOnImbueCloud(null);
+
+    (attrsOf(earlierStepHeading(render())).onclick as () => void)();
+
+    expect(render().find((node) => node.tag === ButtonSubmit)).toBeDefined();
+    page.onremove?.call(page, {} as m.VnodeDOM);
+  });
+
+  it("drops a held create when the page goes away", async () => {
+    const { render, page } = await submitOnImbueCloud(false);
+    const { wait } = heldNotice(render());
+
+    page.onremove?.call(page, {} as m.VnodeDOM);
+
+    expect(wait.email).toBeNull();
   });
 });

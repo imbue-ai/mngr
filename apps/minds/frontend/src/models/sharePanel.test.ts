@@ -1,10 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { installProfiling } from "../profiling";
 import {
   fakeProfilingEnvironment,
+  heldFetch,
+  jsonResponse,
   postedProfileEvents,
   settle,
   sharePanelOptions,
+  UNVERIFIED_REFUSAL,
 } from "../testing";
 import type { RequestResult, ResponseBody } from "./errors";
 import { createAppQueryClient } from "./queryClient";
@@ -2952,6 +2955,10 @@ describe("what the panel calls a target", () => {
 describe("SharePanelModel mobile access link", () => {
   const MOBILE_SUFFIX = "/mobile-access-link";
 
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   /** A published, live panel whose whole-workspace link is ready, so the
    * control is offered. The mobile-link route answers with `respond`. */
   function linkablePanel(
@@ -3031,6 +3038,90 @@ describe("SharePanelModel mobile access link", () => {
 
       expect(refusalMessageOf(model.mobileLinkState)).toBe(noAccessPoint);
     }
+  });
+
+  it("carries the address an unverified account must verify, not the access-point wait", async () => {
+    const { model } = linkablePanel(() => ({
+      ok: false,
+      status: 409,
+      body: UNVERIFIED_REFUSAL,
+    }));
+    await model.load();
+
+    await model.sendMobileAccessLink();
+
+    expect(refusalMessageOf(model.mobileLinkState)).toBe(
+      "Verify your email first: click the link we emailed you.",
+    );
+    expect(model.mobileLinkState).toMatchObject({
+      unverifiedEmail: "owner@example.com",
+    });
+  });
+
+  it("stops offering the verification email once a resend finds the address already verified", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ sent: false, already_verified: true })),
+    );
+    const { model } = linkablePanel(() => ({
+      ok: false,
+      status: 409,
+      body: UNVERIFIED_REFUSAL,
+    }));
+    await model.load();
+    await model.sendMobileAccessLink();
+
+    await model.resendVerificationForMobileLink("owner@example.com");
+
+    expect(refusalMessageOf(model.mobileLinkState)).toBe(
+      "owner@example.com is already verified.",
+    );
+    expect(model.mobileLinkState).toMatchObject({
+      unverifiedEmail: undefined,
+      resendOutcome: "already_verified",
+    });
+  });
+
+  it("leaves a refusal the panel has since cleared alone when a resend lands late", async () => {
+    const send = heldFetch();
+    vi.stubGlobal("fetch", send.fetchImpl);
+    const { model } = linkablePanel(() => ({
+      ok: false,
+      status: 409,
+      body: UNVERIFIED_REFUSAL,
+    }));
+    await model.load();
+    await model.sendMobileAccessLink();
+
+    const sending = model.resendVerificationForMobileLink("owner@example.com");
+    await model.load();
+    send.answer(jsonResponse({ sent: true }));
+    await sending;
+
+    expect(model.mobileLinkState).toEqual({ state: "idle" });
+  });
+
+  it("leaves a newer refusal alone when a resend lands late", async () => {
+    const send = heldFetch();
+    vi.stubGlobal("fetch", send.fetchImpl);
+    let answerCount = 0;
+    const { model } = linkablePanel(() => {
+      answerCount += 1;
+      return answerCount === 1
+        ? { ok: false, status: 409, body: UNVERIFIED_REFUSAL }
+        : { ok: false, status: 409, body: { error: "no_workspace_link" } };
+    });
+    await model.load();
+    await model.sendMobileAccessLink();
+
+    const sending = model.resendVerificationForMobileLink("owner@example.com");
+    await model.sendMobileAccessLink();
+    const newerRefusal = model.mobileLinkState;
+    send.answer(jsonResponse({ sent: true }));
+    await sending;
+
+    expect(newerRefusal).not.toHaveProperty("unverifiedEmail");
+    expect(model.mobileLinkState).toBe(newerRefusal);
   });
 
   it("offers nothing to click while sharing is off, and sends nothing if asked", async () => {

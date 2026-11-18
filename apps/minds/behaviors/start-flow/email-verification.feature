@@ -35,6 +35,7 @@ Feature: Email verification before a cloud create
       | sends a new email                | Sent another email to alice@example.com.                                              |
       | finds one was sent moments ago   | An email went out to alice@example.com moments ago. Check your inbox and spam folder. |
       | fails                            | Could not send the email to alice@example.com. Please try again.                      |
+      | finds it already verified        | alice@example.com is already verified.                                                |
 
   @abandon-unverified
   Scenario: The user can leave an unverified account behind

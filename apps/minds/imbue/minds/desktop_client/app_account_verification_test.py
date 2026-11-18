@@ -19,6 +19,8 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudPlanRefusedCliError
 
+_VERIFICATION_SEND_URLS = ("/accounts/user-1/resend-verification", "/accounts/verification?email=alice@example.com")
+
 
 def _make_client_with_account(tmp_path: Path, cli):
     cli.add_account(user_id="user-1", email="alice@example.com")
@@ -124,8 +126,19 @@ def test_resend_verification_route_sends_for_the_named_account(tmp_path: Path) -
     response = client.post("/accounts/user-1/resend-verification")
 
     assert response.status_code == 200
-    assert json.loads(response.data) == {"sent": True, "email": "alice@example.com"}
+    assert json.loads(response.data) == {"sent": True, "already_verified": False, "email": "alice@example.com"}
     assert cli.resent_verification_emails == ["alice@example.com"]
+
+
+def test_resend_verification_route_reports_an_already_verified_address(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.is_resend_already_verified = True
+    client = _make_client_with_account(tmp_path, cli)
+
+    response = client.post("/accounts/user-1/resend-verification")
+
+    assert response.status_code == 200
+    assert json.loads(response.data) == {"sent": False, "already_verified": True, "email": "alice@example.com"}
 
 
 def test_resend_verification_route_409s_for_an_unknown_account(tmp_path: Path) -> None:
@@ -216,5 +229,28 @@ def test_verification_resend_sends_for_the_signed_in_email(tmp_path: Path) -> No
 
     response = client.post("/accounts/verification?email=alice@example.com")
 
-    assert json.loads(response.data) == {"sent": True, "email": "alice@example.com"}
+    assert json.loads(response.data) == {"sent": True, "already_verified": False, "email": "alice@example.com"}
     assert cli.resent_verification_emails == ["alice@example.com"]
+
+
+@pytest.mark.parametrize("send_url", _VERIFICATION_SEND_URLS)
+def test_verification_send_reports_sent_false_for_the_cooldown(tmp_path: Path, send_url: str) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.is_resend_suppressed = True
+    client = _make_client_with_account(tmp_path, cli)
+
+    response = client.post(send_url)
+
+    assert response.status_code == 200
+    assert json.loads(response.data) == {"sent": False, "already_verified": False, "email": "alice@example.com"}
+
+
+@pytest.mark.parametrize("send_url", _VERIFICATION_SEND_URLS)
+def test_verification_send_502s_when_the_cli_fails(tmp_path: Path, send_url: str) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.resend_error_to_raise = ImbueCloudCliError("connector unreachable")
+    client = _make_client_with_account(tmp_path, cli)
+
+    response = client.post(send_url)
+
+    assert response.status_code == 502

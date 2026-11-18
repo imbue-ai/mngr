@@ -1641,7 +1641,8 @@ def invite_grantee_for_workspace(
     does rather than by the service name behind its hostname. A refusal as
     ``grants_out_of_date`` is answered by pushing the workspace's document and
     trying once more; every other refusal propagates as
-    :class:`ImbueCloudShareRefusedCliError` for the route to report by code.
+    :class:`ImbueCloudShareRefusedCliError` for the route to report by code,
+    and an unverified granter as :class:`ImbueCloudEmailNotVerifiedCliError`.
     Raises :class:`SharingError` when the workspace is unpublished or the
     connector cannot be reached.
     """
@@ -1695,10 +1696,12 @@ def _invite_with_one_retry(
         try:
             with get_profiler().span("sharing.invite_retry", host_id=attempt.host_id):
                 return _invite_through_cli(cli, attempt)
-        except ImbueCloudShareRefusedCliError:
+        except (ImbueCloudShareRefusedCliError, ImbueCloudEmailNotVerifiedCliError):
             raise
         except ImbueCloudCliError as retry_exc:
             raise connector_failure_error("Could not invite", retry_exc) from retry_exc
+    except ImbueCloudEmailNotVerifiedCliError:
+        raise
     except ImbueCloudCliError as exc:
         raise connector_failure_error("Could not invite", exc) from exc
 
@@ -1730,7 +1733,8 @@ def send_mobile_access_link_for_workspace(
     judgment and answers it as a structured refusal, so the desktop never has
     to describe the share's state in its own words.
     Raises :class:`ImbueCloudShareRefusedCliError` for the connector's
-    structured refusals, and :class:`SharingError` when the connector cannot be
+    structured refusals, :class:`ImbueCloudEmailNotVerifiedCliError` for an
+    unverified account, and :class:`SharingError` when the connector cannot be
     reached.
     """
     state = get_state()
@@ -1749,7 +1753,7 @@ def send_mobile_access_link_for_workspace(
             link=link,
             workspace_name=_workspace_display_name(backend_resolver, agent_id),
         )
-    except ImbueCloudShareRefusedCliError:
+    except (ImbueCloudShareRefusedCliError, ImbueCloudEmailNotVerifiedCliError):
         raise
     except ImbueCloudCliError as exc:
         raise connector_failure_error("Could not email the link", exc) from exc

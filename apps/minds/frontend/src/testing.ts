@@ -500,6 +500,14 @@ export function jsonResponse(payload: unknown, status = 200): Response {
   });
 }
 
+/** The plan route's refusal for an account whose email is unverified; `sent` says whether it auto-sent the link. */
+export function planRefusedAsUnverified(
+  email: string,
+  sent: boolean,
+): Response {
+  return jsonResponse({ code: "email_not_verified", email, sent }, 403);
+}
+
 /** Publish a workspace list holding only `agentId`, at `liveness`, to the registered app context. */
 export function publishWorkspaceLiveness(
   agentId: string,
@@ -565,6 +573,28 @@ export function recordingFetch(
     return respond(url);
   };
   return { fetchImpl, requests };
+}
+
+/** What the local app answers an invite or mobile-link request from an unverified account. */
+export const UNVERIFIED_REFUSAL = {
+  error: "email_not_verified",
+  message: "m",
+  email: "owner@example.com",
+};
+
+/** A `fetch` that leaves every request in flight until `answer` settles the latest one. */
+export function heldFetch(): {
+  fetchImpl: () => Promise<Response>;
+  answer: (response: Response) => void;
+} {
+  let settleLatest: (response: Response) => void = () => {};
+  return {
+    fetchImpl: () =>
+      new Promise<Response>((resolve) => {
+        settleLatest = resolve;
+      }),
+    answer: (response) => settleLatest(response),
+  };
 }
 
 /** Run `run` with `globalThis.fetch` swapped for a stub that mimics the

@@ -1930,14 +1930,14 @@ def _account_action_unavailable_response() -> Response:
 
 
 def _send_verification_email_best_effort(cli: ImbueCloudCli, email: str) -> bool:
-    """Send the verification email for ``email``; False when suppressed or failed.
+    """Send the verification email for ``email``; False when nothing was sent.
 
     Best-effort: the caller's response already tells the user a link is on the
     way (or to use resend), so a failed send must not turn the whole
     plan-switch response into an error.
     """
     try:
-        return cli.auth_resend_verification(email)
+        return cli.auth_resend_verification(email).is_sent
     except ImbueCloudCliError as exc:
         logger.warning("Could not send the verification email for {}: {}", email, exc)
         return False
@@ -1955,10 +1955,26 @@ def _handle_account_resend_verification(user_id: str) -> Response:
     )
     if account is None or cli is None:
         return make_response(status_code=409, content="Account not found or imbue_cloud CLI unavailable.")
-    is_sent = _send_verification_email_best_effort(cli, str(account.email))
+    return _verification_send_response(cli, str(account.email))
+
+
+def _verification_send_response(cli: ImbueCloudCli, email: str) -> Response:
+    """Send the verification email for a user who asked for it.
+
+    A CLI failure answers 502, so ``"sent": false`` only ever means the
+    server's cooldown held the send back or the address is already verified,
+    which ``"already_verified"`` tells apart.
+    """
+    try:
+        send_result = cli.auth_resend_verification(email)
+    except ImbueCloudCliError as exc:
+        logger.warning("Could not send the verification email for {}: {}", email, exc)
+        return make_response(status_code=502, content=f"Could not send the verification email: {exc}")
     return make_response(
         status_code=200,
-        content=json.dumps({"sent": is_sent, "email": str(account.email)}),
+        content=json.dumps(
+            {"sent": send_result.is_sent, "already_verified": send_result.is_already_verified, "email": email}
+        ),
         media_type="application/json",
     )
 
@@ -1976,11 +1992,11 @@ def _signed_in_account_for_email(email: str) -> str | None:
 
 
 def _handle_account_verification() -> Response:
-    """The start flow's email-verification gate for the account named by ``?email=``.
+    """The email-verification gate for the account named by ``?email=``.
 
     GET asks the connector whether the email is verified (a plain status
     query the flow polls), unless a browser sign-in in this app already
-    reported it verified; POST re-sends the verification email. Both answer
+    reported it verified; POST sends the verification email. Both answer
     only for an account this install has signed in, so a stranger's address
     cannot be probed or spammed through the local app.
     """
@@ -1991,12 +2007,7 @@ def _handle_account_verification() -> Response:
     if account is None or cli is None:
         return make_response(status_code=409, content="Account not found or imbue_cloud CLI unavailable.")
     if request.method == "POST":
-        is_sent = _send_verification_email_best_effort(cli, account)
-        return make_response(
-            status_code=200,
-            content=json.dumps({"sent": is_sent, "email": account}),
-            media_type="application/json",
-        )
+        return _verification_send_response(cli, account)
     if is_email_verified_by_web_login(account):
         # Right after a sign-in the connector check is at its slowest: its mngr
         # process cold-starts beside the sign-in's own record syncs.

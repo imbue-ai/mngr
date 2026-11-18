@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { jsonResponse } from "../testing";
-import { fetchIsEmailVerified, resendVerificationEmail } from "./emailVerification";
+import { fetchIsEmailVerified, resendVerificationEmail, verificationEmailSentNote } from "./emailVerification";
 
 describe("fetchIsEmailVerified", () => {
   it("asks the app about the named email and reads the verdict", async () => {
@@ -30,11 +30,20 @@ describe("resendVerificationEmail", () => {
     expect(methods).toEqual(["POST"]);
   });
 
+  it("reads an already-verified address as its own outcome, with a note that claims no delivery", async () => {
+    const answer = async (): Promise<Response> => jsonResponse({ sent: false, already_verified: true });
+    const outcome = await resendVerificationEmail("a@b.com", answer);
+    expect(outcome).toBe("already_verified");
+    expect(verificationEmailSentNote("a@b.com", outcome)).toBe("a@b.com is already verified.");
+  });
+
   it("separates a cooldown-suppressed send from one that never went out", async () => {
     // The server answered: a mail really did go out moments ago.
     expect(await resendVerificationEmail("a@b.com", async () => jsonResponse({ sent: false }))).toBe("suppressed");
     // Nothing reached the server, so nothing was sent and the view must not say otherwise.
     expect(await resendVerificationEmail("a@b.com", async () => jsonResponse({}, 409))).toBe("failed");
     expect(await resendVerificationEmail("a@b.com", async () => Promise.reject(new Error("offline")))).toBe("failed");
+    // An answer that does not say is not a cooldown.
+    expect(await resendVerificationEmail("a@b.com", async () => jsonResponse({ email: "a@b.com" }))).toBe("failed");
   });
 });

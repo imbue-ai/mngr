@@ -49,6 +49,7 @@ from imbue.imbue_common.suspension import was_suspended_since
 from imbue.mngr.primitives import PublishedPortDeclaration
 from imbue.mngr_imbue_cloud.connector.session_store import decode_jwt_exp
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
+from imbue.mngr_imbue_cloud.data_types import VerificationEmailSendResult
 from imbue.mngr_imbue_cloud.errors import CLIENT_TOO_OLD_FALLBACK_MESSAGE
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountDeletedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountError
@@ -739,8 +740,8 @@ class ImbueCloudConnectorClient(MutableModel):
             return
         raise ImbueCloudAuthError(f"Revoke failed ({response.status_code}): {response.text[:200]}")
 
-    def auth_send_verification_email(self, access_token: SecretStr, email: str) -> bool:
-        """(Re)send the caller's verification email; returns False when suppressed by the server cooldown.
+    def auth_send_verification_email(self, access_token: SecretStr, email: str) -> VerificationEmailSendResult:
+        """(Re)send the caller's verification email and report what became of it.
 
         Authenticated by the caller's own access token (unverified sessions are
         deliberately accepted server-side -- resending is exactly what an
@@ -765,7 +766,8 @@ class ImbueCloudConnectorClient(MutableModel):
             raise ImbueCloudAuthError(
                 f"Malformed send-verification response: expected a 'sent' bool, got keys {sorted(body)}"
             )
-        return sent
+        # CLEANUP: require this field once every connector tier answers it.
+        return VerificationEmailSendResult(is_sent=sent, is_already_verified=body.get("already_verified") is True)
 
     def auth_is_email_verified(self, access_token: SecretStr, email: str) -> bool:
         """Return whether the caller's ``email`` is verified, authenticated by their access token."""

@@ -50,9 +50,11 @@ from imbue.mngr_imbue_cloud.cli.auth import _write_login_url_file
 from imbue.mngr_imbue_cloud.cli.auth import auth
 from imbue.mngr_imbue_cloud.cli.auth import browser_session_code_payload
 from imbue.mngr_imbue_cloud.cli.auth import build_login_url
+from imbue.mngr_imbue_cloud.cli.auth import build_manage_url
 from imbue.mngr_imbue_cloud.cli.auth import compute_pkce_challenge
 from imbue.mngr_imbue_cloud.cli.auth import make_pkce_verifier
 from imbue.mngr_imbue_cloud.config import ACCOUNTS_URL_ENV_VAR
+from imbue.mngr_imbue_cloud.config import get_sessions_dir
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
 from imbue.mngr_imbue_cloud.connector.session_store import make_session_from_tokens
@@ -61,6 +63,8 @@ from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
 from imbue.mngr_imbue_cloud.wire_types import AuthRawResponse
 from imbue.mngr_imbue_cloud.wire_types import BrowserSessionCode
+
+_MANAGE_URL = "https://accounts.example.test/manage"
 
 
 def _get(port: int, path: str) -> int:
@@ -170,7 +174,7 @@ def test_email_verification_from_callback_speaks_only_for_the_signed_in_address(
 
 
 def test_success_page_without_redirect_says_return_to_terminal() -> None:
-    page = _login_result_page(None, _LoginPageOutcome.SIGNED_IN, None).decode("utf-8")
+    page = _login_result_page(None, _LoginPageOutcome.SIGNED_IN, None, _MANAGE_URL).decode("utf-8")
     assert "You are signed in" in page
     assert "return to your terminal" in page
     assert "<script>" not in page
@@ -180,7 +184,7 @@ def test_success_page_with_redirect_links_to_url_without_auto_navigation() -> No
     # Deliberately a plain link, not an automatic navigation: the click is the
     # user gesture that triggers the browser's open-external-app prompt. The
     # app-driven variant carries the Imbue Studio wordmark and copy.
-    page = _login_result_page("minds://", _LoginPageOutcome.SIGNED_IN, None).decode("utf-8")
+    page = _login_result_page("minds://", _LoginPageOutcome.SIGNED_IN, None, _MANAGE_URL).decode("utf-8")
     assert '<a href="minds://">Open app</a>' in page
     assert "<svg" in page and 'fill="currentColor"' in page
     assert "You&#x27;re in! Feel free to close this tab." in page
@@ -203,24 +207,40 @@ def test_result_page_never_claims_success_for_an_unfinished_sign_in(
     unexpected_text: str,
 ) -> None:
     # An unverified address must not turn an unfinished sign-in into the verification reminder either.
-    page = _login_result_page(success_redirect_url, outcome, "alice@example.com").decode("utf-8")
+    page = _login_result_page(success_redirect_url, outcome, "alice@example.com", _MANAGE_URL).decode("utf-8")
     assert expected_text in page
     assert unexpected_text not in page
     assert "Click the email verification link" not in page
 
 
 def test_success_page_with_unverified_email_leads_with_the_verification_reminder() -> None:
-    page = _login_result_page("minds://", _LoginPageOutcome.SIGNED_IN, "alice@example.com").decode("utf-8")
+    page = _login_result_page("minds://", _LoginPageOutcome.SIGNED_IN, "alice@example.com", _MANAGE_URL).decode(
+        "utf-8"
+    )
     assert '<h1 class="verify">Click the email verification link</h1>' in page
     assert "You must verify your address: alice@example.com" in page
     assert "Check your spam folder" in page
+    assert f'<a href="{_MANAGE_URL}" target="_blank" rel="noopener">Send the email again</a>' in page
     assert "Feel free to close this tab." not in page
     # The app link stays: the reminder replaces the welcome, not the way back.
     assert '<a href="minds://">Open app</a>' in page
 
 
+def test_terminal_reminder_also_offers_the_resend() -> None:
+    page = _login_result_page(None, _LoginPageOutcome.SIGNED_IN, "alice@example.com", _MANAGE_URL).decode("utf-8")
+    assert f'<a href="{_MANAGE_URL}" target="_blank" rel="noopener">Send the email again</a>' in page
+    assert "return to your terminal" in page
+
+
+def test_verified_sign_in_does_not_offer_a_resend() -> None:
+    page = _login_result_page("minds://", _LoginPageOutcome.SIGNED_IN, None, _MANAGE_URL).decode("utf-8")
+    assert "Send the email again" not in page
+
+
 def test_success_page_escapes_the_unverified_email() -> None:
-    page = _login_result_page(None, _LoginPageOutcome.SIGNED_IN, "<b>bold</b>@example.com").decode("utf-8")
+    page = _login_result_page(None, _LoginPageOutcome.SIGNED_IN, "<b>bold</b>@example.com", _MANAGE_URL).decode(
+        "utf-8"
+    )
     assert "<b>" not in page
     assert "&lt;b&gt;bold&lt;/b&gt;@example.com" in page
 
@@ -228,7 +248,7 @@ def test_success_page_escapes_the_unverified_email() -> None:
 def test_success_page_escapes_redirect_url_markup() -> None:
     """A crafted URL must not be able to inject markup into the page: the
     href is attribute-escaped."""
-    page = _login_result_page('minds://x?a=<b>&q="hi"', _LoginPageOutcome.SIGNED_IN, None).decode("utf-8")
+    page = _login_result_page('minds://x?a=<b>&q="hi"', _LoginPageOutcome.SIGNED_IN, None, _MANAGE_URL).decode("utf-8")
     assert "<b>" not in page
     assert 'href="minds://x?a=&lt;b&gt;&amp;q=&quot;hi&quot;"' in page
 
@@ -240,6 +260,10 @@ def test_pkce_challenge_is_base64url_sha256_of_the_verifier() -> None:
     # Fresh verifiers must be unique and URL-safe.
     assert verifier != make_pkce_verifier()
     assert urllib.parse.quote(verifier, safe="-_") == verifier
+
+
+def test_build_manage_url_points_at_the_hosted_account_page() -> None:
+    assert build_manage_url("https://connector.example.com/") == "https://connector.example.com/manage"
 
 
 def test_build_login_url_carries_the_authorize_handoff_as_next() -> None:
@@ -325,7 +349,9 @@ def test_bind_callback_listener_reports_an_occupied_port_as_json(
     _box, occupied_port = running_callback_server
 
     with pytest.raises(SystemExit):
-        _bind_callback_listener(occupied_port, _make_callback_handler_class(_CallbackCaptureBox(), None, 0.0))
+        _bind_callback_listener(
+            occupied_port, _make_callback_handler_class(_CallbackCaptureBox(), None, 0.0, _MANAGE_URL)
+        )
 
     stderr = capsys.readouterr().err
     assert '"error"' in stderr
@@ -338,7 +364,7 @@ def test_bind_callback_listener_reports_an_out_of_range_port_as_json(
     """A --callback-port outside 0-65535 raises OverflowError from socket.bind,
     which must become the JSON error body, not a raw traceback."""
     with pytest.raises(SystemExit):
-        _bind_callback_listener(70000, _make_callback_handler_class(_CallbackCaptureBox(), None, 0.0))
+        _bind_callback_listener(70000, _make_callback_handler_class(_CallbackCaptureBox(), None, 0.0, _MANAGE_URL))
 
     stderr = capsys.readouterr().err
     assert '"error"' in stderr
@@ -573,7 +599,10 @@ def _run_login_and_complete_the_callback(
     )
     login_thread.start()
 
-    login_url, _, _ = poll_for_value(lambda: url_file.read_text().strip() if url_file.exists() else None, timeout=30.0)
+    # The file exists, empty, between the writer's truncate and its write.
+    login_url, _, _ = poll_for_value(
+        lambda: (url_file.read_text().strip() or None) if url_file.exists() else None, timeout=30.0
+    )
     assert login_url is not None, "auth login never wrote its sign-in URL"
     next_path = urllib.parse.parse_qs(urllib.parse.urlparse(login_url).query)["next"][0]
     authorize_query = urllib.parse.parse_qs(urllib.parse.urlparse(next_path).query)
@@ -719,3 +748,44 @@ def test_sigterm_while_holding_the_listener_lease_still_releases_it() -> None:
         f"DELETE /auth/device/attempts/{challenge}",
     ]
     assert signal.getsignal(signal.SIGTERM) == handler_before
+
+
+@pytest.mark.parametrize(
+    "send_answer",
+    [
+        {"sent": True, "already_verified": False},
+        {"sent": False, "already_verified": False},
+        {"sent": False, "already_verified": True},
+    ],
+    ids=["sent", "cooldown", "already_verified"],
+)
+def test_resend_verification_prints_what_became_of_the_send(
+    send_verification_connector_stub: Callable[[dict[str, object]], str],
+    temp_host_dir: Path,
+    send_answer: dict[str, object],
+) -> None:
+    account = ImbueCloudAccount("alice@example.com")
+    ImbueCloudSessionStore(sessions_dir=get_sessions_dir(get_or_create_profile_dir(temp_host_dir))).save(
+        make_session_from_tokens(
+            user_id=SuperTokensUserId("user-1"),
+            email=account,
+            display_name=None,
+            access_token="stale-at",
+            refresh_token="rt-1",
+            profile_picture_url=None,
+        )
+    )
+
+    result = CliRunner().invoke(
+        auth,
+        [
+            "resend-verification",
+            "--account",
+            str(account),
+            "--connector-url",
+            send_verification_connector_stub(send_answer),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {**send_answer, "email": "alice@example.com"}

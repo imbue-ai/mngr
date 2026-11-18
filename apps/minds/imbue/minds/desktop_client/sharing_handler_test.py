@@ -220,8 +220,6 @@ def test_describe_connector_failure_reports_an_unverified_email() -> None:
 
 
 def test_describe_connector_failure_reports_the_typed_verification_refusal() -> None:
-    # The invite route's refusal arrives typed rather than as the older
-    # "Email not verified" text, so the type is what has to be recognized.
     exc = ImbueCloudEmailNotVerifiedCliError(
         "shares invite: This action requires a verified email address (x@example.com). "
         "Verify it via the link we email you, then retry."

@@ -49,6 +49,8 @@ import type {
 import type { VisitingAgentEntry } from "../../../models/workspaceOptions";
 import { GRANT_ADD_KINDS, toGrantAddKind } from "../../../models/sharePanel";
 import { formatRelativeAgo } from "../../../models/backups";
+import { RESEND_EMAIL_LABEL } from "../../../models/emailVerification";
+import type { ResendOutcome } from "../../../models/emailVerification";
 import { monogramLetters } from "../../../models/monogram";
 import { navEntryClass, splitPane } from "../../components/SplitPane";
 import {
@@ -1399,12 +1401,14 @@ function renderInvitationRefusal(
   return m(
     "div",
     { "data-invite-refusal": grant.key, class: CARD_DETAIL_CLASS },
-    markedLine(
-      { size: "helper", isInline: true },
-      withSeeDetails(
-        richErrorText(state.failure.error.message),
-        seeFailureDetailsButton(share, local, state.failure),
-      ),
+    refusalLine(
+      share,
+      local,
+      state.failure,
+      state.unverifiedEmail,
+      state.resendOutcome,
+      (email) => void share.resendVerification(grant.key, email),
+      { "data-resend-verification": grant.key },
     ),
   );
 }
@@ -1433,6 +1437,35 @@ function seeFailureDetailsButton(
     "See details",
     () => openShareFailureDialog(share, local, failure),
     { "data-failure-details": "" },
+  );
+}
+
+/** A refusal's marked line, with the resend when it is waiting on a verified
+ * email. A resend's own note reads as plain news unless the send failed. */
+function refusalLine(
+  share: SharePanelModel,
+  local: ShareTabLocalState,
+  failure: ShareFailure,
+  unverifiedEmail: string | undefined,
+  resendOutcome: ResendOutcome | undefined,
+  onResend: (email: string) => void,
+  attrs: Record<string, string>,
+): m.Children {
+  const resend =
+    unverifiedEmail === undefined
+      ? null
+      : [" ", textButton(RESEND_EMAIL_LABEL, () => onResend(unverifiedEmail), attrs)];
+  if (resendOutcome !== undefined && resendOutcome !== "failed")
+    return m("span", { class: "type-helper text-secondary" }, [
+      failure.error.message,
+      resend,
+    ]);
+  return markedLine(
+    { size: "helper", isInline: true },
+    withSeeDetails(
+      [richErrorText(failure.error.message), resend],
+      seeFailureDetailsButton(share, local, failure),
+    ),
   );
 }
 
@@ -1727,11 +1760,25 @@ function renderMobileLinkStatus(
         `Sent to ${state.recipientEmail}`,
       );
     case "refused":
-      return renderShareFailure(
-        share,
-        local,
-        "ws-share-mobile-link-error",
-        state.failure,
+      if (state.unverifiedEmail === undefined && state.resendOutcome === undefined)
+        return renderShareFailure(
+          share,
+          local,
+          "ws-share-mobile-link-error",
+          state.failure,
+        );
+      return m(
+        "div",
+        { "data-mobile-link-refusal": "", class: "mt-1.5" },
+        refusalLine(
+          share,
+          local,
+          state.failure,
+          state.unverifiedEmail,
+          state.resendOutcome,
+          (email) => void share.resendVerificationForMobileLink(email),
+          { "data-resend-verification": "mobile-link" },
+        ),
       );
   }
 }

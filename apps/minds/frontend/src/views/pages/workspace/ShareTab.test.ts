@@ -8,9 +8,12 @@ import {
   classesOf,
   collectVnodes,
   errorMarks,
+  heldFetch,
+  jsonResponse,
   renderDeep,
   renderRoot,
   settle,
+  UNVERIFIED_REFUSAL,
   sharePanelOptions,
   withAttr,
   withMindsNative,
@@ -838,7 +841,8 @@ describe("ShareTab loading skeleton", () => {
 describe("ShareTab mobile access link", () => {
   /** A published, live panel whose mobile-link route answers with `answer`. */
   async function linkablePanel(
-    answer: unknown = { outcome: "sent", recipient_email: "owner@example.com" },
+    answer: ResponseBody = { outcome: "sent", recipient_email: "owner@example.com" },
+    answeredAs: { ok: boolean; status: number } = { ok: true, status: 200 },
   ): Promise<SharePanelModel> {
     return publishedPanel(
       {},
@@ -846,7 +850,7 @@ describe("ShareTab mobile access link", () => {
         fetchJson: (url: string) =>
           Promise.resolve(
             url.endsWith("/mobile-access-link")
-              ? { ok: true, status: 200, body: answer }
+              ? { ...answeredAs, body: answer }
               : {
                   ok: true,
                   status: 200,
@@ -937,6 +941,33 @@ describe("ShareTab mobile access link", () => {
     ).toBe(
       "Couldn't send the email. Try again. If this persists, report a bug.",
     );
+  });
+
+  it("offers the verification email beside a refusal for an unverified account, and says how it went", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ sent: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    const share = await linkablePanel(UNVERIFIED_REFUSAL, {
+      ok: false,
+      status: 409,
+    });
+
+    pressMobileLink(renderTab(share));
+    await settle();
+
+    const resend = collectVnodes(renderTab(share)).find(
+      (vnode) => attrsOf(vnode)["data-resend-verification"] === "mobile-link",
+    ) as AnyVnode;
+    expect(allText(resend)).toBe("Send the email again");
+
+    (attrsOf(resend).onclick as () => void)();
+    await settle();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const note = collectVnodes(renderTab(share)).find(
+      (vnode) => attrsOf(vnode)["data-mobile-link-refusal"] !== undefined,
+    ) as AnyVnode;
+    expect(allText(note)).toContain("Sent another email to owner@example.com.");
+    expect(errorMarks(note)).toHaveLength(0);
   });
 });
 
@@ -2051,6 +2082,34 @@ describe("ShareTab invitations", () => {
     respondToInvite?: () => Promise<RequestResult>;
   }
 
+  /** The send a refused row offers beside its sentence, if any. */
+  function resendControl(row: AnyVnode): AnyVnode | undefined {
+    return collectVnodes(row).find(
+      (vnode) => attrsOf(vnode)["data-resend-verification"] !== undefined,
+    );
+  }
+
+  /** Invite the friend on `share`, and return their grant. */
+  async function inviteFriend(share: SharePanelModel): Promise<Grant> {
+    const friend = share
+      .grantsFor(WHOLE)
+      .find((grant) => grant.grantee.value === "friend@example.com") as Grant;
+    await share.invite(WHOLE, friend.key);
+    await settle();
+    return friend;
+  }
+
+  /** A panel that has just invited the friend, answered by `answer`. */
+  async function invitedFriend(
+    answer: ResponseBody,
+    answeredAs: { ok: boolean; status: number } = { ok: false, status: 409 },
+  ): Promise<{ share: SharePanelModel; friend: Grant }> {
+    const { share } = await invitationPanel({
+      respondToInvite: () => Promise.resolve({ ...answeredAs, body: answer }),
+    });
+    return { share, friend: await inviteFriend(share) };
+  }
+
   /** A published, synced panel over one address, one account and one domain,
    * with what the outcomes route says about them. */
   async function invitationPanel(
@@ -2302,6 +2361,121 @@ describe("ShareTab invitations", () => {
       "You invited this person too recently.",
     );
     expect(allText(inviteControl(row))).toBe("Invite again");
+  });
+
+  it("offers the verification email beside a refusal for an unverified granter, and says how it went", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ sent: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { share } = await invitedFriend(UNVERIFIED_REFUSAL);
+
+    const row = rowByText(renderTab(share), "friend@example.com");
+    expect(allText(refusalOf(row))).toContain(
+      "Verify your email to invite people",
+    );
+    const resend = resendControl(row) as AnyVnode;
+    expect(allText(resend)).toBe("Send the email again");
+    expect(errorMarks(refusalOf(row))).toHaveLength(1);
+
+    (attrsOf(resend).onclick as () => void)();
+    await settle();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const rowAfterSend = rowByText(renderTab(share), "friend@example.com");
+    expect(allText(refusalOf(rowAfterSend))).toContain(
+      "Sent another email to owner@example.com.",
+    );
+    expect(errorMarks(refusalOf(rowAfterSend))).toHaveLength(0);
+
+    fetchMock.mockResolvedValueOnce(new Response("", { status: 502 }));
+    (attrsOf(resendControl(rowAfterSend) as AnyVnode).onclick as () => void)();
+    await settle();
+
+    const refusalAfterFailure = refusalOf(
+      rowByText(renderTab(share), "friend@example.com"),
+    ) as AnyVnode;
+    expect(allText(refusalAfterFailure)).toContain(
+      "Could not send the email to owner@example.com.",
+    );
+    expect(errorMarks(refusalAfterFailure)).toHaveLength(1);
+  });
+
+  it("stops offering the verification email once a resend finds the address already verified", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ sent: false, already_verified: true })),
+    );
+    const { share } = await invitedFriend(UNVERIFIED_REFUSAL);
+
+    const row = rowByText(renderTab(share), "friend@example.com");
+    (attrsOf(resendControl(row) as AnyVnode).onclick as () => void)();
+    await settle();
+
+    const rowAfterSend = rowByText(renderTab(share), "friend@example.com");
+    expect(allText(refusalOf(rowAfterSend))).toContain(
+      "owner@example.com is already verified.",
+    );
+    expect(resendControl(rowAfterSend)).toBeUndefined();
+  });
+
+  it("offers the verification email for the granter when a refusal names no address", async () => {
+    const { share, friend } = await invitedFriend({
+      ...UNVERIFIED_REFUSAL,
+      email: null,
+    });
+
+    const indicator = share.invitationStatusIndicator(WHOLE, friend);
+    expect(indicator).toMatchObject({ unverifiedEmail: share.granterEmail });
+  });
+
+  it("offers no verification email beside any other refusal", async () => {
+    const { share } = await invitedFriend(
+      { outcome: "too_soon" },
+      { ok: true, status: 200 },
+    );
+
+    const row = rowByText(renderTab(share), "friend@example.com");
+    expect(resendControl(row)).toBeUndefined();
+  });
+
+  it("leaves a refusal the panel has since cleared alone when a resend lands late", async () => {
+    const send = heldFetch();
+    vi.stubGlobal("fetch", send.fetchImpl);
+    const { share, friend } = await invitedFriend(UNVERIFIED_REFUSAL);
+
+    const sending = share.resendVerification(friend.key, "owner@example.com");
+    await share.load();
+    send.answer(jsonResponse({ sent: true }));
+    await sending;
+
+    expect(share.inviteStateFor(friend.key)).toEqual({ state: "idle" });
+  });
+
+  it("leaves a newer refusal alone when a resend lands late", async () => {
+    const send = heldFetch();
+    vi.stubGlobal("fetch", send.fetchImpl);
+    let answerCount = 0;
+    const { share } = await invitationPanel({
+      respondToInvite: () => {
+        answerCount += 1;
+        return Promise.resolve(
+          answerCount === 1
+            ? { ok: false, status: 409, body: UNVERIFIED_REFUSAL }
+            : { ok: true, status: 200, body: { outcome: "too_soon" } },
+        );
+      },
+    });
+    const friend = await inviteFriend(share);
+
+    const sending = share.resendVerification(friend.key, "owner@example.com");
+    await inviteFriend(share);
+    send.answer(jsonResponse({ sent: true }));
+    await sending;
+
+    const row = rowByText(renderTab(share), "friend@example.com");
+    expect(allText(refusalOf(row))).toContain(
+      "You invited this person too recently.",
+    );
+    expect(resendControl(row)).toBeUndefined();
   });
 
   it("says a refusal whole on a line of its own, under the name and what is known about the person", async () => {

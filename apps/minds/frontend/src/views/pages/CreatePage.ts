@@ -13,7 +13,6 @@ import m from "mithril";
 import { getAppContext } from "../../app-context";
 import { electronBridge } from "../../electron-bridge";
 import type { CreateFormDefaults, LocalBackendPrerequisite } from "../../models/create";
-import type { ResendOutcome } from "../../models/emailVerification";
 import type { MachineSizeDimension } from "../../models/machineSize";
 import {
   backupProviderLabel,
@@ -32,7 +31,6 @@ import { MachineSizeInput } from "../components/MachineSizeInput";
 import { DialogCloseButton, Modal } from "../components/Modal";
 import { ErrorNotice, restartAppActions } from "../components/ErrorDisplay";
 import { InlineError } from "../components/errorDesign";
-import { Notice } from "../components/Notice";
 import { variantBesideErrors } from "../components/variantBesideErrors";
 import { CloudAccountsModal, CloudAccountsModalState } from "./create/CloudAccountsModal";
 import { slowStartNotice } from "./create/ComputeNotices";
@@ -50,7 +48,13 @@ import {
   regionChoiceLabel,
 } from "./create/form-model";
 import { ImbueCloudSignInGate } from "./create/sign-in-gate";
-import { VerificationWait } from "./create/verification-wait";
+import { VerificationWaitNotice } from "./create/VerificationWaitNotice";
+import {
+  VERIFICATION_CHECK_FAILED_MESSAGE,
+  VERIFICATION_WAITING_LABEL,
+  VerificationWait,
+  createOnceVerified,
+} from "./create/verification-wait";
 import { renderSwitch, renderSwitchWord } from "../components/Switch";
 import { ENABLE_SHARING_LABEL, SHARING_SENTENCE } from "./workspace/ShareTab";
 
@@ -110,13 +114,6 @@ function indefiniteArticle(label: string): string {
 const LINK_BUTTON_EXTRA =
   "!p-0 !bg-transparent !type-helper !text-tertiary hover:!bg-transparent hover:!text-primary hover:underline " +
   "whitespace-nowrap";
-
-// Only an outcome the server confirmed may point the user at an inbox.
-const RESEND_NOTICE_BY_OUTCOME: Record<ResendOutcome, string> = {
-  sent: "Sent another email.",
-  suppressed: "An email went out moments ago; check your inbox.",
-  failed: "Could not send the email. Please try again.",
-};
 
 export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) => {
   const attrs = initialVnode.attrs;
@@ -248,24 +245,12 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
     // Taken now: the form stays editable while the emailed link is awaited,
     // and the create that goes out must be the one whose account was checked.
     const body = model.submitBody();
-    if (model.launchSelection().mode !== "IMBUE_CLOUD") {
-      postCreate(body, isAfterSignIn);
-      return;
-    }
-    const email = model.selectedAccountEmail();
-    if (email === "") {
-      refuseUncheckedVerification();
-      return;
-    }
-    // The connector refuses an Imbue Cloud create for an unverified email, so
-    // Create stays held until the emailed link is clicked rather than letting
-    // the create fail on the creation page.
-    verificationWait.require(email, () => postCreate(body, isAfterSignIn), refuseUncheckedVerification);
+    createOnceVerified(verificationWait, model, () => postCreate(body, isAfterSignIn), refuseUncheckedVerification);
   }
 
   function refuseUncheckedVerification(): void {
     model.isSubmitting = false;
-    model.submitError = "Could not check whether your email is verified. Please try again.";
+    model.submitError = VERIFICATION_CHECK_FAILED_MESSAGE;
     m.redraw();
   }
 
@@ -300,29 +285,6 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
       if (error.field) model.isAdvancedOpen = true;
       m.redraw();
     });
-  }
-
-  function verificationNotice(): m.Children {
-    const email = verificationWait.email;
-    if (email === null) return null;
-    const outcome = verificationWait.resendOutcome;
-    const resendNotice = outcome === null ? null : RESEND_NOTICE_BY_OUTCOME[outcome];
-    return m(Notice, { variant: "info", id: "verification-wait", role: "status", extra: "!mt-6 !mb-0 !px-5 !py-4 text-center" }, [
-      m("p", { class: "type-body text-primary" }, [
-        "Workspaces on Imbue Cloud require a verified email. Click the link emailed to ",
-        m("strong", email),
-        " when you created your account, and your workspace will be created.",
-      ]),
-      m("div", { class: "mt-3 flex justify-center gap-3" }, [
-        m(
-          Button,
-          { variant: "secondary", id: "verification-resend", onclick: () => verificationWait.resend() },
-          "Resend email",
-        ),
-        m(Button, { variant: "ghost", id: "verification-cancel", onclick: cancelVerificationWait }, "Cancel"),
-      ]),
-      resendNotice === null ? null : m("p", { class: "mt-2 type-helper text-secondary" }, resendNotice),
-    ]);
   }
 
   function fieldRing(fieldId: string): string {
@@ -1003,7 +965,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                   // hidden with the panel.
                   prerequisiteNotice(model.unmetPrerequisiteForSubmit(), "submit-prerequisite"),
                 ]),
-                verificationNotice(),
+                m(VerificationWaitNotice, { wait: verificationWait, onCancel: cancelVerificationWait }),
                 m(
                   "div",
                   {
@@ -1075,7 +1037,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                       disabled: model.isSubmitting || model.unmetPrerequisiteForSubmit() !== null,
                     },
                     verificationWait.email !== null
-                      ? "Waiting for email verification..."
+                      ? VERIFICATION_WAITING_LABEL
                       : model.isSubmitting
                         ? "Creating..."
                         : "Create",

@@ -538,19 +538,23 @@ _APP_PAGE_MESSAGE_BY_OUTCOME: Final[dict[_LoginPageOutcome, str]] = {
 }
 
 
-def _verification_reminder_html(unverified_email: str) -> str:
+def _verification_reminder_html(unverified_email: str, manage_url: str) -> str:
     """The page body for an account whose email is still unverified.
 
-    A password sign-up counts as signed in right away, but the actions that
-    matter (creating a remote workspace, opening a shared one) require the
-    link in the verification email, so this is the one moment to say so
-    loudly. The heading is deliberately oversized.
+    A password sign-up counts as signed in right away, but most of what
+    Imbue Cloud is for requires the link in the verification email, so this
+    is the one moment to say so loudly. The heading is deliberately oversized.
+
+    The resend link goes to the hosted account page because this page's
+    listener closes once the sign-in settles, so it cannot serve a send itself.
     """
     email_html = html.escape(unverified_email)
+    manage_href = html.escape(manage_url, quote=True)
     return (
         '<h1 class="verify">Click the email verification link</h1>'
         f'<p class="verify-detail">You must verify your address: {email_html}</p>'
         '<p class="verify-detail">Check your spam folder</p>'
+        f'<p class="verify-detail"><a href="{manage_href}" target="_blank" rel="noopener">Send the email again</a></p>'
     )
 
 
@@ -558,6 +562,7 @@ def _login_result_page(
     success_redirect_url: str | None,
     outcome: _LoginPageOutcome,
     unverified_email: str | None,
+    manage_url: str,
 ) -> bytes:
     """Build the HTML the callback listener serves to the browser for a sign-in outcome.
 
@@ -578,13 +583,15 @@ def _login_result_page(
         if outcome != _LoginPageOutcome.SIGNED_IN or unverified_email is None:
             body_html = _TERMINAL_PAGE_BODY_BY_OUTCOME[outcome]
         else:
-            body_html = _verification_reminder_html(unverified_email) + "<p>Then return to your terminal.</p>"
+            body_html = _verification_reminder_html(unverified_email, manage_url) + (
+                "<p>Then return to your terminal.</p>"
+            )
     else:
         href = html.escape(success_redirect_url, quote=True)
         if outcome != _LoginPageOutcome.SIGNED_IN or unverified_email is None:
             welcome_html = f'<p class="message">{html.escape(_APP_PAGE_MESSAGE_BY_OUTCOME[outcome])}</p>'
         else:
-            welcome_html = _verification_reminder_html(unverified_email)
+            welcome_html = _verification_reminder_html(unverified_email, manage_url)
         body_html = _STUDIO_WORDMARK_SVG + welcome_html + f'<p><a href="{href}">Open app</a></p>'
     page = (
         "<!DOCTYPE html><html><head><title>Imbue Cloud sign-in</title>"
@@ -630,6 +637,7 @@ def _make_callback_handler_class(
     box: _CallbackCaptureBox,
     success_redirect_url: str | None,
     outcome_wait_seconds: float,
+    manage_url: str,
 ) -> type[http.server.BaseHTTPRequestHandler]:
     """Build a handler class closed over a specific capture box.
 
@@ -653,7 +661,9 @@ def _make_callback_handler_class(
                 outcome = box.wait_for_outcome(outcome_wait_seconds)
             else:
                 outcome = box.wait_for_outcome(0.0)
-            body = _login_result_page(success_redirect_url, outcome, _unverified_email_from_callback(params))
+            body = _login_result_page(
+                success_redirect_url, outcome, _unverified_email_from_callback(params), manage_url
+            )
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -828,6 +838,11 @@ def build_login_url(login_base_url: str, callback_url: str, code_challenge: str,
     return f"{login_base_url.rstrip('/')}/login?" + urllib.parse.urlencode({"next": next_path})
 
 
+def build_manage_url(login_base_url: str) -> str:
+    """The hosted account page, on the origin the sign-in's session belongs to."""
+    return f"{login_base_url.rstrip('/')}/manage"
+
+
 @auth.command(name="login")
 @click.option(
     "--account",
@@ -930,13 +945,15 @@ def login(
     code_challenge = compute_pkce_challenge(code_verifier)
     state = secrets.token_urlsafe(16)
 
+    # Tiers without a dedicated accounts origin serve the page on the connector host.
+    login_base_url = resolve_accounts_url(accounts_url) or str(client.base_url)
     capture_box = _CallbackCaptureBox()
-    handler_class = _make_callback_handler_class(capture_box, success_redirect_url, _LOGIN_OUTCOME_WAIT_SECONDS)
+    handler_class = _make_callback_handler_class(
+        capture_box, success_redirect_url, _LOGIN_OUTCOME_WAIT_SECONDS, build_manage_url(login_base_url)
+    )
     server = _bind_callback_listener(callback_port, handler_class)
     port = server.server_address[1]
     callback_url = f"http://127.0.0.1:{port}{_LOGIN_CALLBACK_PATH}"
-    # Tiers without a dedicated accounts origin serve the page on the connector host.
-    login_base_url = resolve_accounts_url(accounts_url) or str(client.base_url)
     login_url = build_login_url(login_base_url, callback_url, code_challenge, state)
 
     # The browser tab is still waiting on the callback page while the code is
@@ -995,10 +1012,11 @@ def forgot_password(account: str | None, connector_url: str | None) -> None:
 def resend_verification(account: str | None, connector_url: str | None) -> None:
     """(Re-)send the email verification message for the given account.
 
-    Verification is non-blocking, but a few actions (visiting shares, the
-    ally plan) require a verified email; this sends the link on demand.
-    ``sent`` is False when the connector suppressed the send because one
-    went out moments ago (its per-user cooldown).
+    Verification is non-blocking, but a few actions require a verified
+    email; this sends the link on demand.
+    ``already_verified`` is True when nothing was sent because the address
+    needs no link. Otherwise ``sent`` is False when the connector suppressed
+    the send because one went out moments ago (its per-user cooldown).
     """
     store = make_session_store()
     parsed_account = resolve_account_or_active(store, account)
@@ -1011,8 +1029,14 @@ def resend_verification(account: str | None, connector_url: str | None) -> None:
     # `session` is now narrowed to AuthSession (fail_with_json is NoReturn).
     client = make_connector_client(connector_url)
     access_token = get_active_token(store, client, parsed_account)
-    is_sent = client.auth_send_verification_email(access_token, str(session.email))
-    emit_json({"sent": is_sent, "email": str(session.email)})
+    send_result = client.auth_send_verification_email(access_token, str(session.email))
+    emit_json(
+        {
+            "sent": send_result.is_sent,
+            "already_verified": send_result.is_already_verified,
+            "email": str(session.email),
+        }
+    )
 
 
 @auth.command(name="is-verified")
@@ -1023,8 +1047,8 @@ def is_verified(account: str | None, connector_url: str | None) -> None:
     """Check whether the account's email is verified (a plain status query).
 
     Verification is non-blocking: an unverified account is fully signed in,
-    and only specific actions (visiting shares, the ally plan) require the
-    email to be verified. Safe to poll repeatedly.
+    and only specific actions require the email to be verified. Safe to poll
+    repeatedly.
     """
     store = make_session_store()
     parsed_account = resolve_account_or_active(store, account)

@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   EXISTING_LOGIN_LABEL,
   REPORTING_ACCEPT_LABEL,
-  RESEND_EMAIL_LABEL,
   answerStep,
   initialStartFlowState,
   observeEmailVerified,
@@ -11,6 +10,7 @@ import {
   startQuestions,
   undoAnswer,
 } from "../../models/startFlow";
+import { RESEND_EMAIL_LABEL } from "../../models/emailVerification";
 import { allText, attrsOf, collectVnodes, createFormDefaults, withAttr } from "../../testing";
 import { areDefaultsStale, cloudCreateBody, cloudCreateRefusal, transcriptTurns } from "./StartPage";
 

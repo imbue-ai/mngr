@@ -11,8 +11,10 @@ import type {
   AccountReadFailure,
   AccountSection,
   AccountsDetailModel,
+  VerifyEmailPrompt,
 } from "../../../models/accountsDetail";
 import { accountReadError } from "../../../models/accountsDetail";
+import { verificationEmailSentNote } from "../../../models/emailVerification";
 import type { ErrorAction } from "../../../models/errors";
 import { Button } from "../../components/Button";
 import { ErrorNotice, restartAppActions, updateAppActions } from "../../components/ErrorDisplay";
@@ -24,6 +26,13 @@ import { routeLinkAttrs } from "../../components/route-link";
 import { Select } from "../../components/FormControls";
 import { Spinner } from "../../components/Spinner";
 import { renderSwitch, renderSwitchWord } from "../../components/Switch";
+
+function verifyPromptLead(prompt: VerifyEmailPrompt): string {
+  if (prompt.resendOutcome === "already_verified") return "You can switch plans now.";
+  return prompt.wasAutoSent
+    ? `Switching plans requires a verified email. We just sent a link to ${prompt.email} -- click it, then switch again.`
+    : `Switching plans requires a verified email. Use "Resend email" to get a link at ${prompt.email}, click it, then switch again.`;
+}
 
 interface AccountCardAttrs {
   model: AccountsDetailModel;
@@ -209,24 +218,28 @@ function planSection(
   return m("div", [
     verifyPrompt !== null
       ? m(Notice, { variant: "warn" }, [
-          m(
-            "div",
-            verifyPrompt.wasAutoSent
-              ? `Switching plans requires a verified email. We just sent a link to ${verifyPrompt.email} -- click it, then switch again.`
-              : `Switching plans requires a verified email. Use "Resend email" to get a link at ${verifyPrompt.email}, click it, then switch again.`,
-          ),
+          m("div", verifyPromptLead(verifyPrompt)),
           m("div", { class: "flex items-center gap-2 mt-1" }, [
-            m(
-              Button,
-              {
-                variant: "secondary",
-                disabled: verifyPrompt.isResending,
-                onclick: () => void model.resendVerification(account.user_id),
-              },
-              verifyPrompt.isResending ? "Sending…" : "Resend email",
-            ),
-            verifyPrompt.wasResent
-              ? m("span", { class: "type-helper" }, "Sent.")
+            verifyPrompt.resendOutcome === "already_verified"
+              ? null
+              : m(
+                  Button,
+                  {
+                    variant: "secondary",
+                    disabled: verifyPrompt.isResending,
+                    onclick: () => void model.resendVerification(account.user_id),
+                  },
+                  verifyPrompt.isResending ? "Sending…" : "Resend email",
+                ),
+            verifyPrompt.resendOutcome !== null
+              ? m(
+                  "span",
+                  { class: "type-helper" },
+                  verificationEmailSentNote(
+                    verifyPrompt.email,
+                    verifyPrompt.resendOutcome,
+                  ),
+                )
               : null,
           ]),
         ])

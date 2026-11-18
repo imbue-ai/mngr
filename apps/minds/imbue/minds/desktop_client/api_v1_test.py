@@ -110,6 +110,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import BackupRepositoryInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudClientTooOldCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudShareRefusedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import InvitationCliResult
@@ -7285,13 +7286,20 @@ def test_workspace_sharing_invite_sends_no_app_name_when_the_app_registered_none
     assert call["app_display_name"] is None
 
 
-def test_workspace_sharing_invite_pushes_the_document_and_retries_once_when_out_of_date(tmp_path: Path) -> None:
-    agent_id = AgentId()
+def _out_of_date_error() -> ImbueCloudShareRefusedCliError:
     out_of_date = ImbueCloudShareRefusedCliError("shares invite: refused")
     out_of_date.code = "grants_out_of_date"
+    return out_of_date
+
+
+def test_workspace_sharing_invite_pushes_the_document_and_retries_once_when_out_of_date(tmp_path: Path) -> None:
+    agent_id = AgentId()
     cli = _fake_sharing_cli(
         mngr_caller=_ShareProbeCaller(is_share_env_present=True),
-        invite_results=[out_of_date, InvitationCliResult(outcome="invited", invited_at="2026-09-30T12:00:00+00:00")],
+        invite_results=[
+            _out_of_date_error(),
+            InvitationCliResult(outcome="invited", invited_at="2026-09-30T12:00:00+00:00"),
+        ],
     )
     client = _invitation_client(tmp_path, agent_id, cli)
 
@@ -7325,6 +7333,36 @@ def test_workspace_sharing_invite_reports_a_refusal_by_its_code(tmp_path: Path) 
     assert json.loads(refused.data)["error"] == "not_invitable"
     assert two_subjects.status_code == 400
     assert len(cli.invite_calls) == 1
+
+
+def _unverified_error(command: str) -> ImbueCloudEmailNotVerifiedCliError:
+    unverified = ImbueCloudEmailNotVerifiedCliError(f"{command}: this action requires a verified email")
+    unverified.email = "owner@example.com"
+    return unverified
+
+
+@pytest.mark.parametrize(
+    "earlier_results", [[], [_out_of_date_error()]], ids=["first_attempt", "retry_after_out_of_date"]
+)
+def test_workspace_sharing_invite_names_the_address_an_unverified_granter_must_verify(
+    tmp_path: Path, earlier_results: list[ImbueCloudShareRefusedCliError]
+) -> None:
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(
+        mngr_caller=_ShareProbeCaller(is_share_env_present=True),
+        invite_results=[*earlier_results, _unverified_error("shares invite")],
+    )
+    client = _invitation_client(tmp_path, agent_id, cli)
+
+    refused = client.post(
+        f"/api/v1/workspace-sharing/{agent_id}/invitations", headers=_auth_header(), json={"email": "bob@example.com"}
+    )
+
+    assert refused.status_code == 409
+    body = json.loads(refused.data)
+    assert body["error"] == "email_not_verified"
+    assert body["email"] == "owner@example.com"
+    assert len(cli.invite_calls) == len(earlier_results) + 1
 
 
 def test_workspace_sharing_invite_refuses_an_unpublished_workspace(tmp_path: Path) -> None:
@@ -7414,6 +7452,24 @@ def test_workspace_sharing_mobile_access_link_reports_a_refusal_by_its_code(tmp_
 
     assert response.status_code == 409
     assert json.loads(response.data)["error"] == "no_workspace_link"
+
+
+def test_workspace_sharing_mobile_access_link_names_the_address_an_unverified_account_must_verify(
+    tmp_path: Path,
+) -> None:
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(
+        mngr_caller=_ShareProbeCaller(is_share_env_present=True),
+        mobile_access_link_results=[_unverified_error("shares mobile-access-link")],
+    )
+    client = _invitation_client(tmp_path, agent_id, cli)
+
+    response = client.post(f"/api/v1/workspace-sharing/{agent_id}/mobile-access-link", headers=_auth_header())
+
+    assert response.status_code == 409
+    body = json.loads(response.data)
+    assert body["error"] == "email_not_verified"
+    assert body["email"] == "owner@example.com"
 
 
 def test_workspace_sharing_mobile_access_link_leaves_an_unshared_workspace_to_imbue_cloud(

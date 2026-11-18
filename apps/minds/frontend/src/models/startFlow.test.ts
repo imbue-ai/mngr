@@ -504,6 +504,9 @@ describe("the email verification gate", () => {
     expect(noteVerificationEmailSent(waiting, "failed").entries.at(-1)).toMatchObject({
       text: "Could not send the email to alice@example.com. Please try again.",
     });
+    expect(noteVerificationEmailSent(waiting, "already_verified").entries.at(-1)).toMatchObject({
+      text: "alice@example.com is already verified.",
+    });
     const notWaiting = started();
     expect(noteVerificationEmailSent(notWaiting, "sent")).toBe(notWaiting);
   });
