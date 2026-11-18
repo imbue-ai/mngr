@@ -115,6 +115,13 @@ BACKGROUND_TASK_KIND_BY_CLAUDE_TASK_LABEL: Final[Mapping[str, BackgroundTaskKind
     "code": BackgroundTaskKind.OTHER,
 }
 
+# Still running when the turn that backgrounds it ends and when the agent is stopped.
+BACKGROUND_SLEEP_SECONDS: Final[int] = 613
+BACKGROUND_SLEEP_PROMPT: Final[str] = (
+    f"Use the Bash tool with run_in_background set to true to run exactly: sleep {BACKGROUND_SLEEP_SECONDS} "
+    "-- do not wait for it or check on it, and then reply with just OK."
+)
+
 
 def _init_claude_workspace(path: Path) -> None:
     """Init a git repo whose own .gitignore excludes .claude/settings.local.json, as mngr's preflight requires."""

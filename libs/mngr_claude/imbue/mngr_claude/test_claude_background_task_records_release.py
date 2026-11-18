@@ -15,6 +15,8 @@ from imbue.mngr.primitives import BackgroundTaskKind
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import read_background_task_records_in
 from imbue.mngr_claude.testing import AGENT_DESTROY_TIMEOUT_SECONDS
+from imbue.mngr_claude.testing import BACKGROUND_SLEEP_PROMPT
+from imbue.mngr_claude.testing import BACKGROUND_SLEEP_SECONDS
 from imbue.mngr_claude.testing import BACKGROUND_TASK_KIND_BY_CLAUDE_TASK_LABEL
 from imbue.mngr_claude.testing import ClaudeReleaseProfile
 from imbue.mngr_claude.testing import created_agent
@@ -22,8 +24,6 @@ from imbue.mngr_claude.testing import drift_note
 from imbue.mngr_claude.testing import held_tool_command
 from imbue.mngr_claude.testing import wait_for_turn_to_end
 
-# Outlasts the turn that starts it.
-_BACKGROUND_SLEEP_SECONDS: Final[int] = 613
 _RECORD_CONSUMER: Final[str] = (
     "wait_for_stop_hook.sh's write_background_task_records, which records each entry of the Stop payload's "
     "background_tasks and normalises its `type` label to a BackgroundTaskKind"
@@ -70,16 +70,12 @@ def _read_records_a_turn_leaves(tmp_path: Path, prompt: str) -> tuple[tuple[Back
 @pytest.mark.timeout(1500)
 def test_claude_records_a_backgrounded_command_as_shell_work(tmp_path: Path) -> None:
     """A turn that leaves a backgrounded Bash command running ends with one SHELL record of native type `shell`."""
-    records, drift = _read_records_a_turn_leaves(
-        tmp_path,
-        f"Use the Bash tool with run_in_background set to true to run exactly: sleep {_BACKGROUND_SLEEP_SECONDS} "
-        "-- do not wait for it or check on it, and then reply with just OK.",
-    )
+    records, drift = _read_records_a_turn_leaves(tmp_path, BACKGROUND_SLEEP_PROMPT)
 
     assert [(record.kind, record.native_type, record.last_seen_at is not None) for record in records] == [
         (BackgroundTaskKind.SHELL, "shell", True)
     ], (
-        f"the turn that backgrounded `sleep {_BACKGROUND_SLEEP_SECONDS}` left the records {records} {drift}; "
+        f"the turn that backgrounded `sleep {BACKGROUND_SLEEP_SECONDS}` left the records {records} {drift}; "
         f"consumer: {_RECORD_CONSUMER}"
     )
 
