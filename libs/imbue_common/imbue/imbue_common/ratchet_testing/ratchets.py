@@ -534,7 +534,7 @@ class TypeCheckOutcome(FrozenModel):
         if self.stderr_output.strip():
             lines += ["", "Type checker stderr:", "", self.stderr_output]
 
-        lines += ["", "Run `uv run ty check` for each diagnostic's full source context."]
+        lines += ["", "Run `uv run --no-sync ty check` for each diagnostic's full source context."]
         return "\n".join(lines)
 
 
@@ -570,9 +570,14 @@ def parse_type_check_output(stdout: str, stderr: str, return_code: int) -> TypeC
 
 
 def check_no_type_errors(project_root: Path) -> None:
-    """Run the type checker (ty) and raise AssertionError if it reports any diagnostic, warnings included."""
+    """Run the type checker (ty) and raise AssertionError if it reports any diagnostic, warnings included.
+
+    ty checks the environment as it is: ``--no-sync`` keeps ``uv run`` from syncing first,
+    since a sync can rebuild stale editable installs and fetch their build backend from the
+    package index, putting network time inside a check that runs under a test timeout.
+    """
     result = subprocess.run(
-        ["uv", "run", "ty", "check", "--output-format", "concise", "--color", "never"],
+        ["uv", "run", "--no-sync", "ty", "check", "--output-format", "concise", "--color", "never"],
         cwd=project_root,
         capture_output=True,
         text=True,

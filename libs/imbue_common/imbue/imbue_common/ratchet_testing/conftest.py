@@ -36,3 +36,10 @@ def git_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
         capture_output=True,
     )
     yield repo_dir
+
+
+@pytest.fixture
+def offline_uv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Forbid uv from reaching a package index, and let it pick the project's own .venv over the test run's."""
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)

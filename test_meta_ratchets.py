@@ -257,8 +257,8 @@ def test_no_type_errors() -> None:
     [tool.uv.workspace] members = ["libs/*", "apps/*"]) and scans every member, so
     this single check covers the entire repo. CI backstop for the ty pre-push hook.
 
-    Timeout is 60s rather than the default 10s because the ``uv run ty check``
-    subprocess can be slow on offload under load; the check is deterministic, so it
+    Timeout is 60s rather than the default 10s because the ty subprocess can be
+    slow on offload under load; the check is deterministic, so it
     is not marked flaky. If a failure looks spurious, run ``uv sync --all-packages``
     and re-run before treating it as real (see AGENTS.md).
     """
