@@ -57,6 +57,17 @@ and **Docker Desktop WSL integration** -- Imbue Studio has not been verified aga
 the Docker Desktop daemon (follow-up task; for now disable the integration for
 this distro or use a separate distro so Docker CE can be installed).
 
+## Links and sign-ins open in your Windows browser
+
+A stock WSL distro has no browser, so the installer makes the Windows default
+browser the distro's handler for http and https links: it installs
+`xdg-utils` and registers `~/.local/share/applications/imbue-studio-windows-browser.desktop`,
+which hands each link to `rundll32.exe url.dll,FileProtocolHandler`. Every
+link the app opens outside itself goes there, including the Imbue account
+sign-in and a workspace's AI provider sign-in. If you installed a browser
+inside the distro, the installer leaves it as the handler instead. Installed
+before this step existed? Re-run the installer to add it.
+
 ## Container runtime: runc by default
 
 New workspaces default to Docker's standard `runc` runtime on every platform.

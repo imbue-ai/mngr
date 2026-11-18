@@ -241,6 +241,10 @@ if [ "$IS_RASPBERRY_PI" = 1 ]; then
     # grim takes Wayland screenshots for the Pi's remote-desktop workflow.
     apt_groups+=(grim)
 fi
+if [ "$IS_WSL" = 1 ]; then
+    # xdg-open is how the app opens links (see register_windows_browser_handler).
+    apt_groups+=(xdg-utils)
+fi
 missing_packages=()
 for group in "${apt_groups[@]}"; do
     IFS='|' read -ra candidates <<< "$group"
@@ -586,7 +590,60 @@ DESKTOP
     cp "$HOME/.local/share/applications/minds.desktop" "$HOME/.config/autostart/minds.desktop"
 fi
 
+# The app opens links with xdg-open, and a stock WSL distro has no browser for
+# it to find, so this hands http(s) links to the Windows default browser.
+# rundll32 takes the URL as one argument, unlike `cmd.exe /c start` (which
+# splits on &) or explorer.exe (which mishandles query strings).
+register_windows_browser_handler() {
+    step "Opening links in the Windows default browser"
+    local rundll32_path
+    rundll32_path="$(command -v rundll32.exe || true)"
+    if [ -z "$rundll32_path" ]; then
+        echo "    (rundll32.exe is not on PATH -- is appendWindowsPath off in /etc/wsl.conf? Links and sign-ins will not open a browser)"
+        return 0
+    fi
+    local entry="imbue-studio-windows-browser.desktop"
+    # xdg-mime reports any entry claiming a scheme as its handler, explicit
+    # choice or not. A browser installed in the distro keeps both schemes, and
+    # the entry is not written alongside it to compete for them.
+    local other_handler="" is_claimed=1 scheme current_handler
+    for scheme in http https; do
+        current_handler="$(xdg-mime query default "x-scheme-handler/$scheme" || true)"
+        if [ "$current_handler" != "$entry" ]; then
+            is_claimed=0
+            if [ -n "$current_handler" ]; then
+                other_handler="$current_handler"
+            fi
+        fi
+    done
+    if [ -n "$other_handler" ]; then
+        echo "    (keeping $other_handler, the browser already installed in this distro)"
+        return 0
+    fi
+    if [ "$is_claimed" = 1 ]; then
+        skip "links open in the Windows default browser"
+        return 0
+    fi
+    local applications_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+    mkdir -p "$applications_dir"
+    # xdg-open runs Exec's first word through `which` without honoring quotes,
+    # so Exec names rundll32 directly: its path has no spaces, unlike $HOME's may.
+    cat > "$applications_dir/$entry" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=Windows default browser
+Comment=Opens links in the Windows default browser (written by Imbue Studio's installer)
+Exec=$rundll32_path url.dll,FileProtocolHandler %u
+NoDisplay=true
+MimeType=x-scheme-handler/http;x-scheme-handler/https;
+DESKTOP
+    xdg-mime default "$entry" x-scheme-handler/http x-scheme-handler/https
+    echo "    links now open in the Windows default browser"
+}
+
 if [ "$IS_WSL" = 1 ]; then
+    register_windows_browser_handler
+
     if command -v powershell.exe >/dev/null 2>&1 && [ -n "${WSL_DISTRO_NAME:-}" ]; then
         step "Creating the 'Imbue Studio (WSL)' shortcut on the Windows desktop"
         powershell.exe -NoProfile -NonInteractive -Command "
