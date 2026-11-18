@@ -1,5 +1,5 @@
 Feature: Automatic workspace updates
-  Auto-update schedules a workspace that is a minor release behind or below the security floor, so the user never has to.
+  Auto-update schedules a workspace that is out of date or below the security floor, so the user never has to.
   Studio's own setting is the default every workspace follows: a switch, and the window scheduled updates start in.
   A workspace may instead have its own setting: auto-update on in its own window whatever Studio's switch says, or never auto-updated at all.
   A workspace's *effective* setting is its own when it has one, else Studio's; every statement below about auto-update being on or off for a workspace means its effective setting.
@@ -29,6 +29,7 @@ Feature: Automatic workspace updates
   @arms-behind-workspaces
   Scenario: With auto-update on, every workspace a minor release behind is scheduled
     A workspace with only a patch available is not scheduled on its own; the patch rides along with the next minor release.
+    On the alpha release channel no workspace has only a patch available, so every release behind is scheduled.
     Given auto-update is on
     And a running workspace is read as a minor release behind
     Then that workspace's update is scheduled for its next window

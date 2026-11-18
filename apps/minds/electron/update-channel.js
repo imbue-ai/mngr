@@ -13,6 +13,9 @@ const semver = require('semver');
 const CHANNELS = ['stable', 'beta', 'alpha'];
 const DEFAULT_CHANNEL = 'stable';
 
+// The backend reads this file and these channel names too
+// (imbue/minds/desktop_client/update_channel.py): the channel decides which
+// workspace template updates it offers. Rename them on both sides together.
 const PREFERENCE_FILENAME = 'update-channel.json';
 
 // The fallback feed, for a build naming no manifest host: ToDesktop's own

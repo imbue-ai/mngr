@@ -61,10 +61,11 @@ class UpdateAvailability(UpperCaseStrEnum):
     UP_TO_DATE = auto()
     """A positive read on both sides, and the workspace is at the ceiling."""
     OUT_OF_DATE = auto()
-    """A positive read on both sides, and the workspace is on an earlier minor release than the ceiling."""
+    """A positive read on both sides, and the workspace is on an earlier minor release than the ceiling, or
+    sorts below it at all when the app is on the alpha channel."""
     PATCH_AVAILABLE = auto()
-    """A positive read on both sides, and the workspace sorts below the ceiling within its minor release:
-    never prompted for, but may be updated or scheduled by hand."""
+    """A positive read on both sides, and the workspace sorts below the ceiling within its minor release, on a
+    channel other than alpha: never prompted for, but may be updated or scheduled by hand."""
     SECURITY_UPDATE = auto()
     """A positive read on both sides, the workspace sorts below the security floor, and the ceiling does not:
     prompted for however small the gap, since the update carries a security fix the workspace lacks."""

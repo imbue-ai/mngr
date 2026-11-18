@@ -799,8 +799,9 @@ class UiWorkspaceUpdate(FrozenModel):
 
     @property
     def is_update_offered(self) -> bool:
-        """Whether the app has positively read that this workspace is a minor release behind, or below the
-        security floor: the badge, the titlebar status, and bulk actions."""
+        """Whether the app has positively read that this workspace is behind by enough for the app's release
+        channel to offer the update, or below the security floor: the badge, the titlebar status, and bulk
+        actions."""
         return self.availability in (UpdateAvailability.OUT_OF_DATE, UpdateAvailability.SECURITY_UPDATE)
 
     @property

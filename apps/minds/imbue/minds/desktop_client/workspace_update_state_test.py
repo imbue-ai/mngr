@@ -25,6 +25,7 @@ from imbue.minds.desktop_client.testing import exec_json_envelope
 from imbue.minds.desktop_client.testing import landed_verdict
 from imbue.minds.desktop_client.testing import make_update_state_store
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdate
+from imbue.minds.desktop_client.update_channel import ReleaseChannel
 from imbue.minds.desktop_client.update_status import FAILURE_UPDATE_VERDICTS
 from imbue.minds.desktop_client.update_status import KernelFixActivity
 from imbue.minds.desktop_client.update_status import KernelSecurityStatus
@@ -57,18 +58,27 @@ from imbue.mngr.primitives import HostState
 
 @pytest.mark.witnesses("workspace-updates.behind-the-app", partial="the detection verdict only")
 def test_a_workspace_below_the_ceiling_is_out_of_date() -> None:
-    assert derive_update_detection("minds-v0.3.12", "minds-v0.4.1").availability is UpdateAvailability.OUT_OF_DATE
+    assert (
+        derive_update_detection("minds-v0.3.12", "minds-v0.4.1", channel=ReleaseChannel.STABLE).availability
+        is UpdateAvailability.OUT_OF_DATE
+    )
 
 
 @pytest.mark.witnesses("workspace-updates.at-the-app", partial="the detection verdict only")
 def test_a_workspace_at_the_ceiling_is_up_to_date() -> None:
-    assert derive_update_detection("minds-v0.4.1", "minds-v0.4.1").availability is UpdateAvailability.UP_TO_DATE
+    assert (
+        derive_update_detection("minds-v0.4.1", "minds-v0.4.1", channel=ReleaseChannel.STABLE).availability
+        is UpdateAvailability.UP_TO_DATE
+    )
 
 
 @pytest.mark.witnesses("workspace-updates.ahead-of-the-app", partial="the detection verdict only")
 def test_a_workspace_above_the_ceiling_reports_the_app_as_behind() -> None:
     """Reverse divergence is its own answer: there is nothing to run in the workspace."""
-    assert derive_update_detection("minds-v0.5.0", "minds-v0.4.1").availability is UpdateAvailability.APP_BEHIND
+    assert (
+        derive_update_detection("minds-v0.5.0", "minds-v0.4.1", channel=ReleaseChannel.STABLE).availability
+        is UpdateAvailability.APP_BEHIND
+    )
 
 
 @pytest.mark.witnesses("workspace-updates.minor-release-granularity")
@@ -88,9 +98,32 @@ def test_a_workspace_above_the_ceiling_reports_the_app_as_behind() -> None:
 def test_only_a_newer_minor_release_makes_a_workspace_out_of_date(
     workspace_ref: str, ceiling_ref: str, expected: UpdateAvailability
 ) -> None:
-    detection = derive_update_detection(workspace_ref, ceiling_ref)
+    detection = derive_update_detection(workspace_ref, ceiling_ref, channel=ReleaseChannel.STABLE)
     assert detection.availability is expected
     assert detection.unknown_reason is None
+
+
+@pytest.mark.witnesses("workspace-updates.alpha-takes-every-release")
+@pytest.mark.parametrize(
+    ("workspace_ref", "ceiling_ref", "alpha_reading", "other_reading"),
+    [
+        ("minds-v0.8.3", "minds-v0.8.4", UpdateAvailability.OUT_OF_DATE, UpdateAvailability.PATCH_AVAILABLE),
+        ("minds-v0.10.0-rc.1", "minds-v0.10.0", UpdateAvailability.OUT_OF_DATE, UpdateAvailability.PATCH_AVAILABLE),
+        ("minds-v0.9.3", "minds-v0.10.0", UpdateAvailability.OUT_OF_DATE, UpdateAvailability.OUT_OF_DATE),
+        # The security floor and the readings with no gap below the ceiling do not depend on the channel.
+        ("minds-v0.9.0-rc.1", "minds-v0.9.0", UpdateAvailability.SECURITY_UPDATE, UpdateAvailability.SECURITY_UPDATE),
+        ("minds-v0.10.0", "minds-v0.10.0", UpdateAvailability.UP_TO_DATE, UpdateAvailability.UP_TO_DATE),
+        ("minds-v0.10.1", "minds-v0.10.0", UpdateAvailability.APP_BEHIND, UpdateAvailability.APP_BEHIND),
+    ],
+)
+def test_on_the_alpha_channel_any_release_behind_makes_a_workspace_out_of_date(
+    workspace_ref: str, ceiling_ref: str, alpha_reading: UpdateAvailability, other_reading: UpdateAvailability
+) -> None:
+    assert derive_update_detection(workspace_ref, ceiling_ref, channel=ReleaseChannel.ALPHA).availability is (
+        alpha_reading
+    )
+    for channel in (ReleaseChannel.STABLE, ReleaseChannel.BETA):
+        assert derive_update_detection(workspace_ref, ceiling_ref, channel=channel).availability is other_reading
 
 
 @pytest.mark.witnesses("workspace-updates.below-the-security-floor")
@@ -116,14 +149,14 @@ def test_only_a_newer_minor_release_makes_a_workspace_out_of_date(
 def test_a_workspace_below_the_security_floor_has_a_security_update_when_the_ceiling_can_deliver_it(
     workspace_ref: str, ceiling_ref: str, expected: UpdateAvailability
 ) -> None:
-    detection = derive_update_detection(workspace_ref, ceiling_ref)
+    detection = derive_update_detection(workspace_ref, ceiling_ref, channel=ReleaseChannel.STABLE)
     assert detection.availability is expected
     assert detection.unknown_reason is None
 
 
 @pytest.mark.witnesses("workspace-updates.security-floor-needs-a-released-app", partial="the detection verdict only")
 def test_a_dev_build_offers_no_security_update() -> None:
-    detection = derive_update_detection("minds-v0.8.7", "gabriel/some-branch")
+    detection = derive_update_detection("minds-v0.8.7", "gabriel/some-branch", channel=ReleaseChannel.STABLE)
     assert detection.availability is UpdateAvailability.UNKNOWN
     assert detection.unknown_reason is UpdateUnknownReason.NO_APP_VERSION
 
@@ -131,7 +164,10 @@ def test_a_dev_build_offers_no_security_update() -> None:
 @pytest.mark.witnesses("workspace-updates.too-old-over-security-update", partial="the detection verdict only")
 def test_a_workspace_below_the_in_place_cutoff_needs_recreation_rather_than_a_security_update() -> None:
     """Recreation is checked first: an in-place security update cannot be applied to such a workspace either."""
-    assert derive_update_detection("minds-v0.3.9", "minds-v0.9.0").availability is UpdateAvailability.NEEDS_RECREATION
+    assert (
+        derive_update_detection("minds-v0.3.9", "minds-v0.9.0", channel=ReleaseChannel.STABLE).availability
+        is UpdateAvailability.NEEDS_RECREATION
+    )
 
 
 def test_a_security_update_is_offered_and_dispatchable() -> None:
@@ -143,7 +179,10 @@ def test_a_security_update_is_offered_and_dispatchable() -> None:
 @pytest.mark.witnesses("workspace-updates.development-build", partial="the detection verdict only")
 def test_a_dev_build_imposes_no_ceiling() -> None:
     """A branch ceiling cannot name a version, so it must not badge anything."""
-    assert derive_update_detection("minds-v0.3.10", "main").availability is UpdateAvailability.UNKNOWN
+    assert (
+        derive_update_detection("minds-v0.3.10", "main", channel=ReleaseChannel.STABLE).availability
+        is UpdateAvailability.UNKNOWN
+    )
 
 
 def _state_with(availability: UpdateAvailability) -> UiWorkspaceUpdate:
@@ -158,9 +197,18 @@ def _state_with(availability: UpdateAvailability) -> UiWorkspaceUpdate:
 @pytest.mark.witnesses("workspace-updates.too-old-to-update-in-place", partial="the detection verdict only")
 def test_a_workspace_below_the_in_place_cutoff_needs_recreation_whatever_the_app_is_pinned_to() -> None:
     """The cutoff is a fact about the workspace, so a dev build's missing ceiling does not hide it."""
-    assert derive_update_detection("minds-v0.3.9", "minds-v0.4.1").availability is UpdateAvailability.NEEDS_RECREATION
-    assert derive_update_detection("minds-v0.3.9", "main").availability is UpdateAvailability.NEEDS_RECREATION
-    assert derive_update_detection("minds-v0.2.0", None).availability is UpdateAvailability.NEEDS_RECREATION
+    assert (
+        derive_update_detection("minds-v0.3.9", "minds-v0.4.1", channel=ReleaseChannel.STABLE).availability
+        is UpdateAvailability.NEEDS_RECREATION
+    )
+    assert (
+        derive_update_detection("minds-v0.3.9", "main", channel=ReleaseChannel.STABLE).availability
+        is UpdateAvailability.NEEDS_RECREATION
+    )
+    assert (
+        derive_update_detection("minds-v0.2.0", None, channel=ReleaseChannel.STABLE).availability
+        is UpdateAvailability.NEEDS_RECREATION
+    )
 
 
 @pytest.mark.parametrize("workspace_ref", [None, "", "main", "gabriel/some-branch", "my-own-template"])
@@ -177,7 +225,10 @@ def test_a_version_nobody_could_read_is_never_below_the_in_place_floor(workspace
 
 def test_the_in_place_cutoff_is_inclusive() -> None:
     """A workspace at the cutoff release itself can still be updated in place."""
-    assert derive_update_detection("minds-v0.3.10", "minds-v0.4.1").availability is UpdateAvailability.OUT_OF_DATE
+    assert (
+        derive_update_detection("minds-v0.3.10", "minds-v0.4.1", channel=ReleaseChannel.STABLE).availability
+        is UpdateAvailability.OUT_OF_DATE
+    )
 
 
 def test_a_workspace_that_needs_recreation_is_neither_offered_nor_dispatchable() -> None:
@@ -190,8 +241,14 @@ def test_a_workspace_that_needs_recreation_is_neither_offered_nor_dispatchable()
 @pytest.mark.witnesses("workspace-updates.no-workspace-version", partial="the detection verdict only")
 def test_a_workspace_with_no_readable_version_is_unknown() -> None:
     """A custom-template or tagless workspace is never reported as out of date."""
-    assert derive_update_detection(None, "minds-v0.4.1").availability is UpdateAvailability.UNKNOWN
-    assert derive_update_detection("my-own-template", "minds-v0.4.1").availability is UpdateAvailability.UNKNOWN
+    assert (
+        derive_update_detection(None, "minds-v0.4.1", channel=ReleaseChannel.STABLE).availability
+        is UpdateAvailability.UNKNOWN
+    )
+    assert (
+        derive_update_detection("my-own-template", "minds-v0.4.1", channel=ReleaseChannel.STABLE).availability
+        is UpdateAvailability.UNKNOWN
+    )
 
 
 def test_unknown_is_never_claimed_as_behind_but_is_still_worth_asking() -> None:
@@ -215,19 +272,25 @@ def test_a_patch_is_never_offered_but_may_be_run_by_hand() -> None:
 @pytest.mark.witnesses("workspace-updates.unknown-names-the-missing-side")
 def test_unknown_names_which_side_had_no_version() -> None:
     """A dev build reads unknown over machines whose version it read perfectly well."""
-    dev_build = derive_update_detection("minds-v0.3.12", "gabriel/some-branch")
+    dev_build = derive_update_detection("minds-v0.3.12", "gabriel/some-branch", channel=ReleaseChannel.STABLE)
     assert dev_build.unknown_reason is UpdateUnknownReason.NO_APP_VERSION
 
-    custom_template = derive_update_detection("my-own-template", "minds-v0.4.1")
+    custom_template = derive_update_detection("my-own-template", "minds-v0.4.1", channel=ReleaseChannel.STABLE)
     assert custom_template.unknown_reason is UpdateUnknownReason.NO_MACHINE_VERSION
 
     # Neither side readable: the missing ceiling wins, since it explains every row.
-    assert derive_update_detection(None, "main").unknown_reason is UpdateUnknownReason.NO_APP_VERSION
+    assert (
+        derive_update_detection(None, "main", channel=ReleaseChannel.STABLE).unknown_reason
+        is UpdateUnknownReason.NO_APP_VERSION
+    )
 
 
 def test_a_positive_verdict_carries_no_unknown_reason() -> None:
     for workspace_ref in ("minds-v0.3.12", "minds-v0.4.1", "minds-v0.5.0"):
-        assert derive_update_detection(workspace_ref, "minds-v0.4.1").unknown_reason is None
+        assert (
+            derive_update_detection(workspace_ref, "minds-v0.4.1", channel=ReleaseChannel.STABLE).unknown_reason
+            is None
+        )
 
 
 def _out_of_date_store(tmp_path: Path) -> tuple[WorkspaceUpdateStateStore, AgentId]:
@@ -462,6 +525,7 @@ def _detector(
     armed: list[AgentId] | None = None,
     kernel_transport: KernelProbeTransport | None = None,
     read_kernel_probe: Callable[[AgentId, KernelProbeTransport], KernelProbe | None] | None = None,
+    read_release_channel: Callable[[], ReleaseChannel] = lambda: ReleaseChannel.STABLE,
 ) -> WorkspaceUpdateDetector:
     armed_ids = armed if armed is not None else []
     return WorkspaceUpdateDetector(
@@ -470,6 +534,7 @@ def _detector(
         mngr_caller=caller,
         concurrency_group=concurrency_group,
         read_supported_version=lambda: "minds-v0.4.1",
+        read_release_channel=read_release_channel,
         interval_seconds=interval_seconds,
         read_update_facts=(
             read_update_facts if read_update_facts is not None else lambda _agent_id, _is_sign_in_checked: _NO_FACTS
@@ -1570,6 +1635,39 @@ def test_the_sweep_arms_a_behind_workspace_under_auto_update_and_shows_a_stopped
 
     assert armed == [behind_id]
     assert store.get(stopped_id).is_scheduled is False
+
+
+@pytest.mark.witnesses("workspace-updates.alpha-takes-every-release", partial="the reading and arming only")
+def test_the_sweep_offers_and_arms_a_patch_behind_workspace_once_the_app_is_on_alpha(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """The channel is re-read every sweep, so a switch reclassifies a workspace without a restart."""
+    agent_id = AgentId.generate()
+    resolver = _WorkspacesResolver(url_by_agent_and_service={}, host_state_by_agent={agent_id: HostState.RUNNING})
+    caller = _VersionReadingMngrCaller(version_by_agent={str(agent_id): "minds-v0.4.0"})
+    armed: list[AgentId] = []
+    channels = [ReleaseChannel.STABLE]
+    detector = _detector(
+        tmp_path,
+        resolver,
+        caller,
+        root_concurrency_group,
+        auto_update_policy=_ENABLED,
+        armed=armed,
+        read_release_channel=lambda: channels[-1],
+    )
+
+    detector.run_pass()
+    on_stable = detector.store.get(agent_id)
+    armed_on_stable = list(armed)
+    channels.append(ReleaseChannel.ALPHA)
+    detector.run_pass()
+    on_alpha = detector.store.get(agent_id)
+
+    assert (on_stable.availability, on_stable.is_update_offered) == (UpdateAvailability.PATCH_AVAILABLE, False)
+    assert armed_on_stable == []
+    assert (on_alpha.availability, on_alpha.is_update_offered) == (UpdateAvailability.OUT_OF_DATE, True)
+    assert armed == [agent_id]
 
 
 # The kernel axis

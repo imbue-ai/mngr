@@ -1,6 +1,7 @@
 Feature: Detecting an out-of-date workspace
-  The app reports a workspace as out of date only on a positive reading of both versions, and only when the workspace is on an earlier minor release than the app supports.
-  A workspace behind the app within the minor release the app supports has a patch available: the app never prompts the user about it, but the user may still update it or schedule its update by hand.
+  The app reports a workspace as out of date only on a positive reading of both versions, and, off the alpha release channel, only when the workspace is on an earlier minor release than the app supports.
+  When the app takes its own updates from the alpha release channel, any release behind the one the app supports makes a workspace out of date, however small the gap.
+  On any other channel, a workspace behind the app within the minor release the app supports has a patch available: the app never prompts the user about it, but the user may still update it or schedule its update by hand.
   A workspace below the security floor has a security update when the app supports a release at or above that floor: the app prompts the user about it however small the gap, says that the update includes a critical security fix, and explains what that fix addresses when asked.
   An unknown workspace is offered a check, not an update it is assumed to need: the workspace's own update agent reads its upstream and decides what applies, and finding nothing is an ordinary outcome.
   A workspace newer than the app reports that the app is behind.
@@ -14,10 +15,11 @@ Feature: Detecting an out-of-date workspace
     And the app offers to update that workspace
 
   @minor-release-granularity
-  Scenario Outline: Only a newer minor release makes a workspace out of date
+  Scenario Outline: Off the alpha channel, only a newer minor release makes a workspace out of date
     A prerelease belongs to the minor release it precedes.
     In every row either the workspace is at or above the security floor or the app's supported release is below it, so the floor decides nothing here.
-    Given the app's supported release is "<app>"
+    Given the app takes its own updates from the stable or beta release channel
+    And the app's supported release is "<app>"
     And a workspace whose template version reads "<workspace>"
     Then the app reports that workspace as "<reading>"
 
@@ -30,12 +32,28 @@ Feature: Detecting an out-of-date workspace
       | minds-v0.8.4  | minds-v0.8.0       | patch available |
       | minds-v0.10.0 | minds-v0.10.0-rc.1 | patch available |
 
+  @alpha-takes-every-release
+  Scenario Outline: On the alpha channel, any release behind makes a workspace out of date
+    The channel is read again whenever the app reads its workspaces, so switching channels changes the reading without a restart.
+    Given the app takes its own updates from the alpha release channel
+    And the app's supported release is "<app>"
+    And a workspace whose template version reads "<workspace>"
+    Then the app reports that workspace as "<reading>"
+
+    Examples:
+      | app           | workspace          | reading     |
+      | minds-v0.8.4  | minds-v0.8.3       | out of date |
+      | minds-v0.10.0 | minds-v0.10.0-rc.1 | out of date |
+      | minds-v0.10.0 | minds-v0.9.3       | out of date |
+      | minds-v0.10.0 | minds-v0.10.0      | up to date  |
+
   @below-the-security-floor
   Scenario Outline: A workspace below the security floor has a security update when the app can deliver it
     The security floor is minds-v0.9.0, the oldest template release with no known security issue.
     The floor outranks the minor-release rule: a workspace below it is offered a security update even when it is behind the app by only a patch or a prerelease.
     An app whose own supported release is below the floor cannot deliver the fix, so it reads such a workspace by the minor-release rule alone.
-    Given the app's supported release is "<app>"
+    Given the app takes its own updates from the stable or beta release channel
+    And the app's supported release is "<app>"
     And a workspace whose template version reads "<workspace>"
     Then the app reports that workspace as "<reading>"
 
@@ -81,14 +99,16 @@ Feature: Detecting an out-of-date workspace
 
   @patch-available-not-prompted
   Scenario: A workspace with only a patch available is not prompted to update
-    Given the app supports a template release
+    Given the app takes its own updates from the stable or beta release channel
+    And the app supports a template release
     And a workspace running an earlier patch release of that same minor release
     Then the app shows no update badge or titlebar status for that workspace
     And an action covering every workspace with an update available passes over that workspace
 
   @patch-available-by-hand
   Scenario: A workspace with only a patch available may still be updated by hand
-    Given the app supports a template release
+    Given the app takes its own updates from the stable or beta release channel
+    And the app supports a template release
     And a workspace running an earlier patch release of that same minor release
     When the user asks to update that workspace
     Then an update agent is started in that workspace

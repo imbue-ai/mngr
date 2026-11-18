@@ -39,6 +39,7 @@ from imbue.minds.desktop_client.testing import update_command_answer
 from imbue.minds.desktop_client.testing import update_program_invocation
 from imbue.minds.desktop_client.testing import update_run_probe_stdout
 from imbue.minds.desktop_client.update_apply_window import UpdateApplyWindowManager
+from imbue.minds.desktop_client.update_channel import ReleaseChannel
 from imbue.minds.desktop_client.update_service import DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME
 from imbue.minds.desktop_client.update_service import SCHEDULE_REFUSAL_MESSAGE_BY_OUTCOME
 from imbue.minds.desktop_client.update_service import UpdateDispatchOutcome
@@ -108,6 +109,7 @@ def _build_service(
             mngr_caller=caller,
             concurrency_group=concurrency_group,
             read_supported_version=lambda: _CEILING,
+            read_release_channel=lambda: ReleaseChannel.STABLE,
             read_update_facts=lambda agent_id, is_sign_in_checked: None,
             read_auto_update_policy=lambda agent_id: AutoUpdatePolicy(is_enabled=False, skipped_target_ref=""),
             arm_for_auto_update=lambda agent_id: None,

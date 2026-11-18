@@ -67,10 +67,10 @@ export function isRunInFlight(update: UiWorkspaceUpdate): boolean {
   );
 }
 
-/** Whether the app has positively read this machine as a minor release behind,
- * or below the security floor: what the badge and titlebar status claim, and
- * what "Update all" covers. A machine behind only by a patch is never prompted
- * for, unless the patch carries a security fix it lacks. */
+/** Whether the app has positively read this machine as behind by enough for the
+ * app's release channel to offer the update, or below the security floor: what
+ * the badge and titlebar status claim, and what "Update all" covers. Which gaps
+ * count is the backend's call, already folded into `availability`. */
 export function isUpdateOffered(update: UiWorkspaceUpdate): boolean {
   return update.availability === "OUT_OF_DATE" || isSecurityUpdate(update);
 }
@@ -617,7 +617,7 @@ export function updateBadgeFor(
       isSpinnerShown: false,
     };
   }
-  // The template is current (or merely a patch behind), and the machine under it still runs an old kernel.
+  // The template is current (or behind by less than is offered), and the machine under it still runs an old kernel.
   if (isKernelFixOffered(update)) {
     return {
       state: "kernel-update",

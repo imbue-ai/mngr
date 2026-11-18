@@ -209,6 +209,7 @@ from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdatesMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspacesMessage
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 from imbue.minds.desktop_client.update_apply_window import UpdateApplyWindowManager
+from imbue.minds.desktop_client.update_channel import read_release_channel
 from imbue.minds.desktop_client.update_service import UpdateSettingsSource
 from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
 from imbue.minds.desktop_client.update_service import read_workspace_update_facts
@@ -2783,6 +2784,7 @@ def _build_workspace_update_service(
     mngr_caller: MngrCaller | None,
     paths: InstallationPaths | None,
     minds_config: MindsConfig | None,
+    client_env_config: ClientEnvConfig | None,
     account_settings_store: AccountSettingsStore | None,
     facts_cache: WorkspaceFactsCache | None,
     session_store: MultiAccountSessionStore | None,
@@ -2837,12 +2839,16 @@ def _build_workspace_update_service(
         paths=paths,
     )
     kernel_access = _KernelMachineAccessResolver(backend_resolver=backend_resolver)
+    is_update_feed_configured = client_env_config is not None and client_env_config.update_feed_base_url is not None
     detector = WorkspaceUpdateDetector(
         store=state_store,
         backend_resolver=backend_resolver,
         mngr_caller=mngr_caller,
         concurrency_group=root_concurrency_group,
         read_supported_version=default_workspace_template_ref,
+        read_release_channel=lambda: read_release_channel(
+            paths.data_dir, is_update_feed_configured=is_update_feed_configured
+        ),
         read_update_facts=lambda agent_id, is_sign_in_checked: _read_update_facts_through_cache(
             mngr_caller, backend_resolver, settings_source, facts_cache, agent_id, is_sign_in_checked
         ),
@@ -3143,6 +3149,7 @@ def create_desktop_client(
         mngr_caller=mngr_caller,
         paths=paths,
         minds_config=minds_config,
+        client_env_config=client_env_config,
         account_settings_store=account_settings_store,
         facts_cache=workspace_facts_cache,
         session_store=session_store,

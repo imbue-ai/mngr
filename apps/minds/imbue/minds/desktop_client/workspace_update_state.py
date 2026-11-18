@@ -1,8 +1,9 @@
 """Whether each workspace is behind the app's template pin, and what is being done about it.
 
 Detection is a positive read: OUT_OF_DATE only when both sides parse as ``minds-v*``
-and the workspace is on an earlier minor release; PATCH_AVAILABLE when it sorts below
-within the same minor release, which is never prompted for; SECURITY_UPDATE when the
+and the workspace is on an earlier minor release, or sorts below at all on the alpha
+channel; PATCH_AVAILABLE when it sorts below within the same minor release on any
+other channel, which is never prompted for; SECURITY_UPDATE when the
 workspace sorts below the hardcoded security floor and the app's ceiling does not, which
 is prompted for even when the gap is only a patch; NEEDS_RECREATION when the
 workspace's own version sorts below the hardcoded in-place cutoff, whatever the app is
@@ -48,6 +49,8 @@ from imbue.minds.desktop_client.kernel_security import is_kernel_fix_offered
 from imbue.minds.desktop_client.minds_version import parse_minds_version
 from imbue.minds.desktop_client.ui_models import UiWorkspaceKernel
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdate
+from imbue.minds.desktop_client.update_channel import ReleaseChannel
+from imbue.minds.desktop_client.update_channel import is_every_release_offered
 from imbue.minds.desktop_client.update_status import FAILURE_UPDATE_VERDICTS
 from imbue.minds.desktop_client.update_status import IN_FLIGHT_ACTIVITIES
 from imbue.minds.desktop_client.update_status import KernelFixActivity
@@ -115,7 +118,9 @@ def is_below_in_place_update_floor(workspace_ref: str | None) -> bool:
     return workspace_version is not None and workspace_version < cutoff_version
 
 
-def derive_update_detection(workspace_ref: str | None, ceiling_ref: str | None) -> UpdateDetection:
+def derive_update_detection(
+    workspace_ref: str | None, ceiling_ref: str | None, *, channel: ReleaseChannel
+) -> UpdateDetection:
     """Classify one workspace against the in-place cutoff and the app's template ceiling.
 
     The cutoff is checked first and needs only the workspace's side: it is a fact
@@ -125,7 +130,7 @@ def derive_update_detection(workspace_ref: str | None, ceiling_ref: str | None) 
     row at once. A workspace below the security floor is SECURITY_UPDATE when the
     ceiling is not, whatever the size of the gap. Otherwise only a newer minor
     release is prompted for: a workspace behind by patch or prerelease alone is
-    PATCH_AVAILABLE.
+    PATCH_AVAILABLE, except on a ``channel`` that is offered every release.
     """
     workspace_version = parse_minds_version(workspace_ref)
     ceiling_version = parse_minds_version(ceiling_ref)
@@ -144,7 +149,7 @@ def derive_update_detection(workspace_ref: str | None, ceiling_ref: str | None) 
     if workspace_version < security_floor_version and not ceiling_version < security_floor_version:
         return UpdateDetection(availability=UpdateAvailability.SECURITY_UPDATE)
     if workspace_version < ceiling_version:
-        if workspace_version.is_same_minor_release(ceiling_version):
+        if workspace_version.is_same_minor_release(ceiling_version) and not is_every_release_offered(channel):
             return UpdateDetection(availability=UpdateAvailability.PATCH_AVAILABLE)
         return UpdateDetection(availability=UpdateAvailability.OUT_OF_DATE)
     if ceiling_version < workspace_version:
@@ -1039,13 +1044,13 @@ def should_auto_arm(
 ) -> bool:
     """Whether the sweep arms this workspace's update for the user.
 
-    Only a workspace positively read a minor release behind, with nothing armed or running, no
-    decision pending, and this release not skipped. A release a run already went out for is not
-    re-armed: the workspace is still behind, so that run failed or stalled, and only a newer
-    ceiling is a reason to try again unwatched. Reading the failure dismisses it from the row,
-    so the dispatch record, not the row, is what remembers the attempt. A failure still on the row
-    holds the release back unless it is the last dispatch's run and that run aimed elsewhere: at an
-    older ceiling, or at a version the user named.
+    Only a workspace offered its update (see :attr:`UiWorkspaceUpdate.is_update_offered`), with
+    nothing armed or running, no decision pending, and this release not skipped. A release a run
+    already went out for is not re-armed: the workspace is still behind, so that run failed or
+    stalled, and only a newer ceiling is a reason to try again unwatched. Reading the failure
+    dismisses it from the row, so the dispatch record, not the row, is what remembers the attempt.
+    A failure still on the row holds the release back unless it is the last dispatch's run and that
+    run aimed elsewhere: at an older ceiling, or at a version the user named.
     """
     if not policy.is_enabled or not state.is_update_offered or state.is_scheduled or state.is_run_in_flight:
         return False
@@ -1080,6 +1085,11 @@ class WorkspaceUpdateDetector(MutableModel):
     )
     read_supported_version: Callable[[], str] = Field(
         frozen=True, description="The app's template ceiling (``default_workspace_template_ref``)"
+    )
+    read_release_channel: Callable[[], ReleaseChannel] = Field(
+        frozen=True,
+        description="The release channel the app takes its own updates from, which sets how far behind a "
+        "workspace must be to be offered its update",
     )
     read_update_facts: Callable[[AgentId, bool], UpdateWorkspaceFacts | None] = Field(
         frozen=True,
@@ -1165,9 +1175,10 @@ class WorkspaceUpdateDetector(MutableModel):
     def run_pass(self) -> None:
         """One synchronous detection sweep over every active workspace."""
         supported_version = self.read_supported_version()
+        channel = self.read_release_channel()
         # Active, not known: the known set retains workspaces whose host was destroyed.
         host_state_by_agent = self.backend_resolver.list_active_workspace_host_states()
-        self._detect_all(host_state_by_agent, supported_version)
+        self._detect_all(host_state_by_agent, supported_version, channel)
         active_id_strs = {str(agent_id) for agent_id in host_state_by_agent}
         for stale_id_str, state in self.store.snapshot().items():
             if stale_id_str in active_id_strs:
@@ -1184,7 +1195,12 @@ class WorkspaceUpdateDetector(MutableModel):
             for stale_id_str in set(self._cached_kernel_by_agent) - active_id_strs:
                 del self._cached_kernel_by_agent[stale_id_str]
 
-    def _detect_all(self, host_state_by_agent: Mapping[AgentId, HostState | None], supported_version: str) -> None:
+    def _detect_all(
+        self,
+        host_state_by_agent: Mapping[AgentId, HostState | None],
+        supported_version: str,
+        channel: ReleaseChannel,
+    ) -> None:
         """Detect every workspace, reading concurrently so no badge waits on discovery's unstable ordering.
 
         A read that raises ends the pass once every read has returned; the loop
@@ -1193,7 +1209,7 @@ class WorkspaceUpdateDetector(MutableModel):
         items = tuple(host_state_by_agent.items())
         if len(items) <= 1:
             for agent_id, host_state in items:
-                self._detect_one(agent_id, host_state, supported_version)
+                self._detect_one(agent_id, host_state, supported_version, channel)
             return
         read_slots = threading.Semaphore(_MAX_CONCURRENT_VERSION_READS)
         # No exit timeout: the group's default is shorter than a real sweep, and
@@ -1205,7 +1221,7 @@ class WorkspaceUpdateDetector(MutableModel):
             for agent_id, host_state in items:
                 reads.start_new_thread(
                     target=self._detect_one_within_slot,
-                    args=(read_slots, agent_id, host_state, supported_version),
+                    args=(read_slots, agent_id, host_state, supported_version, channel),
                     name=f"workspace-update-read-{agent_id}",
                     daemon=True,
                 )
@@ -1216,12 +1232,15 @@ class WorkspaceUpdateDetector(MutableModel):
         agent_id: AgentId,
         host_state: HostState | None,
         supported_version: str,
+        channel: ReleaseChannel,
     ) -> None:
         """One concurrent read, held to the sweep's slot count."""
         with read_slots:
-            self._detect_one(agent_id, host_state, supported_version)
+            self._detect_one(agent_id, host_state, supported_version, channel)
 
-    def _detect_one(self, agent_id: AgentId, host_state: HostState | None, supported_version: str) -> None:
+    def _detect_one(
+        self, agent_id: AgentId, host_state: HostState | None, supported_version: str, channel: ReleaseChannel
+    ) -> None:
         label_version = self.backend_resolver.get_agent_label(agent_id, ORIGINAL_MINDS_VERSION_LABEL)
         below_floor_label_version = label_version if is_below_in_place_update_floor(label_version) else None
         version = self._read_git_version(agent_id, host_state) or below_floor_label_version
@@ -1234,7 +1253,7 @@ class WorkspaceUpdateDetector(MutableModel):
         facts = self.read_update_facts(agent_id, self.store.get(agent_id).needs_sign_in) if is_host_readable else None
         self.store.record_detection(
             agent_id,
-            detection=derive_update_detection(version, supported_version or None),
+            detection=derive_update_detection(version, supported_version or None, channel=channel),
             current_version=version or "",
             supported_version=supported_version,
             is_readable=facts is not None,
