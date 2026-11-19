@@ -1,0 +1,1 @@
+The desktop app and the `minds` backend no longer check for the retired `MINDS_DATA_HOME`. `STUDIO_ROOTS_OVERRIDE` is the only name for the roots override: a launcher that still exports only the old name now gets the platform's real roots rather than an error telling it to rename the variable.

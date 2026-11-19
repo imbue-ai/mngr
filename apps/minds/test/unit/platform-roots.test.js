@@ -13,7 +13,6 @@ const path = require('path');
 const {
   MINDS_APP_NAME,
   XDG_APP_DIR_NAME,
-  STUDIO_ROOTS_OVERRIDE_ENV_VAR,
   tierForRootName,
   platformRootsFor,
   legacyDataDirFor,
@@ -120,27 +119,6 @@ test('STUDIO_ROOTS_OVERRIDE outranks the XDG layout off darwin', () => {
         XDG_CACHE_HOME: '/ignored/c',
         XDG_STATE_HOME: '/ignored/s',
       },
-    }),
-    { state: '/tmp/t/production/state', cache: '/tmp/t/production/cache', logs: '/tmp/t/production/logs' }
-  );
-});
-
-test('the retired override name raises rather than resolving the real roots', () => {
-  assert.throws(
-    () =>
-      platformRootsFor({ rootName: 'minds', platform: 'linux', homeDir: HOME, env: { MINDS_DATA_HOME: '/tmp/t' } }),
-    new RegExp(STUDIO_ROOTS_OVERRIDE_ENV_VAR)
-  );
-});
-
-test('the retired name is ignored once the current one is set', () => {
-  // Both set is what a shell looks like mid-rename, and the current name answers.
-  assert.deepEqual(
-    platformRootsFor({
-      rootName: 'minds',
-      platform: 'linux',
-      homeDir: HOME,
-      env: { MINDS_DATA_HOME: '/stale', STUDIO_ROOTS_OVERRIDE: '/tmp/t' },
     }),
     { state: '/tmp/t/production/state', cache: '/tmp/t/production/cache', logs: '/tmp/t/production/logs' }
   );

@@ -36,13 +36,6 @@ const APPLE_PLATFORM = 'darwin';
 // It moves only these roots, never the legacy root the migration reads.
 const STUDIO_ROOTS_OVERRIDE_ENV_VAR = 'STUDIO_ROOTS_OVERRIDE';
 
-// CLEANUP: delete this and its check in platformRootsFor alongside
-// _RETIRED_ROOTS_OVERRIDE_ENV_VAR in imbue/minds/bootstrap.py, once no shell,
-// CI step or operator script still exports the old name.
-// Ignoring it silently would hand a caller that still exports it the real roots
-// while it believed it was isolated.
-const RETIRED_ROOTS_OVERRIDE_ENV_VAR = 'MINDS_DATA_HOME';
-
 // Each XDG base directory's default, relative to the home directory, used when
 // the matching variable is unset, empty, or relative.
 const XDG_DATA_HOME_SEGMENTS = ['.local', 'share'];
@@ -102,13 +95,6 @@ function tierForRootName(rootName) {
  */
 function platformRootsFor({ rootName, platform, homeDir, env }) {
   const tier = tierForRootName(rootName);
-  if (env[RETIRED_ROOTS_OVERRIDE_ENV_VAR] && !env[STUDIO_ROOTS_OVERRIDE_ENV_VAR]) {
-    throw new Error(
-      `${RETIRED_ROOTS_OVERRIDE_ENV_VAR} is set but ${STUDIO_ROOTS_OVERRIDE_ENV_VAR} is not. The variable was ` +
-        `renamed; export ${STUDIO_ROOTS_OVERRIDE_ENV_VAR} instead. Continuing would resolve the real roots while ` +
-        'the caller expected a throwaway directory.'
-    );
-  }
   const rootsOverride = env[STUDIO_ROOTS_OVERRIDE_ENV_VAR];
   if (rootsOverride) {
     const tierRoot = path.join(rootsOverride, tier);
@@ -220,7 +206,6 @@ module.exports = {
   MIGRATION_MARKER_NAME,
   tierForRootName,
   platformRootsFor,
-  STUDIO_ROOTS_OVERRIDE_ENV_VAR,
   legacyDataDirFor,
   destinationForLegacyEntry,
   migrationPlanFor,

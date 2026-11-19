@@ -85,6 +85,8 @@ def _rundll32_args_after(container: str, user: str, open_command: str) -> list[s
 
 @pytest.mark.docker
 @pytest.mark.acceptance
+# MIND-790: the setup's apt download into a fresh container has outlasted the 300 s budget.
+@pytest.mark.flaky
 @pytest.mark.timeout(300)
 def test_wsl_installer_sends_links_to_the_windows_browser_unless_the_distro_has_one(tmp_path: Path) -> None:
     (tmp_path / "handler.sh").write_text(_handler_function_source())

@@ -32,7 +32,7 @@ from imbue.minds.bootstrap import root_name_for_env_name
 
 
 def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Leave MINDS_ROOT_NAME, the MNGR_* overrides, the minds path overrides (including the retired MINDS_DATA_HOME) and the XDG base directories unset, restoring at teardown.
+    """Leave MINDS_ROOT_NAME, the MNGR_* overrides, the minds path overrides and the XDG base directories unset, restoring at teardown.
 
     monkeypatch only records vars it changed itself, so a plain delenv of an absent var would leave
     anything the code under test writes directly into os.environ (apply_bootstrap does) in place after
@@ -43,7 +43,6 @@ def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "MNGR_HOST_DIR",
         "MNGR_PREFIX",
         STUDIO_ROOTS_OVERRIDE_ENV_VAR,
-        "MINDS_DATA_HOME",
         MINDS_STATE_DIR_ENV_VAR,
         MINDS_CACHE_DIR_ENV_VAR,
         MINDS_LOG_DIR_ENV_VAR,
@@ -624,30 +623,6 @@ def test_minds_root_exposes_each_role(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert root.state_dir == tmp_path / "staging" / "state"
     assert root.cache_dir == tmp_path / "staging" / "cache"
     assert root.log_dir == tmp_path / "staging" / "logs"
-
-
-def test_the_retired_override_name_raises_rather_than_resolving_the_real_roots(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """A caller that still exports it believes it is isolated, so resolving the real roots behind it is the one outcome worse than stopping."""
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("MINDS_DATA_HOME", str(tmp_path))
-    with pytest.raises(BootstrapError, match=STUDIO_ROOTS_OVERRIDE_ENV_VAR):
-        minds_dir_for_role(MindsPathRole.STATE, DEFAULT_MINDS_ROOT_NAME, platform="linux")
-    with pytest.raises(BootstrapError, match=STUDIO_ROOTS_OVERRIDE_ENV_VAR):
-        list_state_tier_names(platform="linux")
-
-
-def test_the_retired_name_is_ignored_once_the_current_one_is_set(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Both set is what a shell looks like mid-rename, and the current name answers."""
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("MINDS_DATA_HOME", "/stale")
-    monkeypatch.setenv(STUDIO_ROOTS_OVERRIDE_ENV_VAR, str(tmp_path))
-    assert minds_dir_for_role(MindsPathRole.STATE, DEFAULT_MINDS_ROOT_NAME, platform="linux") == (
-        tmp_path / "production" / "state"
-    )
 
 
 def _unmigrated_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:

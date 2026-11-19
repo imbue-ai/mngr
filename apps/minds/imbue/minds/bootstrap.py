@@ -54,21 +54,6 @@ XDG_APP_DIR_NAME: Final[str] = "imbue-studio"
 # It redirects only the destination -- `minds_data_dir_for` still resolves the migration's source against `$HOME` -- so a real build launched with it set moves an existing dotfolder into the throwaway.
 STUDIO_ROOTS_OVERRIDE_ENV_VAR: Final[str] = "STUDIO_ROOTS_OVERRIDE"
 
-# CLEANUP: delete this and `_check_no_retired_roots_override`'s call sites once no shell, CI step or operator script still exports the old name.
-# Ignoring it silently would hand a caller who still exports it the real roots while it believed it was isolated, which is the one failure this variable exists to prevent.
-_RETIRED_ROOTS_OVERRIDE_ENV_VAR: Final[str] = "MINDS_DATA_HOME"
-
-
-def _check_no_retired_roots_override() -> None:
-    """Raise when only the retired ``MINDS_DATA_HOME`` is set, rather than resolving the real roots behind its back."""
-    if os.environ.get(_RETIRED_ROOTS_OVERRIDE_ENV_VAR) and not os.environ.get(STUDIO_ROOTS_OVERRIDE_ENV_VAR):
-        raise BootstrapError(
-            f"{_RETIRED_ROOTS_OVERRIDE_ENV_VAR} is set but {STUDIO_ROOTS_OVERRIDE_ENV_VAR} is not. The variable was "
-            f"renamed; export {STUDIO_ROOTS_OVERRIDE_ENV_VAR} instead. Continuing would resolve the real roots while "
-            "the caller expected a throwaway directory."
-        )
-
-
 # The per-role roots a parent process can hand this one, which win over anything resolved here.
 # The Electron shell is the intended setter: it creates the virtualenv before any Python exists to ask, so it owns resolution (see specs/minds-platform-canonical-dirs/spec.md, F7).
 MINDS_STATE_DIR_ENV_VAR: Final[str] = "MINDS_STATE_DIR"
@@ -310,7 +295,6 @@ def minds_dir_for_role(role: MindsPathRole, root_name: str, platform: str = sys.
         _check_injected_roots_are_for(root_name)
         return Path(injected)
     tier = env_name_from_root_name(root_name)
-    _check_no_retired_roots_override()
     roots_override = os.environ.get(STUDIO_ROOTS_OVERRIDE_ENV_VAR)
     if roots_override:
         return Path(roots_override) / tier / _ROOTS_OVERRIDE_SUBDIR_BY_ROLE[role]
@@ -342,7 +326,6 @@ def list_state_tier_names(platform: str = sys.platform) -> tuple[str, ...]:
             f"{MINDS_STATE_DIR_ENV_VAR}={injected!r} is resolved for one tier, so it cannot name where every "
             "tier's state lives. Enumerate tiers from a process that was not handed injected roots."
         )
-    _check_no_retired_roots_override()
     roots_override = os.environ.get(STUDIO_ROOTS_OVERRIDE_ENV_VAR)
     if roots_override:
         return _tier_names_under(Path(roots_override))
