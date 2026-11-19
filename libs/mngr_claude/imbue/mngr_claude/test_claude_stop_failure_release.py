@@ -46,8 +46,9 @@ class _UnavailableModelClaudeReleaseProfile(ClaudeReleaseProfile):
 def test_claude_turn_that_ends_on_an_api_error_leaves_the_agent_waiting(tmp_path: Path) -> None:
     """A turn that dies on an API error ends with the agent reporting WAITING, not RUNNING until claude's idle notice.
 
-    Pins that claude routes such a turn end to the StopFailure hook event and records the error as an
-    assistant record with ``isApiErrorMessage: true`` and a timestamp.
+    Pins that claude routes such a turn end to the StopFailure hook event, whose payload carries no
+    ``background_tasks``, and records the error as an assistant record with ``isApiErrorMessage: true`` and a
+    timestamp.
     """
     profile = _UnavailableModelClaudeReleaseProfile()
     reason = profile.unavailable_reason()
@@ -88,3 +89,14 @@ def test_claude_turn_that_ends_on_an_api_error_leaves_the_agent_waiting(tmp_path
             drift=drift,
             consumer=_STOP_FAILURE_CONSUMER,
         )
+        stop_failure_payloads = [
+            p for p in read_saved_payloads(dump_dir) if p.get("hook_event_name") == _STOP_FAILURE_EVENT
+        ]
+
+    assert stop_failure_payloads and all("background_tasks" not in p for p in stop_failure_payloads), (
+        f"a {_STOP_FAILURE_EVENT} payload now carries background_tasks {drift}; wait_for_stop_hook.sh's "
+        "write_background_task_records already records whatever list a payload carries, so no code change is due; "
+        "rewrite the text that says a failed turn end clears the records: the Known limitations section and the "
+        "claude Stop payload paragraph of specs/agent-running-background/spec.md, and this test's docstring and "
+        "assertion"
+    )

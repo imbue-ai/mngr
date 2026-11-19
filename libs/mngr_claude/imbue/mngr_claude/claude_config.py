@@ -950,8 +950,8 @@ def build_readiness_hooks_config() -> dict[str, Any]:
       claude_background_tasks.sh for as long as that loop counts the agent as working, and so
       only ever as wide as the condition written there. Its mtime is the signal: the host's
       idle watcher and ``mngr ls`` read the mtime, and nothing parses the contents.
-    - background_tasks/task-<id>: one record per background task the last turn left running,
-      e.g. ``seen:1792575895 kind:SHELL``.
+    - background_tasks/task-<id>: one record per background task the last turn-end payload listed
+      in flight, e.g. ``seen:1792575895 kind:SHELL``.
     - claude_process_started: touched on every startup/resume SessionStart (a
       fresh, not-mid-turn Claude process). Its mtime is the restart boundary:
       a transcript event older than it belongs to a turn the current process

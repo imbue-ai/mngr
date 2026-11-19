@@ -470,6 +470,61 @@ def test_stop_hook_drops_records_for_work_that_has_since_finished(tmp_path: Path
     assert list(hook.record_dir.iterdir()) == []
 
 
+def test_stop_failure_hook_clears_its_records_because_the_payload_omits_the_task_set(tmp_path: Path) -> None:
+    hook = _prepare_stop_hook(
+        tmp_path, [_prompt("hello"), _api_error(timestamp="2026-01-01T00:00:05.000Z")], hook_event_name="StopFailure"
+    )
+    hook.record_dir.mkdir()
+    (hook.record_dir / "task-still-running").write_text("seen:1792575895 kind:SHELL native_type:shell\n")
+    someone_elses = hook.record_dir / "mngr-long-build"
+    someone_elses.write_text("pid:4821\n")
+
+    result = _run_prepared_stop_hook(hook, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert [path.name for path in hook.record_dir.iterdir()] == ["mngr-long-build"]
+    assert someone_elses.read_text() == "pid:4821\n"
+    _assert_marked_idle(hook)
+
+
+def _record_lines_after_a_turn_end(
+    tmp_path: Path, hook_event_name: str, background_tasks: list[dict[str, Any]]
+) -> dict[str, tuple[str, ...]]:
+    """Each record's kind and native_type tokens, after a turn end that found one stale record."""
+    hook = _prepare_stop_hook(
+        tmp_path,
+        [_prompt("hello"), _reply("done")],
+        hook_event_name=hook_event_name,
+        background_tasks=background_tasks,
+    )
+    hook.record_dir.mkdir()
+    (hook.record_dir / "task-stale").write_text("seen:1 kind:SHELL native_type:shell\n")
+
+    result = _run_prepared_stop_hook(hook, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    return {path.name: tuple(path.read_text().split()[1:3]) for path in hook.record_dir.iterdir()}
+
+
+def test_stop_failure_hook_records_a_task_set_its_payload_carries_as_a_stop_does(tmp_path: Path) -> None:
+    background_tasks = [
+        {"id": "bg-shell", "type": "shell", "status": "running"},
+        {"id": "bg-agent", "type": "subagent", "status": "pending"},
+        {"id": "bg-done", "type": "shell", "status": "completed"},
+    ]
+    (tmp_path / "stop").mkdir()
+    (tmp_path / "stop_failure").mkdir()
+
+    after_stop = _record_lines_after_a_turn_end(tmp_path / "stop", "Stop", background_tasks)
+    after_stop_failure = _record_lines_after_a_turn_end(tmp_path / "stop_failure", "StopFailure", background_tasks)
+
+    assert after_stop == {
+        "task-bg-agent": ("kind:SUBAGENT", "native_type:subagent"),
+        "task-bg-shell": ("kind:SHELL", "native_type:shell"),
+    }
+    assert after_stop_failure == after_stop
+
+
 def test_stop_hook_leaves_alone_a_record_it_did_not_write(tmp_path: Path) -> None:
     """The record directory is the agent's, and a record under another prefix is another writer's to remove."""
     hook = _prepare_stop_hook(tmp_path, [_prompt("hello"), _reply("done")], background_tasks=[])
