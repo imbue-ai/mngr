@@ -8,13 +8,179 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Added
 
+- Added: Agents can ask for a `custom-service` connection to be proxied through the desktop with `"proxy": true`; the approval dialog shows the **Proxy through my desktop** switch, and approving creates, grants and routes the connection in one change.
+- Added: Shared with me: workspaces and apps shared with the window's account are listed with owner, status, liveness and last-open verdict, offering open, decline (with undo), report (a permanent strike against the owner), retry, remove and a pasted-link input; opening signs a per-account Electron session into the accounts origin and loads the share in the workspace frame; `imbue-studio://shared/<host-id>` deep links land on its card.
+- Added: Shared workspaces report `is_owned=false` (UI channel schema 29, `GET /api/v1/workspaces` with `share_link`, titlebar), hide owner-only tabs, and refuse owner actions with `403 not_owned`.
+
+### Changed
+
+- Changed: Redesigned the home page as Workspaces, Apps and Invitations tabs: wallpaper workspace cards with status badges and a "..." menu, shared-workspace guest cards, desktop-style icons for own and shared apps, and Join/Decline invitation cards; "Studio settings" moves into the section head and the bottom-left launchers are removed.
+- Changed: A share grants push carries each target's label and display name and the workspace name, and a domain grant may only name the granter's own email domain (none for a public mail provider), enforced by the share panel and the connector.
+
+## [minds-v0.10.5] - 2026-11-17
+
+A patch release cut from the `minds-v0.10.4` tag on a release branch, not from `main`. The app's code is 0.10.4's, and changes merged to `main` after 0.10.4 are not in it. The pinned workspace template moves to `minds-v0.10.5`, which moves apps off the Screen's ports and skips onnxruntime-node's CUDA download, which failed `npm ci` on Linux x64 once upstream stopped serving it.
+
+## [minds-v0.10.4] - 2026-11-13
+
+A patch release over 0.10.3, pinning workspace template `minds-v0.10.4`. It carries plain, actionable error messages across the app, sign-ins through the system browser with latchkey 3.24.0 bundled, the startup fix that keeps remote grants made from another computer, the Screen no longer triggering macOS's local-network prompt, and paramiko 5.0.1 in the bundle.
+
+### Added
+
+- Added: Opt-in profiling mode: `minds run --profile PATH` (or `MINDS_PROFILE_FILE`) records one Perfetto-readable Chrome JSON trace covering backend requests, warm `mngr` processes, the UI and Chromium, with no secrets in spans.
+
+### Changed
+
+- Changed: The pool-host runbook (`docs/deploy/ops/pool-hosts.md`) says to bake a tag from an mngr checkout at that same tag (a newer checkout can fail every slice of an older tag), that a pre-`minds-v0.10.0` tag needs a box with no `minds-v0.10.0`+ slice, and that the baking machine must stay awake until the bake exits.
+- Changed: A workspace created through `POST /api/v1/workspaces` with an `account_id` and no `backup_provider` now gets Imbue backups by default, as desktop-created ones do.
+- Changed: Plainer, actionable error messages across the desktop app -- workspaces list and recovery card, create and sign-in, sharing, updates, workspace settings, permissions, backups and removal, and the startup and setup screens -- drawn with one shared error design: a sentence saying what failed and what to do, raw output behind "See details", the fix as the main button, and "Report a bug" attaching the error to the report.
+- Changed: Browser sign-ins to services whose latchkey reports `systemBrowserLogin` (Google, Ramp, Fastmail, MCP servers' OAuth) open in the user's own default browser (`latchkey auth browser --system`), and skip the Chrome cookie-import offer; adding a further account keeps latchkey's ephemeral browser.
+- Changed: Every MCP-based sign-in (builtin `*-mcp` connectors and custom MCP-flow services) returns through Imbue Studio's hosted callback page, so the consent screen no longer shows a localhost redirect.
+- Changed: Bundled latchkey moves to 3.24.0.
+- Changed: Host recovery worker log records carry `recovery_kind`, `recovery_trigger` and `provider_name`; `dispatch_host_recovery` takes a required `trigger` argument.
+
+### Removed
+
+- Removed: The "How should Imbue Studio notify you?" card after the first notification; notifications stay on the default (in-app cards and system banners) until changed in Settings > Notifications, and `notification_prefs` drops `has_chosen`.
+
+### Fixed
+
+- Fixed: Starting the desktop app no longer wipes a remote workspace's connector grants made from another computer; policy writes now read the machine's policy first and are refused when it cannot be read.
+- Fixed: Starting the app with a stopped remote workspace no longer logs "Host not found" for its latchkey permissions, and a change to its registered agents is held until discovery finds it running instead of being lost.
+- Fixed: Opening the Screen no longer triggers macOS's local-network prompt; Studio's WebRTC no longer announces the Mac's local address.
+- Fixed: Mutating backup programs and the update watchdog no longer interrupt a chat whose agent type mngr's config doesn't name (`RUNNING_UNKNOWN_AGENT_TYPE`).
+- Fixed: Retry on a failed first-launch setup runs setup again instead of only starting the app, and "View full log" opens the log holding the failure instead of silently doing nothing.
+- Fixed: A removal that finished before Imbue Studio can confirm the workspace is gone reads "Confirming removal..." and keeps checking instead of showing as failed.
+
+### Security
+
+- Security: The desktop app bundles filelock 4.2.4, paramiko 5.0.1 and pyasn1 0.6.5, fixing reported advisories; paramiko 5 can no longer reach SSH servers that offer only SHA-1 key exchange or SHA-1 RSA signatures.
+
+## [minds-v0.10.3] - 2026-11-09
+
+A patch release over 0.10.2, pinning workspace template `minds-v0.10.3`. A new workspace is entered as soon as its welcome chat is on screen, the share panel opens and saves with one connector call, and the `imbue-studio` skill places and sizes new workspaces.
+
+### Added
+
+- Added: `GET /api/v1/workspaces` reports each workspace's `launch_mode`, `instance_type`, `cpu_count`, `memory_gb` and `disk_gb`, and new `GET /api/v1/workspaces/cloud-accounts` lists create targets; the `imbue-studio` skill uses them to place and size new workspaces.
+
+### Changed
+
+- Changed: New workspaces open on their welcome chat sooner: the wash stays until the chat is on screen, and create status is polled every 250 ms while the workspace boots.
+- Changed: Opening the share panel and saving a grant each make one connector call (was up to three plus one per grantee); the sharing document carries `invitation_outcomes`.
+
+## [minds-v0.10.2] - 2026-11-09
+
+A patch release over 0.10.1, cut because 0.10.1's workspace template could no longer install the Screen's browser once an upstream asset was re-uploaded with a new digest. Workspace template `minds-v0.10.2` pins that digest and stops the Screen handing control back to a session that has just returned it, and the bundled SSH tunnel reports a rejected key as an authentication failure. No change to the app's own code is listed.
+
+## [minds-v0.10.1] - 2026-11-09
+
+A patch release carrying everything on `main` since 0.10.0, pinning workspace template `minds-v0.10.1`. Imbue Cloud backups move to the backup store, agents can run commands on the user's computer behind a per-device switch and grant, the create form offers a root disk size for cloud workspaces, and custom connections belong to the machine they were created on.
+
+### Added
+
+- Added: `docs/deploy/history/rollouts/gvisor-inode-map-leak.md` rollout page: why gVisor's own memory grows on runsc older than `20261102`, the affected-workspace survey, and the runbook for moving the fleet onto `20261102` (`minds-admin install-runsc` and `restart-workspace-container` per leased workspace, then a rebake).
+- Added: The pool-hosts runbook gains an "Alerts: an empty or thin pool" section covering the new pool-stock alert rules, their Slack card, and the fix for each lease outcome.
+- Added: The desktop app bundles the `imbue-mngr-grok` agent-type plugin.
+- Added: Agents can run commands on the user's computer through `POST /api/v1/remote-execution/<device_id>?program=<program>`, gated by an off-by-default per-device Settings > This computer switch, a device-pinned per-workspace `remote-execution` grant (any command or one program), and a per-call re-check; output streams as NDJSON and every command is logged.
+- Added: The create form offers a root disk size for AWS, GCP and Azure workspaces (default 50 GB).
+- Added: Notifications (feed, toast, OS banner) when an Imbue account is signed out by session expiry or a workspace stops responding and cannot be restarted.
+- Added: The titlebar account switcher marks accounts with no session on this device as "(signed out)" and offers a per-row "Sign in".
+- Added: `custom-service` permission requests may use Latchkey 3.22.0's `mcp` login flow, checked against the metadata the MCP server publishes.
+
+### Changed
+
+- Changed: On Linux, app files move from `~/.minds` to the XDG base directories (`imbue-studio/<tier>` under `$XDG_DATA_HOME`, `$XDG_CACHE_HOME`, `$XDG_STATE_HOME`), with a one-shot fail-hard migration on first launch; the `minds` CLI refuses to run before it.
+- Changed: `MINDS_DATA_HOME` is renamed `STUDIO_ROOTS_OVERRIDE`; setting only the old name raises.
+- Changed: `install-linux.sh --raspberry-pi` installs gVisor `20261102` from its release tarball and upgrades an older runsc it installed instead of skipping.
+- Changed: The Linux launcher `install-linux.sh` writes is now `~/.local/bin/studio-desktop`; the old `minds-desktop` launcher is left in place and keeps working (delete it by hand).
+- Changed: "Remove from this list" on a landing-page tile retires the workspace record instead of deleting it: any record but an untouched stub moves to "Recently destroyed", so its backups stay restorable through the retention window.
+- Changed: Imbue Cloud backups move to the backup store (`rest:` repositories with per-repository tokens instead of per-bucket Cloudflare keys; restic 0.16+ required). Legacy buckets migrate automatically, older snapshots stay listed under "Previous storage", and freeing space no longer needs a cleanup grant. Tier deploys need `[backup_store] is_deployed` and the `secrets/minds/<tier>/backup-store` Vault entry.
+- Changed: Default-template creates copy a release cached at launch (`template-cache/`) instead of cloning from GitHub; the first-run cloud create skips a redundant verification check and Docker probes after browser sign-in.
+- Changed: Custom connections belong to the machine they were created on, and signing out of a custom service's last account deregisters it there.
+- Changed: Protocol-handshake permissions (MCP session, Fastmail JMAP and DAV discovery) are implicit in every grant and no longer shown as a "Session" switch.
+- Changed: The desktop writes `data/.secrets/share_identities.json` beside the grants so the workspace roster names grantees who have not arrived yet.
+- Changed: Provider sign-in relay refusals carry a `reason` (embed contract v14), letting a workspace retry on a fresh port instead of falling back to paste-a-code.
+
+### Fixed
+
+- Fixed: Electron's log path now points at the tier's log root (on macOS the default omitted the tier).
+- Fixed: Freeing backup space for a new workspace finds a destroyed workspace's real (workspace-named) backup bucket, instead of guessing a machine-named one, deleting the record without freeing anything, and leaving the new workspace without backups.
+- Fixed: A chat whose turn ended with background work still running (mngr's new `RUNNING_BACKGROUND`) is no longer interrupted by backup programs or nudged by the update watchdog.
+- Fixed: Long-lived remote workspaces no longer fail new sign-ins and grants with a policy past the 100,000-byte remote command cap: the Minds API allowlist is pinned to discovered agents and sent without whitespace.
+- Fixed: Workspaces can again be created on AWS, GCP and Azure connections from templates that publish ports; new connections get the Screen ports in `firewall_published_ports` (existing ones need their cloud's `prepare` rerun).
+- Fixed: The desktop app again refuses `openExternal`, routing custom-scheme launches through the ask-first link router instead of silently granting them.
+
+### Security
+
+- Security: The ToDesktop build upload excludes `.env` files from `apps/minds`, so local credentials cannot ride into a packaged app.
+
+## [minds-v0.10.0] - 2026-11-02
+
+A minor release, pinning workspace template `minds-v0.10.0`, so workspaces on 0.9.x and older are prompted to update. Highlights: the Screen, a streamed Linux desktop with its own browser that agents and people share; per-account keybindings and the template's multiplayer chat rooms; and a "Security update" badge with a one-click restart for local and cloud machines on a vulnerable kernel.
+
+### Added
+
+- Added: Workspace Screen immersive mode (embed contract v12): a Screen window can go fullscreen with the keyboard locked so every key reaches the remote desktop.
+- Added: Agent-reachable `media-endpoints` and `ice-servers` routes (per-account Cloudflare TURN credentials) for the workspace Screen, via the latchkey `minds-api-proxy`.
+- Added: `minds:open-share-settings` accepts an optional `serviceName` to open the whole-workspace Share tab (embed contract v13).
+- Added: The browser sign-in permission dialog can accept a pasted token instead of opening a browser.
+- Added: Keybindings are an account-keyed setting delivered to workspaces in the profile snapshot, editable from a workspace via `PUT /api/v1/workspaces/<agent_id>/account-settings/keybindings` (gated by the `minds-workspaces-account-settings` latchkey verb).
+
+### Changed
+
+- Changed: Streamlined the workspace creation/onboarding page, dropping the build-goal and examples questions and moving returning-user log-in to the title bar.
+- Changed: On a fresh install, Imbue Studio creates its mngr profile at startup, disabling the default cloud providers from the first mngr process.
+- Changed: Account-keyed settings (update window, auto-update toggle and offer answer, notifications master toggle) move from `config.toml` to per-account records synced through the connector, edited via `GET`/`PUT /ui/api/settings/<account_id>`, which replaces the `update-window`, `auto-update` and `auto-update-prompt` POST routes.
+- Changed: Per-workspace update facts (skipped target, row dismissals) and the backup-verification flag live in the workspace itself, so every computer managing it agrees; the desktop writes a workspace profile snapshot (`data/.state/profile/account.json`, contract `workspace_profile_contract.json`).
+
+### Fixed
+
+- Fixed: A new remote workspace's latchkey gateway now receives the desktop's policy instead of a deny-all default that had rejected the Screen's in-workspace API calls.
+- Fixed: A bug report filed while an earlier report from the same workspace is still collecting now waits and collects afresh, instead of running a concurrent collection that let both time out.
+
+### Security
+
+- Security: Local Lima VMs and cloud-connection VPSes booting a kernel below the CVE-2026-98432 floor (Debian `6.12.113-1`) are badged "Security update", with a "Restart machine" action that moves them onto the fixed kernel.
+
+## [minds-v0.9.5] - 2026-10-30
+
+A patch release over 0.9.4, pinning workspace template `minds-v0.9.5`. Highlights: a redesigned workspace-update experience (a titlebar status pill, a rebuilt Settings > Updates tab, and per-workspace update settings); the app's HTTP clients move to httpx2; first-run setup verifies certificates against the operating system's store; backup exports handle files over 2 GiB; and the bundled latchkey moves to 3.21.0.
+
+### Added
+
 - Added: Nineteen more connectors (Airtable, Atlassian, Buildkite, Cal.com, Fastmail, Hugging Face, Linktree, Neon, Netlify, OpenRouter, PayPal, PostHog, Supabase, Tailscale, TickTick, Trello, Vercel, Webflow, Wix) now show their real logo in the Permissions tab instead of the generic glyph.
-- Added: Started the Imbue Studio 0.9.4 stable rollout — the desktop stable channel offers the 0.9.4 build to 20% of mac and Linux installs, and the stable download link and browser-created workspaces pin `minds-v0.9.4`.
-- Added: Released Imbue Studio 0.9.4 and promoted it to the alpha desktop and browser channels (`FALLBACK_BRANCH` pinned to `minds-v0.9.4`; beta stays 0.8.7, stable 0.8.5), carrying harness-version-mismatch warnings, Antigravity reasoning-effort recording, and (through the services deploy that went with it) the web chrome clearing its data-encryption key on sign-out.
+- Added: Bundled Latchkey 3.21.0 adds the Asana connector, shown with its brand mark in the Permissions tab.
+
+### Changed
+
+- Changed: The desktop backend's HTTP clients now use `httpx2` (Pydantic's maintained `httpx` fork); on macOS the backend sets `SSL_CERT_FILE` to its certifi bundle so TLS keeps working before Apple's 2026-10-19 emSign update, while Linux uses the host CA store.
+- Changed: Bumped bundled Latchkey to 3.20.0.
+- Changed: Redesigned workspace updates — a titlebar status pill (replacing the full-width notice band and the update popup) carries a workspace's update and opens the rebuilt Settings > Updates tab, and auto-update is now per-workspace.
+
+### Fixed
+
+- Fixed: The latchkey gateway's curl router (latchkey-curl-shims v0.7.1) no longer decodes an `X-Imbue-Impersonate` reply before forwarding it, fixing datalib's Slack sync failing on a truncated `auth.test` reply.
+- Fixed: The `/api/v1/files` WebDAV server returns `403 Forbidden` instead of `500` (and no longer reports to Sentry) when macOS privacy protection blocks a folder such as Photos, Music or TV.
+- Fixed: Creating a workspace from a remote repository with a branch it does not have (e.g. `main` on a `master`-default repo) no longer reports "This repository looks private"; the creating page explains the ref is missing (new `GIT_REF_NOT_FOUND` `error_kind`) and the failure is no longer sent to error tracking.
+- Fixed: On macOS, the traffic lights of a pulled-out window now show the normal pointer instead of the grab cursor.
+- Fixed: Exporting a workspace backup as a zip no longer fails with a 500 when the snapshot contains a file larger than 2 GiB (zip entries now use ZIP64 headers).
+- Fixed: The desktop app's bundled `uv` now trusts the OS certificate store, so first-run setup no longer fails with `invalid peer certificate` on networks that re-sign HTTPS with a private CA.
+- Fixed: A failed write to the desktop app's stdout or stderr (e.g. `ENOSPC` on a full disk) no longer crashes the Electron main process.
+
+### Security
+
+- Security: Cleared every `pnpm audit --prod` finding in the Electron package (28 advisories, 16 high) and the renderer (`dompurify` 3.4.17 fixes a critical sanitizer bypass).
+
+## [minds-v0.9.4] - 2026-10-28
+
+This section holds Imbue Studio 0.3.0 through 0.9.4; some of 0.3.0's changes are in the `v0.2.8` and `v0.2.7` sections below, which are named for mngr releases. 0.9.4 itself was a patch release: a pinned harness version that does not match the installed one warns instead of failing the create, Antigravity records reasoning effort, and, through its services deploy, the web app clears its data-encryption key on sign-out.
+
+### Added
+
 - Added: Native crashes of the desktop app's main process now carry crashpad annotations on their Sentry minidump (last navigation milestone, a once-a-minute memory snapshot, and the last main-process event handled) to diagnose an unsymbolicated `EXC_BREAKPOINT` crash.
 - Added: Imbue Studio asks before a workspace opens a custom-scheme link (e.g. `paseo://`, `slack://`, `vscode://`), with a per-scheme "Always allow"; workspace apps on newer templates can handle such links themselves.
 - Added: Workspaces update themselves unattended -- scheduling and the update run inside the workspace, so a scheduled update no longer needs Imbue Studio open or the laptop awake, with an opt-in auto-update setting and a per-release security floor.
-- Added: minds 0.9.0 released.
 - Added: On macOS, Imbue Studio lists itself in System Settings > Privacy & Security > Full Disk Access.
 - Added: `apps/minds/docs/dev-setup.md`, a canonical prerequisites + bootstrap guide for setting up minds for development; `apps/minds/README.md`'s Getting started now points to it.
 - Added: Bumped bundled Latchkey to 2.21.0.
@@ -23,15 +189,12 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Post-signin sync-status banner on the workspace list, create, and accounts pages. When an account signs in on a device with no locally synced records yet, the banner shows "Fetching synced workspaces…" while the first pull is in flight, a retrying notice if it fails, and a dismissible "Found N synced workspaces – View" link once it lands (brand-new accounts never see it). Backed by per-account initial-sync tracking on the sync scheduler and a new `/_chrome/sync-initial-status` endpoint.
 - Added: Bug reports attach the detached `mngr latchkey forward` daemon's logs (`events.jsonl` and `latchkey_forward.log`) and the shared mngr discovery event stream (`events.jsonl`), alongside the existing flat minds logs — the missing files where provider discovery actually logs and where the startup replay reads from, without which discovery bugs (e.g. destroyed workspaces reappearing at startup) were undiagnosable from a bug report.
 - Added: Each install is assigned a stable, randomly-generated anonymous user id (no PII), persisted at `<data_dir>/anonymous_user_id`, and attached to every Sentry error report across all of minds' reporting surfaces (Python backend, `mngr latchkey forward` daemon, browser web UI, Electron main process). Lets Sentry report the number of distinct installs affected by each issue.
-- Added: Released **minds v0.3.8** — pairs the current mngr `main` with a default-workspace-template snapshot that adds a safe `update-self` workspace-update flow and honest rendering of workspace-permission requests. On the mngr/minds side it carries cloud workspaces accessible from any unlocked installation, the OAuth sign-in hang fix, the post-signin synced-workspace fetch banner, and auto-verification of paid users.
-- Added: Released **minds v0.3.7** — pairs the current mngr `main` with a default-workspace-template snapshot that includes the earlyoom OOM-prioritization changes.
 - Added: Documented a fast-forward release path in `apps/minds/docs/release.md`. For low-risk bumps (no functional mngr/minds code, no `system_interface`-facing vendor change), skip the CI-surface PRs and pre-merge launch-to-msg, fast-forward the pair onto `main` to freeze the SHA pair, tag, and run launch-to-msg once on the tags.
 - Added: Electron main-process logs now persist to `~/.minds/logs/electron.log` (uncaught exceptions and unhandled rejections captured) alongside the backend's `minds.log`, so main-process failures are durably diagnosable in packaged builds. Both logs rotate at 10MB (matching the Python backend's jsonl sink) keeping the 10 newest gzipped rotations. Bug reports upload both current logs plus the most recent gzipped rotation of each under accurate names (`backend_logs` / `electron_logs`); a report filed while the backend is down still attaches both.
 - Added: Chrome-style crash recovery across all three per-window views. A workspace content view whose renderer crashes (e.g. killed over a long sleep) now shows an "Aw, Snap!"-style crash page with the crash reason and a manual Reload button instead of a blank white screen. The titlebar renderer's death shows a compact in-titlebar error strip with a Reload button (leaving the workspace content running); the overlay/menu renderer is silently reloaded so the next sidebar/inbox/help open works. Out-of-memory renderer deaths (`oom`, in any of the three views) report to Sentry automatically (subject to the error-reporting opt-in) labeled by which view died; native renderer crashes already flow to Sentry as minidumps, and sleep/external kills (`killed`) are deliberately left unreported as unactionable noise.
 - Added: Helpful guidance when creating a workspace from a private/nonexistent GitHub repo. Any failed clone of a github.com URL now shows a creating-page explanation ("the repository looks private"), recommends signing in with the GitHub CLI (`gh auth login`, linking to the official quickstart), and offers the alternative of cloning the repository locally and entering its path instead. Non-GitHub git remotes get the same guidance minus the `gh auth login` recommendation. The create-operation status API (`GET /api/v1/workspaces/operations/create/<id>`) gained an optional `error_kind` field (`GITHUB_AUTH_REQUIRED` / `GIT_AUTH_REQUIRED`) alongside the human-readable `error` message.
 - Added: Docker compute provider picks its container runtime per platform. The create form gained an advanced "Container runtime" setting (runc vs runsc) that defaults to runc on macOS (where gVisor is unavailable) and runsc on Linux, and can be overridden per workspace — macOS users no longer need the `MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=runc` env-var workaround. Selecting runsc stacks a new `docker_runsc` create-template overlay on top of the shared `docker` template, so the gVisor choice is the only difference between the two runtimes.
 - Added: Settings page gains a left nav with a Permissions section (Connectors, File sharing, Workspace delegation) that inspects and revokes agent access across all workspaces. Revoking removes only the permission rule; saved sign-ins stay so agents can reconnect later.
-- Added: Released minds v0.3.6 — rolls up all mngr/minds changes that landed on `main` since v0.3.5; pins `FALLBACK_BRANCH` at the `minds-v0.3.6` forever-claude-template tag.
 - Added: `minds server list` / `minds server prep` — env-aware wrappers around `mngr imbue_cloud admin server {list,prep}` that resolve the host_pool DSN from the activated env and inject the tier's `POOL_SSH_PRIVATE_KEY` from Vault, so operators no longer need to hand-export those values to inspect or (re-)prep bare-metal boxes.
 - Added: Backup service verification + one-click idempotent "Update backup service" action on running workspaces. The backup status check gains a per-workspace verification (one exec compares the installed `libs/host_backup` code against the `minds-v*` tag matching the app version, checks the `host-backup` supervisord program is RUNNING, and compares the workspace `restic.env` against the minds-side canonical copy); any problem shows a single warning badge on the workspace tile. The Update button checks out the code at the target tag, commits it, runs `uv sync`, and restarts + verifies the service (auto-rollback on failure). Backups can now be enabled on a configure-later workspace post-creation, and a workspace's destination can be changed (fresh provisioning against the new repo, old canonical env archived, existing snapshots retained). A per-workspace "backup verification" toggle disables the checks + badge for workspaces that deliberately run without backups.
 - Added: Modal as a selectable compute provider in the create form ("Modal (1-day ephemeral)", DIRECT mode — the local machine authenticates to Modal with its own token). Selecting it shows a short note on how to authenticate (`uv tool install modal`, `modal token new`, or `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET`). The create wires up like the other remote providers (a `modal` host address plus the `main` + `modal` provisioning templates), and `bootstrap` writes a default `[providers.modal]` block at startup. Modal deliberately gets no Stop/Resume/state-label lifecycle UI — it behaves like the other cloud providers (aws/vultr/imbue_cloud); a Modal sandbox that has timed out may still appear in the list (there is no liveness polling to mark it dead), and resuming a dead sandbox from a snapshot is intentionally not offered.
@@ -47,8 +210,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `GET /api/v1/accounts` — lists signed-in accounts so an agent can discover the id/email to pass to workspace association. Gated by a new must-ask `minds-accounts-read` permission (not in the agent baseline).
 - Added: Cross-workspace SSH tunnel broker for local Docker/Lima targets — `POST /api/v1/workspaces/<id>/ssh` against a local target brokers a reverse SSH tunnel into the calling workspace and returns a loopback endpoint, in addition to the existing remote-target path.
 - Added: User-controlled error reporting via a "Help improve Minds" consent screen (shown on first launch and after upgrading) and a Settings page reached from the sidebar. Two toggles ("Report unexpected errors" and "Include logs") take effect live, gating what Sentry sends across the backend, the browser web UI, and the Electron main process. The `MINDS_SENTRY_ENABLED` and `MINDS_SENTRY_S3_UPLOADS` env vars are retired.
-- Added: Released minds v0.3.5 (rolls up all mngr/minds changes that landed on `main` since v0.3.4; pins `FALLBACK_BRANCH` at the `minds-v0.3.5` forever-claude-template tag).
-- Added: Released minds v0.3.4 (rolls up all mngr/minds changes that landed on `main` since v0.3.3; pins `FALLBACK_BRANCH` at the `minds-v0.3.4` forever-claude-template tag).
 - Added: "Get help" button (question mark) in the top bar opens a modal for reporting a bug to Imbue. Reports include optional app-diagnostics / workspace-details / remote-access checkboxes (remembered across reports), attach logs when the include-logs setting is on, and show a copyable Sentry reference ID on success. Workspace-recovery and full-app error screens carry report buttons too; a backend-down report still files from the app shell with host info and (opt-in) logs.
 - Added: In-workspace agent bug reporting via a new authenticated `POST /api/v1/agents/<id>/report` endpoint.
 - Added: Frontend (browser) and Electron main-process JavaScript error reporting to Sentry, sharing one set of JavaScript Sentry projects (production / staging / dev), kept separate from the backend's Python projects.
@@ -64,7 +225,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Light/dark-aware titlebar that self-themes from the workspace color in pure CSS — derives a black/white contrast from `--titlebar-bg` via relative color (`lch(from ...)`) on a `.titlebar-surface` scope, so the title and buttons read correctly on any workspace color with no JavaScript luminance and no server-side foreground calculation.
 - Added: Notification badge component (`templates/Badge.jinja`) — bare 8px `important` dot, or a count pill that grows for wider numbers and caps at "99+". The titlebar's pending-request count now sits in an inline pill beside the messages icon instead of a corner dot overlapping the icon.
 - Added: `apps/minds/docs/vendor-mngr-sync.md` as the single source of truth for how FCT's `vendor/mngr` is synced (the two mechanisms: `git archive` for reproducible committed release snapshots, `rsync` for working-tree dev iteration and pool bakes).
-- Added: Released minds v0.3.2 (2026-06-22) and v0.3.3 (2026-06-24). Both pin `FALLBACK_BRANCH` at the matching `minds-v<version>` forever-claude-template tag, so a shipped binary clones the FCT snapshot it was verified against. v0.3.3 also carries the Tailwind v4 ToDesktop build fix.
 - Added: `minds pool create --backend slice` bakes pool hosts onto bare-metal "slices" (lima VMs carved on a pre-registered, prepped bare-metal box) instead of OVH VPSes. Default `--backend ovh_vps` is unchanged. The slice path resolves the tier's `pool-ssh` private key from Vault and injects it as `POOL_SSH_PRIVATE_KEY` (mirroring the OVH path's secret injection); accepts `--dry-run` and `--max-concurrency`; requires `--server-id` (the explicitly-chosen bare-metal box); and rejects OVH-only flags with a clear error.
 - Added: `minds paid {add,remove,list}` command group (plus a `just add-paid-email <email>` one-liner) for managing the connector's paid-user allowlist from an activated env. Like `minds pool`, it resolves the connector URL and the paid-list admin key from `client.toml` and Vault automatically.
 - Added: `MngrCaller` keeps a single pre-warmed, single-use `mngr` process running ahead of time and hands each call's argv over an anonymous, connected `socketpair`, so in-app `mngr` invocations (e.g. the `mngr message` after a permission decision) skip the multi-second interpreter-and-plugin import cost. `MngrMessageSender` routes through it by default.
@@ -112,11 +272,9 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Landing page now shows each local mind's container status (Running / Stopped / Unknown) and a per-state control: a Stop button (with a confirmation dialog) when running and a Start button when stopped. The Stopped state suppresses the "server not responding" health badge. Container status is read from the global discovery snapshot's `host.state` (no second `mngr list` loop), and a user-issued Start/Stop sets a short-lived optimistic override so the badge and quit prompt flip immediately.
 - Added: `POST /api/agents/{id}/stop-host`, `POST /api/agents/{id}/start-host`, `GET /api/minds/running`, and `POST /api/minds/stop-hosts` endpoints. Single-mind stop/start runs synchronously and returns the real outcome; the quit-time bulk stop issues one `mngr stop <ids…> --stop-host` (mngr stops the hosts concurrently) and reports any minds that are still running.
 - Added: Quitting page on app quit — when a quit is committed, every open window flips to a full-window "quitting" screen (the same animated wordmark as startup, with a status line) and stays there until the app closes, replacing the previously frozen-looking UI during backend teardown. The native shut-down-running-minds prompt still runs first; "Cancel quit" reverses the flip and returns the app to its normal running state.
-- Added: Cut the **0.3.0** release of the minds desktop binary; `FALLBACK_BRANCH` repointed from `v0.2.35` to FCT tag `v0.3.0` (FCT commit `82a70518`). Every provider mode that clones FCT (lima / docker / vps_docker / vultr / ovh / imbue_cloud) lands on the same reviewed snapshot — the first release on the simpler-lima architecture (FCT PR #150 dropped docker-in-VM, runs agents directly in a lima VM as root) with the M5 lima-VZ SVE2 workaround baked in (`OPENSSL_armcap=0`).
 - Added: `agent_creator`'s `clone_git_repo` and `checkout_branch` now accept commit SHAs in addition to branch and tag names. The underlying clone path switched from `git clone --single-branch --branch <ref>` to `git init && git fetch origin <ref> && git checkout -B <name> FETCH_HEAD`, which is uniform across all three input shapes (non-shallow, mirror-pushable). No behavior change for existing branch/tag inputs.
 - Added: AWS as a workspace compute-provider option (with a required per-region picker; US datacenters by default), alongside Docker, Lima, Vultr, and Imbue Cloud. Selecting AWS runs the agent in a runsc-hardened Docker container on EC2; the workspace listing now labels every row with its compute provider, and AWS hosts are long-lived (no idle shutdown, no max-lifetime cap).
 - Added: OAuth sign-in flow polish. Clicking a provider button gives immediate feedback (its logo swaps to a spinner and both provider buttons fade). The status message stages to real progress ("Opening your browser..." → "Waiting for you to finish signing in with Google/GitHub..." → "Finishing up..."), and the Minds window raises itself to the front the moment sign-in lands so you don't have to switch back manually. OAuth failures, timeouts, and lost flows surface in the same in-page error box (and cleanly reset the buttons) instead of a browser `alert()` popup.
-- Added: Released minds v0.3.9 through v0.8.7, each pinning `FALLBACK_BRANCH` to the matching `minds-v<version>` default-workspace-template tag.
 - Added: Conversational first run (`/start`): after an intro, a chat explains Imbue Studio, asks whether errors may be reported, and sets up the first workspace on Imbue Cloud (recommended: browser sign-in, then an email-verification wait), on this computer or on your own cloud, or signs in to an existing workspace. The creation page continues the conversation, which becomes the new workspace's first chat (seeded through the template's `system/scripts/seed_welcome_chat.py`). Completion is stored as `is_onboarding_complete` in `config.toml`.
 - Added: Release channels in Settings > Updates (Stable, Beta, internal Alpha), each pointing at a signed ToDesktop build in `apps/minds/release-channels.toml` with a required `rollout_percentage` (staged per install) and `platforms` list. Switching to a slower channel never downgrades; a downloaded update installs on restart (on Linux only on "Install and restart"). The updater drives `electron-updater` directly instead of `@todesktop/runtime`, enabled per tier by `update_feed_base_url` in `client.toml`. Browser-created workspaces take their template tag from `[web_channels.<channel>] template_ref`.
 - Added: Workspace updates: a workspace behind the build's supported template version gets a badge, notice band, Settings > Updates entry and update modal. "Update now" runs its `/update-self` agent as a chat; "Schedule update" (default) runs in a local update window (2:00-5:00 AM by default), skipping busy or unreachable workspaces; "Update all now" / "Schedule all updates" cover several. Only a newer minor release prompts; workspaces older than `minds-v0.3.10` are badged "Recreate to update" (`/migrate-workspace from <old>`), and an update that never started shows why ("Update didn't start").
@@ -158,43 +316,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Mint-only AI-key page (`/settings/ai-keys?workspace=<host_id>`), opened from the workspace's "Sign in with Imbue" option, mints a LiteLLM key for the workspace's account and copies a credential blob to paste back.
 - Added: Workspace apps can request microphone input (macOS still asks).
 - Added: Developer knobs `MINDS_REMOTE_DEBUGGING_PORT` (Chromium DevTools protocol on 127.0.0.1, also a `just minds-start` argument), `MINDS_WINDOW_CONTROLS=mac`, `MINDS_LATCHKEY_CURL` (dev mode only) and `start-desktop.sh --reopen`.
-- Added: Imbue Studio 0.9.1 released.
 - Added: Bumped bundled Latchkey to 3.19.4 (restores Zoom sign-in through latchkey).
 - Added: Each Imbue Studio window belongs to one account, with an account switcher in the titlebar; a window's account lives in its URL and its live channel, and the install-wide default account is removed (phase 1 of user-profile state).
 - Added: An account's home page with no workspaces of its own offers to switch the window to each other account (or the device) that has workspaces on this computer, naming how many each has.
 - Added: `GET /api/v1/agents/<agent_id>/folder-syncs` lets an agent in a workspace read this desktop's folder syncs with it (local and workspace paths, state, progress, direction, conflict rule).
 - Added: A workspace app can ask Imbue Studio to open the Permissions pane's Local files section (embed contract v11, `minds:open-local-files`).
-- Added: Released Imbue Studio 0.9.2 (a patch over 0.9.1, template `minds-v0.9.2`) and promoted it to the alpha desktop and workspace channels.
-- Added: Promoted Imbue Studio 0.9.4 to the beta desktop and browser channels (beta workspaces pin `minds-v0.9.4`, mac now requires macOS 13); stable stays 0.8.5.
-- Added: Cut the Imbue Studio 0.9.5 release and promoted it to the desktop alpha channel — a patch release carrying a redesigned workspace-update experience (titlebar status pill, rebuilt Settings > Updates tab, per-workspace update settings), HTTP clients moved to httpx2, first-run certificate verification against the OS trust store, >2 GiB backup exports, and bundled Latchkey 3.21.0.
-- Added: Bundled Latchkey 3.21.0 adds the Asana connector, shown with its brand mark in the Permissions tab.
-- Added: Workspace Screen immersive mode (embed contract v12): a Screen window can go fullscreen with the keyboard locked so every key reaches the remote desktop.
-- Added: Agent-reachable `media-endpoints` and `ice-servers` routes (per-account Cloudflare TURN credentials) for the workspace Screen, via the latchkey `minds-api-proxy`.
-- Added: `minds:open-share-settings` accepts an optional `serviceName` to open the whole-workspace Share tab (embed contract v13).
-- Added: The browser sign-in permission dialog can accept a pasted token instead of opening a browser.
-- Added: Keybindings are an account-keyed setting delivered to workspaces in the profile snapshot, editable from a workspace via `PUT /api/v1/workspaces/<agent_id>/account-settings/keybindings` (gated by the `minds-workspaces-account-settings` latchkey verb).
-- Added: `docs/deploy/history/rollouts/gvisor-inode-map-leak.md` rollout page: why gVisor's own memory grows on runsc older than `20261102`, the affected-workspace survey, and the runbook for moving the fleet onto `20261102` (`minds-admin install-runsc` and `restart-workspace-container` per leased workspace, then a rebake).
-- Added: The pool-hosts runbook gains an "Alerts: an empty or thin pool" section covering the new pool-stock alert rules, their Slack card, and the fix for each lease outcome.
-- Added: The desktop app bundles the `imbue-mngr-grok` agent-type plugin.
-- Added: Released Imbue Studio 0.10.1, 0.10.2 and 0.10.3; alpha (mac, Linux and web) moves to 0.10.3, beta and stable stay on 0.9.4.
-- Added: Opt-in profiling mode: `minds run --profile PATH` (or `MINDS_PROFILE_FILE`) records one Perfetto-readable Chrome JSON trace covering backend requests, warm `mngr` processes, the UI and Chromium, with no secrets in spans.
-- Added: Agents can run commands on the user's computer through `POST /api/v1/remote-execution/<device_id>?program=<program>`, gated by an off-by-default per-device Settings > This computer switch, a device-pinned per-workspace `remote-execution` grant (any command or one program), and a per-call re-check; output streams as NDJSON and every command is logged.
-- Added: `GET /api/v1/workspaces` reports each workspace's `launch_mode`, `instance_type`, `cpu_count`, `memory_gb` and `disk_gb`, and new `GET /api/v1/workspaces/cloud-accounts` lists create targets; the `imbue-studio` skill uses them to place and size new workspaces.
-- Added: The create form offers a root disk size for AWS, GCP and Azure workspaces (default 50 GB).
-- Added: Notifications (feed, toast, OS banner) when an Imbue account is signed out by session expiry or a workspace stops responding and cannot be restarted.
-- Added: The titlebar account switcher marks accounts with no session on this device as "(signed out)" and offers a per-row "Sign in".
-- Added: `custom-service` permission requests may use Latchkey 3.22.0's `mcp` login flow, checked against the metadata the MCP server publishes.
-- Added: Released Imbue Studio 0.10.4, a patch over 0.10.3 pinning template `minds-v0.10.4` (Claude Code 2.1.323 / Claude Fable 5.2, Codex 0.169.0, OpenCode 1.19.5), carrying the error-copy rewrite, system-browser sign-ins, latchkey 3.24.0 and paramiko 5.0.1, and promoted it to the alpha desktop (mac, Linux) and browser channels; beta and stable stay on 0.9.4.
-- Added: Agents can ask for a `custom-service` connection to be proxied through the desktop with `"proxy": true`; the approval dialog shows the **Proxy through my desktop** switch, and approving creates, grants and routes the connection in one change.
-- Added: Released Imbue Studio 0.10.5, a patch cut from the `minds-v0.10.4` tag (0.10.4's app with template `minds-v0.10.5`, which moves apps off the Screen's ports 8090/8091), and promoted it to the alpha and stable desktop (mac, Linux) and browser channels; beta stays on 0.9.4.
-- Added: Shared with me: workspaces and apps shared with the window's account are listed with owner, status, liveness and last-open verdict, offering open, decline (with undo), report (a permanent strike against the owner), retry, remove and a pasted-link input; opening signs a per-account Electron session into the accounts origin and loads the share in the workspace frame; `imbue-studio://shared/<host-id>` deep links land on its card.
-- Added: Shared workspaces report `is_owned=false` (UI channel schema 29, `GET /api/v1/workspaces` with `share_link`, titlebar), hide owner-only tabs, and refuse owner actions with `403 not_owned`.
 
 ### Changed
 
-- Changed: The desktop backend's HTTP clients now use `httpx2` (Pydantic's maintained `httpx` fork); on macOS the backend sets `SSL_CERT_FILE` to its certifi bundle so TLS keeps working before Apple's 2026-10-19 emSign update, while Linux uses the host CA store.
-- Changed: Bumped bundled Latchkey to 3.20.0.
-- Changed: Redesigned workspace updates — a titlebar status pill (replacing the full-width notice band and the update popup) carries a workspace's update and opens the rebuilt Settings > Updates tab, and auto-update is now per-workspace.
 - Changed: The update modal's security-fix notice is now drawn in the warning (orange) palette with plainer "See details" text.
 - Changed: The "Failed to start" screen (and reports filed from it) now show the backend's last stderr lines, exit code or signal, run duration, and how it was launched, instead of only the exit code.
 - Changed: Redesigned the share panel into two-line person cards that show whether each person has opened your workspace and where their invitation stands, replacing the "(hasn't signed up yet)" / "Joined" text.
@@ -378,34 +507,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: A synced folder reads "Syncing" until unison's first pass has compared both sides and left them level, and only then "Synced"; it used to say "Synced" the moment unison started.
 - Changed: A popped-out window no longer merges back when dragged over the window showing its workspace; its close control and the taskbar's "Bring back to desktop" remain the ways back, and the re-dock drop target and desktop ghost are gone.
 - Changed: The backup, restore and apply-update gates count a chat whose state can't be read (UNKNOWN) as running, so they don't run underneath a live chat on a loaded workspace.
-- Changed: Completed the Imbue Studio 0.9.4 stable rollout to 100% of mac (macOS 13+) and Linux installs; macOS 12 stays on 0.8.5.
-- Changed: Streamlined the workspace creation/onboarding page, dropping the build-goal and examples questions and moving returning-user log-in to the title bar.
-- Changed: On a fresh install, Imbue Studio creates its mngr profile at startup, disabling the default cloud providers from the first mngr process.
-- Changed: Imbue Studio 0.10.0: app version 0.10.0 with the pinned template at `minds-v0.10.0` (the Screen, multiplayer chat rooms, per-account keybindings, kernel security badge); the alpha channel is promoted to it.
-- Changed: App data moves off `~/.minds` on first launch -- on macOS to `~/Library/Application Support/Imbue Studio/<env>/` (plus `Caches` and `Logs`), on Linux to the XDG base directories (`imbue-studio/<tier>` under `$XDG_DATA_HOME`, `$XDG_CACHE_HOME`, `$XDG_STATE_HOME`) -- rewriting stored paths; a failed move refuses to start, writes `migration-failure.log` and retries, and the `minds` CLI refuses to run before the move.
-- Changed: `MINDS_DATA_HOME` is renamed `STUDIO_ROOTS_OVERRIDE`; setting only the old name raises.
-- Changed: Account-keyed settings (update window, auto-update toggle and offer answer, notifications master toggle) move from `config.toml` to per-account records synced through the connector, edited via `GET`/`PUT /ui/api/settings/<account_id>`, which replaces the `update-window`, `auto-update` and `auto-update-prompt` POST routes.
-- Changed: Per-workspace update facts (skipped target, row dismissals) and the backup-verification flag live in the workspace itself, so every computer managing it agrees; the desktop writes a workspace profile snapshot (`data/.state/profile/account.json`, contract `workspace_profile_contract.json`).
-- Changed: Production services deployed from `b6ac524b4b` (`20261103T200211Z`), shipping the pool card and the pool-stock alert rollout.
-- Changed: `install-linux.sh --raspberry-pi` installs gVisor `20261102` from its release tarball and upgrades an older runsc it installed instead of skipping.
-- Changed: The Linux launcher `install-linux.sh` writes is now `~/.local/bin/studio-desktop`; the old `minds-desktop` launcher is left in place and keeps working (delete it by hand).
-- Changed: "Remove from this list" on a landing-page tile retires the workspace record instead of deleting it: any record but an untouched stub moves to "Recently destroyed", so its backups stay restorable through the retention window.
-- Changed: Imbue Cloud backups move to the backup store (`rest:` repositories with per-repository tokens instead of per-bucket Cloudflare keys; restic 0.16+ required). Legacy buckets migrate automatically, older snapshots stay listed under "Previous storage", and freeing space no longer needs a cleanup grant. Tier deploys need `[backup_store] is_deployed` and the `secrets/minds/<tier>/backup-store` Vault entry.
-- Changed: New workspaces open on their welcome chat sooner: the wash stays until the chat is on screen, create status is polled every 250 ms while the workspace boots, and default-template creates copy a release cached at launch (`template-cache/`) instead of cloning from GitHub; the first-run cloud create skips a redundant verification check and Docker probes after browser sign-in.
-- Changed: Opening the share panel and saving a grant each make one connector call (was up to three plus one per grantee); the sharing document carries `invitation_outcomes`.
-- Changed: Custom connections belong to the machine they were created on, and signing out of a custom service's last account deregisters it there.
-- Changed: Protocol-handshake permissions (MCP session, Fastmail JMAP and DAV discovery) are implicit in every grant and no longer shown as a "Session" switch.
-- Changed: The desktop writes `data/.secrets/share_identities.json` beside the grants so the workspace roster names grantees who have not arrived yet.
-- Changed: Provider sign-in relay refusals carry a `reason` (embed contract v14), letting a workspace retry on a fresh port instead of falling back to paste-a-code.
-- Changed: The pool-host runbook (`docs/deploy/ops/pool-hosts.md`) says to bake a tag from an mngr checkout at that same tag (a newer checkout can fail every slice of an older tag), that a pre-`minds-v0.10.0` tag needs a box with no `minds-v0.10.0`+ slice, and that the baking machine must stay awake until the bake exits.
-- Changed: A workspace created through `POST /api/v1/workspaces` with an `account_id` and no `backup_provider` now gets Imbue backups by default, as desktop-created ones do.
-- Changed: Plainer, actionable error messages across the desktop app -- workspaces list and recovery card, create and sign-in, sharing, updates, workspace settings, permissions, backups and removal, and the startup and setup screens -- drawn with one shared error design: a sentence saying what failed and what to do, raw output behind "See details", the fix as the main button, and "Report a bug" attaching the error to the report.
-- Changed: Browser sign-ins to services whose latchkey reports `systemBrowserLogin` (Google, Ramp, Fastmail, MCP servers' OAuth) open in the user's own default browser (`latchkey auth browser --system`), and skip the Chrome cookie-import offer; adding a further account keeps latchkey's ephemeral browser.
-- Changed: Every MCP-based sign-in (builtin `*-mcp` connectors and custom MCP-flow services) returns through Imbue Studio's hosted callback page, so the consent screen no longer shows a localhost redirect.
-- Changed: Bundled latchkey moves to 3.24.0.
-- Changed: Host recovery worker log records carry `recovery_kind`, `recovery_trigger` and `provider_name`; `dispatch_host_recovery` takes a required `trigger` argument.
-- Changed: Redesigned the home page as Workspaces, Apps and Invitations tabs: wallpaper workspace cards with status badges and a "..." menu, shared-workspace guest cards, desktop-style icons for own and shared apps, and Join/Decline invitation cards; "Studio settings" moves into the section head and the bottom-left launchers are removed.
-- Changed: A share grants push carries each target's label and display name and the workspace name, and a domain grant may only name the granter's own email domain (none for a public mail provider), enforced by the share panel and the connector.
+- Changed: On macOS, app data moves from `~/.minds` to `~/Library/Application Support/Imbue Studio/<env>/` (plus `Caches` and `Logs`) on first launch, rewriting stored paths; a failed move refuses to start, writes `migration-failure.log` and retries. Other platforms keep `~/.minds`.
 
 ### Deprecated
 
@@ -435,12 +537,9 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Removed: Browser-mode Web Notifications and the osascript/tkinter notification fallbacks; only the desktop app delivers OS notifications.
 - Removed: The titlebar back button and global back/forward arrows.
 - Removed: `scripts/install-wsl.sh` and `scripts/setup-raspberry-pi.sh`, folded into `install-linux.sh`.
-- Removed: The "How should Imbue Studio notify you?" card after the first notification; notifications stay on the default (in-app cards and system banners) until changed in Settings > Notifications, and `notification_prefs` drops `has_chosen`.
 
 ### Fixed
 
-- Fixed: The latchkey gateway's curl router (latchkey-curl-shims v0.7.1) no longer decodes an `X-Imbue-Impersonate` reply before forwarding it, fixing datalib's Slack sync failing on a truncated `auth.test` reply.
-- Fixed: The `/api/v1/files` WebDAV server returns `403 Forbidden` instead of `500` (and no longer reports to Sentry) when macOS privacy protection blocks a folder such as Photos, Music or TV.
 - Fixed: An update running on a workspace whose template predates minds-v0.8.x is no longer stopped partway when the workspace runs short of memory.
 - Fixed: Updating a workspace from before minds-v0.8.7 no longer shows the update as waiting on you while its agent runs a background command.
 - Fixed: A folder sync whose workspace was not running now waits and starts once the workspace is running again, instead of staying stopped until "Try again".
@@ -569,29 +668,9 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: Adding a path that is already shared no longer re-grades it to read-only, which used to take away write access and turn a two-way sync one-way.
 - Fixed: The Permissions pane's once-a-second poll no longer shows a sync that failed to come back at launch as a plain "stopped" row while another sync is running; it reports the failure.
 - Fixed: Quitting Imbue Studio now reliably stops every folder sync, including one that was part-way to starting (which used to leave a `mngr pair` and its unison outliving the app).
-- Fixed: Creating a workspace from a remote repository with a branch it does not have (e.g. `main` on a `master`-default repo) no longer reports "This repository looks private"; the creating page explains the ref is missing (new `GIT_REF_NOT_FOUND` `error_kind`) and the failure is no longer sent to error tracking.
-- Fixed: On macOS, the traffic lights of a pulled-out window now show the normal pointer instead of the grab cursor.
-- Fixed: Exporting a workspace backup as a zip no longer fails with a 500 when the snapshot contains a file larger than 2 GiB (zip entries now use ZIP64 headers).
-- Fixed: The desktop app's bundled `uv` now trusts the OS certificate store, so first-run setup no longer fails with `invalid peer certificate` on networks that re-sign HTTPS with a private CA.
-- Fixed: A failed write to the desktop app's stdout or stderr (e.g. `ENOSPC` on a full disk) no longer crashes the Electron main process.
-- Fixed: A new remote workspace's latchkey gateway now receives the desktop's policy instead of a deny-all default that had rejected the Screen's in-workspace API calls.
-- Fixed: A bug report filed while an earlier report from the same workspace is still collecting now waits and collects afresh, instead of running a concurrent collection that let both time out.
-- Fixed: Electron's log path now points at the tier's log root (on macOS the default omitted the tier).
-- Fixed: Freeing backup space for a new workspace finds a destroyed workspace's real (workspace-named) backup bucket, instead of guessing a machine-named one, deleting the record without freeing anything, and leaving the new workspace without backups.
-- Fixed: A chat whose turn ended with background work still running (mngr's new `RUNNING_BACKGROUND`) is no longer interrupted by backup programs or nudged by the update watchdog.
-- Fixed: Long-lived remote workspaces no longer fail new sign-ins and grants with a policy past the 100,000-byte remote command cap: the Minds API allowlist is pinned to discovered agents and sent without whitespace.
-- Fixed: Workspaces can again be created on AWS, GCP and Azure connections from templates that publish ports; new connections get the Screen ports in `firewall_published_ports` (existing ones need their cloud's `prepare` rerun).
-- Fixed: The desktop app again refuses `openExternal`, routing custom-scheme launches through the ask-first link router instead of silently granting them.
-- Fixed: Starting the desktop app no longer wipes a remote workspace's connector grants made from another computer; policy writes now read the machine's policy first and are refused when it cannot be read.
-- Fixed: Starting the app with a stopped remote workspace no longer logs "Host not found" for its latchkey permissions, and a change to its registered agents is held until discovery finds it running instead of being lost.
-- Fixed: Opening the Screen no longer triggers macOS's local-network prompt; Studio's WebRTC no longer announces the Mac's local address.
-- Fixed: Mutating backup programs and the update watchdog no longer interrupt a chat whose agent type mngr's config doesn't name (`RUNNING_UNKNOWN_AGENT_TYPE`).
-- Fixed: Retry on a failed first-launch setup runs setup again instead of only starting the app, and "View full log" opens the log holding the failure instead of silently doing nothing.
-- Fixed: A removal that finished before Imbue Studio can confirm the workspace is gone reads "Confirming removal..." and keeps checking instead of showing as failed.
 
 ### Security
 
-- Security: Cleared every `pnpm audit --prod` finding in the Electron package (28 advisories, 16 high) and the renderer (`dompurify` 3.4.17 fixes a critical sanitizer bypass).
 - Security: The desktop app's Electron 45 bundle moves to 45.1.0, adding Chromium 156 security fixes and stricter handling of malformed asar archives and File System Access writes to `.git/hooks`.
 - Security: Security update for the emSign/eMudhra CA compromise -- Electron 45, uv 0.13.4, certifi 2026.10.19 and Node 24.22.1 drop the compromised CA root, and workspaces below the new security floor are offered the fix (Electron 45 drops macOS 12 support).
 - Security: Redact secrets from persisted logs. The `mngr create` subprocess is now given a log-safe process `name` with the latchkey gateway password and permissions-override JWT masked, so those secrets no longer leak into the JSONL log's `thread_name` field or `ProcessError` messages. The `modal secret create` subprocess used by `minds env` deploy tooling is likewise named with its `KEY=VALUE` secret values masked so raw Vault secrets no longer reach the thread name or error messages. The Electron backend log (`minds.log`, uploaded with bug reports) now masks the `mngr forward` preauth cookie — a reusable, session-lifetime bearer token — before writing backend stdout events to disk. The single-use one-time login code is left as-is (spent immediately at session start).
@@ -600,9 +679,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Security: Desktop probes of the local `mngr forward` proxy verify its TLS certificate against the proxy's local CA, and the Electron shell trusts a loopback forward-proxy origin only when its leaf was signed by that CA, instead of disabling certificate verification.
 - Security: The share-URL readiness probe verifies certificate chains against the system roots instead of disabling verification altogether.
 - Security: The frontend and Electron pnpm workspaces enforce `trustPolicy: no-downgrade` and `blockExoticSubdeps: true`, rejecting trust-downgraded releases and git/tarball transitive dependencies.
-- Security: Local Lima VMs and cloud-connection VPSes booting a kernel below the CVE-2026-98432 floor (Debian `6.12.113-1`) are badged "Security update", with a "Restart machine" action that moves them onto the fixed kernel.
-- Security: The ToDesktop build upload excludes `.env` files from `apps/minds`, so local credentials cannot ride into a packaged app.
-- Security: The desktop app bundles filelock 4.2.4, paramiko 5.0.1 and pyasn1 0.6.5, fixing reported advisories; paramiko 5 can no longer reach SSH servers that offer only SHA-1 key exchange or SHA-1 RSA signatures.
 
 ## [v0.2.8] - 2026-05-13
 
