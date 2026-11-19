@@ -195,7 +195,7 @@ PERMISSIONS_CONFIG_FILENAME: Final[str] = "permissions.json"
 # such a custom service has its redirect URI pinned
 # (:data:`MINDS_OAUTH_REDIRECT_URI`); an older CLI refuses the preparation, and
 # with it the sign-in.
-LATCHKEY_MIN_VERSION: Final[str] = "3.24.0"
+LATCHKEY_MIN_VERSION: Final[str] = "3.25.0"
 
 # Fixed port at which every containerized/VM/VPS agent reaches the Latchkey
 # gateway. A desktop-gateway agent sees it on its own 127.0.0.1 (a per-agent

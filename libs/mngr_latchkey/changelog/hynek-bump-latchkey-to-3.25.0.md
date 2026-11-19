@@ -1,0 +1,1 @@
+- The latchkey version installed on remote hosts, and the minimum version a local CLI must have (`LATCHKEY_MIN_VERSION`), both move to 3.25.0. The minimum only keeps the pins in lockstep: nothing here depends on 3.25.0.
