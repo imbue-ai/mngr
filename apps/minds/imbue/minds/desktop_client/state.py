@@ -35,6 +35,7 @@ from imbue.minds.desktop_client.backup_trim import BackupTrimManager
 from imbue.minds.desktop_client.connection_operations import ConnectionOperationRegistry
 from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
 from imbue.minds.desktop_client.connections.provider_settings import ProviderSettingsMaterializer
+from imbue.minds.desktop_client.device_resource_monitor import DeviceResourceMonitor
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
 from imbue.minds.desktop_client.folder_sync import FolderSyncManager
@@ -284,6 +285,9 @@ class DesktopClientState(MutableModel):
         default=None,
         frozen=True,
         description="Whether this device can reach anything, for the restart paths that would otherwise be doomed",
+    )
+    device_resource_monitor: DeviceResourceMonitor | None = Field(
+        default=None, frozen=True, description="The titlebar resource gauge's readings of this computer"
     )
     mngr_binary: str = Field(default="mngr", frozen=True, description="Path/name of the mngr binary to shell out to")
     mngr_caller: MngrCaller | None = Field(

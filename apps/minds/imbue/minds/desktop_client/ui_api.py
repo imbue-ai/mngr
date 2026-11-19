@@ -33,6 +33,7 @@ from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_account_scope import is_valid_account_id
 from imbue.minds.desktop_client.ui_api_create import register_create_routes
+from imbue.minds.desktop_client.ui_api_device_resources import register_device_resource_routes
 from imbue.minds.desktop_client.ui_api_folder_syncs import register_folder_sync_routes
 from imbue.minds.desktop_client.ui_api_inbox import register_inbox_routes
 from imbue.minds.desktop_client.ui_api_lifecycle import register_lifecycle_routes
@@ -328,6 +329,7 @@ def create_ui_blueprint() -> Blueprint:
     register_lifecycle_routes(blueprint)
     register_inbox_routes(blueprint)
     register_notification_routes(blueprint)
+    register_device_resource_routes(blueprint)
     register_onboarding_routes(blueprint)
     register_update_routes(blueprint)
     register_user_routes(blueprint)

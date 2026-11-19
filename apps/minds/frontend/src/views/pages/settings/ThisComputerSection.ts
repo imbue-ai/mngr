@@ -15,6 +15,8 @@ import {
   remoteExecutionWarningBanner,
 } from "../../components/RemoteExecutionWarning";
 import { renderSwitch } from "../../components/Switch";
+import { getAppContext } from "../../../app-context";
+import { DeviceResourceSettingsBlock } from "./DeviceResourceSettings";
 
 /** The warning that stands between the switch and its write: the user has to
  * read what they are allowing and tick that they understand it before the
@@ -157,5 +159,6 @@ export function thisComputerPanel(model: SettingsModel): m.Children {
         )
       : null,
     remoteExecutionWarningModal(model),
+    m(DeviceResourceSettingsBlock, { store: getAppContext().shell.stores.deviceResources }),
   ]);
 }

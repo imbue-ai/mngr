@@ -36,6 +36,8 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.connections.data_types import DEFAULT_CREDENTIAL_SOURCE_NAME
 from imbue.minds.desktop_client.data_types import NotificationDestination
+from imbue.minds.desktop_client.device_resources import DeviceResourceSettings
+from imbue.minds.desktop_client.device_resources import DeviceResourceView
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.environment_signals import EnvironmentCondition
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncActivity
@@ -66,7 +68,7 @@ from imbue.mngr_latchkey.file_sharing import FileSharingAccess
 # while a window stayed open across a reconnect -- it cannot catch assets
 # built for another version being served with a matching bootstrap, since
 # both values come from the same live server.
-UI_SCHEMA_VERSION: int = 29
+UI_SCHEMA_VERSION: int = 30
 
 
 class UiSharedWorkspaceOwner(FrozenModel):
@@ -882,6 +884,15 @@ class UiEnvironmentMessage(FrozenModel):
     )
 
 
+class UiDeviceResourcesMessage(FrozenModel):
+    """This computer's resource readings and warnings, as one app-global fact (``device_resources.py``)."""
+
+    type: Literal["device_resources"] = "device_resources"
+    view: DeviceResourceView | None = Field(
+        description="The readings and warnings; None when this backend measures nothing (a test app, or no data directory)"
+    )
+
+
 class UiWorkspaceStoppedMessage(FrozenModel):
     """An in-app action stopped this workspace's host; open views must not observe (and restart) it."""
 
@@ -996,6 +1007,9 @@ class UiSnapshot(FrozenModel):
     discovery_health: UiDiscoveryHealthMessage = Field(description="Current discovery pipeline health")
     workspace_updates: UiWorkspaceUpdatesMessage = Field(description="Current per-workspace update state")
     environment: UiEnvironmentMessage = Field(description="Current device-level connectivity condition")
+    device_resources: UiDeviceResourcesMessage = Field(
+        description="Current resource readings and warnings for this computer"
+    )
 
 
 class UiBootstrapSeed(FrozenModel):
@@ -1545,6 +1559,8 @@ class UiWireSchema(FrozenModel):
     discovery_health: UiDiscoveryHealthMessage = Field(description="discovery_health frame")
     workspace_updates: UiWorkspaceUpdatesMessage = Field(description="workspace_updates frame")
     environment: UiEnvironmentMessage = Field(description="environment frame")
+    device_resources: UiDeviceResourcesMessage = Field(description="device_resources frame")
+    device_resource_settings: DeviceResourceSettings = Field(description="device-resources/settings request body")
     workspace_stopped: UiWorkspaceStoppedMessage = Field(description="workspace_stopped frame")
     open_help: UiOpenHelpMessage = Field(description="open_help frame")
     workspace_refresh: UiWorkspaceRefreshMessage = Field(description="workspace_refresh frame")

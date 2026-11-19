@@ -146,6 +146,8 @@ def desktop_client_runtime(
         # same lifetime.
         if state.machine_stop_kind_tracker is not None:
             state.machine_stop_kind_tracker.start(state.root_concurrency_group)
+        if state.device_resource_monitor is not None:
+            state.device_resource_monitor.start(state.root_concurrency_group)
     try:
         yield
     finally:
@@ -169,6 +171,8 @@ def _shutdown_desktop_client(state: DesktopClientState, is_externally_managed_cl
         state.ui_publisher.stop()
     if state.machine_stop_kind_tracker is not None:
         state.machine_stop_kind_tracker.stop()
+    if state.device_resource_monitor is not None:
+        state.device_resource_monitor.stop()
     state.ui_channel_broadcaster.shutdown()
     if not is_externally_managed_client and state.http_client is not None:
         state.http_client.close()

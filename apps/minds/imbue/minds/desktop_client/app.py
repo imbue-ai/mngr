@@ -93,6 +93,7 @@ from imbue.minds.desktop_client.destroying import delete_destroying
 from imbue.minds.desktop_client.destroying import destroy_row_state
 from imbue.minds.desktop_client.destroying import is_host_still_active
 from imbue.minds.desktop_client.destroying import list_destroying
+from imbue.minds.desktop_client.device_resource_monitor import DeviceResourceMonitor
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
@@ -197,6 +198,7 @@ from imbue.minds.desktop_client.ui_models import UiAccountEntry
 from imbue.minds.desktop_client.ui_models import UiAccountProvidersEntry
 from imbue.minds.desktop_client.ui_models import UiAccountsMessage
 from imbue.minds.desktop_client.ui_models import UiConnectionEntry
+from imbue.minds.desktop_client.ui_models import UiDeviceResourcesMessage
 from imbue.minds.desktop_client.ui_models import UiDiscoveryHealthMessage
 from imbue.minds.desktop_client.ui_models import UiEnvironmentMessage
 from imbue.minds.desktop_client.ui_models import UiHealthMessage
@@ -2957,6 +2959,7 @@ def _create_ui_state_publisher(
     workspace_facts_cache: WorkspaceFactsCache | None,
     connectivity_detector: ConnectivityDetector | None,
     machine_stop_kind_tracker: MachineStopKindTracker | None,
+    device_resource_monitor: DeviceResourceMonitor | None,
 ) -> UiStatePublisher:
     """Build the channel publisher from the same derivation helpers the legacy SSE uses."""
     deriver = _LegacyUiStateDeriver(
@@ -2981,6 +2984,9 @@ def _create_ui_state_publisher(
         derive_requests_and_notifications=deriver.derive_requests_and_notifications,
         derive_discovery_health=deriver.derive_discovery_health,
         derive_environment=deriver.derive_environment,
+        derive_device_resources=lambda: UiDeviceResourcesMessage(
+            view=device_resource_monitor.view() if device_resource_monitor is not None else None
+        ),
         derive_health_states=deriver.derive_health_states,
         derive_workspace_updates=deriver.derive_workspace_updates,
         derive_account_update_settings=deriver.derive_account_update_settings,
@@ -3050,6 +3056,7 @@ def create_desktop_client(
     sign_in_browsers: SignInBrowsersInterface | None = None,
     sleep_tracker: SleepTracker | None = None,
     folder_sync_manager: FolderSyncManager | None = None,
+    device_resource_monitor: DeviceResourceMonitor | None = None,
     device_id: str = "",
     identity_cache: IdentityCache | None = None,
     forward_identity: ForwardIdentityPublisher | None = None,
@@ -3222,6 +3229,7 @@ def create_desktop_client(
         workspace_facts_cache=workspace_facts_cache,
         connectivity_detector=connectivity_detector,
         machine_stop_kind_tracker=machine_stop_kind_tracker,
+        device_resource_monitor=device_resource_monitor,
     )
     # The publisher exists only now; the tracker's changes re-derive the list through it.
     machine_stop_kind_tracker.on_change = ui_publisher.notify_change
@@ -3231,6 +3239,10 @@ def create_desktop_client(
         shared_with_me_store.on_change = ui_publisher.notify_change
     if wallpaper_cache is not None:
         wallpaper_cache.on_change = ui_publisher.notify_change
+    if device_resource_monitor is not None:
+        device_resource_monitor.add_on_push_callback(
+            lambda view: ui_publisher.publish_device_resources(UiDeviceResourcesMessage(view=view))
+        )
 
     # The durable notification feed behind the channel's notifications frame,
     # reconciled by the notifications derive on every publish tick. Its OS
@@ -3331,6 +3343,7 @@ def create_desktop_client(
         device_id=device_id,
         discovery_health_watchdog=discovery_health_watchdog,
         connectivity_detector=connectivity_detector,
+        device_resource_monitor=device_resource_monitor,
         # The real machine's probe needs a group to run commands under; an app
         # built without one gets no probe and the create form reports nothing.
         host_probe=(

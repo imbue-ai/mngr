@@ -5,6 +5,7 @@
 
 import type { UiBootstrap } from "../channel/messages";
 import { AccountsStore } from "./accounts";
+import { DeviceResourcesStore } from "./deviceResources";
 import { HealthStore } from "./health";
 import { NotificationsStore } from "./notifications";
 import { ProvidersStore } from "./providers";
@@ -20,6 +21,7 @@ export interface AppStores {
   accounts: AccountsStore;
   providers: ProvidersStore;
   updates: UpdatesStore;
+  deviceResources: DeviceResourcesStore;
 }
 
 export interface BootContext {
@@ -51,6 +53,7 @@ export function createEmptyStores(): AppStores {
     accounts: new AccountsStore(),
     providers: new ProvidersStore(),
     updates: new UpdatesStore((agentId) => workspaces.entryByAnyId(agentId)?.liveness ?? ""),
+    deviceResources: new DeviceResourcesStore(),
   };
 }
 
@@ -81,4 +84,5 @@ export function applySnapshotToStores(stores: AppStores, bootstrap: Pick<UiBoots
   stores.health.applyEnvironmentMessage(snapshot.environment);
   for (const health of snapshot.health) stores.health.applyHealthMessage(health);
   stores.updates.applyUpdatesMessage(snapshot.workspace_updates);
+  stores.deviceResources.applyMessage(snapshot.device_resources);
 }

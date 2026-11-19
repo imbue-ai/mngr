@@ -380,6 +380,7 @@ describe("boot seeding", () => {
         // frame exists for, and NONE is the value that would read the same
         // whether the seeding happened or not.
         environment: { type: "environment", state: "OFFLINE" },
+        device_resources: { type: "device_resources", view: null },
       },
     });
     expect(boot.seed.isMac).toBe(true);
@@ -426,6 +427,7 @@ describe("boot seeding", () => {
           update_window: "2:00 AM-5:00 AM",
         },
         environment: { type: "environment", state: "OFFLINE" },
+        device_resources: { type: "device_resources", view: null },
       },
     });
     expect(stores.requests.requestIds).toEqual(["evt-1"]);

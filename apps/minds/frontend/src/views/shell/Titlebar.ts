@@ -25,6 +25,7 @@ import type { ChromeAnchor, ShellState } from "./shell-state";
 import type { TitlebarContext } from "./classify";
 import { classifyRoute, hubPagePath, isWorkspaceOverlayPath } from "./classify";
 import { AccountSwitcherButton } from "./AccountSwitcher";
+import { DeviceResourceWarning, DeviceResourceWarningSlot } from "./ResourceWarning";
 import { TitlebarStatusPill } from "./titlebar-status";
 import { titlebarStatusFor } from "./workspace-notices";
 import { defaultFetchJson } from "../../models/workspaceOptions";
@@ -420,6 +421,9 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
           "div",
           { class: "flex items-center justify-end shrink-0 gap-1 pr-1" },
           [
+            // This computer's resource warning, left of the account: about the device, not the account. Only
+            // its place is kept here; the live pill is drawn above the bar (see ResourceWarning.ts).
+            m(DeviceResourceWarningSlot, { store: shell.stores.deviceResources }),
             // The account this window shows, first in the group: left of the bell.
             m(AccountSwitcherButton, { shell, popupHiddenClass }),
             notificationsBell(shell, popupHiddenClass),
@@ -494,7 +498,12 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
               ],
             )
           : null;
-      return [bar, dialog];
+      const resourceWarning = m(DeviceResourceWarning, {
+        store: shell.stores.deviceResources,
+        onOpenSettings: () => m.route.set("/settings", shell.overlayQuery({ section: "this-computer" })),
+        extra: popupHiddenClass,
+      });
+      return [bar, resourceWarning, dialog];
     },
   };
 }

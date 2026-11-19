@@ -12,7 +12,7 @@ import type {
   UiWorkspaceUpdate,
   UiWorkspacesMessage,
 } from "./channel/messages";
-import type { UiSharedWorkspace } from "./generated/ui";
+import type { UiDeviceResourcesMessage, UiSharedWorkspace } from "./generated/ui";
 import { createEmptyStores } from "./models/boot";
 import type { RequestResult } from "./models/errors";
 import type {
@@ -1010,4 +1010,24 @@ export function errorMarks(node: unknown): AnyVnode[] {
   return collectVnodes(node).filter(
     (vnode) => vnode.tag === "<" && vnode.children === ICONS_16["alert-filled"],
   );
+}
+
+const GIB_BYTES = 1024 ** 3;
+
+type DeviceResourceWireView = NonNullable<UiDeviceResourcesMessage["view"]>;
+
+/** This computer's resource readings and warning levels as the backend sends them: calm, the disk warning at 10 GB. */
+export function deviceResourcesWireView(
+  overrides: Partial<DeviceResourceWireView> = {},
+): DeviceResourceWireView {
+  return {
+    settings: { disk_warning_free_gb: 10, memory_warning_percent: null, cpu_warning_percent: null },
+    readings: {
+      cpu: { percent: 25, recent_percent: 20, cores: 8 },
+      memory: { used_bytes: 12 * GIB_BYTES, free_bytes: 4 * GIB_BYTES, total_bytes: 16 * GIB_BYTES },
+      disk: { used_bytes: 400 * GIB_BYTES, free_bytes: 100 * GIB_BYTES, total_bytes: 500 * GIB_BYTES, seconds_to_full: null },
+    },
+    alerts: [],
+    ...overrides,
+  };
 }

@@ -12,6 +12,7 @@ import type {
   UiAccountsMessage,
   UiBootstrap,
   UiBringAppToFrontMessage,
+  UiDeviceResourcesMessage,
   UiDiscoveryHealthMessage,
   UiEnvironmentMessage,
   UiHealthMessage,
@@ -46,6 +47,7 @@ export type {
   UiAccountsMessage,
   UiBootstrap,
   UiBringAppToFrontMessage,
+  UiDeviceResourcesMessage,
   UiDiscoveryHealthMessage,
   UiEnvironmentMessage,
   UiHealthMessage,
@@ -90,6 +92,7 @@ export type UiServerMessage =
   | Framed<UiDiscoveryHealthMessage, "discovery_health">
   | Framed<UiWorkspaceUpdatesMessage, "workspace_updates">
   | Framed<UiEnvironmentMessage, "environment">
+  | Framed<UiDeviceResourcesMessage, "device_resources">
   | Framed<UiWorkspaceStoppedMessage, "workspace_stopped">
   | Framed<UiOpenHelpMessage, "open_help">
   | Framed<UiWorkspaceRefreshMessage, "workspace_refresh">
@@ -128,6 +131,7 @@ export function parseServerMessage(raw: string): UiServerMessage | null {
     case "discovery_health":
     case "workspace_updates":
     case "environment":
+    case "device_resources":
     case "workspace_stopped":
     case "open_help":
     case "workspace_refresh":

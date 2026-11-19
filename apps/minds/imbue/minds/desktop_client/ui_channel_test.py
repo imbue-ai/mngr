@@ -260,6 +260,7 @@ _SNAPSHOT_FRAME_TYPES = [
     "notifications",
     "workspace_updates",
     "environment",
+    "device_resources",
 ]
 
 

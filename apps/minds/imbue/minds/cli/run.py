@@ -90,6 +90,9 @@ from imbue.minds.desktop_client.connections.provider_settings import ProviderSet
 from imbue.minds.desktop_client.connections.provider_settings import is_provider_polled_here
 from imbue.minds.desktop_client.connections.provider_settings import read_signed_in_accounts_from_index_or_none
 from imbue.minds.desktop_client.device_identity import get_or_create_device_id
+from imbue.minds.desktop_client.device_resource_monitor import DeviceResourceMonitor
+from imbue.minds.desktop_client.device_resource_monitor import DeviceResourceSettingsStore
+from imbue.minds.desktop_client.device_resource_monitor import PsutilDeviceResourceReader
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.discovery_health import SupervisorProducerRemediator
 from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
@@ -1061,6 +1064,12 @@ def run(
     logger.info("Imbue Studio login URL (one-time use): {}", minds_login_url)
     emit_event("login_url", {"login_url": minds_login_url, "message": minds_login_url}, output_format)
 
+    # This computer's resource warnings; the reading thread starts with the server runtime.
+    device_resource_monitor = DeviceResourceMonitor(
+        reader=PsutilDeviceResourceReader(disk_path=paths.data_dir),
+        settings_store=DeviceResourceSettingsStore(data_dir=paths.data_dir),
+    )
+
     app = create_desktop_client(
         auth_store=auth_store,
         backend_resolver=backend_resolver,
@@ -1118,6 +1127,7 @@ def run(
         workspace_facts_cache=workspace_facts_cache,
         workspace_profile_writer=workspace_profile_writer,
         shared_with_me_store=shared_with_me_store,
+        device_resource_monitor=device_resource_monitor,
     )
 
     # A settings pull that landed another device's change applies it like a

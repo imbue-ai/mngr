@@ -334,6 +334,7 @@ def test_snapshot_frames_start_with_hello_and_cover_every_snapshot_type() -> Non
         "notifications",
         "workspace_updates",
         "environment",
+        "device_resources",
     ]
 
 

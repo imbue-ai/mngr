@@ -19,6 +19,7 @@ from imbue.minds.desktop_client.ui_models import ProviderPanelStatus
 from imbue.minds.desktop_client.ui_models import RemoteTileState
 from imbue.minds.desktop_client.ui_models import UiAccountProvidersEntry
 from imbue.minds.desktop_client.ui_models import UiAccountsMessage
+from imbue.minds.desktop_client.ui_models import UiDeviceResourcesMessage
 from imbue.minds.desktop_client.ui_models import UiDiscoveryHealthMessage
 from imbue.minds.desktop_client.ui_models import UiEnvironmentMessage
 from imbue.minds.desktop_client.ui_models import UiHealthMessage
@@ -128,6 +129,7 @@ def _install_snapshot() -> UiSnapshot:
             updates={"agent-a1": _update(), "agent-b1": _update()}, update_window="2:00 AM-5:00 AM"
         ),
         environment=UiEnvironmentMessage(state=EnvironmentCondition.NONE),
+        device_resources=UiDeviceResourcesMessage(view=None),
     )
 
 

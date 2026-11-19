@@ -74,6 +74,7 @@ from imbue.minds.desktop_client.ui_models import UiAccountsMessage
 from imbue.minds.desktop_client.ui_models import UiBootstrap
 from imbue.minds.desktop_client.ui_models import UiBootstrapSeed
 from imbue.minds.desktop_client.ui_models import UiConnectionEntry
+from imbue.minds.desktop_client.ui_models import UiDeviceResourcesMessage
 from imbue.minds.desktop_client.ui_models import UiDiscoveryHealthMessage
 from imbue.minds.desktop_client.ui_models import UiEnvironmentMessage
 from imbue.minds.desktop_client.ui_models import UiHealthMessage
@@ -455,6 +456,8 @@ def build_spa_fixture_bootstrap() -> UiBootstrap:
         # seeding one would put a notice band over every machine page in every
         # capture. Flip it to see the two environment states.
         environment=UiEnvironmentMessage(state=EnvironmentBlock.NONE),
+        # No resource readings: a raised warning would put a pill in every capture's titlebar.
+        device_resources=UiDeviceResourcesMessage(view=None),
     )
     # A completed install: the captures are of the app proper, not the first run.
     seed = UiBootstrapSeed(

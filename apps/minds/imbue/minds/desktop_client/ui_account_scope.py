@@ -243,6 +243,7 @@ def project_snapshot(
             snapshot.workspace_updates, scope, update_window, is_auto_update_enabled
         ),
         environment=snapshot.environment,
+        device_resources=snapshot.device_resources,
     )
 
 

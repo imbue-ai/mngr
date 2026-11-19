@@ -263,6 +263,9 @@ export class UiChannelClient {
       case "environment":
         stores.health.applyEnvironmentMessage(message);
         break;
+      case "device_resources":
+        stores.deviceResources.applyMessage(message, () => this.redraw());
+        break;
       case "workspace_stopped":
         this.options.onWorkspaceStopped?.(message);
         break;

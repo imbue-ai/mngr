@@ -57,6 +57,7 @@ from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
 from imbue.minds.desktop_client.ui_models import UiAccountsMessage
 from imbue.minds.desktop_client.ui_models import UiBringAppToFrontMessage
+from imbue.minds.desktop_client.ui_models import UiDeviceResourcesMessage
 from imbue.minds.desktop_client.ui_models import UiDiscoveryHealthMessage
 from imbue.minds.desktop_client.ui_models import UiEnvironmentMessage
 from imbue.minds.desktop_client.ui_models import UiHealthMessage
@@ -140,6 +141,9 @@ class UiStatePublisher(MutableModel):
     derive_environment: Callable[[], UiEnvironmentMessage] = Field(
         frozen=True, description="Current device-level connectivity condition"
     )
+    derive_device_resources: Callable[[], UiDeviceResourcesMessage] = Field(
+        frozen=True, description="Current resource gauge for this computer, for connect-time state"
+    )
     derive_health_states: Callable[[], tuple[UiHealthMessage, ...]] = Field(
         frozen=True, description="Per-workspace health snapshot for connect-time state"
     )
@@ -199,6 +203,10 @@ class UiStatePublisher(MutableModel):
             self.resolve_workspace_account_id(message.agent_id), message.model_dump_json()
         )
 
+    def publish_device_resources(self, message: UiDeviceResourcesMessage) -> None:
+        """Send the resource gauge to every window immediately (no pass, no diffing): its monitor decides when."""
+        self.broadcaster.broadcast(message.model_dump_json())
+
     def publish_one_shot(self, message: UiOneShotMessage) -> None:
         """Broadcast a fire-and-forget event frame."""
         self.broadcaster.broadcast(message.model_dump_json())
@@ -216,6 +224,7 @@ class UiStatePublisher(MutableModel):
             discovery_health=self.derive_discovery_health(),
             workspace_updates=self.derive_workspace_updates(),
             environment=self.derive_environment(),
+            device_resources=self.derive_device_resources(),
         )
         update_window, is_auto_update_enabled = self.derive_account_update_settings(account_id)
         return project_snapshot(install_snapshot, account_id, update_window, is_auto_update_enabled)
@@ -241,6 +250,7 @@ class UiStatePublisher(MutableModel):
         frames.append(marked_notifications.model_dump_json())
         frames.append(snapshot.workspace_updates.model_dump_json())
         frames.append(snapshot.environment.model_dump_json())
+        frames.append(snapshot.device_resources.model_dump_json())
         return frames
 
     def publish_now(self) -> None:

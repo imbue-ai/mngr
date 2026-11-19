@@ -7,6 +7,7 @@ import {
   clearAppContextForTests,
   registerAppContext,
 } from "../../../app-context";
+import { DeviceResourcesStore } from "../../../models/deviceResources";
 import { SettingsModel } from "../../../models/settings";
 import { SettingsSections } from "./SettingsSections";
 import { REMOTE_EXECUTION_CONSEQUENCES } from "../../components/RemoteExecutionWarning";
@@ -16,6 +17,7 @@ import {
   attrsOf,
   byId,
   collectVnodes,
+  deviceResourcesWireView,
   jsonResponse,
   renderDeep,
   renderRoot,
@@ -25,7 +27,7 @@ import {
 
 beforeEach(() => {
   registerAppContext({
-    shell: { accountId: "user-7" },
+    shell: { accountId: "user-7", stores: { deviceResources: new DeviceResourcesStore() } },
   } as unknown as AppContext);
 });
 
@@ -168,5 +170,35 @@ describe("the This computer panel", () => {
     expect(allText(root)).toContain(
       "can run any command on this computer as you",
     );
+  });
+});
+
+describe("the This computer panel's resource warnings", () => {
+  function renderWith(view: ReturnType<typeof deviceResourcesWireView>): AnyVnode {
+    const store = new DeviceResourcesStore(async () => jsonResponse(view));
+    store.applyMessage({ view });
+    registerAppContext({ shell: { accountId: "user-7", stores: { deviceResources: store } } } as unknown as AppContext);
+    return harness(false).render();
+  }
+
+  it("shows each resource's current use above its warning, and offers no gauge", () => {
+    const root = renderWith(deviceResourcesWireView());
+    const text = allText(root);
+    expect(text).toContain("Resource warnings");
+    expect(text).toContain("400 GB of 500 GB disk");
+    expect(text).toContain("12 GB of 16 GB RAM");
+    expect(text).toContain("25% of CPU");
+    expect(text).not.toContain("gauge");
+    expect(byId(root, "device-warning-disk-switch")).toBeDefined();
+    expect(byId(root, "device-warning-visibility-switch")).toBeUndefined();
+  });
+
+  it("names a standing warning beside its resource", () => {
+    const root = renderWith(
+      deviceResourcesWireView({
+        alerts: [{ resource: "disk", severity: "warning", headline: "Disk space is low", detail: "8.0 GB left" }],
+      }),
+    );
+    expect(allText(root)).toContain("! Disk space is low");
   });
 });

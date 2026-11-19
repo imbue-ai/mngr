@@ -102,8 +102,11 @@ def test_schema_version_tracks_breaking_wire_changes() -> None:
     account it shows, and to 29 when workspace entries gained ``is_owned``
     and the ``share`` object of a workspace shared with the account -- an
     older window would render someone else's workspace as the account's own
-    and offer the owner-only controls on it."""
-    assert UI_SCHEMA_VERSION == 29
+    and offer the owner-only controls on it, and to 30 when the snapshot
+    gained a required ``device_resources`` frame (this computer's resource
+    readings and warnings) -- an older window would read the warnings off a
+    snapshot field the older server does not send."""
+    assert UI_SCHEMA_VERSION == 30
 
 
 def test_hello_message_serializes_with_type_discriminator() -> None:
@@ -112,7 +115,7 @@ def test_hello_message_serializes_with_type_discriminator() -> None:
     # fail, whatever the constant becomes.
     frame = UiHelloMessage(schema_version=UI_SCHEMA_VERSION).model_dump_json()
     parsed = json.loads(frame)
-    assert parsed == {"type": "hello", "schema_version": 29}
+    assert parsed == {"type": "hello", "schema_version": 30}
 
 
 def test_workspaces_message_round_trips_through_json() -> None:
@@ -171,9 +174,16 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
         [
             "AccountPanelState",
             "AgentHealth",
+            "AlertSeverity",
+            "AmountReading",
             "ConnectionPanelStatus",
+            "CpuReading",
             "DesktopEgressMode",
+            "DeviceReadings",
+            "DeviceResourceSettings",
+            "DeviceResourceView",
             "DiscoveryHealth",
+            "DiskReading",
             "EnvironmentCondition",
             "ErrorRemedy",
             "FileSharingAccess",
@@ -181,6 +191,7 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "FolderSyncConflict",
             "FolderSyncDirection",
             "FolderSyncState",
+            "GaugeResource",
             "HostRecoveryKind",
             "KernelFixActivity",
             "KernelSecurityStatus",
@@ -190,6 +201,7 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "ProviderPanelStatus",
             "RecoveryFailureCause",
             "RemoteTileState",
+            "ResourceAlert",
             "UiAccountEntry",
             "UiAccountProvidersEntry",
             "UiAccountsMessage",
@@ -206,6 +218,7 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "UiCredentialParameter",
             "UiDesktopEgressRouteRequest",
             "UiDesktopEgressSetting",
+            "UiDeviceResourcesMessage",
             "UiDiscoveryHealthMessage",
             "UiEnvironmentMessage",
             "UiFailureNotice",
