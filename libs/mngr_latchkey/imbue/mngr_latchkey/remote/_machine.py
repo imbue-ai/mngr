@@ -53,12 +53,14 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
 
+import paramiko
 from loguru import logger
 from pydantic import Field
 from pydantic import SecretStr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.command_logging import commands_kept_out_of_logs
@@ -71,7 +73,11 @@ from imbue.mngr_latchkey.filed_permission_requests import parse_filed_permission
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.remote._machine_policy import project_policy_for_machine
 from imbue.mngr_latchkey.remote._machine_policy import restore_policy_from_machine
+from imbue.mngr_latchkey.remote.errors import MachineTransferError
+from imbue.mngr_latchkey.remote.errors import ReceivedFromMachine
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
+from imbue.mngr_latchkey.remote.errors import SentToMachine
+from imbue.mngr_latchkey.remote.errors import describe_machine_transfer
 
 # Name of the latchkey directory on the machine, under the remote user's home.
 # The remote latchkey CLI runs as that user, so ``$HOME/.latchkey`` is the
@@ -212,6 +218,85 @@ _ANSWER_CONTAINER_EXTRA_HOSTS: Final[str] = "CONTAINER_EXTRA_HOSTS"
 # The one answer ``list-requests`` prints.
 _ANSWER_FILED_PERMISSION_REQUESTS: Final[str] = "FILED_PERMISSION_REQUESTS"
 _FLAG_TRUE: Final[bytes] = b"1"
+
+# The part of what is sent that each document entry belongs to (see :func:`_command_parts`).
+_SENT_PART_BY_ENTRY: Final[Mapping[str, SentToMachine]] = {
+    _ENTRY_ENCRYPTION_KEY: SentToMachine.ENCRYPTION_KEY,
+    _ENTRY_FALLBACK_ENCRYPTION_KEY: SentToMachine.FALLBACK_ENCRYPTION_KEY,
+    _ENTRY_LISTEN_PASSWORD: SentToMachine.LISTEN_PASSWORD,
+    _ENTRY_CONFIG_JSON: SentToMachine.CONFIG,
+    _ENTRY_CREDENTIAL_BUNDLE: SentToMachine.CREDENTIAL_MERGE,
+    _ENTRY_CREDENTIAL_DATA_FORMAT_VERSION: SentToMachine.CREDENTIAL_MERGE,
+    _ENTRY_CREDENTIAL_SERVICE: SentToMachine.CREDENTIAL_MERGE,
+    _ENTRY_CREDENTIAL_ACCOUNT: SentToMachine.CREDENTIAL_MERGE,
+    _ENTRY_CLEAR_SERVICE: SentToMachine.CREDENTIAL_CLEAR,
+    _ENTRY_CLEAR_ACCOUNT: SentToMachine.CREDENTIAL_CLEAR,
+    _ENTRY_ABANDON_CREDENTIAL_STORE: SentToMachine.CREDENTIAL_STORE_ABANDONMENT,
+    _ENTRY_DESKTOP_EGRESS_RULES_JSON: SentToMachine.DESKTOP_EGRESS_RULES,
+    _ENTRY_PERMISSIONS_JSON: SentToMachine.PERMISSIONS,
+    _ENTRY_PERMISSIONS_FORMAT_VERSION: SentToMachine.PERMISSIONS_FORMAT_VERSION,
+    _ENTRY_GATEWAY_LISTEN_HOST: SentToMachine.GATEWAY_LISTEN_HOST,
+    _ENTRY_TUNNEL_HOST_ID: SentToMachine.TUNNEL,
+    _ENTRY_TUNNEL_SSH_USER: SentToMachine.TUNNEL,
+    _ENTRY_TUNNEL_SSH_PORT: SentToMachine.TUNNEL,
+    _ENTRY_RESTART_GATEWAY: SentToMachine.GATEWAY_RESTART,
+    _ENTRY_DEVICE_ID: SentToMachine.DEVICE_RECORD,
+    _ENTRY_DEVICE_RECORD_JSON: SentToMachine.DEVICE_RECORD,
+    _ENTRY_REQUEST_ID: SentToMachine.PERMISSION_REQUEST_WITHDRAWAL,
+}
+
+# The document entries that ask a read for an answer it gives only when asked, by that answer.
+_EXPECTED_PART_BY_QUERY_ENTRY: Final[Mapping[str, ReceivedFromMachine]] = {
+    _ENTRY_INCLUDE_CREDENTIAL_STORE: ReceivedFromMachine.CREDENTIAL_STORE,
+    _ENTRY_CONTAINER_HOST_ID: ReceivedFromMachine.CONTAINER_EXTRA_HOSTS,
+}
+
+# What each subcommand answers with, whatever its document asks for.
+_ANSWERED_PARTS_BY_SUBCOMMAND: Final[Mapping[str, frozenset[ReceivedFromMachine]]] = {
+    _READ_STATE_SUBCOMMAND: frozenset(
+        {
+            ReceivedFromMachine.ENCRYPTION_KEY,
+            ReceivedFromMachine.LISTEN_PASSWORD,
+            ReceivedFromMachine.CONFIG,
+            ReceivedFromMachine.PERMISSIONS,
+            ReceivedFromMachine.PERMISSIONS_FORMAT_VERSION,
+            ReceivedFromMachine.DESKTOP_EGRESS_RULES,
+        }
+    ),
+    _APPLY_STATE_SUBCOMMAND: frozenset(),
+    _ANNOUNCE_DEVICE_SUBCOMMAND: frozenset(),
+    _FORGET_REQUEST_SUBCOMMAND: frozenset(),
+    _LIST_REQUESTS_SUBCOMMAND: frozenset({ReceivedFromMachine.FILED_PERMISSION_REQUESTS}),
+}
+
+# What running a command raises when it never reached the machine or lost it midway. The first command a machine
+# runs is what opens its SSH connection, so a connect that fails is that command's failure.
+_COMMAND_TRANSPORT_FAILURES: Final[tuple[type[Exception], ...]] = (
+    MngrError,
+    OSError,
+    paramiko.SSHException,
+    EOFError,
+)
+
+
+class _CommandParts(FrozenModel):
+    """What one machine command carries each way, as read off the document it sends (see :func:`_command_parts`)."""
+
+    sent: frozenset[SentToMachine] = Field(description="What the document hands the machine to hold or act on.")
+    expected: frozenset[ReceivedFromMachine] = Field(description="What the command answers with.")
+
+    def describe(self) -> str:
+        return describe_machine_transfer(self.sent, self.expected)
+
+    def failure(self, host: OuterHostInterface, host_id: HostId, reason: str) -> MachineTransferError:
+        """The error for this command having failed on ``host``, for ``reason``."""
+        return MachineTransferError(
+            host_id=host_id, vps_name=host.get_name(), sent=self.sent, expected=self.expected, reason=reason
+        )
+
+
+class _UnreadableAnswerError(RemoteGatewayError):
+    """Raised when a command's answers are not what its script writes; the command that read them reports it."""
 
 
 class RemoteStateRequest(FrozenModel):
@@ -379,75 +464,82 @@ class RemoteStateUpdate(FrozenModel):
     )
 
 
-def announce_device(host: OuterHostInterface, record: DeviceRecord, failure_description: str) -> None:
-    """Record this computer as connected to the machine (or refresh the record), in one round trip.
+def announce_device(host: OuterHostInterface, record: DeviceRecord, host_id: HostId) -> None:
+    """Record this computer as connected to ``host_id``'s machine (or refresh the record), in one round trip.
 
     Raises:
-        RemoteGatewayError: when the machine refuses or fails the command.
+        MachineTransferError: when the command fails.
     """
-    _run_remote_command(
-        host, _remote_command(_ANNOUNCE_DEVICE_SUBCOMMAND, _announcement_document(record)), failure_description
-    )
+    _run_remote_command(host, host_id, _ANNOUNCE_DEVICE_SUBCOMMAND, _announcement_document(record))
 
 
-def forget_permission_request(host: OuterHostInterface, request_id: str, failure_description: str) -> None:
+def forget_permission_request(host: OuterHostInterface, request_id: str, host_id: HostId) -> None:
     """Drop the machine's copy of a permission request and withdraw it from every connected desktop, in one round trip.
 
     The withdrawal is best-effort on the machine's side: a desktop that could
     not be reached syncs the request away itself when it next connects.
 
     Raises:
-        RemoteGatewayError: when the machine refuses or fails the command.
+        MachineTransferError: when the command fails.
     """
-    _run_remote_command(
-        host,
-        _remote_command(_FORGET_REQUEST_SUBCOMMAND, {_ENTRY_REQUEST_ID: request_id.encode("utf-8")}),
-        failure_description,
-    )
+    _run_remote_command(host, host_id, _FORGET_REQUEST_SUBCOMMAND, {_ENTRY_REQUEST_ID: request_id.encode("utf-8")})
 
 
-def read_filed_permission_requests(
-    host: OuterHostInterface, failure_description: str
-) -> tuple[FiledPermissionRequest, ...]:
-    """The permission requests the machine keeps for the user's desktops, in one round trip.
+def read_filed_permission_requests(host: OuterHostInterface, host_id: HostId) -> tuple[FiledPermissionRequest, ...]:
+    """The permission requests ``host_id``'s machine keeps for the user's desktops, in one round trip.
 
     Raises:
-        RemoteGatewayError: when the machine refuses or fails the command, or
-            answers with something this build cannot read.
+        MachineTransferError: when the command fails, or answers with
+            something this build cannot read.
     """
-    stdout = _run_remote_command(host, _remote_command(_LIST_REQUESTS_SUBCOMMAND, {}), failure_description)
-    answers = _parse_answers(host, stdout, failure_description)
-    records_json = _text(answers, _ANSWER_FILED_PERMISSION_REQUESTS, host, failure_description)
+    document: dict[str, bytes] = {}
+    stdout = _run_remote_command(host, host_id, _LIST_REQUESTS_SUBCOMMAND, document)
     try:
-        return parse_filed_permission_requests(records_json)
-    except FiledPermissionRequestsError as e:
-        raise RemoteGatewayError(f"Failed to {failure_description} on VPS {host.get_name()}: {e}") from e
+        return parse_filed_permission_requests(_text(_parse_answers(stdout), _ANSWER_FILED_PERMISSION_REQUESTS))
+    except (_UnreadableAnswerError, FiledPermissionRequestsError) as e:
+        raise _command_parts(_LIST_REQUESTS_SUBCOMMAND, document).failure(host, host_id, str(e)) from e
 
 
-def read_remote_state(
-    host: OuterHostInterface, request: RemoteStateRequest, failure_description: str
-) -> RemoteMachineState:
-    """Ask the machine what it holds, in one round trip.
+def read_remote_state(host: OuterHostInterface, request: RemoteStateRequest, host_id: HostId) -> RemoteMachineState:
+    """Ask ``host_id``'s machine what it holds, in one round trip.
 
     Raises:
-        RemoteGatewayError: when the machine refuses or fails the command, or
-            answers with something this build cannot read.
+        MachineTransferError: when the command fails, or answers with
+            something this build cannot read.
     """
-    stdout = _run_remote_command(
-        host, _remote_command(_READ_STATE_SUBCOMMAND, _request_document(request)), failure_description
+    document = _request_document(request)
+    stdout = _run_remote_command(host, host_id, _READ_STATE_SUBCOMMAND, document)
+    try:
+        return _machine_state_from_answers(_parse_answers(stdout))
+    except _UnreadableAnswerError as e:
+        raise _command_parts(_READ_STATE_SUBCOMMAND, document).failure(host, host_id, str(e)) from e
+
+
+def apply_remote_state(host: OuterHostInterface, update: RemoteStateUpdate, host_id: HostId) -> None:
+    """Make ``host_id``'s machine hold ``update``, in one round trip.
+
+    Raises:
+        MachineTransferError: when the update does not fit one command, or the
+            command fails.
+    """
+    _run_remote_command(host, host_id, _APPLY_STATE_SUBCOMMAND, _update_document(update))
+
+
+@pure
+def _command_parts(subcommand: str, document: Mapping[str, bytes]) -> _CommandParts:
+    """What ``subcommand`` carries each way with ``document`` on its stdin.
+
+    Every entry is a part of what is sent or asks for an answer, so an entry
+    added to a document without a part in :data:`_SENT_PART_BY_ENTRY` fails
+    every command that sends it rather than going unnamed.
+    """
+    return _CommandParts(
+        sent=frozenset(_SENT_PART_BY_ENTRY[entry] for entry in document if entry not in _EXPECTED_PART_BY_QUERY_ENTRY),
+        expected=_ANSWERED_PARTS_BY_SUBCOMMAND[subcommand]
+        | frozenset(
+            _EXPECTED_PART_BY_QUERY_ENTRY[entry] for entry in document if entry in _EXPECTED_PART_BY_QUERY_ENTRY
+        ),
     )
-    answers = _parse_answers(host, stdout, failure_description)
-    return _machine_state_from_answers(host, answers, failure_description)
-
-
-def apply_remote_state(host: OuterHostInterface, update: RemoteStateUpdate, failure_description: str) -> None:
-    """Make the machine hold ``update``, in one round trip.
-
-    Raises:
-        RemoteGatewayError: when the update does not fit one command, or the
-            machine refuses or fails it.
-    """
-    _run_remote_command(host, _remote_command(_APPLY_STATE_SUBCOMMAND, _update_document(update)), failure_description)
 
 
 @pure
@@ -524,61 +616,71 @@ def _remote_command(subcommand: str, document: Mapping[str, bytes]) -> str:
     )
 
 
-def _run_remote_command(host: OuterHostInterface, command: str, failure_description: str) -> str:
-    """Run one machine command and return its stdout, once its last line says it ran to its end.
+def _run_remote_command(
+    host: OuterHostInterface, host_id: HostId, subcommand: str, document: Mapping[str, bytes]
+) -> str:
+    """Run ``subcommand`` with ``document`` on its stdin and return its stdout, once its last line says it ran to its end.
 
     The command's text is kept out of the logs (see
     :data:`SECRET_BEARING_COMMAND_LOG_REASON`); the host layer traces a
     stand-in naming the kind of command and its size instead.
 
     Raises:
-        RemoteGatewayError: when the command does not fit one remote command,
-            the machine refuses or fails it, or it finishes without reporting an
-            outcome (which means it did not run to its end).
+        MachineTransferError: when the command does not fit one remote
+            command, never reaches the machine or loses it midway, is refused
+            or failed by the machine, or finishes without reporting an outcome
+            (which means it did not run to its end).
     """
+    parts = _command_parts(subcommand, document)
+    command = _remote_command(subcommand, document)
     command_size = len(command.encode("utf-8"))
     if command_size > _MAX_REMOTE_COMMAND_BYTES:
-        raise RemoteGatewayError(
-            f"Failed to {failure_description} on VPS {host.get_name()}: the single command that would carry it is "
-            f"{command_size} bytes, past the {_MAX_REMOTE_COMMAND_BYTES} a remote shell accepts"
+        raise parts.failure(
+            host,
+            host_id,
+            f"the single command that would carry it is {command_size} bytes, past the {_MAX_REMOTE_COMMAND_BYTES} "
+            "a remote shell accepts",
         )
     started_at = time.monotonic()
-    with commands_kept_out_of_logs(SECRET_BEARING_COMMAND_LOG_REASON):
-        result = host.execute_idempotent_command(command, timeout_seconds=REMOTE_LATCHKEY_TIMEOUT_SECONDS)
+    try:
+        with commands_kept_out_of_logs(SECRET_BEARING_COMMAND_LOG_REASON):
+            result = host.execute_idempotent_command(command, timeout_seconds=REMOTE_LATCHKEY_TIMEOUT_SECONDS)
+    except _COMMAND_TRANSPORT_FAILURES as e:
+        raise parts.failure(host, host_id, str(e)) from e
     elapsed_seconds = time.monotonic() - started_at
     # The answers a read prints before it can fail carry the machine's secrets,
     # so a failure is described by everything else the command printed.
     diagnostic_lines = _diagnostic_lines(result.stdout)
     if result.success and elapsed_seconds > _SLOW_REMOTE_COMMAND_WARNING_THRESHOLD_SECONDS:
         logger.warning(
-            "Ran a latchkey command to {} on VPS {} in {:.0f}s", failure_description, host.get_name(), elapsed_seconds
+            "Ran a latchkey command to {} VPS {} for host {} in {:.0f}s",
+            parts.describe(),
+            host.get_name(),
+            host_id,
+            elapsed_seconds,
         )
     # A script that ran to its end may still have something to say: a warning
     # from a latchkey invocation in the middle of it. The log guard hides the command's text,
     # not what the machine printed, and no script writes a secret to stderr.
     if result.success and result.stderr.strip():
         logger.debug(
-            "The machine said on stderr while a latchkey command to {} ran on VPS {}: {}",
-            failure_description,
+            "The machine said on stderr while a latchkey command to {} VPS {} for host {} ran: {}",
+            parts.describe(),
             host.get_name(),
+            host_id,
             result.stderr.strip(),
         )
     if not result.success:
         detail = result.stderr.strip() or "\n".join(diagnostic_lines)
-        raise RemoteGatewayError(
-            "Failed to {} on VPS {}: {}".format(
-                failure_description,
-                host.get_name(),
-                summarize_latchkey_failure(detail, "the command reported no reason"),
-            )
-        )
+        raise parts.failure(host, host_id, summarize_latchkey_failure(detail, "the command reported no reason"))
     stdout_lines = result.stdout.strip().splitlines()
     last_line = stdout_lines[-1] if stdout_lines else ""
     if last_line != OUTCOME_DONE_MARKER:
         last_diagnostic_line = diagnostic_lines[-1] if diagnostic_lines else ""
-        raise RemoteGatewayError(
-            f"Failed to {failure_description} on VPS {host.get_name()}: the command finished without reporting an "
-            f"outcome (last output line: {last_diagnostic_line!r})"
+        raise parts.failure(
+            host,
+            host_id,
+            f"the command finished without reporting an outcome (last output line: {last_diagnostic_line!r})",
         )
     return result.stdout
 
@@ -589,11 +691,11 @@ def _diagnostic_lines(stdout: str) -> list[str]:
     return [line for line in stdout.splitlines() if line.strip() and not line.startswith(ANSWER_PREFIX)]
 
 
-def _parse_answers(host: OuterHostInterface, stdout: str, failure_description: str) -> dict[str, bytes]:
+def _parse_answers(stdout: str) -> dict[str, bytes]:
     """The prefixed, base64-encoded lines of a read's output, decoded and keyed by answer name.
 
     Raises:
-        RemoteGatewayError: when an answer is not the base64 the script is
+        _UnreadableAnswerError: when an answer is not the base64 the script is
             supposed to have written.
     """
     answers: dict[str, bytes] = {}
@@ -604,37 +706,31 @@ def _parse_answers(host: OuterHostInterface, stdout: str, failure_description: s
         try:
             answers[name] = base64.b64decode(encoded, validate=True)
         except ValueError as e:
-            raise RemoteGatewayError(
-                f"Failed to {failure_description} on VPS {host.get_name()}: the machine's {name} answer is not "
-                f"the base64 it should be: {e}"
-            ) from e
+            raise _UnreadableAnswerError(f"the machine's {name} answer is not the base64 it should be: {e}") from e
     return answers
 
 
-def _machine_state_from_answers(
-    host: OuterHostInterface, answers: Mapping[str, bytes], failure_description: str
-) -> RemoteMachineState:
-    """Raises :class:`RemoteGatewayError` when an answer the read always gives is missing, or one is not text."""
-    package_version = _text(answers, _ANSWER_PACKAGE_VERSION, host, failure_description)
-    home = _text(answers, _ANSWER_HOME, host, failure_description)
-    has_credential_store = _flag(answers, _ANSWER_HAS_CREDENTIAL_STORE, host, failure_description)
-    has_container_tunnel_key = _flag(answers, _ANSWER_HAS_CONTAINER_TUNNEL_KEY, host, failure_description)
-    container_extra_hosts_json = _optional_text(answers, _ANSWER_CONTAINER_EXTRA_HOSTS, host, failure_description)
-    data_format_version = _optional_text(answers, _ANSWER_DATA_FORMAT_VERSION, host, failure_description)
-    encryption_key = _optional_text(answers, _ANSWER_ENCRYPTION_KEY, host, failure_description)
-    listen_password = _optional_text(answers, _ANSWER_LISTEN_PASSWORD, host, failure_description)
-    config_json = _optional_text(answers, _ANSWER_CONFIG_JSON, host, failure_description)
-    machine_permissions_json = _optional_text(answers, _ANSWER_PERMISSIONS_JSON, host, failure_description)
+def _machine_state_from_answers(answers: Mapping[str, bytes]) -> RemoteMachineState:
+    """Raises :class:`_UnreadableAnswerError` when an answer the read always gives is missing, or one is not text."""
+    package_version = _text(answers, _ANSWER_PACKAGE_VERSION)
+    home = _text(answers, _ANSWER_HOME)
+    has_credential_store = _flag(answers, _ANSWER_HAS_CREDENTIAL_STORE)
+    has_container_tunnel_key = _flag(answers, _ANSWER_HAS_CONTAINER_TUNNEL_KEY)
+    container_extra_hosts_json = _optional_text(answers, _ANSWER_CONTAINER_EXTRA_HOSTS)
+    data_format_version = _optional_text(answers, _ANSWER_DATA_FORMAT_VERSION)
+    encryption_key = _optional_text(answers, _ANSWER_ENCRYPTION_KEY)
+    listen_password = _optional_text(answers, _ANSWER_LISTEN_PASSWORD)
+    config_json = _optional_text(answers, _ANSWER_CONFIG_JSON)
+    machine_permissions_json = _optional_text(answers, _ANSWER_PERMISSIONS_JSON)
     permissions_json = (
         restore_policy_from_machine(machine_permissions_json) if machine_permissions_json is not None else None
     )
-    desktop_egress_rules_json = _optional_text(answers, _ANSWER_DESKTOP_EGRESS_RULES_JSON, host, failure_description)
-    permissions_format_version = _permissions_format_version(answers, host, failure_description)
+    desktop_egress_rules_json = _optional_text(answers, _ANSWER_DESKTOP_EGRESS_RULES_JSON)
+    permissions_format_version = _permissions_format_version(answers)
     credentials = answers.get(_ANSWER_CREDENTIALS)
     if (credentials is None) != (data_format_version is None):
-        raise RemoteGatewayError(
-            f"Failed to {failure_description} on VPS {host.get_name()}: the machine's credential store came back "
-            "without the format stamp that says how to read it"
+        raise _UnreadableAnswerError(
+            "the machine's credential store came back without the format stamp that says how to read it"
         )
     return RemoteMachineState(
         package_version=package_version,
@@ -653,90 +749,74 @@ def _machine_state_from_answers(
         ),
         has_container_tunnel_key=has_container_tunnel_key,
         container_extra_hosts=(
-            _container_extra_hosts(host, container_extra_hosts_json, failure_description)
-            if container_extra_hosts_json is not None
-            else None
+            _container_extra_hosts(container_extra_hosts_json) if container_extra_hosts_json is not None else None
         ),
     )
 
 
-def _permissions_format_version(
-    answers: Mapping[str, bytes], host: OuterHostInterface, failure_description: str
-) -> PermissionsFormatVersion:
+def _permissions_format_version(answers: Mapping[str, bytes]) -> PermissionsFormatVersion:
     """The format version the machine's policy is stamped with; 0 when it never was.
 
     Raises:
-        RemoteGatewayError: when the stamp is not the non-negative integer the
-            desktop writes.
+        _UnreadableAnswerError: when the stamp is not the non-negative integer
+            the desktop writes.
     """
-    answer = _optional_text(answers, _ANSWER_PERMISSIONS_FORMAT_VERSION, host, failure_description)
+    answer = _optional_text(answers, _ANSWER_PERMISSIONS_FORMAT_VERSION)
     if answer is None:
         return PermissionsFormatVersion(0)
     try:
         return PermissionsFormatVersion(int(answer.strip()))
     except ValueError as e:
-        raise RemoteGatewayError(
-            f"Failed to {failure_description} on VPS {host.get_name()}: the machine's permissions format version is not "
-            f"the non-negative integer it should be: {answer!r}"
+        raise _UnreadableAnswerError(
+            f"the machine's permissions format version is not the non-negative integer it should be: {answer!r}"
         ) from e
 
 
-def _container_extra_hosts(host: OuterHostInterface, answer: str, failure_description: str) -> tuple[str, ...]:
+def _container_extra_hosts(answer: str) -> tuple[str, ...]:
     """The mappings ``docker inspect`` printed for the container, as it prints them: a JSON list, or ``null`` for none.
 
     Raises:
-        RemoteGatewayError: when the answer is not that.
+        _UnreadableAnswerError: when the answer is not that.
     """
     try:
         extra_hosts = json.loads(answer)
     except json.JSONDecodeError as e:
-        raise RemoteGatewayError(
-            f"Failed to {failure_description} on VPS {host.get_name()}: the machine's container extra hosts answer "
-            f"is not the JSON docker prints: {e}"
+        raise _UnreadableAnswerError(
+            f"the machine's container extra hosts answer is not the JSON docker prints: {e}"
         ) from e
     if extra_hosts is None:
         return ()
     if not isinstance(extra_hosts, list) or not all(isinstance(entry, str) for entry in extra_hosts):
-        raise RemoteGatewayError(
-            f"Failed to {failure_description} on VPS {host.get_name()}: the machine's container extra hosts answer "
-            f"is not the list of strings docker prints: {answer!r}"
+        raise _UnreadableAnswerError(
+            f"the machine's container extra hosts answer is not the list of strings docker prints: {answer!r}"
         )
     return tuple(extra_hosts)
 
 
-def _required_answer(
-    answers: Mapping[str, bytes], name: str, host: OuterHostInterface, failure_description: str
-) -> bytes:
-    """Raises :class:`RemoteGatewayError` when the machine did not answer ``name``, which every read must."""
+def _required_answer(answers: Mapping[str, bytes], name: str) -> bytes:
+    """Raises :class:`_UnreadableAnswerError` when the machine did not answer ``name``, which every read must."""
     try:
         return answers[name]
     except KeyError as e:
-        raise RemoteGatewayError(
-            f"Failed to {failure_description} on VPS {host.get_name()}: the machine answered without {name}"
-        ) from e
+        raise _UnreadableAnswerError(f"the machine answered without {name}") from e
 
 
-def _decoded_answer(value: bytes, name: str, host: OuterHostInterface, failure_description: str) -> str:
-    """Raises :class:`RemoteGatewayError` when the ``name`` answer is not the UTF-8 text it should be."""
+def _decoded_answer(value: bytes, name: str) -> str:
+    """Raises :class:`_UnreadableAnswerError` when the ``name`` answer is not the UTF-8 text it should be."""
     try:
         return value.decode("utf-8")
     except UnicodeDecodeError as e:
-        raise RemoteGatewayError(
-            f"Failed to {failure_description} on VPS {host.get_name()}: the machine's {name} answer is not the "
-            f"UTF-8 text it should be: {e}"
-        ) from e
+        raise _UnreadableAnswerError(f"the machine's {name} answer is not the UTF-8 text it should be: {e}") from e
 
 
-def _text(answers: Mapping[str, bytes], name: str, host: OuterHostInterface, failure_description: str) -> str:
-    return _decoded_answer(_required_answer(answers, name, host, failure_description), name, host, failure_description)
+def _text(answers: Mapping[str, bytes], name: str) -> str:
+    return _decoded_answer(_required_answer(answers, name), name)
 
 
-def _flag(answers: Mapping[str, bytes], name: str, host: OuterHostInterface, failure_description: str) -> bool:
-    return _required_answer(answers, name, host, failure_description) == _FLAG_TRUE
+def _flag(answers: Mapping[str, bytes], name: str) -> bool:
+    return _required_answer(answers, name) == _FLAG_TRUE
 
 
-def _optional_text(
-    answers: Mapping[str, bytes], name: str, host: OuterHostInterface, failure_description: str
-) -> str | None:
+def _optional_text(answers: Mapping[str, bytes], name: str) -> str | None:
     value = answers.get(name)
-    return _decoded_answer(value, name, host, failure_description) if value is not None else None
+    return _decoded_answer(value, name) if value is not None else None

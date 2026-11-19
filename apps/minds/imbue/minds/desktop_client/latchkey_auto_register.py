@@ -88,6 +88,13 @@ from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
+from tenacity import RetryCallState
+from tenacity import Retrying
+from tenacity import retry_if_exception
+from tenacity import retry_if_exception_type
+from tenacity import stop_after_attempt
+from tenacity import wait_chain
+from tenacity import wait_fixed
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -99,6 +106,7 @@ from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import find_host_system_services_agent
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
+from imbue.minds.errors import MindError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
@@ -131,19 +139,6 @@ _MAX_MACHINE_READS_PER_CARRY: Final[int] = 3
 # Each attempt can also spend the SSH connect's own handshake deadline before it fails.
 DEFAULT_TRANSIENT_FAILURE_RETRY_DELAYS_SECONDS: Final[tuple[float, ...]] = (10.0, 30.0)
 
-# How a carry reports a machine exchange it gave up on, by the step that failed; each is formatted with the host, the
-# agent addressing it, the error, and the host's state as discovery reports it.
-_READ_FAILURE_MESSAGE: Final[str] = (
-    "Failed to read the latchkey permissions of host {} from its machine (addressed by agent {}) "
-    "before pushing the registered agents; the change will be lost when the machine is next read: {} "
-    "[discovery reports the host as {}]"
-)
-_PUSH_FAILURE_MESSAGE: Final[str] = (
-    "Failed to push the latchkey permissions of host {} to its machine (addressed by agent {}); "
-    "the change to the registered agents will be lost when the machine is next read: {} "
-    "[discovery reports the host as {}]"
-)
-
 # The states in which a host's machine is not there to be opened, or runs nothing its policy would gate: a carry
 # for a host in one of them is held. A host that could not be observed (``UNKNOWN``, ``UNAUTHENTICATED``) is not
 # among them, since it may well be up, and the read that fails against it says what is wrong.
@@ -159,6 +154,11 @@ _DOWN_HOST_STATES: Final[frozenset[HostState]] = frozenset(
         HostState.DESTROYED,
     }
 )
+
+
+class _CarryStoppedError(MindError):
+    """Raised in place of a carry's retry when :meth:`LatchkeyAutoRegister.stop`, or the app's shutdown, cuts the
+    carry's wait short; the change it was carrying is lost."""
 
 
 class _HostListing(FrozenModel):
@@ -323,6 +323,17 @@ def _plan_reconciliation(
     )
 
 
+def _log_carry_retry(host_id: HostId, retry_state: RetryCallState) -> None:
+    """A carry's tenacity ``before_sleep``: report the transient failure the carry waits out before its retry."""
+    assert retry_state.outcome is not None
+    logger.info(
+        "Retrying the carry of the latchkey permissions of host {} to its machine in {}s, after a transient failure: {}",
+        host_id,
+        retry_state.upcoming_sleep,
+        retry_state.outcome.exception(),
+    )
+
+
 class LatchkeyAutoRegister(MutableModel):
     """Subscribes to ``MngrCliBackendResolver`` and pins each managed host's registered agents to the ones it runs.
 
@@ -381,6 +392,7 @@ class LatchkeyAutoRegister(MutableModel):
     transient_failure_retry_delays_seconds: tuple[float, ...] = Field(
         default=DEFAULT_TRANSIENT_FAILURE_RETRY_DELAYS_SECONDS,
         frozen=True,
+        min_length=1,
         description=(
             "How long a carry waits before each retry of a machine read or push that failed transiently (a slow "
             "sshd, a dropped connection); one retry per entry, after which the failure is reported."
@@ -720,9 +732,10 @@ class LatchkeyAutoRegister(MutableModel):
         ``transient_failure_retry_delays_seconds``, reading the machine again
         before pinning and pushing, since the push carries the whole copy and
         must be based on what the machine holds now. A failure that is not
-        transient (a rejected key, a machine refusing the policy), or one that
-        outlasts the retries or the subscription, is logged as an error and the
-        change is lost (see :meth:`_push_until_settled`).
+        transient (a rejected key, a machine refusing the policy), one that
+        outlasts the retries, and a wait :meth:`stop` or the app's shutdown cuts
+        short are logged as an error, with the error that ended the carry
+        attached, and the change is lost (see :meth:`_push_until_settled`).
 
         Before each retry, a carry scheduled for the host during the wait is
         folded into this one as the newer of the two, so the retry carries
@@ -730,38 +743,62 @@ class LatchkeyAutoRegister(MutableModel):
         to carry to, has the carry held (:meth:`_hold_carry`) as a fresh one
         would be, rather than retried against a machine that is not there.
         """
-        # One attempt per retry delay, then a last one with no retry left.
-        for retry_delay in (*self.transient_failure_retry_delays_seconds, None):
-            try:
-                is_file_changed = self._pin_on_the_machines_policy(host_id, pending)
-            except MachineOperationError as e:
-                failure_message, error = _READ_FAILURE_MESSAGE, e
-            else:
-                if is_file_changed is None:
-                    return
-                if not is_file_changed:
-                    logger.debug(
-                        "The machine of host {} already registers the pinned agents; nothing to push", host_id
-                    )
-                    return
-                try:
-                    self.push_permissions_to_machine(str(pending.address_agent_id))
-                    return
-                except MachineOperationError as e:
-                    failure_message, error = _PUSH_FAILURE_MESSAGE, e
-            if not self._is_retrying_after_transient_failure(host_id, error, retry_delay):
-                logger.error(
-                    failure_message,
-                    host_id,
-                    pending.address_agent_id,
-                    error,
-                    self.backend_resolver.get_host_state(host_id),
-                )
-                return
-            pending = self._folded_with_carry_scheduled_meanwhile(host_id, pending)
-            if not self._is_machine_there_to_carry_to(host_id):
-                self._hold_carry(host_id, pending)
-                return
+        try:
+            for attempt in Retrying(
+                retry=retry_if_exception_type(MachineOperationError)
+                & retry_if_exception(is_transient_remote_wiring_error),
+                stop=stop_after_attempt(len(self.transient_failure_retry_delays_seconds) + 1),
+                wait=wait_chain(*(wait_fixed(delay) for delay in self.transient_failure_retry_delays_seconds)),
+                sleep=self._wait_to_retry,
+                before_sleep=lambda retry_state: _log_carry_retry(host_id, retry_state),
+                reraise=True,
+            ):
+                with attempt:
+                    if attempt.retry_state.attempt_number > 1:
+                        pending = self._folded_with_carry_scheduled_meanwhile(host_id, pending)
+                        if not self._is_machine_there_to_carry_to(host_id):
+                            self._hold_carry(host_id, pending)
+                            return
+                    self._read_pin_and_push(host_id, pending)
+        except (MachineOperationError, _CarryStoppedError) as e:
+            logger.opt(exception=e).error(
+                "Failed to carry the latchkey permissions of host {} to its machine (addressed by agent {}); the "
+                "change to the registered agents will be lost when the machine is next read [discovery reports "
+                "the host as {}]",
+                host_id,
+                pending.address_agent_id,
+                self.backend_resolver.get_host_state(host_id),
+            )
+
+    def _wait_to_retry(self, seconds: float) -> None:
+        """A carry's tenacity sleep: wait ``seconds`` before the retry, unless :meth:`stop` or the app's shutdown
+        cuts the wait short.
+
+        Tenacity checks its stop condition only before it sleeps, so a sleep that just returned early would still
+        be followed by another attempt at the machine; raising is what ends the carry.
+
+        Raises:
+            _CarryStoppedError: when the wait is cut short.
+        """
+        if self._stop_event.wait(timeout=seconds):
+            raise _CarryStoppedError(
+                "Gave up waiting to retry the carry: the auto-register was stopped or the app is shutting down"
+            )
+
+    def _read_pin_and_push(self, host_id: HostId, pending: _PendingCarry) -> None:
+        """One attempt at the carry: read the machine's policy, pin the registered agents on it, and push the result
+        when the pin changed it.
+
+        Raises:
+            MachineOperationError: when the machine cannot be read or does not take the push.
+        """
+        is_file_changed = self._pin_on_the_machines_policy(host_id, pending)
+        if is_file_changed is None:
+            return
+        if not is_file_changed:
+            logger.debug("The machine of host {} already registers the pinned agents; nothing to push", host_id)
+            return
+        self.push_permissions_to_machine(str(pending.address_agent_id))
 
     def _folded_with_carry_scheduled_meanwhile(self, host_id: HostId, pending: _PendingCarry) -> _PendingCarry:
         """``pending`` with the carry scheduled for ``host_id`` since it was claimed folded in as the newer one.
@@ -773,26 +810,6 @@ class LatchkeyAutoRegister(MutableModel):
         with self._push_lock:
             waiting = self._hosts_awaiting_push.pop(host_id, None)
         return pending if waiting is None else _folded_carries((pending,), waiting)
-
-    def _is_retrying_after_transient_failure(
-        self, host_id: HostId, error: MachineOperationError, retry_delay: float | None
-    ) -> bool:
-        """Wait out ``retry_delay`` when ``error`` is transient; whether the carry should be tried again.
-
-        ``False`` without waiting for a failure that is not transient or when
-        no retry is left (``retry_delay`` is ``None``), and ``False`` as soon
-        as the subscription stops or the app shuts down during the wait.
-        """
-        if retry_delay is None or not is_transient_remote_wiring_error(error):
-            return False
-        logger.info(
-            "The machine of host {} failed transiently while its latchkey permissions were carried to it; "
-            "retrying in {}s: {}",
-            host_id,
-            retry_delay,
-            error,
-        )
-        return not self._stop_event.wait(timeout=retry_delay)
 
     def _pin_on_the_machines_policy(self, host_id: HostId, pending: _PendingCarry) -> bool | None:
         """Read the machine's policy and pin the registered agents again on it; whether the file changed, or

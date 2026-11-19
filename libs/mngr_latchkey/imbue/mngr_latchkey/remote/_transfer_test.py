@@ -31,6 +31,7 @@ from imbue.mngr_latchkey.remote._machine import read_remote_state
 from imbue.mngr_latchkey.remote._machine_policy import project_policy_for_machine
 from imbue.mngr_latchkey.remote._mirror import latchkey_for_machine
 from imbue.mngr_latchkey.remote._transfer import adopt_machine_desktop_egress_rules
+from imbue.mngr_latchkey.remote._transfer import adopt_machine_permissions
 from imbue.mngr_latchkey.remote._transfer import adopt_machine_permissions_format_version
 from imbue.mngr_latchkey.remote._transfer import clear_remote_credentials
 from imbue.mngr_latchkey.remote._transfer import fetch_machine_state
@@ -50,10 +51,12 @@ from imbue.mngr_latchkey.remote.mock_outer_host_test import store_document
 from imbue.mngr_latchkey.remote.package import REMOTE_EXTENSIONS_DIR_NAME
 from imbue.mngr_latchkey.store import DESKTOP_EGRESS_RULES_FILENAME
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
+from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import PERMISSIONS_FORMAT_VERSION_FILENAME
 from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
 from imbue.mngr_latchkey.store import dump_permissions_text
 from imbue.mngr_latchkey.store import permissions_format_version_path
+from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 from imbue.mngr_latchkey.store import read_permissions_format_version
 from imbue.mngr_latchkey.testing import rule_keys_of_permissions_json
@@ -62,18 +65,19 @@ _SLACK_ANY = dump_permissions_text(LatchkeyPermissionsConfig(rules=({"slack-api"
 _SLACK_ROUTED = '{\n  "slack": true\n}\n'
 _CUSTOM_REGISTRATION = build_custom_service_registration("api.example.com", "https")
 _CUSTOM_CONFIG = merge_minds_latchkey_config(None, {"custom_https_api_example_com": _CUSTOM_REGISTRATION})
+_HOST_ID = HostId.generate()
 
 
 def _merge(bundle: bytes, account: str) -> RemoteCredentialMerge:
     return RemoteCredentialMerge(service_name="slack", account=account, bundle=bundle, data_format_version="2")
 
 
-def _apply(vps: FakeVps, update: RemoteStateUpdate, failure_description: str) -> None:
-    apply_remote_state(cast(OuterHostInterface, vps), update, failure_description=failure_description)
+def _apply(vps: FakeVps, update: RemoteStateUpdate) -> None:
+    apply_remote_state(cast(OuterHostInterface, vps), update, _HOST_ID)
 
 
 def _read(vps: FakeVps, request: RemoteStateRequest) -> RemoteMachineState:
-    return read_remote_state(cast(OuterHostInterface, vps), request, failure_description="read")
+    return read_remote_state(cast(OuterHostInterface, vps), request, _HOST_ID)
 
 
 def _grant(vps: FakeVps, bundle: bytes, account: str, permissions_json: str = _SLACK_ANY) -> None:
@@ -84,7 +88,6 @@ def _grant(vps: FakeVps, bundle: bytes, account: str, permissions_json: str = _S
             credential_merge=_merge(bundle, account),
             permissions_json=permissions_json,
         ),
-        failure_description="grant",
     )
 
 
@@ -143,7 +146,6 @@ def test_a_connect_merges_without_touching_the_machines_policy(tmp_path: Path) -
             encryption_key=SecretStr(MACHINE_KEY),
             credential_merge=_merge(store_document({"slack": ["a@example.com"]}, MACHINE_KEY), "a@example.com"),
         ),
-        failure_description="connect",
     )
 
     assert vps.machine_accounts() == {"slack": ["a@example.com"]}
@@ -162,7 +164,6 @@ def test_a_merge_reads_the_bundle_with_the_machines_plugins_loaded(tmp_path: Pat
             encryption_key=SecretStr(MACHINE_KEY),
             credential_merge=_merge(store_document({"slack": ["a@example.com"]}, MACHINE_KEY), "a@example.com"),
         ),
-        failure_description="connect",
     )
 
     assert vps.plugins_loaded_by("auth re-encrypt") == [["strava"]]
@@ -181,7 +182,6 @@ def test_a_disconnect_takes_one_account_away_and_leaves_its_siblings(tmp_path: P
     _apply(
         vps,
         RemoteStateUpdate(credential_clear=RemoteCredentialClear(service_name="slack", account="gone@example.com")),
-        failure_description="disconnect",
     )
 
     assert vps.machine_accounts() == {"slack": ["kept@example.com"], "github": ["also-kept@example.com"]}
@@ -197,7 +197,6 @@ def test_a_credential_change_on_a_machine_with_no_key_fails_rather_than_guessing
             RemoteStateUpdate(
                 credential_clear=RemoteCredentialClear(service_name="slack", account="gone@example.com")
             ),
-            failure_description="disconnect",
         )
 
     assert vps.machine_accounts() == {"slack": ["gone@example.com"]}
@@ -222,7 +221,6 @@ def test_a_refused_update_abandons_nothing(tmp_path: Path) -> None:
                 permissions_json=_SLACK_ANY,
                 is_gateway_restarted=True,
             ),
-            failure_description="provision",
         )
 
     assert vps.machine_accounts() == {"slack": ["live@example.com"]}
@@ -235,7 +233,7 @@ def test_a_permissions_snapshot_needs_no_key_at_all(tmp_path: Path) -> None:
     """A policy is not encrypted, so a machine that rebooted still takes one."""
     vps = as_vps(fake_vps(tmp_path))
 
-    _apply(vps, RemoteStateUpdate(permissions_json=_SLACK_ANY), failure_description="policy")
+    _apply(vps, RemoteStateUpdate(permissions_json=_SLACK_ANY))
 
     permissions_path = vps.latchkey_dir / PERMISSIONS_CONFIG_FILENAME
     assert permissions_path.read_text() == project_policy_for_machine(_SLACK_ANY)
@@ -383,7 +381,6 @@ def test_the_permissions_and_rules_update_installs_both_files(tmp_path: Path) ->
     _apply(
         vps,
         RemoteStateUpdate(desktop_egress_rules_json=_SLACK_ROUTED, permissions_json=_SLACK_ANY),
-        failure_description="policy and rules",
     )
 
     rules_path = vps.latchkey_dir / DESKTOP_EGRESS_RULES_FILENAME
@@ -413,7 +410,6 @@ def test_a_failed_merge_leaves_the_desktop_egress_rules_alone(tmp_path: Path) ->
                 desktop_egress_rules_json=_SLACK_ROUTED,
                 permissions_json=_SLACK_ANY,
             ),
-            failure_description="grant",
         )
 
     assert vps.machine_desktop_egress_rules() == "{}"
@@ -424,7 +420,7 @@ def test_an_update_without_desktop_egress_rules_leaves_the_machines_alone(tmp_pa
     vps = as_vps(fake_vps(tmp_path))
     vps.hold_desktop_egress_rules(_SLACK_ROUTED)
 
-    _apply(vps, RemoteStateUpdate(permissions_json=_SLACK_ANY), failure_description="policy")
+    _apply(vps, RemoteStateUpdate(permissions_json=_SLACK_ANY))
 
     assert vps.machine_desktop_egress_rules() == _SLACK_ROUTED
 
@@ -447,7 +443,6 @@ def test_a_connect_installs_the_config_ahead_of_the_credential(tmp_path: Path) -
                 config_json=_CUSTOM_CONFIG,
                 credential_merge=_merge(b"not a credential store", ""),
             ),
-            failure_description="connect",
         )
 
     assert vps.machine_config() == _CUSTOM_CONFIG
@@ -463,7 +458,7 @@ def test_a_config_snapshot_replaces_the_machines_file_whole(tmp_path: Path) -> N
         '{"custom_https_other_test": {"baseApiUrl": "https://other.test/"}}}'
     )
 
-    _apply(vps, RemoteStateUpdate(config_json=_CUSTOM_CONFIG), failure_description="config")
+    _apply(vps, RemoteStateUpdate(config_json=_CUSTOM_CONFIG))
 
     assert vps.machine_config() == _CUSTOM_CONFIG
 
@@ -518,7 +513,6 @@ def test_a_connect_without_a_config_leaves_the_machines_alone(tmp_path: Path) ->
             encryption_key=SecretStr(MACHINE_KEY),
             credential_merge=_merge(store_document({"slack": ["a@example.com"]}, MACHINE_KEY), "a@example.com"),
         ),
-        failure_description="connect",
     )
 
     assert vps.machine_config() == '{"settings": {"theme": "dark"}}'
@@ -824,6 +818,27 @@ def test_adopting_desktop_egress_rules_this_build_cannot_read_keeps_the_copy_it_
     assert local_path.read_text() == _SLACK_ROUTED
 
 
+@pytest.mark.parametrize("machine_rules", [_SLACK_ROUTED, None], ids=["stored", "removed"])
+def test_a_copy_of_the_desktop_egress_rules_that_cannot_be_written_here_is_a_local_failure(
+    tmp_path: Path, machine_rules: str | None
+) -> None:
+    """The machine answered; what failed is this computer's own store, so it is not reported as the machine."""
+    host_id = HostId.generate()
+    desktop_egress_rules_path_for_host(plugin_data_dir(tmp_path), host_id).mkdir(parents=True)
+
+    with pytest.raises(LatchkeyStoreError, match="desktop egress rules of host"):
+        adopt_machine_desktop_egress_rules(tmp_path, host_id, machine_rules)
+
+
+def test_a_copy_of_the_policy_that_cannot_be_written_here_is_a_local_failure(tmp_path: Path) -> None:
+    """The machine answered; what failed is this computer's own store, so it is not reported as the machine."""
+    host_id = HostId.generate()
+    permissions_path_for_host(plugin_data_dir(tmp_path), host_id).mkdir(parents=True)
+
+    with pytest.raises(LatchkeyStoreError, match="Failed to store the permissions of host"):
+        adopt_machine_permissions(tmp_path, host_id, _SLACK_ANY)
+
+
 # The format stamp the machine keeps beside its policy.
 
 
@@ -855,7 +870,6 @@ def test_the_stamp_is_installed_beside_the_policy_it_describes(tmp_path: Path) -
     _apply(
         vps,
         RemoteStateUpdate(permissions_json=_SLACK_ANY, permissions_format_version=PermissionsFormatVersion(1)),
-        failure_description="policy and stamp",
     )
 
     assert vps.machine_permissions() == project_policy_for_machine(_SLACK_ANY)

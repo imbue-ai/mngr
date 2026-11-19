@@ -60,13 +60,8 @@ from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationContext
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
 from imbue.mngr_latchkey.remote.credentials import read_host_desktop_egress_rules
 from imbue.mngr_latchkey.remote.credentials import read_host_permissions
+from imbue.mngr_latchkey.remote.errors import MachineTransferError
 from imbue.mngr_latchkey.store import LatchkeyStoreError
-
-# What each kind of change is called when it has to be reported to a user.
-# One phrasing for every edit to a host's policy (a grant, a toggle, a revoke),
-# because the user thinks of them as one kind of thing.
-PERMISSIONS_FAILURE_DESCRIPTION = "apply the permission change on that workspace"
-
 
 # What a workspace whose permissions a newer Imbue Studio wrote is told: only a newer one can read them.
 PERMISSIONS_FORMAT_NEWER_FAILURE: Final[UserFacingFailure] = UserFacingFailure(
@@ -93,6 +88,18 @@ class MachineOperationError(Exception):
         super().__init__(message)
         self.explained_failure = explained_failure
 
+    @property
+    def transfer(self) -> MachineTransferError | None:
+        """The machine command that failed, naming what it was sending and what it expected back; ``None`` when
+        no machine command is what failed (the machine could not be located, or a copy here was missing or
+        unreadable)."""
+        link = self.__cause__
+        while link is not None:
+            if isinstance(link, MachineTransferError):
+                return link
+            link = link.__cause__
+        return None
+
 
 def _explained_failure(cause: Exception) -> UserFacingFailure | None:
     if isinstance(cause, MachineUnreachableError):
@@ -105,18 +112,6 @@ def _explained_failure(cause: Exception) -> UserFacingFailure | None:
 def describe_machine_failure(error: MachineOperationError, sentence: str) -> UserFacingFailure:
     """The failure to show for ``error``: its own explanation when it has one, else ``sentence``."""
     return error.explained_failure or UserFacingFailure(message=sentence, remedy=None)
-
-
-def connect_failure_description(service_name: str) -> str:
-    return f"connect {service_name} on that workspace"
-
-
-def disconnect_failure_description(service_name: str) -> str:
-    return f"disconnect {service_name} on that workspace"
-
-
-def grant_failure_description(service_name: str) -> str:
-    return f"apply the {service_name} grant on that workspace"
 
 
 class MachineOperator(MutableModel):
@@ -151,7 +146,7 @@ class MachineOperator(MutableModel):
                 decides whether that is worth failing the whole view, or the
                 write, for.
         """
-        with self._machine(workspace_agent_id, "read that workspace's connections") as machine:
+        with self._machine(workspace_agent_id) as machine:
             if machine is not None:
                 machine.refresh(PermissionsMigrationContext(device_id=DesktopDeviceId(self.access.device_id)))
 
@@ -168,7 +163,7 @@ class MachineOperator(MutableModel):
         Raises:
             MachineOperationError: when the machine does not take it.
         """
-        with self._machine(workspace_agent_id, connect_failure_description(service_name)) as machine:
+        with self._machine(workspace_agent_id) as machine:
             if machine is not None:
                 machine.connect_service(service_name, account)
 
@@ -187,7 +182,7 @@ class MachineOperator(MutableModel):
         Raises:
             MachineOperationError: when the machine does not take it.
         """
-        with self._machine(workspace_agent_id, disconnect_failure_description(service_name)) as machine:
+        with self._machine(workspace_agent_id) as machine:
             if machine is not None:
                 machine.disconnect_account(service_name, account, is_service_deregistered)
 
@@ -203,11 +198,10 @@ class MachineOperator(MutableModel):
             MachineOperationError: when the policy cannot be read here, or the
                 machine does not take the pair.
         """
-        failure_description = grant_failure_description(service_name)
-        with self._machine(workspace_agent_id, failure_description) as machine:
+        with self._machine(workspace_agent_id) as machine:
             if machine is None:
                 return
-            permissions_json = self._host_permissions(machine.host_id, failure_description)
+            permissions_json = self._host_permissions(machine.host_id)
             if permissions_json is None:
                 machine.connect_service(service_name, account)
             else:
@@ -229,22 +223,16 @@ class MachineOperator(MutableModel):
                 is no copy of the policy or of the rules to push, or when the
                 machine does not take the change.
         """
-        failure_description = grant_failure_description(service_name)
-        with self._machine(workspace_agent_id, failure_description) as machine:
+        with self._machine(workspace_agent_id) as machine:
             if machine is None:
                 return
-            permissions_json = self._host_permissions(machine.host_id, failure_description)
+            permissions_json = self._host_permissions(machine.host_id)
             if permissions_json is None:
                 raise MachineOperationError(
-                    f"Could not {failure_description}: this computer has no copy of the permissions of host "
-                    f"{machine.host_id}.",
-                    None,
+                    f"This computer has no copy of the permissions of host {machine.host_id}.", None
                 )
             machine.connect_service_with_permissions_and_desktop_egress_rules(
-                service_name,
-                account,
-                permissions_json,
-                self._host_desktop_egress_rules(machine.host_id, failure_description),
+                service_name, account, permissions_json, self._host_desktop_egress_rules(machine.host_id)
             )
 
     def push_permissions(self, workspace_agent_id: str) -> None:
@@ -261,10 +249,10 @@ class MachineOperator(MutableModel):
             MachineOperationError: when the snapshot cannot be read, or the
                 machine does not take it.
         """
-        with self._machine(workspace_agent_id, PERMISSIONS_FAILURE_DESCRIPTION) as machine:
+        with self._machine(workspace_agent_id) as machine:
             if machine is None:
                 return
-            permissions_json = self._host_permissions(machine.host_id, PERMISSIONS_FAILURE_DESCRIPTION)
+            permissions_json = self._host_permissions(machine.host_id)
             if permissions_json is not None:
                 machine.set_permissions(permissions_json)
 
@@ -282,48 +270,47 @@ class MachineOperator(MutableModel):
                 is no copy of the rules to push, or when the machine does not
                 take the pair.
         """
-        with self._machine(workspace_agent_id, PERMISSIONS_FAILURE_DESCRIPTION) as machine:
+        with self._machine(workspace_agent_id) as machine:
             if machine is None:
                 return
-            permissions_json = self._host_permissions(machine.host_id, PERMISSIONS_FAILURE_DESCRIPTION)
+            permissions_json = self._host_permissions(machine.host_id)
             if permissions_json is None:
                 return
-            desktop_egress_rules_json = self._host_desktop_egress_rules(
-                machine.host_id, PERMISSIONS_FAILURE_DESCRIPTION
-            )
+            desktop_egress_rules_json = self._host_desktop_egress_rules(machine.host_id)
             machine.set_permissions_and_desktop_egress_rules(permissions_json, desktop_egress_rules_json)
 
-    def _host_permissions(self, host_id: HostId, failure_description: str) -> str | None:
+    def _host_permissions(self, host_id: HostId) -> str | None:
         try:
             return read_host_permissions(self.access.latchkey.plugin_data_dir, host_id)
         except LatchkeyStoreError as e:
-            raise MachineOperationError(f"Could not {failure_description}: {e}", None) from e
+            raise MachineOperationError(
+                f"Could not read this computer's copy of the permissions of host {host_id}: {e}", None
+            ) from e
 
-    def _host_desktop_egress_rules(self, host_id: HostId, failure_description: str) -> str:
+    def _host_desktop_egress_rules(self, host_id: HostId) -> str:
         try:
             desktop_egress_rules_json = read_host_desktop_egress_rules(self.access.latchkey.plugin_data_dir, host_id)
         except LatchkeyStoreError as e:
-            raise MachineOperationError(f"Could not {failure_description}: {e}", None) from e
+            raise MachineOperationError(
+                f"Could not read this computer's copy of the desktop egress rules of host {host_id}: {e}", None
+            ) from e
         if desktop_egress_rules_json is None:
             # The caller writes the copy immediately before pushing it.
             raise MachineOperationError(
-                f"Could not {failure_description}: this computer has no copy of the desktop egress rules "
-                f"of host {host_id}.",
-                None,
+                f"This computer has no copy of the desktop egress rules of host {host_id}.", None
             )
         return desktop_egress_rules_json
 
     @contextmanager
-    def _machine(
-        self, workspace_agent_id: str, failure_description: str
-    ) -> Generator[MachineCredentials | None, None, None]:
+    def _machine(self, workspace_agent_id: str) -> Generator[MachineCredentials | None, None, None]:
         """Open the workspace's machine for one exchange, or yield ``None`` when it has none.
 
         A workspace with no machine of its own is the whole of the no-op case:
         its agents read what this computer already holds. Everything the
         exchange can fail with -- the machine unreachable, or reachable and
-        refusing -- comes back to the caller as one error, described in terms of
-        what they were trying to do.
+        refusing -- comes back to the caller as one error, whose
+        :attr:`MachineOperationError.transfer` names the command that failed
+        when one did.
 
         Raises:
             MachineOperationError: when there is a machine and the exchange
@@ -338,5 +325,5 @@ class MachineOperator(MutableModel):
             with self.access.open_machine(workspace_agent_id, host_id) as machine:
                 yield machine
         except MACHINE_EXCHANGE_FAILURES as e:
-            logger.warning("Could not {} for workspace {}: {}", failure_description, workspace_agent_id, e)
-            raise MachineOperationError(f"Could not {failure_description}: {e}", _explained_failure(e)) from e
+            logger.warning("Failed a machine operation for workspace {}: {}", workspace_agent_id, e)
+            raise MachineOperationError(str(e), _explained_failure(e)) from e

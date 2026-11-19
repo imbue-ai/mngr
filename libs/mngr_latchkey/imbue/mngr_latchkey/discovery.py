@@ -889,7 +889,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
             gateway_password=self.latchkey.derive_gateway_password(),
             permissions_override=permissions_override,
         )
-        announce_device(outer, record, failure_description=f"announce this computer to the machine of host {host_id}")
+        announce_device(outer, record, host_id)
         with self._remote_hosts_lock:
             self._last_announcement_at_by_host_id[host_id_str] = time.monotonic()
         self._record_wiring_step_success(host_id, _RemoteWiringStep.DEVICE_ANNOUNCEMENT)

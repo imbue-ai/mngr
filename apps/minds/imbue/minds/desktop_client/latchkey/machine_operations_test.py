@@ -24,7 +24,8 @@ from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.remote.credentials import FetchedMachineState
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
-from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
+from imbue.mngr_latchkey.remote.errors import MachineTransferError
+from imbue.mngr_latchkey.remote.errors import SentToMachine
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
 from imbue.mngr_latchkey.store import permissions_path_for_host
@@ -38,7 +39,9 @@ class _RecordingMachine(MachineCredentials):
     """A machine that records what it was asked to do instead of exchanging anything with a VPS."""
 
     calls: list[str] = Field(default_factory=list, description="Each exchange this machine was asked for, in order.")
-    refusal: str = Field(default="", description="When set, the reason every exchange is refused with.")
+    refusal: str = Field(
+        default="", description="When set, the reason every exchange is refused with, as a failed policy push."
+    )
     store_failure: str = Field(
         default="", description="When set, the reason this computer's own copies cannot be read or written."
     )
@@ -75,7 +78,13 @@ class _RecordingMachine(MachineCredentials):
 
     def _note(self, call: str) -> None:
         if self.refusal:
-            raise RemoteGatewayError(self.refusal)
+            raise MachineTransferError(
+                host_id=self.host_id,
+                vps_name="vps-test",
+                sent=frozenset({SentToMachine.PERMISSIONS}),
+                expected=frozenset(),
+                reason=self.refusal,
+            )
         if self.store_failure:
             raise LatchkeyStoreError(self.store_failure)
         self.calls.append(call)
@@ -198,7 +207,7 @@ def test_a_desktop_egress_edit_with_no_rules_copy_to_push_fails(tmp_path: Path) 
     with pytest.raises(MachineOperationError, match="no copy of the desktop egress rules") as failure:
         operator.push_permissions_and_desktop_egress_rules(agent_id)
 
-    assert "apply the permission change on that workspace" in str(failure.value)
+    assert failure.value.transfer is None
     assert machine.calls == []
 
 
@@ -263,7 +272,7 @@ def test_a_grant_that_changes_a_route_with_no_rules_copy_to_push_fails(tmp_path:
     with pytest.raises(MachineOperationError, match="no copy of the desktop egress rules") as failure:
         operator.connect_service_with_permissions_and_desktop_egress_rules(agent_id, "slack", "a@example.com")
 
-    assert "apply the slack grant on that workspace" in str(failure.value)
+    assert failure.value.transfer is None
     assert machine.calls == []
 
 
@@ -314,7 +323,9 @@ def test_a_machine_that_refuses_a_change_fails_the_call_that_asked_for_it(tmp_pa
     with pytest.raises(MachineOperationError, match="the VPS said no") as failure:
         operator.push_permissions(agent_id)
 
-    assert "apply the permission change on that workspace" in str(failure.value)
+    transfer = failure.value.transfer
+    assert transfer is not None
+    assert (transfer.sent, transfer.expected) == ({SentToMachine.PERMISSIONS}, frozenset())
 
 
 def test_a_local_copy_that_cannot_be_read_fails_the_call_the_same_way(tmp_path: Path) -> None:
@@ -338,8 +349,10 @@ def test_a_machine_that_cannot_be_opened_fails_the_call_that_asked_for_it(tmp_pa
         tmp_path, is_machine_of_its_own=True, policy=_EMPTY_POLICY, opening_refusal="that workspace is asleep"
     )
 
-    with pytest.raises(MachineOperationError, match="that workspace is asleep"):
+    with pytest.raises(MachineOperationError, match="that workspace is asleep") as failure:
         operator.connect_service(agent_id, "slack", "a@example.com")
+
+    assert failure.value.transfer is None
 
 
 def test_a_workspace_this_app_does_not_know_cannot_be_carried_to(tmp_path: Path) -> None:

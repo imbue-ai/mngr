@@ -184,8 +184,8 @@ class MachineCredentials(FrozenModel):
                 does.
             RemoteGatewayError: when the machine cannot be read, or does not
                 take the migrated policy back.
-            LatchkeyStoreError: when the migrated copy here cannot be read
-                back.
+            LatchkeyStoreError: when a copy here cannot be written, or the
+                migrated copy here cannot be read back.
         """
         fetched = fetch_machine_state(self.host, self.latchkey, self.host_id, self._machine_key())
         adopt_machine_credentials(self.latchkey, self.host_id, fetched)
@@ -238,7 +238,7 @@ class MachineCredentials(FrozenModel):
         Raises:
             RemoteGatewayError: when either policy cannot be read, or the
                 machine does not take the seed.
-            LatchkeyStoreError: when a copy here cannot be read.
+            LatchkeyStoreError: when a copy here cannot be read or written.
         """
         if machine_permissions_json is not None and is_policy_provisioned(self.host_id, machine_permissions_json):
             adopt_machine_permissions(self.latchkey.latchkey_directory, self.host_id, machine_permissions_json)
@@ -401,9 +401,7 @@ class MachineCredentials(FrozenModel):
         Raises:
             RemoteGatewayError: when the machine cannot be read.
         """
-        return read_filed_permission_requests(
-            self.host, failure_description=f"list the permission requests host {self.host_id} keeps"
-        )
+        return read_filed_permission_requests(self.host, self.host_id)
 
     def forget_permission_request(self, request_id: str) -> None:
         """Drop a permission request the user answered here from the machine, and withdraw it from the other desktops.
@@ -416,9 +414,7 @@ class MachineCredentials(FrozenModel):
         Raises:
             RemoteGatewayError: when the machine does not take it.
         """
-        forget_permission_request(
-            self.host, request_id, failure_description=f"forget permission request {request_id} on host {self.host_id}"
-        )
+        forget_permission_request(self.host, request_id, self.host_id)
 
     def _config_registering(self, service_name: str) -> str | None:
         """The config a connect of ``service_name`` installs: the machine's, with a custom service registered; else ``None``.
@@ -441,6 +437,7 @@ class MachineCredentials(FrozenModel):
                 credential the machine could never use is refused rather than
                 pushed.
             RemoteGatewayError: when the machine's config cannot be read.
+            LatchkeyStoreError: when the store's config cannot be rebuilt.
         """
         if not is_custom_service_name(service_name):
             return None
@@ -474,8 +471,8 @@ class MachineCredentials(FrozenModel):
             MachineCredentialsError: when ``service_name`` is not a custom
                 service: a builtin or bundled one is never deregistered, so
                 asking for it is a caller's mistake rather than a no-op.
-            RemoteGatewayError: when the machine's config cannot be read, or
-                the store's cannot be rebuilt.
+            RemoteGatewayError: when the machine's config cannot be read.
+            LatchkeyStoreError: when the store's config cannot be rebuilt.
         """
         if not is_custom_service_name(service_name):
             raise MachineCredentialsError(

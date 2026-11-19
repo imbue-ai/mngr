@@ -45,6 +45,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
+from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import SecretStr
 
@@ -600,6 +601,24 @@ class AnsweringVps(FakeVps):
             )
         )
         return self.canned
+
+
+class UnreachableVps(FakeVps):
+    """A fake machine no command reaches: running one raises ``error``, the way a connection that fails does."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    error: Exception = Field(description="What running any command raises.")
+
+    def execute_idempotent_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        raise self.error
 
 
 class ScriptedOuter(MutableModel):

@@ -237,7 +237,9 @@ def provision_remote_gateway(
     recorded about the machine and whose CLI tries a key against the machine's
     store. ``package_layout`` is where the package's files live on the machine
     (:data:`~imbue.mngr_latchkey.remote.package.DEFAULT_REMOTE_PACKAGE_LAYOUT`
-    on a real one). Raises :class:`RemoteGatewayError` if any step fails.
+    on a real one). Raises :class:`RemoteGatewayError` if a step against the
+    machine fails, and :class:`LatchkeyStoreError` if what was read from it
+    cannot be stored here.
     """
     if host.is_local:
         logger.debug(
@@ -265,7 +267,7 @@ def provision_remote_gateway(
     state = read_remote_state(
         host,
         RemoteStateRequest(container_host_id=host_id, is_credential_store_included=recorded_key is None),
-        failure_description=f"read the latchkey state of host {host_id}",
+        host_id,
     )
     key_decision = _resolve_machine_encryption_key(latchkey, host_id, state, recorded_key)
     listen_password = _resolve_machine_gateway_password(latchkey_directory, host_id, state, desktop_gateway_password)
@@ -290,7 +292,7 @@ def provision_remote_gateway(
         is_gateway_restarted=True,
     )
     with log_span("Applying the latchkey gateway state of host {} to VPS {}", host_id, host.get_name()):
-        apply_remote_state(host, update, failure_description=f"provision the latchkey gateway of host {host_id}")
+        apply_remote_state(host, update, host_id)
     if key_decision.is_decided_here:
         _record_machine_encryption_key(latchkey_directory, host_id, key_decision.key)
     adopt_machine_custom_services(latchkey, host_id, custom_service_registrations_of_config(config_json, host_id))

@@ -130,7 +130,7 @@ def fetch_machine_state(
     """
     request = RemoteStateRequest(is_credential_store_included=True, fallback_encryption_key=machine_key)
     with log_span("Reading the latchkey state of host {} from VPS {}", host_id, host.get_name()):
-        state = read_remote_state(host, request, failure_description=f"read the latchkey state of host {host_id}")
+        state = read_remote_state(host, request, host_id)
     store = (
         _reencrypt_machine_store_for_desktop(latchkey, host_id, state.credential_store, state.encryption_key)
         if state.credential_store is not None
@@ -159,9 +159,7 @@ def fetch_machine_config(host: OuterHostInterface, host_id: HostId) -> str | Non
         RemoteGatewayError: when the machine cannot be read.
     """
     with log_span("Reading the latchkey config of host {} from VPS {}", host_id, host.get_name()):
-        state = read_remote_state(
-            host, RemoteStateRequest(), failure_description=f"read the latchkey config of host {host_id}"
-        )
+        state = read_remote_state(host, RemoteStateRequest(), host_id)
     return state.config_json
 
 
@@ -246,13 +244,13 @@ def adopt_machine_custom_services(
     that machine actually has.
 
     Raises:
-        RemoteGatewayError: when the store's config cannot be rebuilt.
+        LatchkeyStoreError: when the store's config cannot be rebuilt.
     """
     store_dir = machine_store_dir(plugin_data_dir(latchkey.latchkey_directory), host_id)
     try:
         is_changed = write_machine_store_config(latchkey.latchkey_directory, store_dir, custom_service_registrations)
     except LatchkeyStoreError as e:
-        raise RemoteGatewayError(f"Failed to adopt the custom services of host {host_id}: {e}") from e
+        raise LatchkeyStoreError(f"Failed to adopt the custom services of host {host_id}: {e}") from e
     if is_changed:
         materialize_bundled_extensions(latchkey.latchkey_directory)
 
@@ -267,8 +265,8 @@ def adopt_machine_permissions(latchkey_directory: Path, host_id: HostId, permiss
     costs nothing.
 
     Raises:
-        RemoteGatewayError: when the policy is not one this build understands,
-            or cannot be stored.
+        RemoteGatewayError: when the policy is not one this build understands.
+        LatchkeyStoreError: when it cannot be stored here.
     """
     try:
         load_permissions_from_text(permissions_json)
@@ -281,7 +279,7 @@ def adopt_machine_permissions(latchkey_directory: Path, host_id: HostId, permiss
         if not local_path.is_file() or local_path.read_text() != permissions_json:
             atomic_write(local_path, permissions_json)
     except OSError as e:
-        raise RemoteGatewayError(f"Failed to store the permissions of host {host_id} at {local_path}: {e}") from e
+        raise LatchkeyStoreError(f"Failed to store the permissions of host {host_id} at {local_path}: {e}") from e
 
 
 def adopt_machine_permissions_format_version(
@@ -295,14 +293,14 @@ def adopt_machine_permissions_format_version(
     when it differs, so an unchanged stamp costs nothing.
 
     Raises:
-        RemoteGatewayError: when the stamp here cannot be read or written.
+        LatchkeyStoreError: when the stamp here cannot be read or written.
     """
     data_dir = plugin_data_dir(latchkey_directory)
     try:
         if read_permissions_format_version(data_dir, host_id) != permissions_format_version:
             write_permissions_format_version(data_dir, host_id, permissions_format_version)
     except LatchkeyStoreError as e:
-        raise RemoteGatewayError(f"Failed to adopt the permissions format version of host {host_id}: {e}") from e
+        raise LatchkeyStoreError(f"Failed to adopt the permissions format version of host {host_id}: {e}") from e
 
 
 def adopt_machine_desktop_egress_rules(
@@ -319,14 +317,15 @@ def adopt_machine_desktop_egress_rules(
 
     Raises:
         RemoteGatewayError: when the rules are not ones this build
-            understands, or the copy cannot be stored or removed.
+            understands.
+        LatchkeyStoreError: when the copy here cannot be stored or removed.
     """
     local_path = desktop_egress_rules_path_for_host(plugin_data_dir(latchkey_directory), host_id)
     if desktop_egress_rules_json is None:
         try:
             local_path.unlink(missing_ok=True)
         except OSError as e:
-            raise RemoteGatewayError(
+            raise LatchkeyStoreError(
                 f"Failed to remove the desktop egress rules of host {host_id} at {local_path}: {e}"
             ) from e
         return
@@ -340,7 +339,7 @@ def adopt_machine_desktop_egress_rules(
         if not local_path.is_file() or local_path.read_text() != desktop_egress_rules_json:
             atomic_write(local_path, desktop_egress_rules_json)
     except OSError as e:
-        raise RemoteGatewayError(
+        raise LatchkeyStoreError(
             f"Failed to store the desktop egress rules of host {host_id} at {local_path}: {e}"
         ) from e
 
@@ -396,7 +395,7 @@ def push_credentials(
                 config_json=config_json,
                 credential_merge=_merge_of(machine_latchkey, host_id, service_name, account, machine_key),
             ),
-            failure_description=f"add {service_name} to the credentials of host {host_id}",
+            host_id,
         )
 
 
@@ -448,7 +447,7 @@ def push_credentials_with_permissions(
                 permissions_json=permissions_json,
                 permissions_format_version=permissions_format_version,
             ),
-            failure_description=f"add {service_name} to host {host_id} and apply its permissions",
+            host_id,
         )
 
 
@@ -489,7 +488,7 @@ def clear_remote_credentials(
                 config_json=config_json,
                 credential_clear=RemoteCredentialClear(service_name=service_name, account=account),
             ),
-            failure_description=f"disconnect {service_name} of host {host_id}",
+            host_id,
         )
 
 
@@ -527,7 +526,7 @@ def push_permissions_snapshot(
             RemoteStateUpdate(
                 permissions_json=permissions_json, permissions_format_version=permissions_format_version
             ),
-            failure_description=f"apply the permissions of host {host_id}",
+            host_id,
         )
 
 
@@ -564,7 +563,7 @@ def push_permissions_and_desktop_egress_rules(
                 desktop_egress_rules_json=desktop_egress_rules_json,
                 permissions_format_version=permissions_format_version,
             ),
-            failure_description=f"apply the permissions and desktop egress rules of host {host_id}",
+            host_id,
         )
 
 

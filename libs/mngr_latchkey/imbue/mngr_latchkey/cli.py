@@ -577,9 +577,8 @@ def _machine_of_host(
 def _read_machine_policy(mngr_ctx: MngrContext, machine: MachineCredentials) -> None:
     """Make this computer's copy of the host's policy say what its machine holds (see ``MachineCredentials.refresh``).
 
-    The read is an SSH exchange, so a connection that drops surfaces as an
-    ``MngrError`` or ``OSError`` rather than a gateway error, and is reported
-    the same way.
+    A connection that drops arrives as the gateway error of the read it
+    interrupted, and is reported the same way as a machine that refused.
     """
     device = _resolve_device_identity(mngr_ctx, None)
     try:

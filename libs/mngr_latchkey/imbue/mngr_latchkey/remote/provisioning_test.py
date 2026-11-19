@@ -39,7 +39,9 @@ from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import store_machine_gateway_password
 from imbue.mngr_latchkey.remote._mirror import stored_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import stored_machine_gateway_password
+from imbue.mngr_latchkey.remote.errors import MachineTransferError
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
+from imbue.mngr_latchkey.remote.errors import SentToMachine
 from imbue.mngr_latchkey.remote.mock_outer_host_test import DEFAULT_DOCKER_BRIDGE_ADDRESS
 from imbue.mngr_latchkey.remote.mock_outer_host_test import FakeVps
 from imbue.mngr_latchkey.remote.mock_outer_host_test import OUTER_HOST_EXTRA_HOST
@@ -108,7 +110,7 @@ def _provision(outer: OuterHostInterface, latchkey_directory: Path, host_id: Hos
 
 
 def _announce(outer: OuterHostInterface, record: DeviceRecord) -> None:
-    announce_device(outer, record, failure_description="announce the desktop")
+    announce_device(outer, record, HostId.generate())
 
 
 def _latchkey_directory(tmp_path: Path) -> Path:
@@ -356,8 +358,10 @@ def test_a_gateway_that_does_not_come_up_fails_the_pass(tmp_path: Path) -> None:
     outer = fake_vps(tmp_path)
     as_vps(outer).fail_supervisorctl_for(GATEWAY_PROGRAM_NAME)
 
-    with pytest.raises(RemoteGatewayError, match="provision the latchkey gateway"):
+    with pytest.raises(MachineTransferError) as raised:
         _provision(outer, _latchkey_directory(tmp_path), HostId.generate())
+
+    assert SentToMachine.GATEWAY_RESTART in raised.value.sent
 
 
 # The reverse tunnel, for a container whose agent reaches the gateway at its own loopback.
@@ -376,7 +380,7 @@ def test_extra_hosts_resolve_the_outer_host_only_by_its_own_mapping() -> None:
 def test_the_tunnel_decision_needs_a_read_that_looked_at_the_container(tmp_path: Path) -> None:
     outer = fake_vps(tmp_path)
     host_id = HostId.generate()
-    state = read_remote_state(outer, RemoteStateRequest(), failure_description="read")
+    state = read_remote_state(outer, RemoteStateRequest(), host_id)
 
     with pytest.raises(RemoteGatewayError, match="was not asked how its container was created"):
         _does_container_need_reverse_tunnel(outer, host_id, state)
@@ -924,7 +928,7 @@ def test_a_read_asked_about_the_container_answers_how_it_was_created(tmp_path: P
     outer = fake_vps(tmp_path, container_name="mngr-ws-2")
     host_id = HostId.generate()
 
-    state = read_remote_state(outer, RemoteStateRequest(container_host_id=host_id), failure_description="read")
+    state = read_remote_state(outer, RemoteStateRequest(container_host_id=host_id), host_id)
 
     assert state.container_extra_hosts == (OUTER_HOST_EXTRA_HOST,)
     assert as_vps(outer).docker_calls() == [
@@ -935,9 +939,7 @@ def test_a_read_asked_about_the_container_answers_how_it_was_created(tmp_path: P
     # A container created with no mapping at all (docker prints ``null``), and one an earlier pass tunneled into.
     as_vps(outer).predate_outer_host_mapping()
     as_vps(outer).mint_tunnel_key()
-    state_of_older = read_remote_state(
-        outer, RemoteStateRequest(container_host_id=host_id), failure_description="read"
-    )
+    state_of_older = read_remote_state(outer, RemoteStateRequest(container_host_id=host_id), host_id)
     assert state_of_older.container_extra_hosts == ()
     assert state_of_older.has_container_tunnel_key is True
 
@@ -947,7 +949,7 @@ def test_a_read_asked_about_a_container_the_machine_lacks_fails(tmp_path: Path) 
     host_id = HostId.generate()
 
     with pytest.raises(RemoteGatewayError, match=f"no container labeled com.imbue.mngr.host-id={host_id}"):
-        read_remote_state(outer, RemoteStateRequest(container_host_id=host_id), failure_description="read")
+        read_remote_state(outer, RemoteStateRequest(container_host_id=host_id), host_id)
 
 
 # Announcing this computer to the machine.

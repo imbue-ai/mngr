@@ -3,12 +3,16 @@
 import json
 import threading
 from collections.abc import Callable
+from collections.abc import Generator
 from collections.abc import Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import NoReturn
 
+import loguru
 import paramiko
 import pytest
+from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -25,6 +29,7 @@ from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperat
 from imbue.minds.desktop_client.latchkey.testing import leave_copies_on_this_computer_as_they_are
 from imbue.minds.desktop_client.latchkey.testing import leave_permissions_on_this_computer
 from imbue.minds.desktop_client.latchkey_auto_register import LatchkeyAutoRegister
+from imbue.minds.desktop_client.latchkey_auto_register import _CarryStoppedError
 from imbue.minds.desktop_client.latchkey_auto_register import _PendingCarry
 from imbue.minds.desktop_client.latchkey_auto_register import _coalesced_carry
 from imbue.mngr.errors import HostAuthenticationError
@@ -801,6 +806,22 @@ def _machine_operation_error_from_rejected_ssh_key() -> MachineOperationError:
     return _machine_operation_error_from_ssh_authentication("Authentication failed.")
 
 
+@contextmanager
+def _errors_logged() -> Generator[list[BaseException | None], None, None]:
+    """The exception attached to each ERROR logged inside the block, in order; ``None`` for one logged without any."""
+    errors: list[BaseException | None] = []
+
+    def collect(message: "loguru.Message") -> None:
+        exception = message.record["exception"]
+        errors.append(None if exception is None else exception.value)
+
+    sink_id = logger.add(collect, level="ERROR")
+    try:
+        yield errors
+    finally:
+        logger.remove(sink_id)
+
+
 # Retries without waiting, so the tests about the transient retry do not sleep out the production backoff.
 _IMMEDIATE_RETRY_DELAYS_SECONDS: tuple[float, ...] = (0.0, 0.0)
 
@@ -893,21 +914,38 @@ def test_a_push_refused_for_a_rejected_ssh_key_is_not_retried(
     resolver: MngrCliBackendResolver,
     build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
 ) -> None:
-    """A rejected key is no slow host: retrying cannot fix it, so it is reported at once."""
+    """A rejected key is no slow host: retrying cannot fix it, so it is reported at once, with the push's error."""
+    rejected_key = _machine_operation_error_from_rejected_ssh_key()
     carry = _carry_of_a_new_agent_through_failures(
-        tmp_path,
-        resolver,
-        build_latchkey_auto_register,
-        push_failures=(_machine_operation_error_from_rejected_ssh_key(),),
+        tmp_path, resolver, build_latchkey_auto_register, push_failures=(rejected_key,)
     )
-    with capture_loguru(level="ERROR") as log_output:
+    with _errors_logged() as errors:
         carry.auto_register.start()
         _wait_for_pushes(carry.machine, 1)
         _wait_until_pushes_settle(carry.auto_register)
 
     assert carry.machine.pushed_workspace_agent_ids == [str(carry.new_agent)]
     assert carry.machine.refreshed_count() == 1
-    assert f"Failed to push the latchkey permissions of host {carry.host_id}" in log_output.getvalue()
+    assert errors == [rejected_key]
+
+
+def test_a_read_refused_for_a_rejected_ssh_key_is_reported_with_the_reads_error(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """The read before the push reports its own failure, so the error says which exchange the machine refused."""
+    rejected_key = _machine_operation_error_from_rejected_ssh_key()
+    carry = _carry_of_a_new_agent_through_failures(
+        tmp_path, resolver, build_latchkey_auto_register, read_failures=(rejected_key,)
+    )
+    with _errors_logged() as errors:
+        carry.auto_register.start()
+        _wait_for_reads(carry.machine, 1)
+        _wait_until_pushes_settle(carry.auto_register)
+
+    assert carry.machine.pushed_count() == 0
+    assert errors == [rejected_key]
 
 
 def test_a_push_that_keeps_timing_out_in_ssh_authentication_is_reported_once_the_retries_run_out(
@@ -915,21 +953,20 @@ def test_a_push_that_keeps_timing_out_in_ssh_authentication_is_reported_once_the
     resolver: MngrCliBackendResolver,
     build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
 ) -> None:
-    """A host that stays too slow through every retry still reports the lost change as an error, once."""
+    """A host that stays too slow through every retry still reports the lost change as an error, once, with the
+    last push's error."""
     attempt_count = len(_IMMEDIATE_RETRY_DELAYS_SECONDS) + 1
+    timeouts = tuple(_machine_operation_error_from_ssh_auth_timeout() for _ in range(attempt_count))
     carry = _carry_of_a_new_agent_through_failures(
-        tmp_path,
-        resolver,
-        build_latchkey_auto_register,
-        push_failures=tuple(_machine_operation_error_from_ssh_auth_timeout() for _ in range(attempt_count)),
+        tmp_path, resolver, build_latchkey_auto_register, push_failures=timeouts
     )
-    with capture_loguru(level="ERROR") as log_output:
+    with _errors_logged() as errors:
         carry.auto_register.start()
         _wait_for_pushes(carry.machine, attempt_count)
         _wait_until_pushes_settle(carry.auto_register)
 
     assert carry.machine.read_counts_at_push == list(range(1, attempt_count + 1))
-    assert log_output.getvalue().count(f"Failed to push the latchkey permissions of host {carry.host_id}") == 1
+    assert errors == [timeouts[-1]]
 
 
 def test_stopping_ends_the_wait_before_a_transient_retry(
@@ -937,7 +974,8 @@ def test_stopping_ends_the_wait_before_a_transient_retry(
     resolver: MngrCliBackendResolver,
     build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
 ) -> None:
-    """A carry waiting to retry a slow host gives up when the subscription stops, rather than holding up the app."""
+    """A carry waiting to retry a slow host gives up when the subscription stops, rather than holding up the app, and
+    reports the stop as what lost the change."""
     carry = _carry_of_a_new_agent_through_failures(
         tmp_path,
         resolver,
@@ -945,14 +983,14 @@ def test_stopping_ends_the_wait_before_a_transient_retry(
         push_failures=(_machine_operation_error_from_ssh_auth_timeout(),),
         retry_delays_seconds=(3600.0,),
     )
-    with capture_loguru(level="ERROR") as log_output:
+    with _errors_logged() as errors:
         carry.auto_register.start()
         _wait_for_pushes(carry.machine, 1)
         carry.auto_register.stop()
         _wait_until_pushes_settle(carry.auto_register)
 
     assert carry.machine.pushed_count() == 1
-    assert f"Failed to push the latchkey permissions of host {carry.host_id}" in log_output.getvalue()
+    assert [type(error) for error in errors] == [_CarryStoppedError]
 
 
 def test_a_carry_whose_host_goes_down_while_it_waits_to_retry_is_held_for_the_host(
