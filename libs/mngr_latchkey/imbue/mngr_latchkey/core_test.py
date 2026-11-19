@@ -39,6 +39,8 @@ from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import LocalFileDescriptorsExhaustedError
+from imbue.mngr.errors import ProviderNotAuthorizedError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentId
@@ -2558,6 +2560,27 @@ def _outer_host_auth_error(paramiko_error: paramiko.AuthenticationException) -> 
             id="wrapped-no-valid-connections",
         ),
         pytest.param(
+            ProviderUnavailableError(ProviderInstanceName("imbue_cloud"), "could not reach Imbue Cloud"),
+            True,
+            id="provider-unavailable",
+        ),
+        pytest.param(
+            _raised_from(
+                ProviderUnavailableError(ProviderInstanceName("imbue_cloud"), "could not reach Imbue Cloud"),
+                socket.gaierror(socket.EAI_NONAME, "nodename nor servname provided, or not known"),
+            ),
+            True,
+            id="provider-unavailable-from-dns-failure",
+        ),
+        pytest.param(
+            _raised_from(
+                RemoteGatewayError("Failed to reach the machine"),
+                ProviderUnavailableError(ProviderInstanceName("imbue_cloud"), "could not reach Imbue Cloud"),
+            ),
+            True,
+            id="wrapped-provider-unavailable",
+        ),
+        pytest.param(
             _outer_host_auth_error(paramiko.AuthenticationException("Authentication timeout.")),
             True,
             id="host-authentication-error-from-auth-timeout",
@@ -2600,12 +2623,21 @@ def _outer_host_auth_error(paramiko_error: paramiko.AuthenticationException) -> 
         pytest.param(SSHTunnelError("No SSH key file", SSHTunnelPhase.LOCAL_SETUP), False, id="tunnel-local-setup"),
         pytest.param(RemoteGatewayError("Malformed permissions file"), False, id="remote-gateway-error-alone"),
         pytest.param(HostNotFoundError(ProviderInstanceName("p"), HostId()), False, id="host-not-found"),
+        pytest.param(ProviderNotAuthorizedError(ProviderInstanceName("aws")), False, id="provider-not-authorized"),
+        pytest.param(
+            _raised_from(
+                RemoteGatewayError("Failed to reach the machine"),
+                ProviderNotAuthorizedError(ProviderInstanceName("aws")),
+            ),
+            False,
+            id="wrapped-provider-not-authorized",
+        ),
     ],
 )
 def test_is_transient_remote_wiring_error_classifies_by_error_and_cause_chain(
     error: BaseException, is_transient: bool
 ) -> None:
-    """Transient SSH shapes are recognized wherever they sit in the chain; misconfiguration is not."""
+    """Transient shapes are recognized wherever they sit in the chain; misconfiguration is not."""
     assert is_transient_remote_wiring_error(error) is is_transient
 
 
@@ -3054,8 +3086,29 @@ def _mark_provisioning_in_flight(handler: LatchkeyDiscoveryHandler, agent_id: Ag
         handler._pending_remote_agents.add(_instance_tag(agent_id, host_id))
 
 
+@pytest.mark.parametrize(
+    ("error", "expected_reported_text"),
+    [
+        pytest.param(
+            _raised_from(
+                RemoteGatewayError("Failed to hand the machine its permissions"),
+                HostConnectionError("Connection was closed while running command"),
+            ),
+            "Failed to hand the machine its permissions",
+            id="wrapped-host-connection-error",
+        ),
+        pytest.param(
+            _raised_from(
+                ProviderUnavailableError(ProviderInstanceName("imbue_cloud"), "could not reach Imbue Cloud"),
+                socket.gaierror(socket.EAI_NONAME, "nodename nor servname provided, or not known"),
+            ),
+            "could not reach Imbue Cloud",
+            id="provider-unavailable-from-dns-failure",
+        ),
+    ],
+)
 def test_transient_provisioning_failure_is_retried_by_the_next_cycle_and_reported_at_the_threshold(
-    tmp_path: Path, temp_mngr_ctx: MngrContext
+    tmp_path: Path, temp_mngr_ctx: MngrContext, error: BaseException, expected_reported_text: str
 ) -> None:
     """A transient provisioning failure does not escape the worker, leaves the host retryable, and escalates late.
 
@@ -3063,7 +3116,9 @@ def test_transient_provisioning_failure_is_retried_by_the_next_cycle_and_reporte
     group at error level. A transient failure is instead noted and the pass
     left for the next discovery cycle: the in-flight and pending flags are
     cleared, and the host is not recorded as provisioned. Only a streak as long
-    as the threshold is reported as an error.
+    as the threshold is reported as an error. Opening the outer host lists the
+    provider's hosts first, so a provider that cannot reach its own backend
+    fails this way before any SSH happens.
     """
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
@@ -3078,10 +3133,7 @@ def test_transient_provisioning_failure_is_retried_by_the_next_cycle_and_reporte
             mngr_ctx=temp_mngr_ctx,
             device=_DEVICE,
         )
-        handler._error_to_raise = _raised_from(
-            RemoteGatewayError("Failed to hand the machine its permissions"),
-            HostConnectionError("Connection was closed while running command"),
-        )
+        handler._error_to_raise = error
         with _captured_log_records() as captured:
             _mark_provisioning_in_flight(handler, agent_id, host_id)
             handler._run_remote_gateway_provisioning(agent_id, host_id, ssh_info, "imbue_cloud", None)
@@ -3112,7 +3164,7 @@ def test_transient_provisioning_failure_is_retried_by_the_next_cycle_and_reporte
     assert provisioned_hosts_after_failure == set()
     # The streak is reported exactly once, at the threshold, with the wrapped error's text.
     assert len(errors_at_threshold) == 1, errors_at_threshold
-    assert "Failed to hand the machine its permissions" in errors_at_threshold[0]
+    assert expected_reported_text in errors_at_threshold[0]
     # A later success provisions normally and forgets the streak.
     assert handler._provisioned == [(agent_id, host_id)]
     assert provisioned_hosts_after_success == {str(host_id)}

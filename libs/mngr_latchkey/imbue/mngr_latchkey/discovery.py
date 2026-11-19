@@ -69,6 +69,8 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import LocalFileDescriptorsExhaustedError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderNotAuthorizedError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.outer_host import is_ssh_auth_timeout
 from imbue.mngr.hosts.outer_host import is_transient_ssh_error
 from imbue.mngr.hosts.outer_host import is_unreachable_peer_connect_error
@@ -96,7 +98,7 @@ from imbue.mngr_latchkey.remote.provisioning import DEFAULT_REMOTE_PACKAGE_LAYOU
 from imbue.mngr_latchkey.remote.provisioning import provision_remote_gateway
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
-# How many consecutive discovery cycles a wiring step may fail with transient SSH errors
+# How many consecutive discovery cycles a wiring step may fail with transient errors
 # before the streak is reported as an error. Every cycle (30s by default) is one attempt,
 # so this is about five minutes of a host that reports as running yet cannot be reached:
 # long enough that a blip never reports, short enough that a real misconfiguration (a
@@ -265,10 +267,15 @@ def is_transient_remote_wiring_error(error: BaseException) -> bool:
     which is a host that is booting, restarting or momentarily off this
     machine's network; for a ``HostConnectionError``, which is what those
     become after the outer host's own retries give up; for a tunnel failure
-    the tunnel layer attributes to the host rather than to this device; and for
+    the tunnel layer attributes to the host rather than to this device; for a
+    ``ProviderUnavailableError``, which is the provider failing to reach its own
+    backend while opening the outer host, before any SSH (this computer's
+    network or DNS dropping out, or the backend briefly down) -- the failure the
+    provider marks as one to retry rather than act on; and for
     a ``HostAuthenticationError`` only when sshd never answered authentication
     in time (:func:`is_ssh_auth_timeout`), which is a slow host rather than a
-    rejected key. Everything else -- trust material missing on this device, a
+    rejected key. Everything else -- trust material missing on this device,
+    provider credentials missing or refused (``ProviderNotAuthorizedError``), a
     rejected key, a malformed file, this process running out of file
     descriptors -- is a failure no amount of retrying fixes, and is reported at
     once.
@@ -279,6 +286,10 @@ def is_transient_remote_wiring_error(error: BaseException) -> bool:
         if isinstance(link, HostAuthenticationError):
             return is_ssh_auth_timeout(link)
         if isinstance(link, HostConnectionError):
+            return True
+        if isinstance(link, ProviderNotAuthorizedError):
+            return False
+        if isinstance(link, ProviderUnavailableError):
             return True
         if isinstance(link, SSHTunnelError):
             return link.phase is SSHTunnelPhase.HOST_CONNECT
@@ -403,7 +414,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
     # Same, for hosts whose outer sshd rejected this machine's key.
     _unauthenticated_hosts: set[str] = PrivateAttr(default_factory=set)
     # The run of discovery cycles in a row each host's wiring step has failed with a
-    # transient SSH error. A success deletes the entry. Guarded by
+    # transient error. A success deletes the entry. Guarded by
     # ``_remote_hosts_lock``.
     _transient_failure_streak_by_key: dict[_TransientFailureStreakKey, _TransientFailureStreak] = PrivateAttr(
         default_factory=dict
@@ -942,7 +953,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
         streak_length = streak.length
         if streak_length == TRANSIENT_FAILURE_REPORT_THRESHOLD:
             logger.opt(exception=error).error(
-                "Failed to {} on {} consecutive discovery cycles with transient SSH errors while the host "
+                "Failed to {} on {} consecutive discovery cycles with transient errors while the host "
                 "reports as running; still retrying every cycle. Streak started at {}; SSH info changed during "
                 "the streak: {}; {}; {}; connect errors: {}; machine suspended during the streak: {}. Latest: {}",
                 attempt_description,
@@ -1276,7 +1287,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
         """Fire-and-forget worker: stand up the VPS-resident gateway for a remote agent.
 
         Opens the agent's outer host and runs the full provisioning sequence on
-        it. A transient SSH failure is logged via
+        it. A transient failure is logged via
         ``_record_wiring_step_failure`` (the next discovery cycle retries, and a
         long streak is escalated there); any other exception propagates out of
         the thread target so the CG's ObservableThread logs it at error level

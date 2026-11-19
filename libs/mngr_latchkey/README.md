@@ -174,10 +174,12 @@ safe to kill as above; the next start of the embedder would do the same.
 
 Every discovery cycle (30s by default) re-runs each remote host's SSH wiring
 steps -- the desktop-to-VPS tunnel, the desktop-gateway reverse tunnel, and VPS
-gateway provisioning -- until they succeed, so a transient SSH failure (a
+gateway provisioning -- until they succeed, so a transient failure (a
 connection reset, a dead transport, a handshake blip, an authentication
-timeout, or a host that is not answering yet -- whether its SYN is dropped,
-refused, or has no route from this computer) heals by itself and is only logged
+timeout, a host that is not answering yet -- whether its SYN is dropped,
+refused, or has no route from this computer -- or a provider that cannot reach
+its own backend while opening the host, such as Imbue Cloud while this
+computer's DNS briefly fails) heals by itself and is only logged
 at `INFO` the first time and `DEBUG` on later cycles. A host that keeps failing that way for
 `TRANSIENT_FAILURE_REPORT_THRESHOLD` (10) consecutive cycles while reporting as
 running is logged once at `ERROR` with a traceback (which is what reaches
@@ -185,7 +187,8 @@ Sentry), then retried quietly until it succeeds, at which point a new outage
 would report afresh. The host stopping (or reporting `UNAUTHENTICATED`) also
 ends the streak, so failures before and after a restart are two separate
 outages. Failures that retrying cannot fix -- trust material missing
-on this computer, a rejected key, a malformed file -- are logged at `ERROR`
+on this computer, provider credentials missing or refused, a rejected key, a
+malformed file -- are logged at `ERROR`
 immediately.
 
 A remote host that is restored onto new coordinates by anyone other than this
