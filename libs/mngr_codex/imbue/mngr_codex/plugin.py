@@ -75,6 +75,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from enum import auto
 from pathlib import Path
+from typing import Annotated
 from typing import Any
 from typing import Callable
 from typing import ClassVar
@@ -113,6 +114,7 @@ from imbue.mngr.api.preservation import run_adopt_session_preflight
 from imbue.mngr.api.preservation import transfer_cloned_agent_session_store
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.field_markers import SettingsPatchField
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import MessageDeliveredButBlockedError
 from imbue.mngr.errors import PluginMngrError
@@ -464,9 +466,10 @@ class CodexAgentConfig(AgentTypeConfig):
     # config_overrides is a free-form blob merged last (shallow) into the
     # per-agent config.toml. Covers anything not surfaced as a typed knob (extra
     # [notice] keys, a [profiles.*] table, model_provider, etc.).
-    config_overrides: dict[str, Any] = Field(
+    config_overrides: Annotated[dict[str, Any], SettingsPatchField()] = Field(
         default_factory=dict,
-        description="Key-value overrides merged last into the per-agent config.toml. "
+        description="Key-value overrides merged last into the per-agent config.toml. Each config layer adds "
+        "its keys to those of the layers below it. "
         'Example: {"model_provider": "openai", "approval_policy": "on-request"}.',
     )
     # auto_dismiss_dialogs_at_startup is the auto-consent knob. When True (or under

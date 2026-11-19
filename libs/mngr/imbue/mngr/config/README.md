@@ -86,12 +86,12 @@ via **serialize -> pre-process -> overlay merge -> reparse**:
 A dict field annotated `Annotated[dict[str, Any], SettingsPatchField()]`
 **accumulates** across layers rather than assigning: non-overlapping keys from every
 layer survive and same-key `__extend`s combine. The merge reads the marker off the
-pydantic field metadata, so core never hard-codes the field name. Because such a
-field can only grow (a higher layer adding keys is a superset), it is also **exempt
-from the assign-narrowing detector**. The fields carrying it today are
+pydantic field metadata, so core never hard-codes the field name. A higher layer that
+only adds keys to such a field never counts as narrowing; a plain nested table inside
+it that drops one of a lower layer's keys still does. The fields carrying it today are
 `CommandDefaults.defaults` (so each layer's `[commands.<name>]` table adds the parameters it
-names to the ones lower layers set), `ClaudeAgentConfig.settings_overrides` and
-`GrokAgentConfig.settings_overrides`.
+names to the ones lower layers set), `ClaudeAgentConfig.settings_overrides`,
+`GrokAgentConfig.settings_overrides` and `CodexAgentConfig.config_overrides`.
 `AntigravityAgentConfig.settings_overrides` mirrors claude's field by name but is *not* marked,
 so it still assigns by default.
 

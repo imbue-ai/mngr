@@ -23,7 +23,10 @@ Set fields under an `[agent_types.codex]` table in your mngr config, or pass ove
 - `sandbox_mode` — `read-only|workspace-write|danger-full-access`. Default: `workspace-write`.
 - `auto_allow_permissions` — when `true`, sets `approval_policy = "never"` so codex never
   prompts for tool approval (the sandbox still applies). Default: `false`.
-- `config_overrides` — free-form key/values merged last into the per-agent `config.toml`.
+- `config_overrides` — free-form key/values merged last into the per-agent `config.toml`. Each
+  config layer adds its keys to those of the layers below it. To merge a nested table that a lower
+  layer also set, write its key with `__extend` (e.g. `features__extend`); a plain nested table that
+  drops one of the lower table's keys fails to load with a settings-narrowing error.
 - `auto_dismiss_dialogs_at_startup` — when `true`, trust the repo and allow the hook bypass without
   prompting. Default: `false`.
 - `version` — pin the codex CLI version to install (e.g. `"0.139.0"`). When set, installation

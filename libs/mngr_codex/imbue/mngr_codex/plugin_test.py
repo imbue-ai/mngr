@@ -118,6 +118,16 @@ def test_codex_agent_config_merge_with_replaces_cli_args() -> None:
     assert str(merged.command) == "codex"
 
 
+def test_codex_config_overrides_accumulate_across_config_layers() -> None:
+    lower_layer = CodexAgentConfig(config_overrides={"model_reasoning_summary": "auto"})
+    upper_layer = CodexAgentConfig(config_overrides={"features": {"memories": False}})
+
+    merged, narrowings = merge_models_via_overlay(lower_layer, upper_layer)
+
+    assert merged.config_overrides == {"model_reasoning_summary": "auto", "features": {"memories": False}}
+    assert narrowings == []
+
+
 def test_codex_agent_subclasses_base_agent_not_send_keys_or_interactive_tui() -> None:
     """codex drives the app-server, so it subclasses ``BaseAgent`` directly -- not
     ``SendKeysAgent`` (it sends no keys) nor the send-keys/evidence-probe ``InteractiveTuiAgent``.
