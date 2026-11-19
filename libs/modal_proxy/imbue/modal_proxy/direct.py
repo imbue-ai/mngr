@@ -9,12 +9,14 @@
 # came from.
 
 import concurrent.futures
+import gc
 import io
 import os
 import subprocess
 import tempfile
 import time
 from collections.abc import Callable
+from collections.abc import Coroutine
 from collections.abc import Generator
 from contextlib import AbstractContextManager
 from datetime import datetime
@@ -22,6 +24,10 @@ from datetime import timezone
 from functools import wraps
 from io import StringIO
 from pathlib import Path
+from types import AsyncGeneratorType
+from types import CoroutineType
+from types import FrameType
+from types import GeneratorType
 from typing import Any
 from typing import Final
 from typing import Mapping
@@ -344,15 +350,57 @@ def _start_cancellable_call(
 
 def _start_cancellable_upload_exit(
     upload: AbstractContextManager[AbstractVolumeUploadContextManager],
-) -> concurrent.futures.Future[Any]:
+) -> tuple[concurrent.futures.Future[Any], Coroutine[Any, Any, Any]]:
     """Run a batch upload's exit, where the upload actually happens, as a future whose cancellation stops it.
 
     synchronicity refuses ``_future=True`` on a context manager's exit, so this goes through
     its private API instead: translate the blocking context manager back to the async one it
     wraps, then schedule that one's exit on Modal's event loop, as ``_future=True`` would.
+    The exit's coroutine comes back with the future, so a stall can name the step it is stuck in.
     """
     async_upload = synchronizer._translate_in(upload)
-    return synchronizer._run_function_sync_future(async_upload.__aexit__(None, None, None), async_upload.__aexit__)
+    exit_coroutine = async_upload.__aexit__(None, None, None)
+    return synchronizer._run_function_sync_future(exit_coroutine, async_upload.__aexit__), exit_coroutine
+
+
+def _describe_frame(frame: FrameType) -> str:
+    source_path = Path(frame.f_code.co_filename)
+    return f"{frame.f_code.co_qualname} ({source_path.parent.name}/{source_path.name}:{frame.f_lineno})"
+
+
+def _describe_where_suspended(coroutine: Coroutine[Any, Any, Any]) -> str:
+    """Name each function a coroutine is suspended in, outermost first, ending with what it last awaits.
+
+    Python 3.12 offers no public way from an awaited ``async_generator_asend`` or ``Task`` to the
+    generator or coroutine behind it, so those hops follow the single one among its GC referents.
+    Modal's loop may resume the coroutine while another thread reads it, so this is a snapshot.
+    """
+    steps: list[str] = []
+    awaited: object = coroutine
+    visited_ids: set[int] = set()
+    while awaited is not None and id(awaited) not in visited_ids:
+        visited_ids.add(id(awaited))
+        match awaited:
+            case CoroutineType():
+                frame, awaited = awaited.cr_frame, awaited.cr_await
+            case AsyncGeneratorType():
+                frame, awaited = awaited.ag_frame, awaited.ag_await
+            case GeneratorType():
+                frame, awaited = awaited.gi_frame, awaited.gi_yieldfrom
+            case _:
+                behind = [
+                    referent
+                    for referent in gc.get_referents(awaited)
+                    if isinstance(referent, (CoroutineType, AsyncGeneratorType))
+                ]
+                if len(behind) != 1:
+                    steps.append(type(awaited).__name__)
+                    break
+                awaited = behind[0]
+                continue
+        if frame is not None:
+            steps.append(_describe_frame(frame))
+    return " > ".join(steps)
 
 
 # Slowest upload rate a write is allowed before it counts as stalled: a 2 Mbit/s link.
@@ -364,13 +412,27 @@ def _upload_stall_seconds(attempt_stall_seconds: float, byte_count: int) -> floa
     return attempt_stall_seconds + byte_count / _SLOWEST_UPLOAD_BYTES_PER_SECOND
 
 
-def _await_attempt(attempt: concurrent.futures.Future[_R], deadline: _AttemptDeadline, call_description: str) -> _R:
+def _await_attempt(
+    attempt: concurrent.futures.Future[_R],
+    deadline: _AttemptDeadline,
+    call_description: str,
+    # The coroutine the attempt runs; None when synchronicity started the call and keeps it hidden
+    attempt_coroutine: Coroutine[Any, Any, Any] | None,
+) -> _R:
     """Wait for one attempt at a Modal call, cancelling it once it has stalled past its deadline."""
     while not concurrent.futures.wait((attempt,), timeout=deadline.seconds_remaining()).done:
-        if deadline.seconds_remaining() <= 0.0 and attempt.cancel():
-            raise ModalProxyCallTimeoutError(
-                f"Modal made no progress on {call_description} for {deadline.stall_seconds:.3g}s; cancelled the attempt"
+        if deadline.seconds_remaining() <= 0.0:
+            # Described before the cancel, which unwinds the coroutine out of the step it is stuck in.
+            where_stalled = (
+                ""
+                if attempt_coroutine is None
+                else f" while it waited in {_describe_where_suspended(attempt_coroutine)}"
             )
+            if attempt.cancel():
+                raise ModalProxyCallTimeoutError(
+                    f"Modal made no progress on {call_description} for {deadline.stall_seconds:.3g}s; "
+                    f"cancelled the attempt{where_stalled}"
+                )
     return attempt.result()
 
 
@@ -554,7 +616,7 @@ class DirectVolume(VolumeInterface):
 
     def _hydrate_within_deadline(self) -> None:
         deadline = _AttemptDeadline(stall_seconds=self.attempt_stall_seconds)
-        _await_attempt(_start_cancellable_call(self.volume.hydrate), deadline, "hydrate")
+        _await_attempt(_start_cancellable_call(self.volume.hydrate), deadline, "hydrate", attempt_coroutine=None)
 
     @_retry_transient
     @_translate_exceptions
@@ -568,7 +630,9 @@ class DirectVolume(VolumeInterface):
     @_translate_exceptions
     def listdir(self, path: str) -> list[FileEntry]:
         deadline = _AttemptDeadline(stall_seconds=self.attempt_stall_seconds)
-        entries = _await_attempt(_start_cancellable_call(self.volume.listdir, path), deadline, f"listdir({path!r})")
+        entries = _await_attempt(
+            _start_cancellable_call(self.volume.listdir, path), deadline, f"listdir({path!r})", attempt_coroutine=None
+        )
         return [
             FileEntry(
                 path=e.path,
@@ -590,6 +654,7 @@ class DirectVolume(VolumeInterface):
             _start_cancellable_call(self.volume.read_file_into_fileobj, path, contents, progress_cb=deadline.extend),
             deadline,
             f"read_file({path!r})",
+            attempt_coroutine=None,
         )
         return contents.getvalue()
 
@@ -601,6 +666,7 @@ class DirectVolume(VolumeInterface):
             _start_cancellable_call(self.volume.remove_file, path, recursive=recursive),
             deadline,
             f"remove_file({path!r})",
+            attempt_coroutine=None,
         )
 
     @_retry_transient
@@ -615,8 +681,12 @@ class DirectVolume(VolumeInterface):
             batch.put_file(io.BytesIO(file_data), path)
         byte_count = sum(len(file_data) for file_data in file_contents_by_path.values())
         deadline = _AttemptDeadline(stall_seconds=_upload_stall_seconds(self.attempt_stall_seconds, byte_count))
+        upload_attempt, upload_exit_coroutine = _start_cancellable_upload_exit(upload)
         _await_attempt(
-            _start_cancellable_upload_exit(upload), deadline, f"write_files({sorted(file_contents_by_path)!r})"
+            upload_attempt,
+            deadline,
+            f"write_files({sorted(file_contents_by_path)!r})",
+            attempt_coroutine=upload_exit_coroutine,
         )
 
     @_translate_exceptions

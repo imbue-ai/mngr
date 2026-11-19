@@ -2,6 +2,7 @@ import ast
 import inspect
 import io
 import os
+import re
 import subprocess
 import threading
 import time
@@ -26,17 +27,21 @@ from grpclib.exceptions import ProtocolError
 from grpclib.exceptions import StreamTerminatedError
 from modal._grpc_client import _STATUS_TO_EXCEPTION
 from modal._utils.async_utils import asyncify
+from modal._utils.async_utils import synchronizer
 from modal._utils.grpc_utils import RETRYABLE_GRPC_STATUS_CODES
 from modal.config import config
 from modal.stream_type import StreamType as ModalStreamType
 from modal.types import FileEntry as ModalFileEntry
 from modal.types import FileEntryType as ModalFileEntryType
+from modal.volume import _Volume
 from modal.volume import _raise_on_block_response_error
+from modal_proto import api_pb2
 from pydantic import BaseModel
 from pydantic import SecretStr
 from tenacity import RetryCallState
 from tenacity import Retrying
 
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.modal_proxy.data_types import FileEntry
 from imbue.modal_proxy.data_types import FileEntryType
 from imbue.modal_proxy.data_types import StreamType
@@ -1125,6 +1130,68 @@ def test_write_files_cancels_an_upload_modal_never_answers_and_reissues_it() -> 
         stalled_exit = fake.uploads[0].exit_coroutine
         assert stalled_exit is not None
         assert inspect.getcoroutinestate(stalled_exit) == inspect.CORO_CLOSED
+
+
+class _StubWhoseFirstCommitNeverAnswers:
+    """Stand-in for Modal's gRPC stub: the first ``VolumePutFiles2`` never answers, later ones commit.
+
+    The unanswered call blocks a thread until the context exits.
+    """
+
+    def __init__(self) -> None:
+        self._is_unanswered_call_released = threading.Event()
+        self.requests: list[api_pb2.VolumePutFiles2Request] = []
+        self.VolumePutFiles2 = asyncify(self._put_files)
+
+    def __enter__(self) -> "_StubWhoseFirstCommitNeverAnswers":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._is_unanswered_call_released.set()
+
+    def _put_files(self, request: api_pb2.VolumePutFiles2Request, retry: object) -> api_pb2.VolumePutFiles2Response:
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            self._is_unanswered_call_released.wait()
+        return api_pb2.VolumePutFiles2Response()
+
+
+class _StandInModalClient:
+    """Stand-in for Modal's client, carrying only what a hydrated volume's upload reads from it."""
+
+    _snapshotted: bool = False
+
+    def __init__(self, stub: _StubWhoseFirstCommitNeverAnswers) -> None:
+        self._stub = stub
+
+
+def _hydrated_v2_modal_volume(client: _StandInModalClient) -> modal.Volume:
+    """A modal.Volume that runs Modal's own batch upload against ``client``."""
+    metadata = api_pb2.VolumeMetadata(version=api_pb2.VolumeFsVersion.VOLUME_FS_VERSION_V2)
+    hydrated = _Volume._new_hydrated(_FAKE_VOLUME_OBJECT_ID, client, metadata)  # ty: ignore[invalid-argument-type]
+    return synchronizer._translate_out(hydrated)
+
+
+def test_a_cancelled_write_names_the_step_of_modals_upload_it_was_waiting_in() -> None:
+    """A stalled upload must say which step it was stuck in: Modal's commit, its block storage, or hashing.
+
+    Modal's real upload runs here, through both of its nested context managers, against a commit that
+    never answers.
+    """
+    with _StubWhoseFirstCommitNeverAnswers() as stub, capture_loguru() as log_output:
+        modal_volume = _hydrated_v2_modal_volume(_StandInModalClient(stub))
+        volume = DirectVolume.model_construct(volume=modal_volume, attempt_stall_seconds=_SHORT_ATTEMPT_STALL_SECONDS)
+
+        volume.write_files({"/hosts/host-1.json": b'{"host_id": "host-1"}'})
+
+    assert len(stub.requests) == 2
+    assert re.search(
+        r"cancelled the attempt while it waited in .*"
+        r"batch_upload \(modal/volume\.py:\d+\) > "
+        r"_VolumeUploadContextManager2\.__aexit__ \(modal/volume\.py:\d+\) > "
+        r"_VolumeUploadContextManager2\._put_file_specs \(modal/volume\.py:\d+\)",
+        log_output.getvalue(),
+    ), log_output.getvalue()
 
 
 def test_an_upload_gets_time_for_its_size_on_top_of_the_stall_window() -> None:

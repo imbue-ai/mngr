@@ -23,6 +23,9 @@ from imbue.mngr_claude_usage.plugin import _stable_shim_path
 from imbue.mngr_modal.instance import ModalProviderInstance
 
 
+# Flaky while MIND-717 is open: Modal sometimes stalls the host-record write on every attempt
+# its retry budget allows.
+@pytest.mark.flaky
 @pytest.mark.modal
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)
