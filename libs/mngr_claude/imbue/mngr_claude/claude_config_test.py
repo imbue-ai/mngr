@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 from inline_snapshot import snapshot
 
+from imbue.mngr.utils.testing import FAILED_TURN_END_LINE
 from imbue.mngr_claude.claude_config import COMPACTING_MARKER_FILENAME
 from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
@@ -1550,3 +1551,15 @@ def test_session_start_hook_removes_stale_compacting_marker_on_startup_and_resum
 
     assert result.returncode == 0, f"hook failed: stdout={result.stdout!r} stderr={result.stderr!r}"
     assert marker.exists() != should_remove
+
+
+def test_user_prompt_submit_hook_removes_the_last_turn_end_as_it_opens_a_turn(tmp_path: Path) -> None:
+    state_dir, host_dir = _make_state_and_host_dirs(tmp_path)
+    (state_dir / "turn_end").write_text(FAILED_TURN_END_LINE + "\n")
+    payload = json.dumps({"session_id": "sess-compaction-48213", "prompt": "next"})
+
+    result = _run_hook_command(_readiness_hook_command("UserPromptSubmit"), payload, state_dir, host_dir)
+
+    assert result.returncode == 0, f"hook failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert (state_dir / "active").exists()
+    assert not (state_dir / "turn_end").exists()

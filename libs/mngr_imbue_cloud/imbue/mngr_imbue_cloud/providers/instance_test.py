@@ -44,9 +44,11 @@ from imbue.mngr.errors import PublishedPortUnsupportedError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
@@ -62,6 +64,8 @@ from imbue.mngr.primitives import parse_published_port_declarations
 from imbue.mngr.providers.host_key_store import HostKeyOrigin
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import format_as_known_hosts_address
+from imbue.mngr.utils.testing import FAILED_TURN_END
+from imbue.mngr.utils.testing import FAILED_TURN_END_LINE
 from imbue.mngr.utils.testing import allow_warnings
 from imbue.mngr.utils.testing import build_test_known_hosts_file
 from imbue.mngr.utils.testing import find_free_port
@@ -1808,6 +1812,26 @@ def test_agent_details_of_a_partial_listing_keep_the_cached_services_agent(temp_
         ("worker", None),
         ("system-services", "true"),
     ]
+
+
+def test_build_agent_details_from_raw_publishes_the_turn_end_of_a_listed_agent(temp_mngr_ctx: MngrContext) -> None:
+    provider = _make_sequenced_provider(_make_lease(HostId.generate()), [], temp_mngr_ctx)
+    agent_raw: dict[str, Any] = {
+        "data": {"id": str(AgentId.generate()), "name": "worker", "type": "unknown-type", "command": "my-agent"},
+        "tmux_info": "0|my-agent|100",
+        "is_active": False,
+        "raw_turn_end": FAILED_TURN_END_LINE,
+    }
+
+    details = provider._build_agent_details_from_raw(
+        agent_raw=agent_raw,
+        host_details=HostDetails(id=HostId.generate(), name="test-host", provider_name=_STICKY_PROVIDER_NAME),
+        ssh_activity=None,
+        ps_output="",
+    )
+
+    assert details is not None
+    assert (details.state, details.turn_end) == (AgentLifecycleState.WAITING, FAILED_TURN_END)
 
 
 def test_first_discovery_with_no_cache_falls_back_to_bare_lease_stub(temp_mngr_ctx: MngrContext) -> None:

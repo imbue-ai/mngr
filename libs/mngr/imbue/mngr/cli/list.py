@@ -1388,6 +1388,7 @@ All agent fields from the "Available Fields" section can be used in filter expre
 - `has(host.ssh)` - Agents on remote hosts with SSH access
 - `has(labels.foo)` - Agents that have a `foo` label set
 - `background_tasks.exists(t, t.kind == "SHELL")` - Agents RUNNING_BACKGROUND on a command they left running (each background task has `name`, `kind`, `native_type`, `started_at` and `last_seen_at`)
+- `has(turn_end.kind) && turn_end.kind == "FAILED"` - Agents whose last turn died on an error (`turn_end` has `kind`, `native_type` and `ended_at`, and is null while a turn is open)
 """,
         ),
         (

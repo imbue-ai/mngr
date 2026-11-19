@@ -52,6 +52,8 @@ from imbue.mngr.primitives import PortProtocol
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.primitives import SSHInfo
+from imbue.mngr.primitives import TurnEnd
+from imbue.mngr.primitives import TurnEndKind
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.utils.testing import capture_loguru
 
@@ -286,6 +288,21 @@ def test_build_agent_details_populates_pid_from_probe(host_id: HostId) -> None:
         assert details.pid == 4321
         assert details.host.provider_name == ProviderInstanceName(provider_name)
         agent.probe_lifecycle_from_snapshot.assert_called_once()
+
+
+def test_build_agent_details_carries_the_probed_turn_end(host_id: HostId) -> None:
+    online_host = _make_mock_online_host(host_id)
+    online_host.get_activity_config.return_value = _make_activity_config_mock()
+    agent = _make_mock_online_agent(AgentId.generate())
+    turn_end = TurnEnd(kind=TurnEndKind.FAILED, native_type="model_not_found", ended_at=datetime.now(timezone.utc))
+    agent.probe_lifecycle_from_snapshot.return_value = LifecycleProbeResult(
+        state=AgentLifecycleState.WAITING, turn_end=turn_end
+    )
+    host_details = HostDetails(id=host_id, name="test-host", provider_name=ProviderInstanceName("local"))
+
+    details = _build_agent_details_from_online_agent(agent, host_details, online_host, None, {}, None)
+
+    assert (details.state, details.turn_end) == (AgentLifecycleState.WAITING, turn_end)
 
 
 def test_connection_error_fallback_applies_provider_state_override(

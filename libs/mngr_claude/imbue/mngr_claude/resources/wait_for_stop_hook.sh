@@ -21,8 +21,9 @@
 #          code-review-json Modal volume and remove the marker.
 #        - Invoke notify_user (best-effort; silently skipped if the command
 #          is not defined).
-#   3. Mark the agent inactive, unless a queued prompt is about to start the
-#      next turn or another stop hook blocked the turn end, and exit.
+#   3. Record how the turn ended, then mark the agent inactive, unless a queued
+#      prompt is about to start the next turn or another stop hook blocked the
+#      turn end, and exit.
 #
 # Identification strategy:
 #   All stop hooks and bash tool tasks are direct children of the Claude
@@ -231,6 +232,16 @@ is_turn_continuing() {
     [ -z "${1:-}" ] && has_blocked_stop_hook
 }
 
+# Record how this turn ended: FAILED with the payload's error name on a StopFailure, else COMPLETED.
+write_turn_end() {
+    command -v mngr_turn_end_write >/dev/null 2>&1 || return 0
+    if [ "$HOOK_EVENT_NAME" = "StopFailure" ]; then
+        mngr_turn_end_write FAILED "$(printf '%s' "$HOOK_INPUT" | jq -r '.error // empty' 2>/dev/null)"
+    else
+        mngr_turn_end_write COMPLETED
+    fi
+}
+
 # Mark agent as inactive and emit activity event, or leave it active when a
 # queued prompt is about to start the next turn or another stop hook blocked it
 # $1 (optional): reason for marking inactive (e.g. "signal:SIGTERM")
@@ -259,6 +270,7 @@ mark_inactive() {
         echo "wait_for_stop_hook: a queued prompt or a blocking stop hook continues the turn, leaving the agent active"
         return 0
     fi
+    write_turn_end || true
     rm -f "$MNGR_AGENT_STATE_DIR/active"
     # A prompt submitted just before the clear had its marker removed by it, and
     # its enqueue record may not have reached the transcript yet (nor a block's
@@ -267,6 +279,7 @@ mark_inactive() {
     sleep "$REQUEUE_RECHECK_DELAY"
     if is_turn_continuing "$reason"; then
         touch "$MNGR_AGENT_STATE_DIR/active"
+        rm -f "$MNGR_AGENT_STATE_DIR/turn_end"
         return 0
     fi
     date -u +"%Y-%m-%dT%H:%M:%S.000000000Z" > "$MNGR_AGENT_STATE_DIR/idle_since"

@@ -435,7 +435,7 @@ RUNNING_AGENT_LIFECYCLE_STATES: Final[frozenset[AgentLifecycleState]] = frozense
 
 
 class LifecycleProbeReading(FrozenModel):
-    """What one read of an agent's state directory saw of its turn and its background task records."""
+    """What one read of an agent's state directory saw: its turn marker, background task records and turn_end line."""
 
     is_active: bool = Field(
         default=False,
@@ -444,6 +444,10 @@ class LifecycleProbeReading(FrozenModel):
     raw_background_tasks: str = Field(
         default="",
         description="The collected `<name>\\t<first line>` record lines, one per line, still to be parsed",
+    )
+    raw_turn_end: str = Field(
+        default="",
+        description="The first line of the agent's turn_end file, still to be parsed; empty when it has none",
     )
 
 
@@ -503,8 +507,36 @@ class BackgroundTask(FrozenModel):
         return self.name
 
 
+class TurnEndKind(UpperCaseStrEnum):
+    """How an agent's turn ended."""
+
+    # The agent handed the turn back itself.
+    COMPLETED = auto()
+    # The turn ended because something went wrong, e.g. an API error.
+    FAILED = auto()
+    # The turn was stopped before it finished, by a person, a program, a hook or a harness limit.
+    INTERRUPTED = auto()
+
+
+class TurnEnd(FrozenModel):
+    """How and when an agent's last turn ended, as read from its ``turn_end`` file."""
+
+    kind: TurnEndKind = Field(description="How the turn ended")
+    native_type: str = Field(
+        default="",
+        description=(
+            "The harness's own word for how the turn ended, e.g. `model_not_found`, with control characters "
+            "replaced; empty when the file has none"
+        ),
+    )
+    ended_at: datetime = Field(description="Instant mngr recorded the turn's end")
+
+    def __str__(self) -> str:
+        return self.kind.value
+
+
 class LifecycleProbeResult(FrozenModel):
-    """Agent lifecycle state plus the agent's main process PID, from a single probe."""
+    """An agent's lifecycle state, main process PID, background tasks and turn end, from a single probe."""
 
     state: AgentLifecycleState = Field(description="Agent lifecycle state")
     pid: int | None = Field(
@@ -521,6 +553,10 @@ class LifecycleProbeResult(FrozenModel):
             "The agent's background task records, in the order read; non-empty exactly where the state "
             "is RUNNING_BACKGROUND"
         ),
+    )
+    turn_end: TurnEnd | None = Field(
+        default=None,
+        description="How and when the agent's last turn ended; None while a turn is open or when nothing recorded it",
     )
 
 

@@ -13,6 +13,7 @@ from typing import Final
 
 import pytest
 
+from imbue.mngr.hosts.background_tasks import TURN_END_FILE_NAME
 from imbue.mngr.hosts.background_tasks import build_lifecycle_probe_read_command
 from imbue.mngr.hosts.background_tasks import determine_agent_probe_result
 from imbue.mngr.hosts.background_tasks import parse_background_tasks
@@ -31,6 +32,7 @@ from imbue.mngr.providers.listing_utils import extract_agent_data_from_parsed_li
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr.providers.listing_utils import parse_optional_float
 from imbue.mngr.providers.listing_utils import parse_optional_int
+from imbue.mngr.utils.testing import FAILED_TURN_END_LINE
 from imbue.mngr.utils.testing import RAW_LINE_SEPARATOR_BY_NAME
 from imbue.mngr.utils.testing import write_executable_script
 
@@ -643,13 +645,13 @@ def test_extract_agent_data_returns_data_dicts_and_skips_malformed(log_warnings:
     assert sum("missing or non-object 'data'" in message for message in log_warnings) == 2
 
 
-def _run_agents_section_script(host_dir: Path) -> dict[str, Any]:
+def _run_agents_section_script(host_dir: Path, is_host_running: bool = True) -> dict[str, Any]:
     """Execute just the agents section against a real tree and parse what it emitted.
 
     The section is shell, and the record scan's one awk derives each record's owner from the
     path it was handed, so running it against a real tree is what proves the attribution.
     """
-    script = f"HOST_DIR={shlex.quote(str(host_dir))}\n{_build_agents_section_script(is_host_running=True)}"
+    script = f"HOST_DIR={shlex.quote(str(host_dir))}\n{_build_agents_section_script(is_host_running=is_host_running)}"
     finished = subprocess.run(["sh", "-c", script], capture_output=True, timeout=60)
     assert finished.returncode == 0, finished.stderr
     return parse_listing_collection_output(finished.stdout.decode())
@@ -840,3 +842,24 @@ def test_listing_script_reports_the_turn_marker_of_each_agent(tmp_path: Path) ->
     mid_turn = build_lifecycle_probe_reading(agents["agent-mid-turn"])
     assert mid_turn.is_active is True
     assert build_lifecycle_probe_reading(agents["agent-between-turns"]) == LifecycleProbeReading()
+
+
+@pytest.mark.parametrize("is_host_running", [True, False], ids=["running_host", "stopped_container"])
+def test_listing_script_reports_the_turn_end_of_each_agent(is_host_running: bool, tmp_path: Path) -> None:
+    host_dir = tmp_path / "mngr"
+    (_write_agent(host_dir, "agent-failed") / TURN_END_FILE_NAME).write_text(
+        f"{FAILED_TURN_END_LINE}\nkind:COMPLETED\n"
+    )
+    (_write_agent(host_dir, "agent-completed") / TURN_END_FILE_NAME).write_text("ended:1767355260 kind:COMPLETED")
+    _write_agent(host_dir, "agent-never-ended")
+
+    agents = {
+        agent["data"]["id"]: agent
+        for agent in _run_agents_section_script(host_dir, is_host_running=is_host_running)["agents"]
+    }
+
+    assert {agent_id: build_lifecycle_probe_reading(agent).raw_turn_end for agent_id, agent in agents.items()} == {
+        "agent-failed": FAILED_TURN_END_LINE,
+        "agent-completed": "ended:1767355260 kind:COMPLETED",
+        "agent-never-ended": "",
+    }

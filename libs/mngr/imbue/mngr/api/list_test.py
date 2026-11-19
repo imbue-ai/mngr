@@ -84,6 +84,8 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.primitives import SSHInfo
+from imbue.mngr.primitives import TurnEnd
+from imbue.mngr.primitives import TurnEndKind
 from imbue.mngr.providers.local.backend import LOCAL_BACKEND_NAME
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
@@ -457,6 +459,26 @@ def test_a_cel_filter_can_ask_what_kind_of_background_task_an_agent_left_running
     matched = [agent.name for agent in (shell_held, monitor_held) if _apply_cel_filters(agent, includes, excludes)]
 
     assert matched == ["shell-held"]
+
+
+def test_a_cel_filter_can_ask_which_agents_last_turn_failed_without_warning_on_an_agent_with_none() -> None:
+    ended_at = datetime.now(timezone.utc)
+    failed = make_test_agent_details(
+        name="failed", turn_end=TurnEnd(kind=TurnEndKind.FAILED, native_type="rate_limit", ended_at=ended_at)
+    )
+    completed = make_test_agent_details(
+        name="completed", turn_end=TurnEnd(kind=TurnEndKind.COMPLETED, ended_at=ended_at)
+    )
+    never_ended = make_test_agent_details(name="never-ended")
+    includes, excludes = compile_cel_filters(['has(turn_end.kind) && turn_end.kind == "FAILED"'], [])
+
+    with capture_loguru(level="WARNING") as log_output:
+        matched = [
+            agent.name for agent in (failed, completed, never_ended) if _apply_cel_filters(agent, includes, excludes)
+        ]
+
+    assert matched == ["failed"]
+    assert log_output.getvalue() == ""
 
 
 def test_agent_details_to_cel_context_preserves_full_model_structure() -> None:

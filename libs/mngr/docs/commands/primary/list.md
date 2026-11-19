@@ -114,6 +114,7 @@ All agent fields from the "Available Fields" section can be used in filter expre
 - `has(host.ssh)` - Agents on remote hosts with SSH access
 - `has(labels.foo)` - Agents that have a `foo` label set
 - `background_tasks.exists(t, t.kind == "SHELL")` - Agents RUNNING_BACKGROUND on a command they left running (each background task has `name`, `kind`, `native_type`, `started_at` and `last_seen_at`)
+- `has(turn_end.kind) && turn_end.kind == "FAILED"` - Agents whose last turn died on an error (`turn_end` has `kind`, `native_type` and `ended_at`, and is null while a turn is open)
 
 
 
@@ -135,6 +136,10 @@ Fields marked `(cel only)` cannot be used in `--fields`/`--format` template stri
 - `state` - Agent lifecycle state (STOPPED/RUNNING/RUNNING_BACKGROUND/WAITING/REPLACED/RUNNING_UNKNOWN_AGENT_TYPE/DONE/UNKNOWN)
 - `pid` - PID of the agent's main process (e.g. claude) in its host's PID namespace, populated when the agent is running; None for stopped agents. Only watchable in-process (e.g. via psutil) when the host is the local machine (its provider is 'local').
 - `background_tasks` - The background tasks the agent left running after its turn, each with its name, kind, native_type, started_at and last_seen_at. Non-empty exactly where the state is RUNNING_BACKGROUND
+- `turn_end` - How and when the agent's last turn ended: its kind (COMPLETED, FAILED or INTERRUPTED), native_type (the harness's own word, e.g. an API error name) and ended_at. None while a turn is open, when the agent's harness records no turn end, for an agent created before mngr recorded it, and for an agent whose host is offline
+- `turn_end.kind` - How the turn ended
+- `turn_end.native_type` - The harness's own word for how the turn ended, e.g. `model_not_found`, with control characters replaced; empty when the file has none
+- `turn_end.ended_at` - Instant mngr recorded the turn's end
 - `url` - Agent URL (reported)
 - `start_time` - Last start time (reported)
 - `runtime_seconds` - Runtime in seconds

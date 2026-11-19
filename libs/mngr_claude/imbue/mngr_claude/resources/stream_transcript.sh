@@ -53,6 +53,10 @@ source "$MNGR_AGENT_STATE_DIR/commands/mngr_log.sh"
 source "$MNGR_AGENT_STATE_DIR/commands/mngr_transcript_lib.sh"
 # shellcheck source=mngr_common_transcript_lib.sh
 source "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh"
+# shellcheck source=mngr_background_task_lib.sh
+if [ -r "$MNGR_AGENT_STATE_DIR/commands/mngr_background_task_lib.sh" ]; then
+    source "$MNGR_AGENT_STATE_DIR/commands/mngr_background_task_lib.sh"
+fi
 
 # Per-session state (bash 4+ associative arrays)
 # Note: explicit =() is required for set -u compatibility (empty associative
@@ -447,6 +451,9 @@ _heal_interrupt_stranded_marker() {
         return 0
     fi
 
+    if command -v mngr_turn_end_write >/dev/null 2>&1; then
+        mngr_turn_end_write INTERRUPTED || true
+    fi
     # The same clear, idle stamp and activity event the idle hooks run (see
     # _CLEAR_ACTIVE_MARKERS_AND_EMIT_ACTIVITY_EVENT in claude_config.py and
     # mark_inactive in wait_for_stop_hook.sh); the event makes `mngr observe`

@@ -26,16 +26,23 @@ from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.interfaces.host import OuterHostInterface
+from imbue.mngr.primitives import ActivitySource
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.providers.host_key_store import load_host_key_record
 from imbue.mngr.providers.ssh_utils import per_host_key_dir
 from imbue.mngr.providers.ssh_utils import save_ssh_keypair
+from imbue.mngr.utils.testing import FAILED_TURN_END
+from imbue.mngr.utils.testing import FAILED_TURN_END_LINE
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_vps.bare_realizer import BareRealizer
 from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
@@ -1164,6 +1171,39 @@ def test_describe_instance_shape_tolerates_an_api_error_so_the_create_still_fini
     with capture_loguru() as captured:
         assert provider._describe_instance_shape(VpsInstanceId("i-1"), "p", None) is None
     assert any("throttled" in line for line in captured.getvalue().splitlines())
+
+
+# _build_single_agent_details
+
+
+def test_build_single_agent_details_publishes_the_turn_end_of_a_listed_agent(temp_mngr_ctx: MngrContext) -> None:
+    agent_raw: dict[str, Any] = {
+        "data": {
+            "id": str(AgentId.generate()),
+            "name": "test-agent",
+            "type": "unknown-type",
+            "command": "my-agent",
+            "create_time": datetime.now(timezone.utc).isoformat(),
+        },
+        "tmux_info": "0|my-agent|100",
+        "is_active": False,
+        "raw_turn_end": FAILED_TURN_END_LINE,
+    }
+
+    details = _minimal_provider(temp_mngr_ctx)._build_single_agent_details(
+        agent_raw=agent_raw,
+        host_details=HostDetails(
+            id=HostId.generate(), name="test-host", provider_name=ProviderInstanceName("test-vps-docker")
+        ),
+        ssh_activity=None,
+        ps_output="",
+        idle_timeout_seconds=300,
+        activity_sources=(ActivitySource.USER,),
+        idle_mode=IdleMode.USER,
+    )
+
+    assert details is not None
+    assert (details.state, details.turn_end) == (AgentLifecycleState.WAITING, FAILED_TURN_END)
 
 
 # Per-host VPS-root client key: listing entries, create-time minting, reads

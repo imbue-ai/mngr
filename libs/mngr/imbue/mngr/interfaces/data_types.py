@@ -45,6 +45,7 @@ from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
+from imbue.mngr.primitives import TurnEnd
 from imbue.mngr.primitives import VolumeId
 
 # Canonical mapping from IdleMode to the activity sources it enables.
@@ -698,6 +699,15 @@ class AgentDetails(FrozenModel):
         description=(
             "The background tasks the agent left running after its turn, each with its name, kind, "
             "native_type, started_at and last_seen_at. Non-empty exactly where the state is RUNNING_BACKGROUND"
+        ),
+    )
+    turn_end: TurnEnd | None = Field(
+        default=None,
+        description=(
+            "How and when the agent's last turn ended: its kind (COMPLETED, FAILED or INTERRUPTED), native_type "
+            "(the harness's own word, e.g. an API error name) and ended_at. None while a turn is open, when the "
+            "agent's harness records no turn end, for an agent created before mngr recorded it, and for an agent "
+            "whose host is offline"
         ),
     )
     url: str | None = Field(default=None, description="Agent URL (reported)")

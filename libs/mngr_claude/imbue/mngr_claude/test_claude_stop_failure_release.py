@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Final
 
@@ -26,6 +27,11 @@ _STOP_FAILURE_CONSUMER: Final[str] = (
     "claude_config's StopFailure hook, which runs wait_for_stop_hook.sh to mark the agent inactive "
     "(its queued-prompt check cuts the queue off at the isApiErrorMessage record)"
 )
+_TURN_END_CONSUMER: Final[str] = (
+    "wait_for_stop_hook.sh's write_turn_end, which records a StopFailure as turn_end kind FAILED with the "
+    "payload's `error` as its native_type"
+)
+_LIST_TIMEOUT_SECONDS: Final[float] = 120.0
 
 
 class _UnavailableModelClaudeReleaseProfile(ClaudeReleaseProfile):
@@ -40,11 +46,11 @@ class _UnavailableModelClaudeReleaseProfile(ClaudeReleaseProfile):
 @pytest.mark.rsync
 @pytest.mark.timeout(1500)
 def test_claude_turn_that_ends_on_an_api_error_leaves_the_agent_waiting(tmp_path: Path) -> None:
-    """A turn that dies on an API error ends with the agent reporting WAITING, not RUNNING until claude's idle notice.
+    """A turn that dies on an API error ends with the agent reporting WAITING and a FAILED turn_end.
 
     Pins that claude routes such a turn end to the StopFailure hook event, whose payload carries no
-    ``background_tasks``, and records the error as an assistant record with ``isApiErrorMessage: true`` and a
-    timestamp.
+    ``background_tasks`` and names the error in ``error``, and records the error as an assistant record with
+    ``isApiErrorMessage: true`` and a timestamp.
     """
     profile = _UnavailableModelClaudeReleaseProfile()
     reason = profile.unavailable_reason()
@@ -88,6 +94,22 @@ def test_claude_turn_that_ends_on_an_api_error_leaves_the_agent_waiting(tmp_path
         stop_failure_payloads = [
             p for p in read_saved_payloads(dump_dir) if p.get("hook_event_name") == _STOP_FAILURE_EVENT
         ]
+        listing = profile.run_mngr(
+            ctx, "list", "--provider", "local", "--format", "json", timeout=_LIST_TIMEOUT_SECONDS
+        )
+        assert listing.returncode == 0, f"mngr list failed:\n{listing.stdout}\n{listing.stderr}"
+        (listed_agent,) = [agent for agent in json.loads(listing.stdout)["agents"] if agent["name"] == agent_name]
+
+    payload_errors = [p.get("error") for p in stop_failure_payloads]
+    assert payload_errors and all(isinstance(error, str) and error for error in payload_errors), (
+        f"a {_STOP_FAILURE_EVENT} payload carries no error name in `error` {drift}: {payload_errors}; "
+        f"consumer: {_TURN_END_CONSUMER}"
+    )
+    turn_end = listed_agent.get("turn_end") or {}
+    assert (turn_end.get("kind"), turn_end.get("native_type")) == ("FAILED", payload_errors[-1]), (
+        f"mngr list published turn_end {listed_agent.get('turn_end')!r} after a turn that ended on the API error "
+        f"{payload_errors[-1]!r} {drift}; consumer: {_TURN_END_CONSUMER}"
+    )
 
     assert stop_failure_payloads and all("background_tasks" not in p for p in stop_failure_payloads), (
         f"a {_STOP_FAILURE_EVENT} payload now carries background_tasks {drift}; wait_for_stop_hook.sh's "

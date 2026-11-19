@@ -57,7 +57,9 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.hosts.background_tasks import TURN_END_FILE_NAME
 from imbue.mngr.hosts.background_tasks import parse_background_tasks
+from imbue.mngr.hosts.background_tasks import parse_turn_end
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import build_tmux_capture_pane_command
@@ -82,6 +84,8 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import PublishedEndpoint
 from imbue.mngr.primitives import SSHInfo
+from imbue.mngr.primitives import TurnEnd
+from imbue.mngr.primitives import TurnEndKind
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_all_registries
@@ -1224,6 +1228,7 @@ def make_test_agent_details(
     resource: HostResources | None = None,
     published_endpoints: Sequence[PublishedEndpoint] = (),
     background_tasks: Sequence[BackgroundTask] = (),
+    turn_end: TurnEnd | None = None,
 ) -> AgentDetails:
     """Create a real AgentDetails for testing.
 
@@ -1254,6 +1259,7 @@ def make_test_agent_details(
         state=state,
         pid=pid,
         background_tasks=tuple(background_tasks),
+        turn_end=turn_end,
         user_activity_time=user_activity_time,
         idle_seconds=idle_seconds,
         labels=labels or {},
@@ -2158,6 +2164,14 @@ RAW_LINE_SEPARATOR_BY_NAME: Final[Mapping[str, str]] = {
     "paragraph_separator": "\u2029",
 }
 
+# A turn_end file's line and the turn end mngr reads from it.
+FAILED_TURN_END_LINE: Final[str] = "ended:1767355200 kind:FAILED native_type:model_not_found"
+FAILED_TURN_END: Final[TurnEnd] = TurnEnd(
+    kind=TurnEndKind.FAILED,
+    native_type="model_not_found",
+    ended_at=datetime(2026, 1, 2, 12, 0, 0, tzinfo=timezone.utc),
+)
+
 
 def read_background_task_records_in(record_dir: Path) -> tuple[BackgroundTask, ...]:
     """Every record under ``record_dir``, in name order, parsed from each file's first line."""
@@ -2169,3 +2183,11 @@ def read_background_task_records_in(record_dir: Path) -> tuple[BackgroundTask, .
         if path.is_file() and not path.name.startswith(".")
     }
     return parse_background_tasks("\n".join(f"{name}\t{line}" for name, line in sorted(first_line_by_name.items())))
+
+
+def read_turn_end_in(state_dir: Path) -> TurnEnd | None:
+    """The turn end recorded under ``state_dir``, parsed from the first line of its turn_end file."""
+    turn_end_path = state_dir / TURN_END_FILE_NAME
+    if not turn_end_path.is_file():
+        return None
+    return parse_turn_end(turn_end_path.read_bytes().decode().split("\n", 1)[0])

@@ -8,15 +8,21 @@ import pytest
 
 from imbue.mngr.hosts.background_tasks import BACKGROUND_TASK_DIR_NAME
 from imbue.mngr.hosts.background_tasks import BACKGROUND_TASK_NATIVE_TYPE_MAX_LENGTH
+from imbue.mngr.hosts.background_tasks import TURN_END_FILE_NAME
 from imbue.mngr.hosts.background_tasks import build_lifecycle_probe_read_command
 from imbue.mngr.hosts.background_tasks import determine_agent_probe_result
 from imbue.mngr.hosts.background_tasks import parse_background_tasks
 from imbue.mngr.hosts.background_tasks import parse_lifecycle_probe_reading
+from imbue.mngr.hosts.background_tasks import parse_turn_end
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import BackgroundTask
 from imbue.mngr.primitives import BackgroundTaskKind
 from imbue.mngr.primitives import LifecycleProbeReading
 from imbue.mngr.primitives import LifecycleProbeResult
+from imbue.mngr.primitives import TurnEnd
+from imbue.mngr.primitives import TurnEndKind
+from imbue.mngr.utils.testing import FAILED_TURN_END
+from imbue.mngr.utils.testing import FAILED_TURN_END_LINE
 from imbue.mngr.utils.testing import RAW_LINE_SEPARATOR_BY_NAME
 
 # More empty records than the scan is given file descriptors.
@@ -449,3 +455,108 @@ def test_a_record_cannot_revive_an_agent_that_is_not_live(
 
     assert probe.state == expected_state
     assert probe.background_tasks == ()
+
+
+def test_parse_turn_end_reads_every_field_the_line_states() -> None:
+    assert parse_turn_end(FAILED_TURN_END_LINE + "\r") == FAILED_TURN_END
+
+
+@pytest.mark.parametrize("kind", list(TurnEndKind))
+def test_parse_turn_end_reads_a_kind_by_its_exact_name_and_no_native_type_as_empty(kind: TurnEndKind) -> None:
+    assert parse_turn_end(f"kind:{kind.value} ended:1767355200") == TurnEnd(
+        kind=kind, ended_at=FAILED_TURN_END.ended_at
+    )
+
+
+def test_parse_turn_end_publishes_a_native_type_decoded_and_safe_to_print() -> None:
+    turn_end = parse_turn_end("ended:1767355200 kind:FAILED native_type:rate%20limit%0A" + "x" * 2000)
+
+    assert turn_end is not None
+    assert turn_end.native_type == ("rate limit�" + "x" * 2000)[:BACKGROUND_TASK_NATIVE_TYPE_MAX_LENGTH]
+
+
+@pytest.mark.parametrize(
+    "raw_turn_end",
+    [
+        pytest.param("", id="no_file"),
+        pytest.param("kind:FAILED", id="no_ended"),
+        pytest.param("ended:earlier kind:FAILED", id="ended_not_a_number"),
+        pytest.param("ended:99999999999999999999 kind:FAILED", id="ended_past_the_end_of_time"),
+        pytest.param("ended:1767355200", id="no_kind"),
+        pytest.param("ended:1767355200 kind:", id="empty_kind"),
+        pytest.param("ended:1767355200 kind:CRASHED", id="a_kind_this_reader_does_not_know"),
+        pytest.param("ended:1767355200 kind:failed", id="a_kind_name_in_another_case"),
+    ],
+)
+def test_parse_turn_end_reads_a_line_it_cannot_place_as_none(raw_turn_end: str) -> None:
+    assert parse_turn_end(raw_turn_end) is None
+
+
+def test_parse_lifecycle_probe_reading_carries_the_turn_end_line() -> None:
+    reading = parse_lifecycle_probe_reading(f"ACTIVE=\nTURN_END={FAILED_TURN_END_LINE}\n")
+
+    assert reading == LifecycleProbeReading(is_active=False, raw_turn_end=FAILED_TURN_END_LINE)
+
+
+@pytest.mark.parametrize(
+    ("turn_end_content", "expected_raw_turn_end"),
+    [
+        pytest.param(f"{FAILED_TURN_END_LINE}\nkind:COMPLETED\n".encode(), FAILED_TURN_END_LINE, id="first_line"),
+        pytest.param(FAILED_TURN_END_LINE.encode(), FAILED_TURN_END_LINE, id="no_newline"),
+        pytest.param(b"", "", id="empty_file"),
+        pytest.param(None, "", id="no_file"),
+    ],
+)
+def test_the_probe_command_reads_the_first_line_of_the_turn_end_file(
+    turn_end_content: bytes | None, expected_raw_turn_end: str, tmp_path: Path
+) -> None:
+    if turn_end_content is not None:
+        (tmp_path / TURN_END_FILE_NAME).write_bytes(turn_end_content)
+
+    result = subprocess.run(
+        ["sh", "-c", build_lifecycle_probe_read_command(str(tmp_path))], capture_output=True, text=True, timeout=30
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert parse_lifecycle_probe_reading(result.stdout).raw_turn_end == expected_raw_turn_end
+
+
+@pytest.mark.parametrize(
+    ("is_active", "is_blocked_on_dialog", "tmux_info", "raw_background_tasks", "expected_state", "is_published"),
+    [
+        pytest.param(False, False, "0|claude|123", "", AgentLifecycleState.WAITING, True, id="waiting"),
+        pytest.param(
+            False,
+            False,
+            "0|claude|123",
+            "task-1\tseen:1767358800",
+            AgentLifecycleState.RUNNING_BACKGROUND,
+            True,
+            id="running_background",
+        ),
+        pytest.param(False, False, None, "", AgentLifecycleState.STOPPED, True, id="stopped"),
+        pytest.param(False, False, "1|bash|4242", "", AgentLifecycleState.DONE, True, id="done"),
+        pytest.param(True, False, "0|claude|123", "", AgentLifecycleState.RUNNING, False, id="running"),
+        pytest.param(True, True, "0|claude|123", "", AgentLifecycleState.WAITING, False, id="held_by_a_dialog"),
+        pytest.param(True, False, None, "", AgentLifecycleState.STOPPED, False, id="stopped_with_a_leftover_marker"),
+    ],
+)
+def test_a_probe_publishes_the_turn_end_exactly_while_no_turn_is_open(
+    is_active: bool,
+    is_blocked_on_dialog: bool,
+    tmux_info: str | None,
+    raw_background_tasks: str,
+    expected_state: AgentLifecycleState,
+    is_published: bool,
+) -> None:
+    reading = LifecycleProbeReading(
+        is_active=is_active, raw_background_tasks=raw_background_tasks, raw_turn_end=FAILED_TURN_END_LINE
+    )
+
+    probe = _probe(reading, is_blocked_on_dialog=is_blocked_on_dialog, tmux_info=tmux_info)
+
+    assert (probe.state, probe.turn_end) == (expected_state, FAILED_TURN_END if is_published else None)
+
+
+def test_a_probe_without_a_turn_end_file_publishes_none() -> None:
+    assert _probe(LifecycleProbeReading(is_active=False)).turn_end is None

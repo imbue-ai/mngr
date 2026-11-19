@@ -28,8 +28,10 @@ from uuid import uuid4
 import pytest
 
 from imbue.mngr import resources as mngr_resources
+from imbue.mngr.primitives import TurnEndKind
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import get_short_random_string
+from imbue.mngr.utils.testing import read_turn_end_in
 
 # Helpers
 
@@ -142,6 +144,12 @@ class ScriptRunner:
             importlib.resources.files(mngr_resources).joinpath("mngr_common_transcript_lib.sh").read_text()
         )
         convert_lib_path.chmod(0o755)
+
+        # The streamer sources the real background task library to record an interrupted turn's end.
+        self.background_task_lib_path = self.agent_state_dir / "commands" / "mngr_background_task_lib.sh"
+        self.background_task_lib_path.write_text(
+            importlib.resources.files(mngr_resources).joinpath("mngr_background_task_lib.sh").read_text()
+        )
 
         # Standard paths
         self.script_path = Path(__file__).parent / "stream_transcript.sh"
@@ -719,6 +727,7 @@ def _assert_single_pass_leaves_marker(runner: ScriptRunner, marker: Path) -> Non
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert marker.exists()
     assert runner.get_activity_event_lines() == []
+    assert read_turn_end_in(runner.agent_state_dir) is None
 
 
 @_REQUIRES_JQ
@@ -757,6 +766,29 @@ def test_single_pass_heals_marker_stranded_by_trailing_interrupt_sentinel(
     assert event["reason"] == "interrupt_heal"
     # The sentinel line itself still streams into the output like any other line.
     assert len(runner.get_output_lines()) == 2
+    turn_end = read_turn_end_in(runner.agent_state_dir)
+    assert turn_end is not None
+    assert (turn_end.kind, turn_end.native_type) == (TurnEndKind.INTERRUPTED, "")
+
+
+@_REQUIRES_JQ
+def test_single_pass_heals_a_stranded_marker_without_the_background_task_library(
+    tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str
+) -> None:
+    """An agent provisioned before the library existed still heals, and records no turn end."""
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
+    runner.background_task_lib_path.unlink()
+    now = time.time()
+    runner.add_session("sess-cur", [_make_interrupt_sentinel_line(now)])
+    runner.set_current_session("sess-cur")
+    marker = runner.create_active_marker(now - 300.0)
+
+    result = runner.run_single_pass()
+
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert not marker.exists()
+    assert len(runner.get_activity_event_lines()) == 1
+    assert read_turn_end_in(runner.agent_state_dir) is None
 
 
 @_REQUIRES_JQ

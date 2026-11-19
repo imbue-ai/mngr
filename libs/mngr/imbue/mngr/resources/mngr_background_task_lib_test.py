@@ -20,10 +20,13 @@ import pytest
 from imbue.mngr.hosts.background_tasks import BACKGROUND_TASK_DIR_NAME
 from imbue.mngr.hosts.background_tasks import BACKGROUND_TASK_KEEPALIVE_ENV_VAR
 from imbue.mngr.hosts.background_tasks import DEFAULT_BACKGROUND_TASK_KEEPALIVE_SECONDS
+from imbue.mngr.hosts.background_tasks import TURN_END_FILE_NAME
 from imbue.mngr.primitives import BackgroundTask
 from imbue.mngr.primitives import BackgroundTaskKind
+from imbue.mngr.primitives import TurnEndKind
 from imbue.mngr.utils.testing import HOSTILE_NATIVE_TYPES
 from imbue.mngr.utils.testing import read_background_task_records_in
+from imbue.mngr.utils.testing import read_turn_end_in
 
 _LIB: Path = Path(__file__).parent / "mngr_background_task_lib.sh"
 _BASH: Final[tuple[str, ...]] = ("bash",)
@@ -530,3 +533,70 @@ def test_the_library_leaves_strict_mode_to_the_script_that_sources_it(tmp_path: 
     assert "e" not in after.stdout.strip()
     assert "u" not in after.stdout.strip()
     assert "C" not in after.stdout.strip()
+
+
+@pytest.mark.parametrize("shell", _ALL_SHELLS, ids="_".join)
+def test_a_written_turn_end_is_read_back_as_ended_now(shell: Sequence[str], tmp_path: Path) -> None:
+    _skip_unless_installed(shell)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    written_at = datetime.now(timezone.utc)
+
+    result = _run_lib(state_dir, "mngr_turn_end_write FAILED 'rate limit'", shell)
+
+    assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
+    turn_end = read_turn_end_in(state_dir)
+    assert turn_end is not None
+    assert (turn_end.kind, turn_end.native_type) == (TurnEndKind.FAILED, "rate limit")
+    assert abs(turn_end.ended_at - written_at) <= _CLOCK_SLACK
+    assert [path.name for path in state_dir.iterdir()] == [TURN_END_FILE_NAME]
+
+
+def test_a_turn_end_without_a_native_type_writes_no_native_type_token(tmp_path: Path) -> None:
+    _run_lib(tmp_path, "mngr_turn_end_write COMPLETED")
+
+    line = (tmp_path / TURN_END_FILE_NAME).read_text()
+
+    assert [token.partition(":")[0] for token in line.split()] == ["ended", "kind"]
+    assert line.endswith(" kind:COMPLETED\n") and line.count("\n") == 1
+
+
+def test_a_turn_end_replaces_the_one_before_it(tmp_path: Path) -> None:
+    _run_lib(tmp_path, "mngr_turn_end_write FAILED model_not_found\nmngr_turn_end_write INTERRUPTED")
+
+    turn_end = read_turn_end_in(tmp_path)
+
+    assert turn_end is not None
+    assert (turn_end.kind, turn_end.native_type) == (TurnEndKind.INTERRUPTED, "")
+
+
+def test_a_turn_end_native_type_is_written_as_python_would_quote_it(tmp_path: Path) -> None:
+    body = 'for native_type in "$@"; do mngr_turn_end_write FAILED "$native_type"; cat "$MNGR_AGENT_STATE_DIR/turn_end"; done'
+
+    result = _run_lib(tmp_path, body, arguments=HOSTILE_NATIVE_TYPES)
+
+    assert result.returncode == 0, result.stderr
+    assert [line.split(" ", 1)[1] for line in result.stdout.splitlines()] == [
+        f"kind:FAILED native_type:{quote(native_type, safe='')}" for native_type in HOSTILE_NATIVE_TYPES
+    ]
+
+
+@pytest.mark.parametrize(
+    ("state_dir_name", "body"),
+    [
+        pytest.param(None, "mngr_turn_end_write FAILED", id="no_agent"),
+        pytest.param("state", "mngr_turn_end_write ''", id="no_kind"),
+        pytest.param("not-a-directory/state", "mngr_turn_end_write FAILED", id="unwritable_state_dir"),
+    ],
+)
+def test_a_turn_end_that_cannot_be_written_is_a_no_op_under_strict_mode(
+    state_dir_name: str | None, body: str, tmp_path: Path
+) -> None:
+    (tmp_path / "not-a-directory").write_text("")
+    (tmp_path / "state").mkdir()
+    state_dir = None if state_dir_name is None else tmp_path / state_dir_name
+
+    result = _run_lib(state_dir, f"set -eu\n{body}\necho SURVIVED")
+
+    assert (result.returncode, result.stdout) == (0, "SURVIVED\n")
+    assert sorted(path.name for path in (tmp_path / "state").iterdir()) == []

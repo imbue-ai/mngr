@@ -1,9 +1,23 @@
 #!/usr/bin/env bash
-# Writes, clears and checks background task records, one file per task at $MNGR_AGENT_STATE_DIR/background_tasks/<name>.
+# Writes, clears and checks background task records under $MNGR_AGENT_STATE_DIR/background_tasks/, and writes $MNGR_AGENT_STATE_DIR/turn_end.
 
 # Reduce a record name to the characters [A-Za-z0-9_.-].
 _mngr_background_task_file_name() {
     printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_'
+}
+
+# mngr_turn_end_write <kind> [native_type]: record how the agent's turn ended, e.g. `ended:1792575895 kind:FAILED native_type:rate_limit`.
+mngr_turn_end_write() {
+    local kind="${1:-}" native_type="${2:-}" line staging_path
+    [ -n "${MNGR_AGENT_STATE_DIR:-}" ] && [ -n "$kind" ] || return 0
+    line="ended:$(date +%s) kind:$(_mngr_background_task_encode "$kind")"
+    native_type=$(_mngr_background_task_encode "$native_type") || native_type=""
+    [ -z "$native_type" ] || line="$line native_type:$native_type"
+    staging_path="$MNGR_AGENT_STATE_DIR/.turn_end.$$.tmp"
+    if ! { printf '%s\n' "$line" > "$staging_path" && mv -f "$staging_path" "$MNGR_AGENT_STATE_DIR/turn_end"; } 2>/dev/null; then
+        rm -f "$staging_path" 2>/dev/null || :
+    fi
+    return 0
 }
 
 # Encode text as a record value, e.g. `cloud session` as `cloud%20session`; text that needs od prints nothing without it.

@@ -905,7 +905,8 @@ def build_readiness_hooks_config() -> dict[str, Any]:
       mid-turn while Claude is genuinely active. The same branch removes a
       stranded 'compacting' marker (a compaction cancelled with Escape or cut
       short by a crash fires no PostCompact).
-    - UserPromptSubmit: creates 'active' file, removes 'permissions_waiting', signals tmux wait-for
+    - UserPromptSubmit: creates 'active' file, removes 'permissions_waiting', 'idle_since' and 'turn_end',
+      signals tmux wait-for
     - PreCompact: writes the 'compacting' marker (atomically via .tmp + mv) and emits an
       activity event. Fires for both a ``/compact`` and Claude's own auto-compaction.
     - PostCompact: writes 'last_compaction.json' (atomically via .tmp + mv), removes the
@@ -920,8 +921,8 @@ def build_readiness_hooks_config() -> dict[str, Any]:
       finish, then runs post-completion actions (uploads the current commit's
       autofix issue file to the Modal code-review-json volume when the
       code-guardian orchestrator wrote .reviewer/outputs/orchestrator_success
-      at the project root, and invokes notify_user best-effort), and finally removes 'active' and
-      'permissions_waiting' and emits an activity event -- except that it leaves
+      at the project root, and invokes notify_user best-effort), and finally writes 'turn_end',
+      removes 'active' and 'permissions_waiting' and emits an activity event -- except that it leaves
       'active' in place while the session transcript shows a queued prompt
       (not a slash command) about to start the next turn
     - StopFailure: the same script as Stop. Claude Code ends a turn that died on
@@ -945,6 +946,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
       written where that happens and removed where 'active' is created. So it dates the turn
       boundary rather than the agent's last work, and it is one of the sources
       ``get_agent_idle_since`` resolves rather than the idle epoch itself.
+    - turn_end: how the last turn ended, e.g. ``ended:1792575895 kind:FAILED native_type:model_not_found``.
     - activity/agent: a derived view of the whole "is this agent working" condition, projected
       into the time domain -- the agent's activity clock, refreshed by
       claude_background_tasks.sh for as long as that loop counts the agent as working, and so
@@ -1080,7 +1082,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                         {
                             "type": "command",
                             "command": MAIN_SESSION_ONLY_GUARD
-                            + 'touch "$MNGR_AGENT_STATE_DIR/active" && rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting" "$MNGR_AGENT_STATE_DIR/idle_since" && '
+                            + 'touch "$MNGR_AGENT_STATE_DIR/active" && rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting" "$MNGR_AGENT_STATE_DIR/idle_since" "$MNGR_AGENT_STATE_DIR/turn_end" && '
                             + _EMIT_ACTIVITY_EVENT,
                         },
                         {

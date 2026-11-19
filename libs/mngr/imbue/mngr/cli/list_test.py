@@ -57,6 +57,8 @@ from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
+from imbue.mngr.primitives import TurnEnd
+from imbue.mngr.primitives import TurnEndKind
 from imbue.mngr.utils.cel_utils import compile_cel_sort_keys
 from imbue.mngr.utils.testing import make_test_agent_details
 from imbue.mngr.utils.testing import record_host_name
@@ -204,6 +206,25 @@ def test_get_field_value_names_the_background_tasks_of_an_agent() -> None:
     assert _get_field_value(agent, "background_tasks[0].last_seen_at") == str(last_seen_at)
     assert _get_field_value(agent, "background_tasks[1].started_at") == ""
     assert _get_field_value(agent, "background_tasks[1].last_seen_at") == ""
+
+
+def test_get_field_value_reads_the_turn_end_as_its_kind_and_a_missing_one_as_empty() -> None:
+    ended_at = datetime.now(timezone.utc)
+    ended = make_test_agent_details(
+        turn_end=TurnEnd(kind=TurnEndKind.FAILED, native_type="model_not_found", ended_at=ended_at)
+    )
+    never_ended = make_test_agent_details()
+
+    assert [_get_field_value(ended, field) for field in ("turn_end", "turn_end.native_type", "turn_end.ended_at")] == [
+        "FAILED",
+        "model_not_found",
+        str(ended_at),
+    ]
+    assert [_get_field_value(never_ended, field) for field in ("turn_end", "turn_end.kind", "turn_end.ended_at")] == [
+        "",
+        "",
+        "",
+    ]
 
 
 # Tests for _get_field_value with bracket notation

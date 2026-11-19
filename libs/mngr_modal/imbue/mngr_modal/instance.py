@@ -3368,6 +3368,7 @@ log "=== Shutdown script completed ==="
             start_on_boot=agent_data.get("start_on_boot", False),
             state=lifecycle.state,
             background_tasks=lifecycle.background_tasks,
+            turn_end=lifecycle.turn_end,
             pid=lifecycle.pid,
             url=agent_raw.get("url"),
             start_time=start_time,

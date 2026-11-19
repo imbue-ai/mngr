@@ -17,9 +17,12 @@ import pytest
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr import resources as mngr_resources
 from imbue.mngr.primitives import BackgroundTaskKind
+from imbue.mngr.primitives import TurnEnd
+from imbue.mngr.primitives import TurnEndKind
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import HOSTILE_NATIVE_TYPES
 from imbue.mngr.utils.testing import read_background_task_records_in
+from imbue.mngr.utils.testing import read_turn_end_in
 from imbue.mngr_claude.resources.testing import make_assistant_record
 from imbue.mngr_claude.resources.testing import make_user_record
 from imbue.mngr_claude.resources.testing import write_raw_transcript
@@ -216,6 +219,10 @@ def _assert_marked_idle(hook: _StopHook) -> None:
     assert len(hook.activity_events.read_text().splitlines()) == 1
 
 
+def _turn_end_after(hook: _StopHook) -> TurnEnd | None:
+    return read_turn_end_in(hook.active_marker.parent)
+
+
 @pytest.mark.skipif(not Path("/proc").is_dir(), reason="the hook finds its Claude process through /proc")
 def test_stop_hook_clears_code_guardians_success_marker_when_the_shell_is_in_a_subfolder(tmp_path: Path) -> None:
     """code-guardian writes the marker at the project root, and Claude runs this hook wherever the agent last cd'd to.
@@ -402,6 +409,7 @@ def test_stop_hook_restores_the_marker_when_the_enqueue_lands_after_the_clear(tm
     assert process.returncode == 0, stderr
 
     _assert_left_active(hook)
+    assert _turn_end_after(hook) is None
 
 
 def test_stop_hook_records_the_background_work_the_turn_leaves_running(tmp_path: Path) -> None:
@@ -671,3 +679,60 @@ def test_stop_hook_does_not_record_a_task_that_reports_a_terminal_status(tmp_pat
         "task-still-running",
         "task-unknown-to-us",
     ]
+
+
+def test_stop_hook_records_a_completed_turn_end_as_it_marks_the_agent_idle(tmp_path: Path) -> None:
+    started_at = datetime.now(timezone.utc)
+
+    hook = _run_stop_hook_at_turn_end(tmp_path, [_prompt("hello"), _reply("done")])
+
+    _assert_marked_idle(hook)
+    turn_end = _turn_end_after(hook)
+    assert turn_end is not None
+    assert (turn_end.kind, turn_end.native_type) == (TurnEndKind.COMPLETED, "")
+    assert abs(turn_end.ended_at - started_at) <= _CLOCK_SLACK
+
+
+def test_stop_failure_hook_records_a_failed_turn_end_named_by_the_payload_error(tmp_path: Path) -> None:
+    hook = _prepare_stop_hook(
+        tmp_path, [_prompt("hello"), _api_error(timestamp="2026-01-01T00:00:05.000Z")], hook_event_name="StopFailure"
+    )
+    hook_input = {**json.loads(hook.hook_input), "error": "model_not_found"}
+
+    result = _run_prepared_stop_hook(hook, tmp_path, hook_input=json.dumps(hook_input))
+
+    assert result.returncode == 0, result.stderr
+    _assert_marked_idle(hook)
+    turn_end = _turn_end_after(hook)
+    assert turn_end is not None
+    assert (turn_end.kind, turn_end.native_type) == (TurnEndKind.FAILED, "model_not_found")
+
+
+@pytest.mark.parametrize(
+    ("transcript_records", "hook_event_name"),
+    [
+        pytest.param([_prompt("hello"), _queue_operation("enqueue", "next")], "Stop", id="queued_prompt"),
+        pytest.param([_prompt("hello"), _reply("done"), _stop_hook_feedback()], "Stop", id="blocked_by_a_stop_hook"),
+        pytest.param(
+            [_prompt("hello"), *_queued_prompt_dequeued_ahead_of_api_error("next")],
+            "StopFailure",
+            id="queued_prompt_after_a_failure",
+        ),
+    ],
+)
+def test_stop_hook_records_no_turn_end_while_the_agent_keeps_working(
+    tmp_path: Path, transcript_records: list[dict[str, Any]], hook_event_name: str
+) -> None:
+    hook = _run_stop_hook_at_turn_end(tmp_path, transcript_records, hook_event_name=hook_event_name)
+
+    _assert_left_active(hook)
+    assert _turn_end_after(hook) is None
+
+
+def test_stop_hook_records_no_turn_end_and_still_marks_the_agent_idle_without_the_library(tmp_path: Path) -> None:
+    hook = _run_stop_hook_at_turn_end(
+        tmp_path, [_prompt("hello"), _reply("done")], is_background_task_record_lib_installed=False
+    )
+
+    _assert_marked_idle(hook)
+    assert _turn_end_after(hook) is None

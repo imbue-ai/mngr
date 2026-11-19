@@ -1,6 +1,8 @@
+from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 
+from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
@@ -12,6 +14,8 @@ from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
+from imbue.mngr.utils.testing import FAILED_TURN_END
+from imbue.mngr.utils.testing import FAILED_TURN_END_LINE
 from imbue.mngr_modal.instance import ModalProviderInstance
 
 
@@ -167,9 +171,10 @@ def test_build_single_agent_details_returns_agent_with_correct_state(
     assert result.state == AgentLifecycleState.DONE
 
 
-def test_build_single_agent_details_publishes_the_background_tasks_of_a_listed_agent(
-    testing_provider: ModalProviderInstance,
-) -> None:
+def _build_listed_idle_agent_details(
+    testing_provider: ModalProviderInstance, listing_fields: Mapping[str, str]
+) -> AgentDetails | None:
+    """The details of a listed agent between turns whose pane runs its process, its row extended by ``listing_fields``."""
     agent_raw: dict = {
         "data": {
             "id": str(AgentId.generate()),
@@ -180,9 +185,9 @@ def test_build_single_agent_details_publishes_the_background_tasks_of_a_listed_a
         },
         "tmux_info": "0|my-agent|100",
         "is_active": False,
-        "raw_background_tasks": "task-full\tseen:1767355200 kind:SHELL native_type:shell\ntask-bare\tpid:4821",
+        **listing_fields,
     }
-    result = testing_provider._build_single_agent_details(
+    return testing_provider._build_single_agent_details(
         agent_raw=agent_raw,
         host_details=_make_host_details(),
         ssh_activity=None,
@@ -190,6 +195,15 @@ def test_build_single_agent_details_publishes_the_background_tasks_of_a_listed_a
         idle_timeout_seconds=300,
         activity_sources=(ActivitySource.USER,),
         idle_mode=IdleMode.USER,
+    )
+
+
+def test_build_single_agent_details_publishes_the_background_tasks_of_a_listed_agent(
+    testing_provider: ModalProviderInstance,
+) -> None:
+    result = _build_listed_idle_agent_details(
+        testing_provider,
+        {"raw_background_tasks": "task-full\tseen:1767355200 kind:SHELL native_type:shell\ntask-bare\tpid:4821"},
     )
     assert result is not None
     assert result.state == AgentLifecycleState.RUNNING_BACKGROUND
@@ -202,6 +216,14 @@ def test_build_single_agent_details_publishes_the_background_tasks_of_a_listed_a
         ),
         BackgroundTask(name="task-bare"),
     )
+
+
+def test_build_single_agent_details_publishes_the_turn_end_of_a_listed_agent(
+    testing_provider: ModalProviderInstance,
+) -> None:
+    result = _build_listed_idle_agent_details(testing_provider, {"raw_turn_end": FAILED_TURN_END_LINE})
+    assert result is not None
+    assert (result.state, result.turn_end) == (AgentLifecycleState.WAITING, FAILED_TURN_END)
 
 
 def test_build_single_agent_details_returns_none_for_missing_id(

@@ -36,7 +36,10 @@ from loguru import logger
 from imbue.imbue_common.pure import pure
 from imbue.mngr.hosts.background_tasks import BACKGROUND_TASK_DIR_NAME
 from imbue.mngr.hosts.background_tasks import BACKGROUND_TASK_PREFIX
+from imbue.mngr.hosts.background_tasks import TURN_END_FILE_NAME
+from imbue.mngr.hosts.background_tasks import TURN_END_PREFIX
 from imbue.mngr.hosts.background_tasks import build_background_task_scan
+from imbue.mngr.hosts.background_tasks import build_turn_end_read
 from imbue.mngr.hosts.common import TMUX_PANE_LISTING_FORMAT
 from imbue.mngr.hosts.common import find_agent_session_name
 from imbue.mngr.hosts.common import find_first_pane_info
@@ -220,7 +223,7 @@ def _build_agents_section_script(is_host_running: bool) -> str:
     (and a ``tr`` of the URL file for an agent that has one), because on a sandboxed runtime
     (gVisor) each process spawn costs tens of milliseconds and a host can carry dozens of
     agents. A stopped host has no running agent, so its leftover ``active`` markers and
-    records are not read.
+    records are not read; each agent's ``turn_end`` is read either way.
     """
     active_check = (
         """if [ -f "${agent_dir}active" ]; then
@@ -264,6 +267,7 @@ if [ -d "$HOST_DIR/agents" ]; then
         echo ''
         echo '{SEP_AGENT_DATA_END}'
         {active_check}
+        {build_turn_end_read(f'"${{agent_dir}}{TURN_END_FILE_NAME}"')}
         if [ -f "${{agent_dir}}status/url" ]; then
             echo "URL=$(tr -d '\\n' < "${{agent_dir}}status/url")"
         else
@@ -490,6 +494,8 @@ def _parse_agent_section(lines: list[str], idx: int) -> tuple[dict[str, Any], in
                     logger.warning("Failed to parse agent data.json in listing output: {}", e)
         elif aline.startswith("ACTIVE="):
             agent_raw["is_active"] = aline[len("ACTIVE=") :].strip() == "true"
+        elif aline.startswith(TURN_END_PREFIX):
+            agent_raw["raw_turn_end"] = aline[len(TURN_END_PREFIX) :]
         elif aline.startswith("URL="):
             val = aline[len("URL=") :].strip()
             agent_raw["url"] = val if val else None
@@ -502,7 +508,7 @@ def _parse_agent_section(lines: list[str], idx: int) -> tuple[dict[str, Any], in
 
 @pure
 def build_lifecycle_probe_reading(agent_raw: Mapping[str, Any]) -> LifecycleProbeReading:
-    """The turn marker and background task records of one batched listing row, in the shape the reducer takes.
+    """The turn marker, background task records and turn end of one batched listing row, as the reducer takes them.
 
     Named here rather than in the protocol module because the key names are this listing's
     own, and a provider should hand the reducer a reading rather than assemble one.
@@ -510,6 +516,7 @@ def build_lifecycle_probe_reading(agent_raw: Mapping[str, Any]) -> LifecycleProb
     return LifecycleProbeReading(
         is_active=bool(agent_raw.get("is_active", False)),
         raw_background_tasks=str(agent_raw.get("raw_background_tasks", "")),
+        raw_turn_end=str(agent_raw.get("raw_turn_end", "")),
     )
 
 
