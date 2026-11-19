@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-18
+
+The codex agent type's `config_overrides` now accumulates across config layers, as claude's `settings_overrides` does: each layer adds its keys to those of the layers below it. A user-level `agent_types.codex.config_overrides.model_reasoning_summary = "auto"`, for example, now combines with a project config that sets other `config_overrides` keys; before, that combination failed to load with a settings-narrowing error. To merge a nested table that two layers set, write its key with `__extend`.
+
+Every agent step in the codex common transcript carries the codex session id as `extra.harness_session_id` (from the rollout's `session_meta`) and its turn id as `extra.harness_turn_id` (from the `turn_context`). These are the `session_id` and `turn_id` codex sends in the `x-codex-turn-metadata` request header, so a step can be joined to an LLM proxy's per-request log. A new `harness_internals(harness="codex")` release test pins that the stamped session id is the root thread id codex's daemon reports.
+
 ## 2026-11-13
 
 The real-CLI release tests pin codex agents to `gpt-6.1-sol` (was `gpt-5.5`). A ChatGPT-account login now rejects `gpt-5.5` ("not supported when using Codex with a ChatGPT account"), so every turn in those tests failed before the agent could reply.

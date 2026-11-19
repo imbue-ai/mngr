@@ -11,11 +11,12 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `mngr create --publish <port>[/<protocol>]` declares ports to publish on a new host (create-template key `publish`), reported as `published_endpoints` by `mngr create`/`mngr list --format json` and the discovery stream.
 - Added: Support for the `grok` agent type via the separately installed `imbue-mngr-grok` plugin, listed in the plugin catalog and offered unchecked by the install wizard.
 - Added: `imbue.mngr.agents.tui_utils.is_shell_command_message` (moved from `imbue.mngr_claude.dialogs`).
-- Added: `RUNNING_BACKGROUND` agent state, reported exactly when an agent has no open turn and at least one background task record under its `background_tasks/` directory (`resources/mngr_work_lease_lib.sh` writes them; records never expire, and `HOOK_WORK_LEASE_TTL_SECONDS`, default 24 hours, only bounds how long a record keeps the activity clock fresh); `--running` selects it too. `AgentDetails`, `mngr list` JSON/`--fields`, CEL filters and `mngr observe` events carry `background_tasks`, each with `name`, `kind` (`SHELL`, `SUBAGENT`, `MONITOR`, `SCHEDULE`, `OTHER`), `native_type`, `started_at` and `last_seen_at`. Agents created before this change write under `leases/`, which mngr does not read, so they never report `RUNNING_BACKGROUND`.
+- Added: `RUNNING_BACKGROUND` agent state, reported exactly when an agent has no open turn and at least one background task record under its `background_tasks/` directory (`resources/mngr_background_task_lib.sh` writes them; records never expire, and `HOOK_BACKGROUND_TASK_KEEPALIVE_SECONDS`, default 24 hours, only bounds how long a record keeps the activity clock fresh); `--running` selects it too. `AgentDetails`, `mngr list` JSON/`--fields`, CEL filters and `mngr observe` events carry `background_tasks`, each with `name`, `kind` (`SHELL`, `SUBAGENT`, `MONITOR`, `SCHEDULE`, `OTHER`), `native_type`, `started_at` and `last_seen_at`. Agents created before this change write under `leases/`, which mngr does not read, so they never report `RUNNING_BACKGROUND`.
 - Added: `ssh_utils.load_ssh_private_key_file`, loading any paramiko key type, with `SSHPrivateKeyError` subclasses `SSHPrivateKeyEncryptedError` and `SSHPrivateKeyUnparseableError`.
 - Added: The docker/VPS container entrypoint runs the image's `/usr/local/bin/mngr-container-start-hook`, detached, after restoring sshd on a container restart.
 - Added: The JSONL `error` event carries an error's structured facts under `details` (`MngrError.event_details()`); `ProviderUnavailableError` reports `short_reason` and `short_remediation` there.
 - Added: A warning when SSH connection retries are exhausted, naming the attempt count, time spent, deadline, why it stopped and the underlying paramiko exception class.
+- Added: `SendKeysAgent._is_message_delivered_as_paste` lets an agent type paste (bracketed paste) a message instead of typing it.
 
 ### Changed
 
@@ -26,6 +27,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: The `agent_release_testing` helpers and `DEFAULT_HOST_LOCK_TIMEOUT_SECONDS` are public.
 - Changed: The in-host idle watcher (`activity_watcher.sh`) reads `data.json` with one `jq` call per check instead of six (~0.84% to ~0.17% of a core); its per-check `DEBUG` event is gone.
 - Changed: The mngr Docker image (`resources/Dockerfile`) installs Claude Code 2.1.323 (was 2.1.307), whose `fable` alias is Claude Fable 5.2.
+- Changed: An SSH connect that fails because the process ran out of file descriptors raises `LocalFileDescriptorsExhaustedError` at once instead of being retried.
+- Changed: `mngr observe`'s per-poll log lines are TRACE instead of DEBUG, so `logs/mngr/events.jsonl` no longer grows ~24 MB a day on an idle workspace.
 
 ### Fixed
 
@@ -35,6 +38,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: `mngr gc` no longer deletes the volume of a host still being created when it listed hosts; volumes younger than the provider's `min_online_host_age_seconds` are spared on providers that report volume creation time (Modal, local).
 - Fixed: A message containing a NUL character sent to a tmux-input agent is refused with `SendMessageError` before anything is typed, instead of crashing the send or pasting the NULs.
 - Fixed: A local host command that cannot start raises `CommandStartError` (a `MngrError`) instead of `ProcessSetupError`, so `mngr message` with `ErrorBehavior.CONTINUE` records the agent as failed rather than aborting.
+- Fixed: Outer-host SSH connections through a `ProxyCommand` from `~/.ssh/config` no longer leak the proxy process and its pipes, which exhausted file descriptors in long-running processes like `mngr latchkey forward`.
 
 ### Security
 

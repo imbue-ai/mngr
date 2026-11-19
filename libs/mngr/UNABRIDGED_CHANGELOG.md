@@ -4,6 +4,30 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-18
+
+The config README's list of settings-patch fields, whose values from every config layer are combined, now includes the codex agent type's `config_overrides`. Its note on narrowing now says a plain nested table that drops a lower layer's keys still counts as narrowing.
+
+`test_snapshot_destroy_all_for_agent` (release tests) is marked flaky. Its Modal host create can fail when the sandbox's SSH server isn't ready within 60 seconds, the intermittent cause tracked in MIND-719.
+
+The generated `mngr latchkey` command reference documents that `mngr latchkey forward` installs the pinned latchkey plugins before starting its shared gateway.
+
+The code that said "work lease" says "background task". These are renames with no behaviour change: the record directory, file names, record line and published `background_tasks` are as before.
+
+- The setting that bounds how long a background task keeps a remote host awake after it was last seen is `HOOK_BACKGROUND_TASK_KEEPALIVE_SECONDS`, renamed from `HOOK_WORK_LEASE_TTL_SECONDS`. The old name is not read. An agent created on an earlier version keeps its own copy of the library, which reads the old name.
+
+- The shell library a harness hook sources is `mngr_background_task_lib.sh`, renamed from `mngr_work_lease_lib.sh`. Its functions are `mngr_background_task_write`, `mngr_background_task_clear`, `mngr_background_task_any_recent` and `mngr_background_task_dir`, renamed from `mngr_work_lease_declare`, `mngr_work_lease_clear`, `mngr_work_lease_any_live` and `mngr_work_lease_dir`.
+
+- `WorkLease` and `InvalidWorkLeaseError` are renamed `BackgroundTask` and `InvalidBackgroundTaskError`, and the kind enum is `BackgroundTaskKind`. `imbue.mngr.hosts.work_leases` is `imbue.mngr.hosts.background_tasks`: `parse_work_leases` is `parse_background_tasks`, `build_work_lease_scan` is `build_background_task_scan`, `LEASE_PREFIX` is `BACKGROUND_TASK_PREFIX`, `WORK_LEASE_TTL_ENV_VAR` is `BACKGROUND_TASK_KEEPALIVE_ENV_VAR`, `DEFAULT_WORK_LEASE_TTL_SECONDS` is `DEFAULT_BACKGROUND_TASK_KEEPALIVE_SECONDS`, and every other `WORK_LEASE_*` constant there, and `WORK_LEASE_NAME_PATTERN` in `imbue.mngr.primitives`, swaps that prefix for `BACKGROUND_TASK_`. `SEP_AGENT_LEASES_START` and `SEP_AGENT_LEASES_END` in `imbue.mngr.providers.listing_utils` are `SEP_AGENT_BACKGROUND_TASKS_START` and `SEP_AGENT_BACKGROUND_TASKS_END`. `LifecycleProbeResult.leases` and `LifecycleProbeReading.raw_leases` are `background_tasks` and `raw_background_tasks`.
+
+`mngr observe` no longer fills its file log on a long-lived host. It polls every provider and host every few seconds, and three of its per-poll lines ("Loading all agents from host", "Polling discovery for provider", "Discovery tail: consumed ...") were written at DEBUG, so `logs/mngr/events.jsonl` grew about 24 MB a day on an idle workspace, almost all of it these lines, until rotation stopped it at about 1.1 GB. They are now TRACE (`-vv` still shows them).
+
+Outer-host SSH connections made through a `ProxyCommand` from the user's `~/.ssh/config` (for example a docker provider with `DOCKER_HOST=ssh://<alias>` whose alias goes through `tailscale nc`) no longer leak the proxy process. paramiko's `ProxyCommand.close()` only signals the proxy, so each connection left three open pipes and an unreaped child behind until a full garbage collection freed the transport. In a long-running process like `mngr latchkey forward`, which reconnects to each remote host every cycle, that used up the file descriptors after about 80 minutes, and every new SSH connect then failed with `filedescriptor out of range in select()`. `OuterHost.disconnect()`, every failed connect attempt, and every reconnect that replaces a connection dropped for a retry now close the proxy's pipes and reap it.
+
+A connect that fails because the process has run out of file descriptors (a `ProxyCommand` pipe numbered beyond what `select()` can watch, or the descriptor limit reached) now raises `LocalFileDescriptorsExhaustedError` (a `HostConnectionError`) at once. It is no longer retried for 30 seconds as a slow SSH banner, which spawned a new proxy on every attempt.
+
+An agent type can now have a message pasted into its pane (bracketed paste) instead of typed, by overriding `SendKeysAgent._is_message_delivered_as_paste`. By default only messages too long for one `tmux send-keys` call are pasted, as before. The Claude and Antigravity agents use this to deliver messages their TUIs would otherwise read as a keyboard shortcut.
+
 ## 2026-11-17
 
 `background_tasks` replaces `leases` on `AgentDetails`, in `mngr list --format json`, `--fields`, CEL filters and `mngr observe` events. Each item has `name`, `kind` (`SHELL`, `SUBAGENT`, `MONITOR`, `SCHEDULE` or `OTHER`), `native_type` (the harness's own type name), `started_at` and `last_seen_at`; `expires_at` is gone. A row that still carries `leases` is accepted and the key dropped.

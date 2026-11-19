@@ -9,6 +9,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Added
 
 - Added: Claude agents' Stop hook records each in-flight background task from the Stop payload's `background_tasks` under `background_tasks/`, with its `kind` and claude's own `native_type`, so they report `RUNNING_BACKGROUND` until that work wakes them; records carry no deadline and a restart drops them. Agents created before this change write under `leases/`, which mngr does not read, so they never report `RUNNING_BACKGROUND`.
+- Added: Claude common-transcript agent steps carry the claude session id as `extra.harness_session_id`, joinable to an LLM proxy's per-request log.
+- Added: A blocking unrecognized Claude Code dialog logs a warning with the installed claude version, its pin, and the dialog's shape (never its text).
 
 ### Changed
 
@@ -20,6 +22,9 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: A message sent to a claude agent still running its SessionStart hooks now confirms within seconds instead of being reported unconfirmed after the 90s window.
 - Fixed: Messaging a Claude agent stuck on the Bypass Permissions mode warning now fails with instructions to answer it in the agent's terminal instead of pressing Escape (which exited Claude); a start blocked by the warning explains how to accept it once.
 - Fixed: The streaming snapshot no longer streams Claude's gray status lines (e.g. "Ran 3 shell commands") or the background-agents "● main" row as reply text.
+- Fixed: The Stop hook finds code-guardian's `.reviewer/outputs/orchestrator_success` at the project root, so a turn ending in a subfolder still uploads autofix issues.
+- Fixed: Sending a lone `?` no longer opens Claude Code's shortcuts panel and times out after 90s; it is pasted.
+- Fixed: Messages with no letters or digits (e.g. `?`, an emoji) are confirmed once Claude records them.
 
 ## [v0.3.1] - 2026-10-28
 

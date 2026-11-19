@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Codex common-transcript agent steps carry `extra.harness_session_id` and `extra.harness_turn_id`, joinable to an LLM proxy's per-request log.
+
+### Changed
+
+- Changed: `config_overrides` accumulates across config layers like claude's `settings_overrides` (use `__extend` to merge a nested table), so a user-level override no longer fails to load beside a project-level one.
+
 ## [v0.2.1] - 2026-10-28
 
 ### Added

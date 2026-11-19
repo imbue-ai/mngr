@@ -4,6 +4,26 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-18
+
+The Stop hook mngr installs for Claude agents now finds code-guardian's success marker (`.reviewer/outputs/orchestrator_success`) at the project root. It used to look in whatever folder the agent's shell was in. An agent that ended its turn in a subfolder skipped uploading that commit's autofix issues and left the marker behind for a later turn. A project with no git commit to upload for no longer stops the hook before it marks the agent idle.
+
+Every agent step in the claude common transcript carries the claude session id it ran under as `extra.harness_session_id`, read from the `sessionId` on its session records. It is the id claude sends in the `x-claude-code-session-id` request header, so a step can be joined to an LLM proxy's per-request log; a native subagent's steps carry the parent session's id, as its requests do. A new `harness_internals(harness="claude")` release test pins that the stamped id is the session id claude reports to its hooks.
+
+The Stop hook sources `mngr_background_task_lib.sh` and calls `mngr_background_task_write` and `mngr_background_task_clear`, following mngr's rename of its work-lease library; `claude_background_tasks.sh` sources the same file and calls `mngr_background_task_any_recent` for its heartbeat. `HOOK_WORK_LEASE_NAME_PREFIX` is renamed `HOOK_BACKGROUND_TASK_NAME_PREFIX`. The records the hook writes are unchanged.
+
+Fixed: sending a message that is just `?` to a Claude agent no longer fails after a 90-second timeout.
+
+Claude Code reads a lone `?` typed into an empty input box as the key for its shortcuts panel, so the message never reached the input box and the Enter that followed submitted nothing. mngr now pastes a lone `?`, which Claude Code inserts as text. A message starting with `?` followed by more text was already typed correctly and is unchanged.
+
+Confirming a message that has no letters or digits, such as `?`, `??` or an emoji, now accepts Claude recording it. The fallback check looked only for transcript records containing a letter or digit, so it could never find such a message's own record.
+
+A harness-internals release test pins, against the real Claude Code, that restarting a claude agent clears the background task records its previous process wrote, and that claude resumes none of those tasks: its `SessionStart` payload carries no task list and the first turn after the restart lists none.
+
+When an unrecognized Claude Code dialog blocks a send, mngr now logs a warning with the claude version installed on the agent's host, its pin, and the dialog's shape: whether it shows a numbered selector, how many options it has, and whether an "esc to ..." footer sits in the bottom three or bottom eight lines. The pane's text is never logged. Provisioning also logs at debug level which first-run dismissal flags the agent's `.claude.json` carries, including whether it pre-accepts the work dir's trust dialog. Together these show whether a new startup prompt needs a named dialog class or a config flag.
+
+No behaviour change: unit tests pin that a turn ending on an API error clears the Stop hook's background task records, and that a `StopFailure` payload carrying `background_tasks` would be recorded the same as a `Stop` one. A release test pins that claude's `StopFailure` payload has no `background_tasks`.
+
 ## 2026-11-17
 
 The Stop hook records each background task claude lists under the agent's `background_tasks/` directory, which replaces `leases/`, as `seen:<now> kind:<KIND> native_type:<label>`: the label is claude's own `type` for the task, and the kind is `SHELL` for `shell`, `SUBAGENT` for `subagent`, `teammate`, `cloud session` and `workflow`, `MONITOR` for `monitor` and `OTHER` for every other label. A record carries no deadline. An agent created on an earlier version keeps its own hooks, which write under `leases/`: mngr no longer reads those records, so it never reads `RUNNING_BACKGROUND`. Release tests pin the `shell` and `subagent` labels against a real claude agent, and claude's own label table against the labels mngr lists.

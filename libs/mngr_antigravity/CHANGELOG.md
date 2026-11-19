@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed: A message starting with `?` is pasted, so agy no longer opens its help screen and swallows the message.
+
 ## [v0.2.1] - 2026-10-28
 
 ### Added

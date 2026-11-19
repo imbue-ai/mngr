@@ -11,11 +11,26 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Agents can ask for a `custom-service` connection to be proxied through the desktop with `"proxy": true`; the approval dialog shows the **Proxy through my desktop** switch, and approving creates, grants and routes the connection in one change.
 - Added: Shared with me: workspaces and apps shared with the window's account are listed with owner, status, liveness and last-open verdict, offering open, decline (with undo), report (a permanent strike against the owner), retry, remove and a pasted-link input; opening signs a per-account Electron session into the accounts origin and loads the share in the workspace frame; `imbue-studio://shared/<host-id>` deep links land on its card.
 - Added: Shared workspaces report `is_owned=false` (UI channel schema 29, `GET /api/v1/workspaces` with `share_link`, titlebar), hide owner-only tabs, and refuse owner actions with `403 not_owned`.
+- Added: Experimental connectors: Studio installs its pinned latchkey plugins (Garmin Connect, Spotify, Strava) locally and on every remote workspace's machine, and the Permissions tab offers their services under an **Experimental connectors** heading with a "Use at your own risk" warning.
+- Added: A workspace create on Imbue Cloud refused because the account is on the waitlist now offers **Retry**, to select after accepting the invite in the invitation email.
+- Added: "Send the email again" in the Share tab when an invitation or Mobile Access Link is refused for an unverified email; Create from Template waits on an unverified account's emailed link with the create form's "Resend email".
 
 ### Changed
 
 - Changed: Redesigned the home page as Workspaces, Apps and Invitations tabs: wallpaper workspace cards with status badges and a "..." menu, shared-workspace guest cards, desktop-style icons for own and shared apps, and Join/Decline invitation cards; "Studio settings" moves into the section head and the bottom-left launchers are removed.
 - Changed: A share grants push carries each target's label and display name and the workspace name, and a domain grant may only name the granter's own email domain (none for a public mail provider), enforced by the share panel and the connector.
+- Changed: On the alpha channel, any newer workspace template release (including patch and prerelease bumps) counts as an update; stable and beta still update only on a newer minor release or security fix.
+- Changed: Under WSL, Studio's windows keep the native title bar instead of being frameless, so clicks land where the pointer is.
+- Changed: A new remote workspace is no longer pointed at the reverse-tunneled gateway `http://127.0.0.1:1989` when its container lacks the `host.docker.internal` mapping; pool hosts must be baked by an mngr that creates containers with it.
+- Changed: Every email resend reports its outcome (failed, already verified, or sent), including the Accounts page's "Resend email".
+
+### Fixed
+
+- Fixed: A workspace update apply that takes services down twice (e.g. rollback then retry) no longer shows "Lost connection to this workspace" during the second outage.
+- Fixed: A transient failure carrying a remote workspace's registered-agent change to its machine is retried (after 10s and 30s) instead of losing the change.
+- Fixed: The Landing list no longer shows a greyed duplicate row of a workspace while it is being created.
+- Fixed: On macOS, the first click on a background Studio window reaches the page.
+- Fixed: Under WSL, links and sign-in pages open in the Windows default browser (re-run `scripts/install-linux.sh` to get the handler).
 
 ## [minds-v0.10.5] - 2026-11-17
 

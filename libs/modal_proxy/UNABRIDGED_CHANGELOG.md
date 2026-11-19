@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-18
+
+When `DirectVolume.write_files` cancels an upload attempt that stalled past its deadline (MIND-717), the `ModalProxyCallTimeoutError` now names the step of Modal's upload the attempt was waiting in, outermost function first, read before the cancel unwinds it: for example `... > _VolumeUploadContextManager2._put_file_specs (modal/volume.py:1619) > ...` for a commit Modal never answered, `_put_missing_blocks` for a block upload to object storage, or the hashing step. The transient-retry warning already logs each attempt's error, so every stalled write in CI now says which of the three it hit. The message for reads, listings, hydration and removals is unchanged, since synchronicity's `_future=True` keeps their coroutine out of reach.
+
 ## 2026-11-09
 
 Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.

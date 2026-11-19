@@ -15,6 +15,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `is_system_browser` option on `Latchkey.auth_browser` and `auth_browser_login` (`latchkey auth browser --system`), `LatchkeyServiceInfo.is_system_browser_login_supported` and `custom_services.is_system_browser_login_flow`; combining it with the ephemeral browser raises `LatchkeyError`.
 - Added: `is_chrome_profile_missing_failure` and `is_scopes_not_granted_failure` classify those sign-in failures.
 - Added: The `permission-requests` extension accepts `"proxy": true` on `custom-service` requests (booleans only, else HTTP 400) and stores it on the request's payload.
+- Added: Latchkey service plugins: `imbue.mngr_latchkey.service_plugins` pins Garmin Connect, Spotify and Strava (`KNOWN_SERVICE_PLUGINS`), installed by `mngr latchkey forward` before the gateway starts and by the `mngr-latchkey` Debian package on remote machines; the service catalog lists their services.
 
 ### Changed
 
@@ -24,6 +25,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `Latchkey.auth_browser` pins Imbue Studio's redirect URI before every MCP OAuth sign-in that registers a client (builtin `*-mcp` and custom `mcp` flow, per new `is_mcp_oauth_service`); `MINDS_OAUTH_REDIRECT_URI` replaces `MINDS_OAUTH_REDIRECT_URI_BY_SERVICE`.
 - Changed: The `minds-workspaces-backups-manage` verb admits `/backup-service/setup/retry`.
 - Changed: A wiring-step failure that retrying cannot fix now names the step and when it last succeeded for the host.
+- Changed: Discovery reports a wiring step that failed from file-descriptor exhaustion as an error at once instead of after 10 transient cycles.
+
+### Removed
+
+- Removed: The `on_host_created` hook that pointed a new container lacking `host.docker.internal` at the reverse-tunneled `http://127.0.0.1:1989`, with `fall_back_to_reverse_tunneled_gateway_url` and `CONTAINER_HOSTS_FILE_PATH`; outer hosts must create containers with the mapping.
 
 ### Fixed
 

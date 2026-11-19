@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-18
+
+The outcome grok's hook appends to `logs/grok_hooks.log` reads `background_tasks=N` where it read `leases=N`, and the hook's constants are `BACKGROUND_TASK_DIRNAME`, `BACKGROUND_TASK_NAME_PREFIX`, `BACKGROUND_TASK_KIND_BY_TASK_TYPE` and `OTHER_BACKGROUND_TASK_KIND`. `grok_background_tasks.sh` sources `mngr_background_task_lib.sh` and calls `mngr_background_task_any_recent` for its heartbeat, following mngr's rename of its work-lease library. The README names the setting `HOOK_BACKGROUND_TASK_KEEPALIVE_SECONDS`, renamed from `HOOK_WORK_LEASE_TTL_SECONDS`. The records the hook writes are unchanged.
+
 ## 2026-11-17
 
 grok's hook records each background task grok lists in flight under the agent's `background_tasks/` directory, which replaces `leases/`, as `seen:<now> kind:<KIND> native_type:<type>`, where the type is grok's own task `type`, kept exactly, and the kind is what it maps to: `shell` is `SHELL`, `subagent` is `SUBAGENT`, `monitor` is `MONITOR`, any other type is `OTHER`. `mngr list` shows them as `background_tasks`. A record carries no deadline: it stays until a later `Stop` no longer lists its task, its subagent ends, or a top-level session starts or ends. `HOOK_WORK_LEASE_TTL_SECONDS` now only bounds how long after a record was last seen it keeps the agent's activity clock fresh. An agent created on an earlier version keeps its own hooks, which write under `leases/`: mngr no longer reads those records, so it never reads `RUNNING_BACKGROUND`. The binary-contract tests pin the kind and native type against the pinned grok.

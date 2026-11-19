@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-18
+
+A docker provider whose daemon is reached over `ssh://` now reports a failed SSH connect (a rejected handshake, a missing `ProxyCommand`, a refused connection) as `ProviderUnavailableError`. Before, paramiko's `SSHException` or `OSError` escaped docker-py unwrapped. That skipped the handlers that clean up a half-built provider, and killed the latchkey discovery worker that hit it.
+
+A docker provider reached over `ssh://` through a `ProxyCommand` no longer leaks the proxy process from its own docker-py client. Before, each failed SSH connect, and each close of a working client, left three open pipes and an unreaped child until a full garbage collection. Discovery rebuilds the provider on every poll while it is unreachable, or while its daemon has no mngr state container yet, so a long-running `mngr observe` leaked about four file descriptors a minute. The error reported for such a failed connect keeps its message and exception type but no longer carries the docker-py and paramiko stack trace.
+
 ## 2026-11-13
 
 When the Docker daemon can't be reached, the provider's unavailability error now names the fix ("start Docker", or "start Docker on <host>" for a remote daemon), so `mngr list` and clients such as Imbue Studio can tell the user what to do.

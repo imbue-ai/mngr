@@ -4,6 +4,18 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-18
+
+The plugin no longer hooks `mngr create` (`on_host_created`) to point a new VPS-gateway host whose container cannot resolve `host.docker.internal` at the reverse-tunneled `http://127.0.0.1:1989`: a new host's `LATCHKEY_GATEWAY` always stays as `prepare_agent_latchkey` decided it, so an outer host has to create its containers with the mapping. `fall_back_to_reverse_tunneled_gateway_url` and `CONTAINER_HOSTS_FILE_PATH` are removed from `agent_setup`. Existing hosts whose agents name their own loopback keep the VPS->container reverse tunnel.
+
+Latchkey plugins: services that ride an undocumented API ship outside latchkey, as ES module packages in `<LATCHKEY_DIRECTORY>/plugins/`. New `imbue.mngr_latchkey.service_plugins` pins the plugins this build installs (`KNOWN_SERVICE_PLUGINS`: Garmin Connect, Spotify and Strava, each at one commit of its repository) and installs them: `install_known_service_plugins` downloads each one's tarball from GitHub once per pinned commit, all of them concurrently, stamps the commit inside the plugin, and leaves a plugin already at that commit alone. `mngr latchkey forward` runs it before starting the gateway, which loads plugins only as it starts; a plugin that cannot be downloaded or unpacked is logged and skipped until the next start.
+
+The `mngr-latchkey` Debian package installs the same pinned plugins on a remote host's machine from its `postinst` (version-gated the same way, restarting the gateway when one changed), so every machine serves the same services. It downloads them in the background while the rest of the install runs and waits for them only before starting the gateway; a plugin that cannot be downloaded or unpacked is skipped rather than failing the install, and provisioning logs it as a warning. The package version follows the pins.
+
+The service catalog (`ServicesCatalog` with a `latchkey_directory`, and the `services.json` materialized for the gateway) names every pinned plugin's services, each under one scope pinned to its API hosts; like a custom service's, a grant for such a scope (`build_account_grant`, `build_desktop_egress_grant`) is refused without the scope's schema. A machine store shares the desktop's `plugins` directory by symlink, and a foreign store is re-encrypted with it linked in, so credentials whose type a plugin defines can be read.
+
+Latchkey discovery now reports a remote wiring step that failed because the process ran out of file descriptors as an error at once. Before, it counted as a transient SSH failure and was only reported after 10 consecutive discovery cycles.
+
 ## 2026-11-16
 
 A `custom-service` permission request may carry `"proxy": true`, as a `predefined` one may: the agent asks that the service being connected also send its requests out through the computer that approves the request. The `permission-requests` extension accepts only a boolean (anything else is an HTTP 400), stores `true` on the request's payload and never acts on it.

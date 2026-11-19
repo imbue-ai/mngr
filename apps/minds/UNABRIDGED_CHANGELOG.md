@@ -4,6 +4,62 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-18
+
+When Studio is on the alpha release channel, a workspace behind the template release Studio supports is out of date however small the gap, so a patch or prerelease bump now gets the "Update available" badge, the titlebar status, "Update all", and, with auto-update on, a scheduled update. On the stable and beta channels only a newer minor release (or a security fix) does, as before. Switching channels takes effect at Studio's next check of its workspaces, without a restart.
+
+Test-only (MIND-637): the smoke journey now stops and starts its workspace from the home page (step 4b). After the agent's first reply it presses the row's Stop control and agrees to the question it asks, waits for the connector to report the workspace `stopped` (its disks uploaded and verified), presses Start, and presses the row to re-enter the workspace. It then requires the desktop to render, `hello.py` to still hold the run's nonce, and the main chat to answer a second prompt, which starts the hello server again for the share step. No test stopped or started a workspace through the app before.
+
+By default the start follows the stop at once, which restarts the machine in place. `MINDS_SMOKE_RESTORE_FROM_STORAGE=1` has the journey first wait until the machine has left its server (the tier's retention window, ten minutes from the stop request on staging and production), so that the start restores it from object storage.
+
+A new snapshot-stage test, `test_workspace_stops_and_starts_from_the_home_page_via_electron`, drives the same two controls on every PR against a fresh local Docker workspace. It compares what the home page shows with what Docker runs at each turn, and requires the desktop and a chat's page to come back. It sends no message, so it needs no AI key.
+
+`apps/minds/docs/testing-overview.md` section 1.10 gains *Stopping and starting the workspace*, and `docs/deploy/reference/workspace-stop-start.md` names the journey beside the deployment test.
+
+The e2e runner's two Playwright listeners that live only for a block, the create flow's response log and the home page's dialog log, register through one helper, `_page_listener`. Its event name is a two-name `Literal`, because Playwright types `Page.on` per literal event name and an enum's value does not satisfy that, so the minds count of the `Literal with multiple options` ratchet goes from 0 to 1.
+
+Every smoke session now writes `.test_output/smoke/report.html` beside `verdict.json` and names it at the end of its output: the run one level below its pass/fail verdict. It records when and where the run ran (the GitHub Actions run, or the machine), the commit, the pytest command and selection, the tier and the build under test, and which of the suite's inputs the environment set. It lists every selected scenario grouped by outcome, failures first and open, passes and skips folded, each with its duration, why it failed or skipped, its subtests, its screenshots and files, and links to its source at the run's commit and to the Sentry issues of the app it launched (given `SENTRY_ORG`). The journey records its steps in a `steps.jsonl` beside its screenshots, so the report shows which step a failed journey did not finish. A run whose every scenario skipped is reported as skipped, not passed.
+
+The integration tests of the smoke suite's default-workspace-template runner (`test_dwt_suites.py`) get a 30-second budget each: they drive real bash and nested pytest processes, which took up to ten seconds under a parallel local run and so timed out intermittently against the shared ten-second budget.
+
+- The smoke suite passes the app its roots override only as
+  `STUDIO_ROOTS_OVERRIDE`, no longer also as the retired `MINDS_DATA_HOME`:
+  every channel now serves a build that reads the new name.
+
+Under WSL, Studio's windows now keep the native title bar instead of being frameless. WSLg drew a maximized frameless window offset from where it took clicks, so every click landed away from the button under the pointer (microsoft/wslg#1015). Studio's own bar stays below the native one, without its minimize, maximize and close buttons. Other platforms are unchanged.
+
+A workspace whose update apply takes its services down more than once, such as an apply that rolls back and then its retry, no longer shows "Lost connection to this workspace" during the second outage. The workspace answering between the two outages used to end the app's tolerance for the apply's outage while the update apply window stayed open, so the second outage went to stuck after the normal few seconds. An outage that starts inside an open apply window now holds off the stuck verdict again until the window's deadline, and the app still asks the workspace whether an apply is under way, so a retry's apply shows over the workspace again and gets its own window. An outage that starts while the app is still asking the workspace about an earlier one is held until that answer arrives, window or not.
+
+A new remote workspace is no longer pointed at `http://127.0.0.1:1989` when its container lacks the `host.docker.internal` mapping, so a pool host has to be baked by an mngr that creates containers with it. Existing workspaces that were pointed there keep reaching their gateway over the reverse SSH tunnel. The latchkey permissions doc says so.
+
+Experimental connectors: Imbue Studio now installs the latchkey plugins it pins (Garmin Connect, Spotify and Strava) into this computer's latchkey directory as it starts and onto every remote workspace's machine as it is provisioned, and a workspace's Permissions tab offers their services at the foot of Add connection under an **Experimental connectors** heading with a "Use at your own risk" warning. They are connected and granted like any other service, carry the service's logo (Spotify and Strava; Garmin Connect falls back to the plain glyph), and a connected one's panel heading carries an "Experimental" label. A permission request for one carries the warning too, under the dialog's header: "This is an experimental connector. Use at your own risk." These services rely on an undocumented API and can stop working without notice; in the extreme case the service might suspend the account, which the warnings' tooltip says. A plugin that cannot be downloaded is skipped without holding the app or a workspace up; its connector cannot be connected until a later start installs it.
+
+The release runbook keeps the channels ordered, alpha ≥ beta ≥ stable: promoting a channel also moves any channel that must be ahead of it and is behind to the same build in the same pull request, unless the deploying user says otherwise.
+
+On macOS, the first click on an Imbue Studio window while another app is in front now reaches the page, as in native Mac apps, instead of only bringing the window forward and needing a second click.
+
+The Imbue Studio Landing list no longer shows a greyed, unreachable duplicate of a workspace while it is being created. When a create leases a pool host and rebuilds it, the host's lease-time record used to render as a second row with the same name beside the Creating row until the machine reported its workspace labels, several minutes later; that record now gets no row of its own while the create is in progress.
+
+Promoted Imbue Studio 0.10.5 to the beta desktop channel (mac, Linux) and beta's browser-created workspaces, at 100%, so every channel serves 0.10.5.
+
+Recorded beta's 0.10.5 promotion run and the production smoke run on the beta channel in the 0.10.5 release history.
+
+A change to a remote workspace's registered agents is no longer lost when its machine is momentarily slow. When the read or push that carries the change to the machine fails transiently (sshd not answering authentication in time, a dropped connection), the carry is retried twice, after 10s and then 30s, re-reading the machine each time before pushing. A change discovery reports during the wait goes out with the retry, and a workspace that stops during the wait has its change held until it runs again. Only a failure that outlasts the retries, or one retrying cannot fix (a rejected key, a machine refusing the policy), is still logged as an error, and in that case the change is lost as before.
+
+This changelog gets one section per Imbue Studio release: the release's version-bump commit moves what is under `## [Unreleased]` into a `## [minds-v<version>] - <date>` section that opens with a short summary, so each release tag holds its own section, and adds no per-PR entry for the app. Entries that only record a release operation on a version (its cut, a channel promotion, a release record) no longer get a bullet here.
+
+A patch cut from minds-v0.10.5 or an earlier tag cuts the workspace template unstamped; at its merge back, the release's section is written by hand into the template's changelog, as for the app's.
+
+The release runbook also stamps the workspace template's changelog: after the template's mngr pin lands, the release's section goes on the tip of the template's main branch in a commit of its own, which is pushed only when its pin matches the release's, checked, and tagged. A branch that carries a stamp is never merged, except a patch cut's template branch, which is merged back by a direct push to the template's main branch. The app's release section ends with a link to the template's changelog at the same tag.
+
+Under WSL on Windows, links and sign-in pages now open in the Windows default browser. A stock WSL distro has no browser, so the Imbue account sign-in, a workspace's AI provider sign-in, and every other link the app opens outside itself did nothing. On WSL, `scripts/install-linux.sh` now installs `xdg-utils` and registers a desktop entry that hands http and https links to `rundll32.exe url.dll,FileProtocolHandler`. A browser already installed in the distro stays the handler. Existing WSL installs get the fix by re-running the installer. `docs/wsl.md` describes it.
+
+When creating a workspace on Imbue Cloud fails because your account is still on the waitlist, the failure now offers **Retry** next to **Run on this computer**, and tells you to open the invite link in your invitation email and accept the invite, then select Retry. Accepting the invite takes the account off the waitlist, so the retry can go through on Imbue Cloud without starting the create over.
+
+An invitation or Mobile Access Link refused because your email is unverified now offers "Send the email again" in the Share tab, and Create from Template waits on an unverified account's emailed link with the same resend as the create form.
+
+Every resend now says what became of it: a failed send says it failed instead of claiming an email went out moments ago, a press for an address that is already verified says so, and the Accounts page's "Resend email" reports each press.
+
 ## 2026-11-17
 
 Imbue Studio 0.10.5: the desktop app's version moves to 0.10.5 and its pinned workspace template to `minds-v0.10.5`, a patch release cut from the `minds-v0.10.4` tag, not from `main` (workspaces already on 0.10.x are not prompted to update). The app's code is 0.10.4's. The template adds two fixes for the Screen's ports: an update moves an app of yours off 8090 or 8091 before it applies, and `build-app` no longer gives 8091 to a new app.

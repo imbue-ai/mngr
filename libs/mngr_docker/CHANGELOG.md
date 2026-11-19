@@ -12,6 +12,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: A provisioned host container runs the image's `/usr/local/bin/mngr-container-start-hook`, detached, after restarting sshd on every container (re)start.
 - Added: The provider's unreachable-daemon error names the fix ("start Docker", or "start Docker on <host>" for a remote daemon).
 
+### Fixed
+
+- Fixed: A failed SSH connect to an `ssh://` daemon raises `ProviderUnavailableError` instead of escaping as paramiko's `SSHException` or `OSError`, which killed the latchkey discovery worker.
+- Fixed: A provider reached over `ssh://` through a `ProxyCommand` no longer leaks the proxy process (about four file descriptors a minute in a long-running `mngr observe` while the daemon is unreachable).
+
 ## [v0.1.1] - 2026-10-28
 
 ## [v0.1.0] - 2026-10-22

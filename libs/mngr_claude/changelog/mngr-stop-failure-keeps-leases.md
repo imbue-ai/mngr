@@ -1,1 +1,0 @@
-No behaviour change: unit tests pin that a turn ending on an API error clears the Stop hook's background task records, and that a `StopFailure` payload carrying `background_tasks` would be recorded the same as a `Stop` one. A release test pins that claude's `StopFailure` payload has no `background_tasks`.

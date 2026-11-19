@@ -1,1 +1,0 @@
-The config README's list of settings-patch fields, whose values from every config layer are combined, now includes the codex agent type's `config_overrides`. Its note on narrowing now says a plain nested table that drops a lower layer's keys still counts as narrowing.

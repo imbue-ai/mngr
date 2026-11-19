@@ -14,6 +14,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Changed: `modal_proxy` distinguishes the Modal deployed-app-limit refusal from the ephemeral-app cap, raising a non-retryable `ModalProxyDeployedAppLimitError` instead of retrying a condition that cannot clear.
 - Changed: Modal SDK 1.5.4 to 1.6.1 (synchronicity 0.12.6).
+- Changed: A `DirectVolume.write_files` timeout's `ModalProxyCallTimeoutError` names the Modal upload step the stalled attempt was waiting in.
 
 ### Fixed
 

@@ -1,1 +1,0 @@
-A harness-internals release test pins, against the real Claude Code, that restarting a claude agent clears the background task records its previous process wrote, and that claude resumes none of those tasks: its `SessionStart` payload carries no task list and the first turn after the restart lists none.

@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-18
+
+`check_no_type_errors` now runs `uv run --no-sync ty check`, so it type-checks the project's environment as it is instead of locking and syncing it first. That sync could rebuild editable installs uv no longer considered fresh and fetch their build backend from PyPI, which in default-workspace-template's CI sandboxes put network and build time inside the type ratchet, the likely cause of its occasional runs past the 10s test timeout (MIND-684). An environment that is out of date now shows up as unresolved imports in the failure message; run `uv sync --all-packages` and re-run. The failure message now suggests `uv run --no-sync ty check` to reproduce, the same command the check runs.
+
 ## 2026-11-17
 
 New `imbue_common.public_email_domains.PUBLIC_EMAIL_DOMAINS`, the mail providers anyone can sign up at (moved from the minds desktop's share grant validation), so the desktop's refusal of a whole-domain grant on one and the connector's refusal to surface such a grant to recipients read one list.

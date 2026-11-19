@@ -1,9 +1,0 @@
-Test-only (MIND-637): the smoke journey now stops and starts its workspace from the home page (step 4b). After the agent's first reply it presses the row's Stop control and agrees to the question it asks, waits for the connector to report the workspace `stopped` (its disks uploaded and verified), presses Start, and presses the row to re-enter the workspace. It then requires the desktop to render, `hello.py` to still hold the run's nonce, and the main chat to answer a second prompt, which starts the hello server again for the share step. No test stopped or started a workspace through the app before.
-
-By default the start follows the stop at once, which restarts the machine in place. `MINDS_SMOKE_RESTORE_FROM_STORAGE=1` has the journey first wait until the machine has left its server (the tier's retention window, ten minutes from the stop request on staging and production), so that the start restores it from object storage.
-
-A new snapshot-stage test, `test_workspace_stops_and_starts_from_the_home_page_via_electron`, drives the same two controls on every PR against a fresh local Docker workspace. It compares what the home page shows with what Docker runs at each turn, and requires the desktop and a chat's page to come back. It sends no message, so it needs no AI key.
-
-`apps/minds/docs/testing-overview.md` section 1.10 gains *Stopping and starting the workspace*, and `docs/deploy/reference/workspace-stop-start.md` names the journey beside the deployment test.
-
-The e2e runner's two Playwright listeners that live only for a block, the create flow's response log and the home page's dialog log, register through one helper, `_page_listener`. Its event name is a two-name `Literal`, because Playwright types `Page.on` per literal event name and an enum's value does not satisfy that, so the minds count of the `Literal with multiple options` ratchet goes from 0 to 1.

@@ -28,6 +28,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `auth login` JSON output includes `is_email_verified`.
 - Changed: The batched listing collects work leases, so agents can report `RUNNING_BACKGROUND`, and publishes them as the agent's `background_tasks`.
 - Changed: `connector/session_store.py`'s `_decode_jwt_exp` is now public as `decode_jwt_exp` and returns None instead of raising for an unreadable payload or `exp`.
+- Changed: The page after `auth login` for an unverified account links to the account page to resend the verification email, and `auth resend-verification` reports `already_verified` when nothing was sent.
 
 ### Removed
 

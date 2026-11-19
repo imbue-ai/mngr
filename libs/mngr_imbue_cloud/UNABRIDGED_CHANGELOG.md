@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-18
+
+Follows mngr's rename of `LifecycleProbeResult.leases` to `background_tasks` and of `imbue.mngr.hosts.work_leases` to `imbue.mngr.hosts.background_tasks`. What an agent listing publishes is unchanged.
+
+The page shown after `auth login` for an unverified account now links to the account page, where the verification email can be sent again.
+
+`auth resend-verification` now reports `already_verified` when nothing was sent because the address needs no link.
+
 ## 2026-11-17
 
 Agent listings publish what an agent left running after its turn as `background_tasks`, which replaces `leases`.
