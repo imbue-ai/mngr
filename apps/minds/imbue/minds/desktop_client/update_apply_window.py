@@ -457,18 +457,35 @@ class UpdateApplyWindowManager(MutableModel):
         can see it, so without this the machine reads as stuck until the stuck edge asks.
         The outage is held back while the read is out, since a remote read can outlast the
         stuck threshold; an outage with no apply under way is convicted once it answers.
+
+        An outage that starts while the window is open is held back until the window's
+        deadline, and the record is still read: the machine answering ends the tracker's
+        grace but not the window, and one window can hold more than one outage (an apply
+        that rolls back, then its retry). The poll may have seen the rollback in between,
+        so only the retry's own record says the workspace is applying again, and for how long.
         """
         aid_str = str(agent_id)
-        if not self.store.get(agent_id).is_run_in_flight:
-            return
+        is_run_in_flight = self.store.get(agent_id).is_run_in_flight
         with self._lock:
-            if self._is_window_open_locked(aid_str) or aid_str in self._onset_check_agent_ids:
+            window_deadline = self._deadline_by_agent.get(aid_str) if self._is_window_open_locked(aid_str) else None
+            is_reading = aid_str in self._onset_check_agent_ids
+            is_check_started = is_run_in_flight and not is_reading
+            if is_check_started or is_reading:
+                # A read out (this outage's, or an earlier one's) holds the outage and ends the
+                # grace itself, so the window's deadline must not cut its hold short.
+                if is_check_started:
+                    self._onset_check_agent_ids.add(aid_str)
+                grace_deadline = max(window_deadline or 0.0, time.monotonic() + _RUN_PROBE_TIMEOUT_SECONDS)
+            elif window_deadline is None:
                 return
-            self._onset_check_agent_ids.add(aid_str)
+            else:
+                grace_deadline = window_deadline
             # Under the lock so a window opening meanwhile arms its own, longer grace after this one.
-            self.tracker.begin_probe_grace(
-                agent_id, ProbeGracePurpose.UPDATE_APPLY, time.monotonic() + _RUN_PROBE_TIMEOUT_SECONDS
-            )
+            self.tracker.begin_probe_grace(agent_id, ProbeGracePurpose.UPDATE_APPLY, grace_deadline)
+        if window_deadline is not None:
+            logger.info("Held back an outage of {}: it began inside its open update apply window", agent_id)
+        if not is_check_started:
+            return
         start_mngr_thread(
             self.concurrency_group,
             target=self._check_apply_at_outage_onset,
@@ -492,7 +509,7 @@ class UpdateApplyWindowManager(MutableModel):
             # Under the lock so a window another path opens meanwhile keeps its grace.
             with self._lock:
                 self._onset_check_agent_ids.discard(aid_str)
-                if aid_str not in self._deadline_by_agent:
+                if not self._is_window_open_locked(aid_str):
                     self.tracker.end_probe_grace(agent_id, ProbeGracePurpose.UPDATE_APPLY)
 
     def start(self) -> None:
@@ -532,12 +549,18 @@ class UpdateApplyWindowManager(MutableModel):
 
     def _arm_window(self, agent_id: AgentId, *, apply_updated_at: datetime | None) -> None:
         """Arm the probe grace and the deadline, leaving the row's activity alone."""
+        aid_str = str(agent_id)
         window_seconds = self._window_seconds_for(apply_updated_at)
-        deadline = time.monotonic() + window_seconds
+        now = time.monotonic()
+        deadline = now + window_seconds
         with self._lock:
-            was_open = str(agent_id) in self._deadline_by_agent
-            self._deadline_by_agent[str(agent_id)] = deadline
-        self.tracker.begin_probe_grace(agent_id, ProbeGracePurpose.UPDATE_APPLY, deadline)
+            was_open = aid_str in self._deadline_by_agent
+            self._deadline_by_agent[aid_str] = deadline
+            # A record read still out holds its outage for the read's budget, which a stale
+            # apply's window is shorter than, and ends the grace itself.
+            is_reading = aid_str in self._onset_check_agent_ids
+            grace_deadline = max(deadline, now + _RUN_PROBE_TIMEOUT_SECONDS) if is_reading else deadline
+            self.tracker.begin_probe_grace(agent_id, ProbeGracePurpose.UPDATE_APPLY, grace_deadline)
         if was_open:
             logger.debug("Extended the update apply window for {} ({:.0f}s)", agent_id, window_seconds)
         else:
@@ -630,11 +653,20 @@ class UpdateApplyWindowManager(MutableModel):
             expired = [aid_str for aid_str, deadline in self._deadline_by_agent.items() if now >= deadline]
             for aid_str in expired:
                 del self._deadline_by_agent[aid_str]
+            # An outage's record read still out holds its outage, and ends the grace itself, so its
+            # grace is re-armed for the read's budget rather than ended with the window.
+            # Decided under the lock so a read an onset starts right after this keeps its grace.
+            for aid_str in expired:
+                if aid_str in self._onset_check_agent_ids:
+                    self.tracker.begin_probe_grace(
+                        AgentId(aid_str), ProbeGracePurpose.UPDATE_APPLY, now + _RUN_PROBE_TIMEOUT_SECONDS
+                    )
+                else:
+                    self.tracker.end_probe_grace(AgentId(aid_str), ProbeGracePurpose.UPDATE_APPLY)
         for aid_str in expired:
             agent_id = AgentId(aid_str)
             if self.is_window_open(agent_id):
                 continue
-            self.tracker.end_probe_grace(agent_id, ProbeGracePurpose.UPDATE_APPLY)
             logger.info("Closed the update apply window for {} (deadline expired)", agent_id)
             self._hand_back_expired_window(agent_id)
 

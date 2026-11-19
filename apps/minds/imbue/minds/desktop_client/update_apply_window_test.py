@@ -109,6 +109,56 @@ def _is_failure_suppressed(tracker: SystemInterfaceHealthTracker, agent_id: Agen
     return tracker.get_health(agent_id) is AgentHealth.HEALTHY
 
 
+def _record_a_probe_failure_past_the_stuck_threshold(tracker: SystemInterfaceHealthTracker, agent_id: AgentId) -> None:
+    """Record a probe failure once the run has outlasted the 0.01s stuck threshold, so only a grace holds it."""
+    waiting_since = time.monotonic()
+    assert poll_until(lambda: time.monotonic() - waiting_since > 0.05, timeout=1.0)
+    tracker.record_probe_failure(agent_id)
+
+
+def _wait_for_the_onset_record_read_to_finish(agent_id: AgentId) -> None:
+    onset_read_thread_name = f"update-apply-onset-{agent_id}"
+    assert poll_until(
+        lambda: not any(thread.name == onset_read_thread_name for thread in threading.enumerate()), timeout=5.0
+    )
+
+
+def _make_manager_with_a_held_record_read(
+    root_concurrency_group: ConcurrencyGroup,
+    tmp_path: Path,
+    *,
+    fallback_window_seconds: float = 300.0,
+    run_record: str | None = None,
+) -> tuple[
+    UpdateApplyWindowManager,
+    SystemInterfaceHealthTracker,
+    WorkspaceUpdateStateStore,
+    HookedMngrCaller,
+    threading.Event,
+]:
+    """A manager whose record reads return ``run_record`` (default: an apply under way), each held until the returned event is set."""
+    release_read = threading.Event()
+    caller = HookedMngrCaller(
+        result=MngrCallResult(
+            returncode=0,
+            stdout=update_run_probe_stdout(run=applying_record_json() if run_record is None else run_record),
+        )
+    )
+
+    def hold_the_read(_argv: Sequence[str]) -> None:
+        release_read.wait(timeout=10.0)
+
+    caller.set_on_call(hold_the_read)
+    manager, tracker, store, _ = _make_manager(
+        root_concurrency_group,
+        tmp_path,
+        mngr_caller=caller,
+        stuck_threshold_seconds=0.01,
+        fallback_window_seconds=fallback_window_seconds,
+    )
+    return manager, tracker, store, caller, release_read
+
+
 # The probe
 
 
@@ -465,16 +515,80 @@ def test_the_terminal_verdict_closes_the_window(root_concurrency_group: Concurre
     assert _is_failure_suppressed(tracker, agent_id) is False
 
 
-def test_a_probe_success_ends_the_grace_so_normal_accounting_resumes(
+@pytest.mark.witnesses("workspace-updates.outage-after-answering-mid-apply")
+def test_an_outage_that_starts_after_the_machine_answered_inside_an_open_window_is_not_convicted(
     root_concurrency_group: ConcurrencyGroup, tmp_path: Path
 ) -> None:
-    manager, tracker, _, _ = _make_manager(root_concurrency_group, tmp_path)
+    """A rolled-back apply and its retry each restart the services, and the machine answers in between.
+
+    The poll can see the rollback while it answers, so the retry's own record is what says it is applying again.
+    """
+    manager, tracker, store, _ = _make_manager(
+        root_concurrency_group, tmp_path, probe_stdout=_APPLYING_STDOUT, stuck_threshold_seconds=0.01
+    )
     agent_id = AgentId.generate()
+    begin_dispatched_update_run(store, agent_id, _CHAT)
     manager.open_window(agent_id)
-
+    tracker.record_failure(agent_id)
     tracker.record_probe_success(agent_id)
+    store.set_activity(agent_id, UpdateActivity.RUNNING)
 
-    assert _is_failure_suppressed(tracker, agent_id) is False
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+    _record_a_probe_failure_past_the_stuck_threshold(tracker, agent_id)
+
+    assert tracker.get_health(agent_id) is AgentHealth.HEALTHY
+    assert manager.is_window_open(agent_id) is True
+    assert poll_until(lambda: store.get(agent_id).activity is UpdateActivity.APPLYING, timeout=5.0)
+
+
+def test_an_outage_inside_an_open_window_stays_held_after_its_record_says_no_apply_is_under_way(
+    root_concurrency_group: ConcurrencyGroup, tmp_path: Path
+) -> None:
+    """The record can show the rollback between an apply and its retry; the window still holds the outage."""
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(
+            returncode=0, stdout=update_run_probe_stdout(run=json.dumps({"chat_agent_name": _CHAT}) + "\n")
+        )
+    )
+    manager, tracker, store, _ = _make_manager(
+        root_concurrency_group, tmp_path, mngr_caller=caller, stuck_threshold_seconds=0.01
+    )
+    agent_id = AgentId.generate()
+    begin_dispatched_update_run(store, agent_id, _CHAT)
+    manager.open_window(agent_id)
+    tracker.record_probe_success(agent_id)
+    store.set_activity(agent_id, UpdateActivity.RUNNING)
+
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+    assert caller.called_event.wait(timeout=5.0)
+    _wait_for_the_onset_record_read_to_finish(agent_id)
+    _record_a_probe_failure_past_the_stuck_threshold(tracker, agent_id)
+
+    assert tracker.get_health(agent_id) is AgentHealth.HEALTHY
+    assert manager.is_window_open(agent_id) is True
+    assert store.get(agent_id).activity is UpdateActivity.RUNNING
+
+
+def test_an_outage_that_starts_after_the_window_closed_is_convicted(
+    root_concurrency_group: ConcurrencyGroup, tmp_path: Path
+) -> None:
+    manager, tracker, store, _ = _make_manager(root_concurrency_group, tmp_path, stuck_threshold_seconds=0.01)
+    agent_id = AgentId.generate()
+    begin_dispatched_update_run(store, agent_id, _CHAT)
+    manager.open_window(agent_id)
+    tracker.record_probe_success(agent_id)
+    manager.close_window(agent_id, reason="terminal verdict")
+
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+
+    def is_stuck_after_another_failure() -> bool:
+        tracker.record_probe_failure(agent_id)
+        return tracker.get_health(agent_id) is AgentHealth.STUCK
+
+    assert poll_until(is_stuck_after_another_failure, timeout=5.0)
 
 
 def test_re_arming_an_open_window_extends_it_rather_than_stacking(
@@ -837,17 +951,8 @@ def test_an_outage_outlasting_the_stuck_threshold_while_its_record_is_read_is_no
     root_concurrency_group: ConcurrencyGroup, tmp_path: Path
 ) -> None:
     """The read can take longer than the stuck threshold on a remote workspace; the outage waits for its answer."""
-    release_read = threading.Event()
-    caller = HookedMngrCaller(
-        result=MngrCallResult(returncode=0, stdout=update_run_probe_stdout(run=applying_record_json()))
-    )
-
-    def hold_the_read(_argv: Sequence[str]) -> None:
-        release_read.wait(timeout=10.0)
-
-    caller.set_on_call(hold_the_read)
-    manager, tracker, store, _ = _make_manager(
-        root_concurrency_group, tmp_path, mngr_caller=caller, stuck_threshold_seconds=0.01
+    manager, tracker, store, caller, release_read = _make_manager_with_a_held_record_read(
+        root_concurrency_group, tmp_path
     )
     agent_id = AgentId.generate()
     begin_dispatched_update_run(store, agent_id, _CHAT)
@@ -855,14 +960,141 @@ def test_an_outage_outlasting_the_stuck_threshold_while_its_record_is_read_is_no
     tracker.record_failure(agent_id)
     tracker.record_probe_failure(agent_id)
     assert caller.called_event.wait(timeout=5.0)
-    read_started_at = time.monotonic()
-    assert poll_until(lambda: time.monotonic() - read_started_at > 0.05, timeout=1.0)
-    tracker.record_probe_failure(agent_id)
+    _record_a_probe_failure_past_the_stuck_threshold(tracker, agent_id)
     assert tracker.get_health(agent_id) is AgentHealth.HEALTHY
 
     release_read.set()
     assert poll_until(lambda: store.get(agent_id).activity is UpdateActivity.APPLYING, timeout=5.0)
     assert tracker.get_health(agent_id) is AgentHealth.HEALTHY
+
+
+def test_an_outage_starting_while_an_earlier_outages_record_is_read_is_held_with_no_window_open(
+    root_concurrency_group: ConcurrencyGroup, tmp_path: Path
+) -> None:
+    """The machine can answer between two outages before the first one's read returns, and that read can still find the apply."""
+    manager, tracker, store, caller, release_read = _make_manager_with_a_held_record_read(
+        root_concurrency_group, tmp_path
+    )
+    agent_id = AgentId.generate()
+    begin_dispatched_update_run(store, agent_id, _CHAT)
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+    assert caller.called_event.wait(timeout=5.0)
+    tracker.record_probe_success(agent_id)
+
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+    _record_a_probe_failure_past_the_stuck_threshold(tracker, agent_id)
+
+    assert manager.is_window_open(agent_id) is False
+    assert tracker.get_health(agent_id) is AgentHealth.HEALTHY
+    release_read.set()
+    assert poll_until(lambda: store.get(agent_id).activity is UpdateActivity.APPLYING, timeout=5.0)
+    assert tracker.get_health(agent_id) is AgentHealth.HEALTHY
+
+
+def test_a_window_expiring_while_an_outages_record_is_read_keeps_holding_that_outage(
+    root_concurrency_group: ConcurrencyGroup, tmp_path: Path
+) -> None:
+    """A retry's outage can start just before the window's deadline, and its record says whether it is applying."""
+    manager, tracker, store, caller, release_read = _make_manager_with_a_held_record_read(
+        root_concurrency_group, tmp_path, fallback_window_seconds=0.5
+    )
+    agent_id = AgentId.generate()
+    begin_dispatched_update_run(store, agent_id, _CHAT)
+    manager.open_window(agent_id)
+    tracker.record_probe_success(agent_id)
+
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+    assert caller.called_event.wait(timeout=5.0)
+    assert poll_until(lambda: not manager.is_window_open(agent_id), timeout=5.0)
+    manager.run_expiry_pass()
+    assert store.get(agent_id).activity is UpdateActivity.RUNNING
+    tracker.record_probe_failure(agent_id)
+
+    assert tracker.get_health(agent_id) is AgentHealth.HEALTHY
+    release_read.set()
+    assert poll_until(lambda: store.get(agent_id).activity is UpdateActivity.APPLYING, timeout=5.0)
+
+
+def test_a_window_expiring_while_an_earlier_outages_record_is_read_keeps_holding_the_next_outage(
+    root_concurrency_group: ConcurrencyGroup, tmp_path: Path
+) -> None:
+    """The expiry ends the window's grace, which must not drop the next outage's hold while the earlier read is out."""
+    manager, tracker, store, caller, release_read = _make_manager_with_a_held_record_read(
+        root_concurrency_group, tmp_path, fallback_window_seconds=0.5
+    )
+    agent_id = AgentId.generate()
+    begin_dispatched_update_run(store, agent_id, _CHAT)
+    manager.open_window(agent_id)
+    tracker.record_probe_success(agent_id)
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+    assert caller.called_event.wait(timeout=5.0)
+    tracker.record_probe_success(agent_id)
+
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+    assert poll_until(lambda: not manager.is_window_open(agent_id), timeout=5.0)
+    # Before the expiry pass runs: it wakes only every few seconds, past the stuck threshold.
+    tracker.record_probe_failure(agent_id)
+    _record_a_probe_failure_past_the_stuck_threshold(tracker, agent_id)
+    assert tracker.get_health(agent_id) is AgentHealth.HEALTHY
+    manager.run_expiry_pass()
+    tracker.record_probe_failure(agent_id)
+
+    assert tracker.get_health(agent_id) is AgentHealth.HEALTHY
+    release_read.set()
+    assert poll_until(lambda: store.get(agent_id).activity is UpdateActivity.APPLYING, timeout=5.0)
+
+
+def test_a_record_read_finding_no_apply_after_its_window_expired_stops_holding_the_outage(
+    root_concurrency_group: ConcurrencyGroup, tmp_path: Path
+) -> None:
+    """The read's hold outlasts the window; once the read answers, nothing holds the outage, expiry pass or not."""
+    manager, tracker, store, caller, release_read = _make_manager_with_a_held_record_read(
+        root_concurrency_group,
+        tmp_path,
+        fallback_window_seconds=0.3,
+        run_record=json.dumps({"chat_agent_name": _CHAT}) + "\n",
+    )
+    agent_id = AgentId.generate()
+    begin_dispatched_update_run(store, agent_id, _CHAT)
+    manager.open_window(agent_id)
+    tracker.record_probe_success(agent_id)
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+    assert caller.called_event.wait(timeout=5.0)
+    assert poll_until(lambda: not manager.is_window_open(agent_id), timeout=5.0)
+
+    release_read.set()
+    _wait_for_the_onset_record_read_to_finish(agent_id)
+    _record_a_probe_failure_past_the_stuck_threshold(tracker, agent_id)
+
+    assert tracker.get_health(agent_id) is AgentHealth.STUCK
+
+
+def test_a_window_shorter_than_an_outages_record_read_does_not_cut_that_reads_hold_short(
+    root_concurrency_group: ConcurrencyGroup, tmp_path: Path
+) -> None:
+    """The poll can open a window while the onset's read is out, and a stale apply's window is shorter than the read."""
+    manager, tracker, store, caller, release_read = _make_manager_with_a_held_record_read(
+        root_concurrency_group, tmp_path, fallback_window_seconds=0.3
+    )
+    agent_id = AgentId.generate()
+    begin_dispatched_update_run(store, agent_id, _CHAT)
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+    assert caller.called_event.wait(timeout=5.0)
+
+    manager.open_window(agent_id)
+    assert poll_until(lambda: not manager.is_window_open(agent_id), timeout=5.0)
+    _record_a_probe_failure_past_the_stuck_threshold(tracker, agent_id)
+
+    assert tracker.get_health(agent_id) is AgentHealth.HEALTHY
+    release_read.set()
+    assert poll_until(lambda: store.get(agent_id).activity is UpdateActivity.APPLYING, timeout=5.0)
 
 
 def test_the_chats_a_restart_would_interrupt_are_the_running_or_busy_ones_but_never_the_services_agent() -> None:

@@ -12,6 +12,15 @@ Feature: The apply step's outage
     And the app reports that workspace as applying its update
     And the app reports the apply over that workspace rather than a lost connection to it
 
+  @outage-after-answering-mid-apply
+  Scenario: A workspace that stops answering again during its apply step is not diagnosed as broken
+    One apply step can take the services down more than once: an apply that rolls back, then its retry.
+    Given a workspace whose update has reached its apply step
+    And that workspace stopped answering and then answered again
+    When that workspace stops answering again
+    Then the app does not report that workspace as stuck
+    And the app reports the apply over that workspace rather than a lost connection to it
+
   @prepare-outage-is-real
   Scenario: A workspace that dies before the apply step is a normal outage
     Given a workspace with an update in flight that has not reached its apply step

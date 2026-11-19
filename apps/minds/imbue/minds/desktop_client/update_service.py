@@ -780,8 +780,8 @@ class WorkspaceUpdateService(MutableModel):
             self._waiting_streak_by_agent.pop(aid_str, None)
             # Moving again. Once the record says the apply landed, the agent is finishing its
             # checks; without that, an apply no longer under way may have rolled back, so the
-            # run is preparing. The window is left to close on its own (a verdict, the tracker's
-            # probe, or its deadline). A stopped lead that reached here is one the workspace's
+            # run is preparing. The window is left to close on its own (a verdict or its
+            # deadline). A stopped lead that reached here is one the workspace's
             # watchdog is restarting.
             if is_records_run and status is not None and status.is_landed:
                 self.state_store.set_activity(
