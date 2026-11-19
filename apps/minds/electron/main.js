@@ -3348,7 +3348,8 @@ async function startBackendWithRetry() {
         // the lockup travels up to the titlebar only when the start flow is
         // about to hold it there, and otherwise the page simply reports itself
         // finished and waits to be painted over. Either way the route waits for
-        // that rather than cutting the film short.
+        // that rather than cutting the film short. A page nobody can see has no
+        // film to wait out and reports itself finished at once.
         if (!target.window.isDestroyed()) {
           target.window.webContents.send('startup-ready', { park: routing.route === 'start' });
         }

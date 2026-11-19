@@ -519,6 +519,7 @@
     // Only the start flow holds it there; every other route paints over this
     // page, and a mark that moved first would be a move to nowhere.
     var shouldPark = false;
+    var isStartupReady = false;
     // When the loader came up, or null if it never did.
     var loaderShownAt = null;
     var introFrame = null;
@@ -528,7 +529,7 @@
     // Tell the main process the film is over, so it can land the first route.
     // The page is deliberately left as it is: whatever route lands paints over
     // it, and tidying up first would flash something the user did not ask for.
-    // Idempotent -- the error takeover and the natural end can both reach here.
+    // Idempotent: more than one path reaches here.
     function finishIntro() {
       if (isIntroFinished) return;
       isIntroFinished = true;
@@ -760,6 +761,14 @@
       introTimers.push(setTimeout(function() { settleIntro(timing.settleMs); }, schedule.parkedAt));
     }
 
+    // The film is for a window someone can see. A hidden page (minimized,
+    // hidden, or on macOS fully covered) gets no animation frames, so an
+    // arrival still running would never land and the app would wait on it
+    // forever.
+    function finishIfUnseen() {
+      if (isStartupReady && document.visibilityState === 'hidden') finishIntro();
+    }
+
     function playIntro() {
       var timing = window.mindsIntroTiming.INTRO_TIMING;
       var rootStyle = document.documentElement.style;
@@ -788,9 +797,12 @@
       if (window.mindsNative && window.mindsNative.onStartupReady) {
         window.mindsNative.onStartupReady(function(detail) {
           shouldPark = !!(detail && detail.park);
+          isStartupReady = true;
+          finishIfUnseen();
           startDeparture();
         });
       }
+      document.addEventListener('visibilitychange', finishIfUnseen);
       if (isReducedMotion) {
         // No film to wait out, but the loader still has a wait to report.
         arrive();

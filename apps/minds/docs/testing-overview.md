@@ -92,18 +92,20 @@ is the only thing that runs them. It does not run the Playwright specs.
   models and views, rendered without a DOM through the `renderRoot` helper in
   `frontend/src/testing.ts`. Run alone via `pnpm -C frontend test`.
 - **Playwright e2e** (`test/e2e/`, `playwright.config.js`, `pnpm test:e2e`;
-  `test/e2e/README.md` covers running them), four specs:
+  `test/e2e/README.md` covers running them), six specs:
   - `macos-launch.spec.js` -- launches the installed `/Applications/Imbue Studio.app`
     via the `mindsApp` fixture and asserts it reaches a usable landing page.
   - `macos-lifecycle.spec.js` -- the installed app's macOS windowless states:
     with no window open, a dock reopen, a deeplink, a backend crash, or a
     window closed mid-startup still leads to a window showing the app's real
     state.
-  - `link-routing.spec.js` and `context-menu.spec.js` -- launch this
+  - `link-routing.spec.js`, `context-menu.spec.js`,
+    `client-permission.spec.js` (the microphone gate) and `intro.spec.js` (the
+    loading document's intro handshake, visible and hidden) -- launch this
     checkout's Electron on a small harness entry, with no backend.
 
   CI runs only the two `macos-*` specs, in the `macos_launch` job of
-  `minds-launch-to-msg.yml` (see 1.5). The other two run by hand;
+  `minds-launch-to-msg.yml` (see 1.5). The other four run by hand;
   `just minds-test-electron-menu` runs `context-menu.spec.js`. The legacy
   renderer-contract specs were deleted with the pre-SPA shell scripts they
   drove.

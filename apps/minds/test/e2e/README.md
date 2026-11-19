@@ -40,12 +40,13 @@ by the vitest suites in `frontend/src/**/*.test.ts`). Set
 `MINDS_E2E_NO_VIDEO=1` if ffmpeg is missing on the host.
 
 `link-routing.spec.js` (popups, in-place frame navigations and server
-redirects), `context-menu.spec.js` and `client-permission.spec.js` (the
-microphone gate, on Chromium's fake audio device) need no installed app: each
-launches this checkout's own Electron (`node_modules/.bin/electron`) on a
+redirects), `context-menu.spec.js`, `client-permission.spec.js` (the
+microphone gate, on Chromium's fake audio device) and `intro.spec.js` (the
+loading document's intro handshake, visible and hidden) need no installed app:
+each launches this checkout's own Electron (`node_modules/.bin/electron`) on a
 small harness entry (`link-routing-app.js`, `context-menu-app.js`,
-`client-permission-app.js`) that wires the shipped `electron/` modules, with
-no backend. None of them runs in CI.
+`client-permission-app.js`, `intro-app.js`) that wires the shipped `electron/`
+modules, with no backend. None of them runs in CI.
 
 ```
 pnpm exec playwright test --config=test/e2e/playwright.config.js link-routing.spec.js
