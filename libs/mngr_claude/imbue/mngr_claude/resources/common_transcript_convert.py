@@ -11,7 +11,8 @@ file-history snapshots, system bookkeeping) is dropped.
 
 Each output line is a ``header``, ``step`` or ``observation`` record. Fidelity is
 full: complete tool ``arguments`` objects, untruncated tool output, and thinking
-blocks as ``reasoning_content``. Display truncation belongs to the reader.
+blocks as ``reasoning_content`` (except progress updates, which are the agent's
+message; see ``is_progress_update``). Display truncation belongs to the reader.
 
 Dedup is ID-based: each output ``event_id`` is derived from the source event's
 uuid, so re-processing the same input never produces duplicate output.
@@ -33,6 +34,8 @@ already emitted, and a full parse of a session-sized file costs milliseconds.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -131,6 +134,80 @@ def _is_sidechain(record: Mapping[str, Any]) -> bool:
     consumer can carve the subagent back out.
     """
     return bool(record.get("isSidechain"))
+
+
+# A progress update is the note a Claude 5 model writes for the person watching, right before a
+# tool call. The API returns it as a ``thinking`` block, but it is the agent talking to the user,
+# so it belongs in the step's ``message``, not its ``reasoning_content``. Text alone does not tell
+# it apart under ``display: "summarized"``, where reasoning carries text too; the block's signature
+# does: a protobuf message whose field 2 > field 1 > field 8 is the block kind, ``narration`` for a
+# progress update and ``thinking`` for reasoning. Claude Code reads the same field. The layout is
+# undocumented, so only a signature that positively decodes to ``thinking`` makes a block
+# reasoning: a layout change then files reasoning as message text rather than losing updates.
+_REASONING_KIND = b"thinking"
+_BLOCK_KIND_FIELD_PATH = (2, 1, 8)
+
+
+class _MalformedProtobufError(Exception):
+    pass
+
+
+def _read_varint(data: bytes, offset: int) -> tuple[int, int]:
+    value = 0
+    for shift in range(0, 64, 7):
+        if offset >= len(data):
+            break
+        byte = data[offset]
+        offset += 1
+        value |= (byte & 0x7F) << shift
+        if byte < 0x80:
+            return value, offset
+    raise _MalformedProtobufError("truncated or overlong varint")
+
+
+def _length_delimited_field(message: bytes, field_number: int) -> bytes | None:
+    """The first length-delimited value of ``field_number`` in ``message``, or None when absent."""
+    offset = 0
+    while offset < len(message):
+        key, offset = _read_varint(message, offset)
+        number, wire_type = key >> 3, key & 0x7
+        if wire_type == 0:
+            _, offset = _read_varint(message, offset)
+        elif wire_type == 1:
+            offset += 8
+        elif wire_type == 5:
+            offset += 4
+        elif wire_type == 2:
+            length, offset = _read_varint(message, offset)
+            if offset + length > len(message):
+                raise _MalformedProtobufError("length past the end of the message")
+            if number == field_number:
+                return message[offset : offset + length]
+            offset += length
+        else:
+            raise _MalformedProtobufError(f"unsupported wire type {wire_type}")
+    return None
+
+
+def thinking_block_kind(block: Mapping[str, Any]) -> bytes | None:
+    """The block kind a thinking block's signature carries (``narration`` or ``thinking``), or None."""
+    signature = block.get("signature")
+    if not isinstance(signature, str):
+        return None
+    try:
+        value: bytes | None = base64.b64decode(signature + "=" * (-len(signature) % 4), validate=True)
+        for field_number in _BLOCK_KIND_FIELD_PATH:
+            if value is None:
+                return None
+            value = _length_delimited_field(value, field_number)
+    except (binascii.Error, ValueError, _MalformedProtobufError):
+        return None
+    return value
+
+
+def is_progress_update(block: Mapping[str, Any]) -> bool:
+    """Whether a ``thinking`` block is a progress update: any whose signature does not mark it as reasoning."""
+    return thinking_block_kind(block) != _REASONING_KIND
 
 
 def _session_id(record: Mapping[str, Any]) -> str:
@@ -340,7 +417,11 @@ def _build_agent_step(group: _AssistantGroup) -> dict[str, Any] | None:
             block_type = block.get("type", "")
             if block_type == "thinking":
                 thinking = block.get("thinking", "") or block.get("text", "")
-                if isinstance(thinking, str) and thinking:
+                if not isinstance(thinking, str) or not thinking.strip():
+                    continue
+                if is_progress_update(block):
+                    text_parts.append(thinking.strip())
+                else:
                     thinking_parts.append(thinking)
             elif block_type == "tool_use":
                 tool_calls.append(

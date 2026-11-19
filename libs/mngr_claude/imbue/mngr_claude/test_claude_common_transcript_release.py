@@ -13,6 +13,7 @@ from imbue.mngr.agents.agent_release_testing import is_step_from
 from imbue.mngr.agents.agent_release_testing import send_expecting_success
 from imbue.mngr.agents.agent_release_testing import wait_for_records
 from imbue.mngr.utils.testing import get_short_random_string
+from imbue.mngr_claude.resources.common_transcript_convert import thinking_block_kind
 from imbue.mngr_claude.testing import AGENT_DESTROY_TIMEOUT_SECONDS
 from imbue.mngr_claude.testing import ClaudeReleaseProfile
 from imbue.mngr_claude.testing import TURN_PROGRESS_TIMEOUT_SECONDS
@@ -237,4 +238,64 @@ def test_claude_agent_steps_carry_the_session_id_claude_reports(tmp_path: Path) 
         assert session_id and stamped and all(value == session_id for value in stamped), (
             f"agent steps carry harness_session_id {stamped}, not the session id {session_id!r} claude reported "
             f"{drift}; consumer: {_SESSION_ID_CONSUMER}"
+        )
+
+
+_SIGNATURE_CONSUMER: Final[str] = (
+    "common_transcript_convert.thinking_block_kind, which reads a thinking block's signature (field 2 > 1 > 8 "
+    "is the block kind) so that a progress update becomes the step's message rather than its reasoning"
+)
+# The block kinds a Claude 5 thinking signature is known to carry: a progress update and reasoning.
+_KNOWN_THINKING_BLOCK_KINDS: Final[frozenset[bytes]] = frozenset({b"narration", b"thinking"})
+_THINKING_PROMPT: Final[str] = (
+    "Think it through carefully before you answer: which is larger, 17 * 23 or 19 * 21? Then use the Bash tool "
+    "to run exactly `echo <the larger product>`, and reply with just DONE."
+)
+
+
+class _ThinkingClaudeReleaseProfile(ClaudeReleaseProfile):
+    """Opus 5.5, the model the chat runs, where progress updates are written; Haiku 5.5 writes none."""
+
+    model = "claude-opus-5-5"
+
+
+@pytest.mark.release
+@pytest.mark.harness_internals(harness="claude")
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(1500)
+def test_claude_thinking_signatures_carry_the_block_kind(tmp_path: Path) -> None:
+    """Every thinking block claude records carries its block kind where the converter reads it.
+
+    Pins the signature layout a progress update is told apart by: a base64 protobuf message whose
+    field 2 > field 1 > field 8 is ``narration`` for a progress update and ``thinking`` for reasoning.
+    Whether the model writes a progress update is its own choice, so the test pins the layout on
+    whatever thinking blocks the turn has rather than waiting for an update.
+    """
+    profile = _ThinkingClaudeReleaseProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    ctx = profile.setup(tmp_path)
+    agent_name = f"claude-thinking-{get_short_random_string()}"
+    drift = drift_note(ctx, "the thinking block signature")
+    with created_agent(profile, ctx, agent_name, destroy_timeout=AGENT_DESTROY_TIMEOUT_SECONDS):
+        send_expecting_success(profile, ctx, agent_name, _THINKING_PROMPT)
+        wait_for_turn_to_end(profile, ctx, _THINKING_PROMPT, drift)
+
+        thinking_blocks = [
+            block
+            for record in read_session_records(wait_for_native_session_file(ctx))
+            if record.get("type") == "assistant"
+            for block in (record.get("message") or {}).get("content") or []
+            if isinstance(block, dict) and block.get("type") == "thinking"
+        ]
+        assert thinking_blocks, (
+            f"a turn asked to think before answering recorded no thinking block {drift}; consumer: {_SIGNATURE_CONSUMER}"
+        )
+        kinds = [thinking_block_kind(block) for block in thinking_blocks]
+        assert all(kind in _KNOWN_THINKING_BLOCK_KINDS for kind in kinds), (
+            f"thinking block signatures decode to the kinds {kinds}, not only {sorted(_KNOWN_THINKING_BLOCK_KINDS)} "
+            f"{drift}; consumer: {_SIGNATURE_CONSUMER}"
         )

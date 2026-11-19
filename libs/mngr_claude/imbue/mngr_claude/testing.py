@@ -155,6 +155,7 @@ class ClaudeReleaseProfile(AgentReleaseProfile):
     clear_slash_command = "/clear"
     native_session_preserved_relpaths = (_CLAUDE_PROJECTS_RELPATH,)
     unknown_slash_command = "/mngr-invalid-command-probe"
+    model = RELEASE_TEST_MODEL
 
     def count_injected_deliveries(self, host_dir: Path, token: str) -> int:
         """Count the raw transcript's ``queue-operation``/``remove`` records carrying ``token``."""
@@ -208,7 +209,7 @@ class ClaudeReleaseProfile(AgentReleaseProfile):
             "--",
             "--dangerously-skip-permissions",
             "--model",
-            RELEASE_TEST_MODEL,
+            self.model,
         ]
 
     def run_mngr(self, ctx: AgentReleaseContext, *args: str, timeout: float) -> subprocess.CompletedProcess[str]:
