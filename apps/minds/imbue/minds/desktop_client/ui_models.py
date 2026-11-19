@@ -46,6 +46,8 @@ from imbue.minds.desktop_client.folder_sync_settings import FolderSyncDirection
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncState
 from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
 from imbue.minds.desktop_client.minds_config import WorkspaceAutoUpdateMode
+from imbue.minds.desktop_client.settings.schema import ClientPermissionDecision
+from imbue.minds.desktop_client.settings.schema import ClientPermissionSource
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.system_interface_health import RecoveryFailureCause
@@ -1519,6 +1521,56 @@ class UiConnectCredentialsRequest(FrozenModel):
     )
 
 
+# Client permissions: the Permissions pane's section, and the gate's read
+#
+# This computer's own decisions about what a workspace's pages may use of it,
+# per workspace, never synced and never shown to the workspace
+# (``specs/workspace-microphone-permission/spec.md``, section 5.6).
+
+
+class UiClientPermissionRow(FrozenModel):
+    """One client permission's row: the decision in effect, where it came from, and the workspace's own entry."""
+
+    permission: str = Field(
+        description="The permission's name: its W3C Permissions Policy feature name ('microphone')"
+    )
+    label: str = Field(description="Row label")
+    description: str = Field(description="What granting the permission lets a page of the workspace do")
+    decision: ClientPermissionDecision = Field(
+        description="The decision in effect for this workspace on this computer"
+    )
+    source: ClientPermissionSource = Field(description="Which level of the resolution order decided it")
+    stored: ClientPermissionDecision | None = Field(
+        description="This workspace's own entry; null when it defers to the next level"
+    )
+
+
+class UiClientPermissions(FrozenModel):
+    """The payload of GET /ui/api/workspaces/<agent_id>/client-permissions, and of every write's answer."""
+
+    rows: tuple[UiClientPermissionRow, ...] = Field(
+        description="One row per declared permission, in declaration order"
+    )
+
+
+class UiClientPermissionWriteRequest(FrozenModel):
+    """Body of PUT /ui/api/workspaces/<agent_id>/client-permissions/<name>."""
+
+    decision: ClientPermissionDecision | None = Field(
+        description="The workspace's own entry for the permission; null deletes it, so the workspace defers again"
+    )
+
+
+class UiClientPermissionDecision(FrozenModel):
+    """The answer of GET /ui/api/client-permissions/decision: what the Electron gate needs, in one read."""
+
+    decision: ClientPermissionDecision = Field(description="The decision in effect for the workspace on this computer")
+    source: ClientPermissionSource = Field(description="Which level of the resolution order decided it")
+    workspace_name: str = Field(
+        description="The workspace's display name (its id when unknown), so the gate can name it without a second lookup"
+    )
+
+
 # Grant-dialog permission rows (nested in the inbox detail payload)
 #
 # The same classification the Permissions pane's toggles use, so one service
@@ -1584,6 +1636,11 @@ class UiWireSchema(FrozenModel):
         description="folder-syncs/discard-copy request body"
     )
     folder_syncs: UiFolderSyncs = Field(description="folder-syncs poll payload")
+    client_permissions: UiClientPermissions = Field(description="client-permissions payload")
+    client_permission_write: UiClientPermissionWriteRequest = Field(
+        description="client-permissions/<name> PUT request body"
+    )
+    client_permission_decision: UiClientPermissionDecision = Field(description="client-permissions/decision answer")
     permission_grant_group: UiPermissionGrantGroup = Field(description="one grant-dialog permission group")
     switch_account: UiSwitchAccountRequest = Field(description="windows/switch-account request body")
     switch_account_response: UiSwitchAccountResponse = Field(description="windows/switch-account response")

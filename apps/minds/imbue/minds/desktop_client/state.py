@@ -76,6 +76,7 @@ from imbue.minds.desktop_client.welcome_chat import WelcomeChatSeeder
 from imbue.minds.desktop_client.workspace_color_writes import WorkspaceColorWrites
 from imbue.minds.desktop_client.workspace_diagnostics import WorkspaceCollectionQueue
 from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsCache
+from imbue.minds.desktop_client.workspace_install_settings_store import WorkspaceInstallSettingsStore
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
 from imbue.minds.desktop_client.workspace_profile_writer import WorkspaceProfileWriter
@@ -228,6 +229,14 @@ class DesktopClientState(MutableModel):
         default=None,
         frozen=True,
         description="Cache of the per-workspace facts that live in each workspace (spec section 7.4)",
+    )
+    workspace_install_settings_store: WorkspaceInstallSettingsStore | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "What this install holds per workspace: this computer's client-permission decisions. None for an app "
+            "built without a data directory, whose client-permission routes answer 503"
+        ),
     )
     workspace_profile_writer: WorkspaceProfileWriter | None = Field(
         default=None,

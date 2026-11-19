@@ -55,6 +55,8 @@ import { AutoUpdatePromptModal } from "../components/AutoUpdatePromptModal";
 import { UpdateApplyModal } from "../components/UpdateApplyModal";
 import { WebLoginModal } from "../components/WebLoginModal";
 import { ErrorDialogLayer } from "../components/ErrorDialog";
+import { ClientPermissionPrompt } from "./ClientPermissionPrompt";
+import { clientPermissionPrompt } from "../../models/clientPermissions";
 import { electronBridge } from "../../electron-bridge";
 
 /** The request popup's overlay attrs: the docked options panel's own window,
@@ -537,6 +539,17 @@ export function Shell(): m.Component<ShellAttrs> {
         // After the overlay slot, which shares its z-[110], so it paints over
         // an app modal (Manage Accounts) that opened it.
         m(WebLoginModal),
+        // Main's question about the workspace underneath (may its pages use
+        // the microphone?), whose request waits on the answer. Last of the
+        // z-[110] surfaces, so it paints over every other one, the sign-in
+        // included.
+        m(ClientPermissionPrompt, {
+          model: clientPermissionPrompt,
+          accent:
+            clientPermissionPrompt.current === null
+              ? null
+              : (shell.stores.workspaces.accentEntry(clientPermissionPrompt.current.workspaceId)?.accent ?? null),
+        }),
         m(ErrorDialogLayer),
       ]);
     },

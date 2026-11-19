@@ -490,6 +490,21 @@ class FolderSyncStoreError(MindError):
     ...
 
 
+class WorkspaceInstallSettingsStoreError(MindError):
+    """Raised when the record of what this install holds for a workspace cannot be written."""
+
+    ...
+
+
+class WorkspaceInstallSettingsTooNewError(MindError):
+    """Raised when a write targets a workspace's install-held record whose settings_format postdates this app.
+
+    The record stays readable; the remedy is updating the app.
+    """
+
+    ...
+
+
 class AccountsIndexUnreadableError(MindsSettingsError):
     """Raised when the plugin's ``accounts.json`` index exists but cannot be read as a signed-in account list.
 

@@ -47,6 +47,10 @@ import {
 } from "../../models/help";
 import { WebLoginModel, webLogin } from "../../models/webLogin";
 import { ErrorDialogQueue, errorDialogs } from "../../models/errorDialog";
+import {
+  ClientPermissionPromptModel,
+  clientPermissionPrompt,
+} from "../../models/clientPermissions";
 import type { UiWorkspaceEntry } from "../../channel/messages";
 import type { UiWorkspaceApp } from "../../generated/ui";
 import type { WorkspaceMessage } from "../../models/workspaceMessage";
@@ -210,6 +214,7 @@ export class ShellState {
   private updatesTabArrivalCount = 0;
   private readonly webLogin: WebLoginModel;
   private readonly errorDialogs: ErrorDialogQueue;
+  private readonly clientPermissionPrompt: ClientPermissionPromptModel;
   channel: UiChannelClient | null = null;
   /** The notification arrival controller (toasts, badge relay, OS hint),
    * installed by index.ts like the channel; null only before boot wiring. */
@@ -365,11 +370,13 @@ export class ShellState {
     webLoginModel: WebLoginModel = webLogin,
     autoUpdatePrompt: AutoUpdatePromptModel = new AutoUpdatePromptModel(),
     errorDialogQueue: ErrorDialogQueue = errorDialogs,
+    clientPermissionPromptModel: ClientPermissionPromptModel = clientPermissionPrompt,
   ) {
     this.stores = stores;
     this.webLogin = webLoginModel;
     this.autoUpdatePrompt = autoUpdatePrompt;
     this.errorDialogs = errorDialogQueue;
+    this.clientPermissionPrompt = clientPermissionPromptModel;
   }
 
   /** Whether this window's workspace frame is showing the workspace named. */
@@ -1457,8 +1464,10 @@ export class ShellState {
    *
    * The error dialog leads: it is drawn above every other surface, the
    * switcher popover included. Then the switcher popover (z-[200]), then the
-   * browser sign-in modal: the Shell emits it after every other z-[110]
-   * surface, so it sits over the app modal (Manage Accounts) that opened it,
+   * client-permission prompt, which the Shell emits last of all the z-[110]
+   * surfaces, then the browser sign-in modal: the Shell emits it after every
+   * other z-[110] surface but that one, so it sits over the app modal (Manage
+   * Accounts) that opened it,
    * and over the recovery card too.
    * Next the notification feed, which can also open over the recovery card.
    * The card comes before the two route-based overlays because it is not one
@@ -1479,6 +1488,10 @@ export class ShellState {
     }
     if (this.isAccountSwitcherOpen) {
       this.closeAccountSwitcher();
+      return true;
+    }
+    if (this.clientPermissionPrompt.isOpen) {
+      this.clientPermissionPrompt.dismiss();
       return true;
     }
     if (this.webLogin.isOpen) {

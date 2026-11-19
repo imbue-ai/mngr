@@ -1275,8 +1275,15 @@ so a grant left behind by a disconnected account is never invisible --
 plus **Add connection** (which also holds the [experimental
 connectors](#experimental-connectors)), **Local files** (the
 `minds-file-server-*` shared-path grants) and **Other workspaces** (the
-`minds-workspaces-*` verbs). A "Waiting on you" strip leads the pane when this workspace's agents
-have pending requests; each row opens the review popup on that request.
+`minds-workspaces-*` verbs). The nav ends with **Client permissions**, which
+is not a latchkey grant at all: it holds this computer's own decisions about
+which of its capabilities the workspace's pages may use (the microphone, in
+phase 1), kept per install and never pushed to the machine, so it renders
+even when the gateway cannot be reached. How a decision is asked for and
+changed is in [desktop-app.md](./desktop-app.md#immersive-mode); the design
+is `specs/workspace-microphone-permission/spec.md`. A "Waiting on you" strip
+leads the pane when this workspace's agents have pending requests; each row
+opens the review popup on that request.
 
 Three properties are worth knowing:
 

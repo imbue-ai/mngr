@@ -226,6 +226,37 @@ interface MindsNativeSurface {
   // trace beside Chromium's own. Optional: a preload from before profiling
   // lacks it, and the browser build has no process of its own to name.
   rendererPid?: number;
+  // Client permissions (the client-permissions spec, section 5.5): main asks
+  // this window's page to decide a capability of this computer for the
+  // workspace it shows, and the page answers. Optional: a preload from before
+  // the gate lacks them, and the browser build leaves it to the browser's own
+  // per-origin prompt.
+  onClientPermissionPrompt?(callback: (ask: ClientPermissionAsk) => void): void;
+  answerClientPermission?(answer: ClientPermissionAnswer): void;
+}
+
+/** The capabilities of this computer a workspace's pages may be allowed to
+ * use: W3C Permissions Policy feature names (D2). */
+export type ClientPermissionName = "microphone";
+
+/** Main's ask of this window's page to decide a client permission for the
+ * workspace its frame shows: the user's stored decision is "ask", so the page
+ * draws Studio's prompt and answers with `answerClientPermission`. The
+ * workspace is named as the Permissions tab names it. */
+export interface ClientPermissionAsk {
+  promptId: string;
+  workspaceId: string;
+  permission: ClientPermissionName;
+  workspaceName: string;
+}
+
+/** The page's answer to an ask. A remembered answer is already in the store
+ * when this is sent (the page writes before it answers); an unremembered Allow
+ * is a session grant and an unremembered Don't allow is one-shot (D12). */
+export interface ClientPermissionAnswer {
+  promptId: string;
+  decision: "granted" | "denied";
+  isRemembered: boolean;
 }
 
 /** What a shared workspace's frame document answered, as main read it off
@@ -608,5 +639,13 @@ export const electronBridge = {
    * desktop build older than profiling. */
   get rendererPid(): number | null {
     return native()?.rendererPid ?? null;
+  },
+  /** Main asks this window's page to decide a client permission (the
+   * microphone) for the workspace it shows. Never fires in the browser. */
+  onClientPermissionPrompt(callback: (ask: ClientPermissionAsk) => void): void {
+    native()?.onClientPermissionPrompt?.(callback);
+  },
+  answerClientPermission(answer: ClientPermissionAnswer): void {
+    native()?.answerClientPermission?.(answer);
   },
 };

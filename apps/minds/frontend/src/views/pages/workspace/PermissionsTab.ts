@@ -1,8 +1,10 @@
 // The Permissions tab: everything agents in this workspace can reach, as
 // toggles. Left nav is one entry per connection (a signed-in or granted
-// (service, account) pair), then Add connection, then the two latchkey-self
-// families -- Local files (shared paths) and Other workspaces (cross-workspace
-// verbs). The right pane holds the selected entry's toggles.
+// (service, account) pair), then Add connection, then the latchkey-self
+// families -- Local files (shared paths), Other workspaces (cross-workspace
+// verbs), This computer -- and last Client permissions, the capabilities of
+// this computer the workspace's own pages may use. The right pane holds the
+// selected entry's controls.
 //
 // Port of WorkspacePermissionsSection.jinja + workspace_permissions.js. The
 // one behavior change: a flip re-renders from the server's refreshed view
@@ -41,6 +43,7 @@ import type {
   FileSharingAccess,
   FolderSyncState,
   UiAvailableConnection,
+  UiClientPermissionRow,
   UiSharedPath,
   UiPermissionConnection,
   UiSelfPermissionToggle,
@@ -48,8 +51,16 @@ import type {
   UiWorkspacePermissions,
 } from "../../../generated/ui";
 import type { PermissionsModel } from "../../../models/workspacePermissions";
+import type { ClientPermissionsModel } from "../../../models/clientPermissions";
+import {
+  CLIENT_PERMISSION_CHOICES,
+  clientPermissionChoiceLabel,
+  selectedChoiceOf,
+  storedValueForChoice,
+} from "../../../models/clientPermissions";
 import {
   ADD_CONNECTION_SECTION,
+  CLIENT_PERMISSIONS_SECTION,
   FILE_SHARING_ACCESSES,
   LOCAL_FILES_SECTION,
   OTHER_MACHINES_SECTION,
@@ -197,6 +208,9 @@ export function PermissionsTab(): m.Component<PermissionsTabAttrs> {
       // nor blanks the pane.
       vnode.attrs.model.ensureLoaded();
       const { model } = vnode.attrs;
+      // Its own read, started beside the latchkey one rather than after it:
+      // the section stands whether or not the gateway answers.
+      model.clientPermissions.ensureLoaded();
       local.folderSyncPollTimer = setInterval(() => {
         void model.refreshLiveFolderSyncs();
       }, FOLDER_SYNC_POLL_MS);
@@ -268,22 +282,7 @@ function renderBody(
     });
   }
   const data = model.data;
-  if (data === null || data.permissions_unavailable) {
-    // The gateway (or the machine's host) is unreachable: say why rather than
-    // rendering an empty tree that reads as "nothing is granted".
-    const notice = data?.unavailable_notice ?? null;
-    const error: UserFacingError = {
-      message: notice?.message ?? "Permissions can't be loaded right now. Try again in a moment.",
-      details: notice?.detail ?? "",
-    };
-    return m(ErrorNotice, {
-      id: "ws-perm-unavailable",
-      error,
-      actions: unavailableActions(notice?.remedy ?? null, tryAgain),
-      workspaceAgentId: model.agentId,
-      extra: "mt-6 shrink-0",
-    });
-  }
+  if (data === null) return renderUnavailableNotice(model, null, "mt-6 shrink-0");
 
   // Waiting on you is a section like any other: what is selected is whatever
   // the URL asks for.
@@ -293,6 +292,7 @@ function renderBody(
     local.disconnectSectionId = null;
     local.desktopEgressDraft = null;
     model.clearWriteError();
+    model.clientPermissions.clearErrorMessage();
     onSelectSection(section);
   };
 
@@ -325,6 +325,28 @@ function renderBody(
       contentExtra: "flex flex-col pb-8",
     }),
   ];
+}
+
+/** Said in place of a pane the gateway (or the machine's host) could not
+ * serve, so an empty tree never reads as "nothing is granted". */
+function renderUnavailableNotice(
+  model: PermissionsModel,
+  data: UiWorkspacePermissions | null,
+  extra: string,
+): m.Children {
+  const notice = data?.unavailable_notice ?? null;
+  const error: UserFacingError = {
+    message: notice?.message ?? "Permissions can't be loaded right now. Try again in a moment.",
+    details: notice?.detail ?? "",
+  };
+  const tryAgain: ErrorAction = { label: "Try again", onclick: () => void model.load() };
+  return m(ErrorNotice, {
+    id: "ws-perm-unavailable",
+    error,
+    actions: unavailableActions(notice?.remedy ?? null, tryAgain),
+    workspaceAgentId: model.agentId,
+    extra,
+  });
 }
 
 /** The buttons over a pane that could not be read. The remedy the server names
@@ -495,6 +517,11 @@ function renderNav(
         m(Icon16, { name: "triangle-alert", extra: "shrink-0" }),
         m("span", { class: "truncate" }, "This computer"),
       ),
+      navEntry(
+        CLIENT_PERMISSIONS_SECTION,
+        m(Icon16, { name: "monitor", extra: "shrink-0" }),
+        m("span", { class: "truncate" }, "Client permissions"),
+      ),
     ]),
   ];
 }
@@ -509,6 +536,10 @@ function renderSelectedPanel(
   onReviewRequest: (requestId: string) => void,
 ): m.Children {
   const connections: UiPermissionConnection[] = data.connections;
+  if (selected === CLIENT_PERMISSIONS_SECTION) return renderClientPermissionsPanel(model.clientPermissions);
+  // Every section the gateway feeds says it is unreachable; Client
+  // permissions, above, needs neither the gateway nor the machine.
+  if (data.permissions_unavailable) return renderUnavailableNotice(model, data, "shrink-0");
   if (selected === WAITING_SECTION) return renderWaitingPanel(data.waiting_requests, onReviewRequest);
   if (selected === LOCAL_FILES_SECTION) return renderLocalFilesPanel(model);
   if (selected === OTHER_MACHINES_SECTION) return renderOtherMachinesPanel(model);
@@ -1414,6 +1445,105 @@ function renderThisComputerPanel(model: PermissionsModel): m.Children {
             ),
           ),
         ],
+  ]);
+}
+
+/** The capabilities of this computer the workspace's own pages may use.
+ * Nothing here touches the workspace's machine, so the panel reads from its
+ * own model and renders when the gateway behind the rest of the tab cannot be
+ * reached. */
+function renderClientPermissionsPanel(model: ClientPermissionsModel): m.Children {
+  return m("section", { "data-perm-panel": CLIENT_PERMISSIONS_SECTION }, [
+    m("h2", { class: "type-heading text-primary mb-1" }, "Client permissions"),
+    m(
+      "p",
+      { class: "type-body text-secondary mb-4" },
+      "Persistent permissions you grant this workspace that apply only on this computer. Imbue Studio asks " +
+        "before a page of the workspace uses one. Your other computers keep their own answers, and the " +
+        "workspace itself never sees them.",
+    ),
+    renderClientPermissionRows(model),
+  ]);
+}
+
+function renderClientPermissionRows(model: ClientPermissionsModel): m.Children {
+  if (model.status === "idle" || model.status === "loading") {
+    return m("p", { class: "type-body text-secondary flex items-center gap-2" }, [
+      m(Spinner, { size: "sm" }),
+      "Loading client permissions...",
+    ]);
+  }
+  const data = model.data;
+  if (model.status === "load_failed" || data === null) {
+    return m("div", { class: "flex flex-col gap-3 items-start" }, [
+      m(
+        Notice,
+        { variant: "warn", id: "client-permissions-load-failed" },
+        `Client permissions can't be loaded right now: ${model.errorMessage}`,
+      ),
+      m(Button, { variant: "secondary", onclick: () => void model.load() }, "Try again"),
+    ]);
+  }
+  return [
+    model.errorMessage
+      ? m(Notice, { variant: "error", role: "alert", id: "client-permissions-error" }, model.errorMessage)
+      : null,
+    m(
+      "div",
+      { class: "flex flex-col pr-4" },
+      data.rows.map((row) => renderClientPermissionRow(model, row)),
+    ),
+  ];
+}
+
+/** One client permission: what it is, and the four-way control over it (D14).
+ *
+ * Use the default is a state the user selects like the other three, not a
+ * reset hidden elsewhere: "stop storing my usual answer and let the default
+ * decide" is a choice in its own right. Native radios, so the group takes the
+ * arrow keys. The write answers with the whole view, so every row is inert
+ * while any write runs, and the acting row wears the spinner. */
+function renderClientPermissionRow(
+  model: ClientPermissionsModel,
+  row: UiClientPermissionRow,
+): m.Children {
+  const isWriting = model.isWriting();
+  const selected = selectedChoiceOf(row);
+  return m("div", { class: "perm-row py-3", "data-client-permission": row.permission }, [
+    m("p", { class: "type-body text-primary font-semibold" }, row.label),
+    row.description ? m("p", { class: "type-helper text-tertiary mt-0.5" }, row.description) : null,
+    m("div", { class: "mt-2 flex flex-wrap items-center gap-x-5 gap-y-1" }, [
+      m(
+        "div",
+        {
+          role: "radiogroup",
+          "aria-label": row.label,
+          ...(model.isRowBusy(row.permission) ? { "aria-busy": "true" } : {}),
+          class: "flex flex-wrap items-center gap-x-5 gap-y-1",
+        },
+        CLIENT_PERMISSION_CHOICES.map((choice) =>
+          m(
+            "label",
+            {
+              class: "flex items-center gap-2 py-1 type-body text-primary cursor-pointer",
+              "data-client-permission-choice": choice,
+            },
+            [
+              m("input", {
+                type: "radio",
+                name: `client-permission-${model.agentId}-${row.permission}`,
+                class: "shrink-0",
+                checked: choice === selected,
+                disabled: isWriting,
+                onchange: () => void model.setDecision(row.permission, storedValueForChoice(choice)),
+              }),
+              m("span", clientPermissionChoiceLabel(choice, row)),
+            ],
+          ),
+        ),
+      ),
+      model.isRowBusy(row.permission) ? m(Spinner, { size: "sm" }) : null,
+    ]),
   ]);
 }
 

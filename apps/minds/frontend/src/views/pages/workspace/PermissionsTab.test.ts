@@ -13,8 +13,9 @@ import {
   slackConnection,
   stravaAvailable,
 } from "../../../models/workspacePermissions.testing";
-import type { UiWorkspacePermissions } from "../../../generated/ui";
+import type { UiClientPermissions, UiWorkspacePermissions } from "../../../generated/ui";
 import type { RequestResult } from "../../../models/errors";
+import { clientPermissionsView, microphoneRow } from "../../../models/clientPermissions.testing";
 import { OPTIONS_TABS, WorkspaceOptionsModel, defaultFetchJson, toOptionsTab } from "../../../models/workspaceOptions";
 import { ADD_SHARED_PATH_ROW_KEY, PermissionsModel, isPathSyncOn } from "../../../models/workspacePermissions";
 import type { ErrorDialogRequest } from "../../../models/errorDialog";
@@ -32,9 +33,20 @@ import { Spinner } from "../../components/Spinner";
 import { ErrorNotice } from "../../components/ErrorDisplay";
 import type { ErrorAction, UserFacingError } from "../../../models/errors";
 import type { AnyVnode } from "../../../testing";
-import { allText, attrsOf, classesOf, collectText, collectVnodes, errorMarks, renderDeep, withAttr } from "../../../testing";
+import {
+  allText,
+  attrsOf,
+  byId,
+  classesOf,
+  collectText,
+  collectVnodes,
+  errorMarks,
+  renderDeep,
+  withAttr,
+} from "../../../testing";
 
 const AGENT_ID = "agent-" + "c".repeat(8);
+const CLIENT_PERMISSIONS_URL = `/ui/api/workspaces/${AGENT_ID}/client-permissions`;
 
 // Which marks 404'd is remembered app-wide, on purpose. Without this the
 // test that exercises a missing mark would retire that service for every
@@ -112,6 +124,8 @@ interface RenderResult {
   /** The request ids the pane asked to open on their own page. */
   reviewedRequests: string[];
   requests: { url: string; body: unknown }[];
+  /** The Client permissions section's own requests. */
+  clientRequests: { url: string; method: string; body: unknown }[];
 }
 
 /** Render the tab without a DOM: instantiate the closure component, run its
@@ -140,12 +154,33 @@ async function render(
     respond?: (url: string) => Promise<RequestResult> | null;
     /** Collects the error dialogs the pane raises. */
     shownDialogs?: ErrorDialogRequest[];
+    /** What the Client permissions read answers with. */
+    clientPermissions?: UiClientPermissions;
+    /** Answer a Client permissions request yourself; null falls through to
+     * the read's view, or for a write to the view that write produces. */
+    respondClientPermissions?: (url: string, init?: RequestInit) => Promise<RequestResult> | null;
   } = {},
 ): Promise<RenderResult> {
   const requests: { url: string; body: unknown }[] = [];
+  const clientRequests: { url: string; method: string; body: unknown }[] = [];
   let isSignedIn = false;
   const model = new PermissionsModel(AGENT_ID, {
     fetchJson: (url: string, init?: RequestInit) => {
+      // The Client permissions section reads and writes on its own, so its
+      // traffic is kept apart from the latchkey requests the other tests pin.
+      if (url.startsWith(CLIENT_PERMISSIONS_URL)) {
+        const body = typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : null;
+        clientRequests.push({ url, method: init?.method ?? "GET", body });
+        const answered = options.respondClientPermissions?.(url, init) ?? null;
+        if (answered !== null) return answered;
+        if (init?.method === "PUT") {
+          const { decision } = body as { decision: "granted" | "denied" | "ask" | null };
+          const row =
+            decision === null ? microphoneRow() : microphoneRow({ decision, source: "workspace", stored: decision });
+          return Promise.resolve({ ok: true, status: 200, body: clientPermissionsView([row]) });
+        }
+        return Promise.resolve({ ok: true, status: 200, body: options.clientPermissions ?? clientPermissionsView() });
+      }
       requests.push({ url, body: typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : null });
       const answered = options.respond?.(url) ?? null;
       if (answered !== null) return answered;
@@ -198,7 +233,17 @@ async function render(
       m(instance, { ...attrs, model: other } as unknown as m.Attributes) as m.Vnode,
     );
   const remove = (): void => (instance.onremove as unknown as () => void).call(instance);
-  return { root: rerender(), rerender, rerenderFor, remove, model, selectedSections, reviewedRequests, requests };
+  return {
+    root: rerender(),
+    rerender,
+    rerenderFor,
+    remove,
+    model,
+    selectedSections,
+    reviewedRequests,
+    requests,
+    clientRequests,
+  };
 }
 
 /** A connect awaits the sign-in, then the reload, then the selection -- more
@@ -209,8 +254,11 @@ async function settleConnect(): Promise<void> {
 
 describe("PermissionsTab loading", () => {
   it("reads the pane's own endpoint when the tab is first mounted", async () => {
-    const { requests } = await render(permissionsView());
+    const { requests, clientRequests } = await render(permissionsView());
     expect(requests.map((request) => request.url)).toEqual([`/ui/api/workspaces/${AGENT_ID}/permissions`]);
+    expect(clientRequests.map((request) => `${request.method} ${request.url}`)).toEqual([
+      `GET ${CLIENT_PERMISSIONS_URL}`,
+    ]);
   });
 
   it("offers a retry instead of an empty tree when the read fails", async () => {
@@ -228,12 +276,11 @@ describe("PermissionsTab loading", () => {
     const { root } = await render(
       permissionsView({ connections: [], available_connections: [], permissions_unavailable: true }),
     );
-    const text = allText(root);
     expect(errorNotices(root).get("ws-perm-unavailable")?.error.message).toBe(
       "Permissions can't be loaded right now. Try again in a moment.",
     );
-    expect(text).not.toContain("Add connection");
-    expect(text).not.toContain("Every available service already has an account connected.");
+    expect(allText(root)).not.toContain("Every available service already has an account connected.");
+    expect(withAttr(root, "data-perm-panel")).toHaveLength(0);
   });
 
   const NEWER_FORMAT_VIEW: UiWorkspacePermissions = permissionsView({
@@ -362,7 +409,7 @@ describe("PermissionsTab waiting strip", () => {
 });
 
 describe("PermissionsTab left nav", () => {
-  it("lists the connections, Add connection, and the three self families", async () => {
+  it("lists the connections, Add connection, the three self families, and Client permissions last", async () => {
     const { root } = await render(
       permissionsView({
         connections: [slackConnection(), slackConnection({ service_name: "notion", display_name: "Notion", account: "n@x.com" })],
@@ -376,7 +423,9 @@ describe("PermissionsTab left nav", () => {
       "local-files",
       "other-machines",
       "this-computer",
+      "client-permissions",
     ]);
+    expect(allText(withAttr(root, "data-perm-nav").at(-1))).toBe("Client permissions");
   });
 
   it("shows the account label under a connection only when it disambiguates", async () => {
@@ -1570,6 +1619,170 @@ describe("PermissionsTab service marks", () => {
     // A globe, not the box "Local files" draws further down the same nav: a
     // service with no usable mark should not read as the same kind of entry.
     expect(collectVnodes(nav).some((node) => attrsOf(node).name === "globe")).toBe(true);
+  });
+});
+
+describe("PermissionsTab client permissions", () => {
+  const SECTION = "client-permissions";
+
+  function radios(node: unknown): AnyVnode[] {
+    return collectVnodes(node).filter((vnode) => vnode.tag === "input" && attrsOf(vnode).type === "radio");
+  }
+
+  /** Each radio's label and whether it is checked, in the order drawn. */
+  function choices(node: unknown): { label: string; isChecked: boolean }[] {
+    return withAttr(node, "data-client-permission-choice").map((choice) => ({
+      label: allText(choice),
+      isChecked: attrsOf(radios(choice)[0]).checked === true,
+    }));
+  }
+
+  function choose(node: unknown, choice: string): void {
+    const label = withAttr(node, "data-client-permission-choice").find(
+      (vnode) => attrsOf(vnode)["data-client-permission-choice"] === choice,
+    );
+    (attrsOf(radios(label)[0]).onchange as () => void)();
+  }
+
+  it("is a ?section the pane honours", async () => {
+    const { root } = await render(permissionsView(), { requestedSection: SECTION });
+    const pressed = withAttr(root, "data-perm-nav")
+      .filter((node) => attrsOf(node)["aria-pressed"] === "true")
+      .map((node) => attrsOf(node)["data-perm-nav"]);
+    expect(pressed).toEqual([SECTION]);
+  });
+
+  it("says the answers stay on this computer and draws a row per permission", async () => {
+    const { root } = await render(permissionsView(), { requestedSection: SECTION });
+    const panel = withAttr(root, "data-perm-panel").find((node) => attrsOf(node)["data-perm-panel"] === SECTION);
+    const text = allText(panel);
+    expect(text).toContain("Client permissions");
+    expect(text).toContain(
+      "Persistent permissions you grant this workspace that apply only on this computer. Imbue Studio asks " +
+        "before a page of the workspace uses one. Your other computers keep their own answers, and the " +
+        "workspace itself never sees them.",
+    );
+    const rows = withAttr(root, "data-client-permission");
+    expect(rows.map((row) => attrsOf(row)["data-client-permission"])).toEqual(["microphone"]);
+    expect(allText(rows[0])).toContain("Microphone");
+    expect(allText(rows[0])).toContain("Listen to an audio input");
+    const group = collectVnodes(rows[0]).find((vnode) => attrsOf(vnode).role === "radiogroup");
+    expect(attrsOf(group as AnyVnode)["aria-label"]).toBe("Microphone");
+  });
+
+  it.each([
+    [null, "Use the default (Ask)"],
+    ["ask", "Ask"],
+    ["granted", "Allow"],
+    ["denied", "Don't allow"],
+  ] as const)("checks the radio for a stored %j", async (stored, checkedLabel) => {
+    const row =
+      stored === null ? microphoneRow() : microphoneRow({ stored, decision: stored, source: "workspace" });
+    const { root } = await render(permissionsView(), {
+      requestedSection: SECTION,
+      clientPermissions: clientPermissionsView([row]),
+    });
+    const drawn = choices(root);
+    expect(drawn.map((choice) => choice.label)).toEqual(["Use the default (Ask)", "Ask", "Allow", "Don't allow"]);
+    expect(drawn.filter((choice) => choice.isChecked).map((choice) => choice.label)).toEqual([checkedLabel]);
+  });
+
+  it.each([
+    ["default", null],
+    ["ask", "ask"],
+    ["granted", "granted"],
+    ["denied", "denied"],
+  ] as const)("writes %s as %j and shows what the server answered", async (choice, decision) => {
+    // Start from a state other than the one chosen, so every choice is a change.
+    const startingStored = decision === "denied" ? "granted" : "denied";
+    const { root, rerender, clientRequests } = await render(permissionsView(), {
+      requestedSection: SECTION,
+      clientPermissions: clientPermissionsView([
+        microphoneRow({ stored: startingStored, decision: startingStored, source: "workspace" }),
+      ]),
+    });
+
+    choose(root, choice);
+    await settle();
+
+    expect(clientRequests.at(-1)).toEqual({
+      url: `${CLIENT_PERMISSIONS_URL}/microphone`,
+      method: "PUT",
+      body: { decision },
+    });
+    const checked = choices(rerender()).filter((drawn) => drawn.isChecked);
+    expect(checked).toHaveLength(1);
+    expect(checked[0].label).toBe(
+      { default: "Use the default (Ask)", ask: "Ask", granted: "Allow", denied: "Don't allow" }[choice],
+    );
+  });
+
+  it("locks every radio and spins while a write is in flight", async () => {
+    let release: () => void = () => undefined;
+    const { root, rerender } = await render(permissionsView(), {
+      requestedSection: SECTION,
+      respondClientPermissions: (_url, init) =>
+        init?.method === "PUT"
+          ? new Promise((resolve) => {
+              release = () => resolve({ ok: true, status: 200, body: clientPermissionsView() });
+            })
+          : null,
+    });
+
+    choose(root, "granted");
+    const locked = rerender();
+    expect(radios(locked).map((radio) => attrsOf(radio).disabled)).toEqual([true, true, true, true]);
+    expect(spinners(locked)).toHaveLength(1);
+
+    release();
+    await settle();
+    expect(radios(rerender()).map((radio) => attrsOf(radio).disabled)).toEqual([false, false, false, false]);
+  });
+
+  it("keeps the selection and says why when a write is refused", async () => {
+    const { root, rerender } = await render(permissionsView(), {
+      requestedSection: SECTION,
+      respondClientPermissions: (_url, init) =>
+        init?.method === "PUT"
+          ? Promise.resolve({ ok: false, status: 409, body: { error: "saved by a newer version" } })
+          : null,
+    });
+
+    choose(root, "granted");
+    await settle();
+
+    const after = rerender();
+    expect(allText(byId(after, "client-permissions-error"))).toContain(
+      "Could not save the change: saved by a newer version",
+    );
+    expect(choices(after).filter((choice) => choice.isChecked).map((choice) => choice.label)).toEqual([
+      "Use the default (Ask)",
+    ]);
+  });
+
+  it("offers a retry when its own read fails, whatever the rest of the pane did", async () => {
+    const { root } = await render(permissionsView(), {
+      requestedSection: SECTION,
+      respondClientPermissions: () => Promise.resolve({ ok: false, status: 500, body: { error: "store is unreadable" } }),
+    });
+    expect(allText(byId(root, "client-permissions-load-failed"))).toContain("store is unreadable");
+    expect(allText(root)).toContain("Try again");
+    expect(radios(root)).toHaveLength(0);
+  });
+
+  it("renders when the gateway behind the other sections cannot be reached", async () => {
+    const unavailable = permissionsView({ connections: [], available_connections: [], permissions_unavailable: true });
+    const clientSection = await render(unavailable, { requestedSection: SECTION });
+    expect(allText(withAttr(clientSection.root, "data-perm-nav"))).toContain("Client permissions");
+    expect(withAttr(clientSection.root, "data-client-permission")).toHaveLength(1);
+    expect(radios(clientSection.root)).toHaveLength(4);
+    expect(errorNotices(clientSection.root).has("ws-perm-unavailable")).toBe(false);
+
+    const localFiles = await render(unavailable, { requestedSection: "local-files" });
+    expect(errorNotices(localFiles.root).get("ws-perm-unavailable")?.error.message).toBe(
+      "Permissions can't be loaded right now. Try again in a moment.",
+    );
+    expect(radios(localFiles.root)).toHaveLength(0);
   });
 });
 

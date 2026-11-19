@@ -32,6 +32,7 @@ from imbue.minds.desktop_client.session_store import get_owning_account_id_for_w
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_account_scope import is_valid_account_id
+from imbue.minds.desktop_client.ui_api_client_permissions import register_client_permission_routes
 from imbue.minds.desktop_client.ui_api_create import register_create_routes
 from imbue.minds.desktop_client.ui_api_device_resources import register_device_resource_routes
 from imbue.minds.desktop_client.ui_api_folder_syncs import register_folder_sync_routes
@@ -325,6 +326,7 @@ def create_ui_blueprint() -> Blueprint:
     register_settings_routes(blueprint)
     register_options_routes(blueprint)
     register_permissions_routes(blueprint)
+    register_client_permission_routes(blueprint)
     register_folder_sync_routes(blueprint)
     register_lifecycle_routes(blueprint)
     register_inbox_routes(blueprint)

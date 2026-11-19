@@ -1,4 +1,5 @@
 const { BrowserWindow, Menu, Notification, Tray, clipboard, contentTracing, crashReporter, dialog, ipcMain, net, shell, app, session, screen, nativeImage, powerMonitor } = require('electron');
+const crypto = require('crypto');
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
@@ -141,6 +142,7 @@ const {
 } = require('./activation-diagnostics');
 const { createExternalOpener, createLinkRouter, isCustomSchemeUrl, isExternalUrl } = require('./link-routing');
 const { createExternalLinkPermissions } = require('./external-link-permissions');
+const { clientPermissionNameOf, createClientPermissionGate, parseDecisionBody } = require('./client-permission-policy');
 
 // After the single-web-context collapse each window is ONE BrowserWindow whose
 // page is the Imbue Studio SPA (titlebar + hub pages + the sandboxed workspace
@@ -418,8 +420,9 @@ function sendToBundle(bundle, channel, payload) {
 }
 
 // The permission policy of one session: openExternal goes through the link
-// router's ask-first opener, and everything else is decided by the immersive
-// policy (lock permissions only for the chrome's own top-level page).
+// router's ask-first opener, a client permission (the microphone) is decided
+// per workspace by clientPermissionGate, and everything else is decided by the
+// immersive policy (lock permissions only for the chrome's own top-level page).
 function installPermissionHandlersOn(ses) {
   const decide = (contents, permission) =>
     decidePermissionRequest({
@@ -428,10 +431,18 @@ function installPermissionHandlersOn(ses) {
       chromeOrigin: originOf(backendBaseUrl),
     });
   ses.setPermissionRequestHandler((contents, permission, callback, details) => {
-    callback(decide(contents, permission));
+    const isAllowed = decide(contents, permission);
+    const clientPermission = isAllowed ? clientPermissionNameOf(permission, details) : null;
+    if (clientPermission === null) callback(isAllowed);
+    else clientPermissionGate.request(contents, clientPermission, details && details.requestingUrl, callback);
     if (permission === OPEN_EXTERNAL_PERMISSION) linkRouter.openExternalRequested(contents, details);
   });
-  ses.setPermissionCheckHandler((contents, permission) => decide(contents, permission));
+  ses.setPermissionCheckHandler((contents, permission, _requestingOrigin, details) => {
+    if (!decide(contents, permission)) return false;
+    const clientPermission = clientPermissionNameOf(permission, details);
+    if (clientPermission === null) return true;
+    return clientPermissionGate.check(contents || null, clientPermission, details && details.requestingUrl);
+  });
 }
 
 function installSharedFramePolicyOn(ses) {
@@ -1330,6 +1341,7 @@ function wireBundleNavigationEvents(bundle) {
     // with it, and the new page reports its own. Immersive mode went with
     // the old page too (fullscreen ends with the document).
     linkRouter.forgetMount(wc);
+    clientPermissionGate.mountChanged(wc);
     setImmersiveFor(bundle, false);
     onTopLevelNavigate(url);
   });
@@ -1398,6 +1410,7 @@ function wireBundleNavigationEvents(bundle) {
   // button. Never navigate synchronously inside this handler (electron#19887).
   wc.on('render-process-gone', (_e, details) => {
     linkRouter.forgetMount(wc);
+    clientPermissionGate.mountChanged(wc);
     const reason = details && details.reason;
     if (reason === 'clean-exit') return;
     if (isShuttingDown || bundle.window.isDestroyed()) return;
@@ -1584,6 +1597,98 @@ const linkRouter = createLinkRouter({
     const bundle = bundleOfWebContentsId(webContents.id);
     return bundle !== null && isSharedRowWorkspaceId(bundle.currentWorkspaceId);
   },
+});
+
+const CLIENT_PERMISSION_DECISION_TIMEOUT_MS = 1500;
+const CLIENT_PERMISSION_CACHE_TTL_MS = 5000;
+const CLIENT_PERMISSION_PROMPT_TIMEOUT_MS = 10 * 60 * 1000;
+
+// The workspace's stored client-permission decision, from the backend over
+// loopback with the session cookie; null (deny, uncached) on any failure.
+function fetchClientPermissionDecision(workspaceId, permission) {
+  return new Promise((resolve) => {
+    const fail = (why) => {
+      console.warn(`[client-permissions] denying ${permission} for ${workspaceId}: ${why}`);
+      resolve(null);
+    };
+    if (!backendBaseUrl) {
+      fail('no backend yet');
+      return;
+    }
+    const query = new URLSearchParams({ workspace: workspaceId, permission });
+    let done = false;
+    let req;
+    const finish = (value, why) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (value === null) {
+        try { req.abort(); } catch { /* noop */ }
+        fail(why);
+      } else {
+        resolve(value);
+      }
+    };
+    const timer = setTimeout(() => finish(null, `no decision within ${CLIENT_PERMISSION_DECISION_TIMEOUT_MS}ms`), CLIENT_PERMISSION_DECISION_TIMEOUT_MS);
+    try {
+      req = net.request({
+        url: `${backendBaseUrl}/ui/api/client-permissions/decision?${query}`,
+        method: 'GET',
+        useSessionCookies: true,
+      });
+    } catch (err) {
+      finish(null, `the decision request could not be made: ${err && err.message}`);
+      return;
+    }
+    req.on('response', (response) => {
+      let body = '';
+      response.on('data', (chunk) => { body += chunk.toString(); });
+      response.on('end', () => {
+        if (response.statusCode !== 200) {
+          finish(null, `the decision route answered ${response.statusCode}`);
+          return;
+        }
+        const decision = parseDecisionBody(body);
+        if (decision === null) finish(null, 'the decision route answered a malformed body');
+        else finish(decision);
+      });
+      response.on('error', (err) => finish(null, `the decision response failed: ${err && err.message}`));
+    });
+    req.on('error', (err) => finish(null, `the decision request failed: ${err && err.message}`));
+    req.end();
+  });
+}
+
+// See ./client-permission-policy for the decision order. The backend sends
+// main no change signal, so a decision changed in the Permissions tab reaches
+// the gate when its cache entry expires (or at once when a prompt's
+// remembered answer wrote it).
+const clientPermissionGate = createClientPermissionGate({
+  mountOf: (wc) => linkRouter.mountOf(wc),
+  mountShowing: (workspaceId) => linkRouter.mountShowing(workspaceId),
+  fetchDecision: fetchClientPermissionDecision,
+  sendPrompt: (wc, prompt) => {
+    if (!wc || wc.isDestroyed()) return false;
+    try {
+      wc.send('client-permission-prompt', prompt);
+      return true;
+    } catch (err) {
+      console.warn('[client-permissions] could not send the prompt:', err && err.message);
+      return false;
+    }
+  },
+  showToast: (wc, toast) => {
+    if (!wc || wc.isDestroyed()) return;
+    try {
+      wc.send('show-toast', toast);
+    } catch (err) {
+      console.warn('[client-permissions] could not show the denial toast:', err && err.message);
+    }
+  },
+  newPromptId: () => crypto.randomUUID(),
+  warn: (message) => console.warn(message),
+  cacheTtlMs: CLIENT_PERMISSION_CACHE_TTL_MS,
+  promptTimeoutMs: CLIENT_PERMISSION_PROMPT_TIMEOUT_MS,
 });
 
 // The address is copied either way; the explanation is an in-app toast in
@@ -2234,7 +2339,20 @@ ipcMain.on('workspace-link-handling', (event, report) => {
   }
   if (!linkRouter.recordMount(event.sender, report)) {
     console.warn('[link-routing] dropped a malformed mount report');
+    return;
   }
+  clientPermissionGate.mountChanged(event.sender);
+});
+
+// The window's page answered a client-permission prompt (see
+// clientPermissionGate): `{ promptId, decision, isRemembered }`. Only the
+// trusted SPA page may answer, and only the window that was asked.
+ipcMain.on('client-permission-answer', (event, answer) => {
+  if (!trustedShellEventSenderBundle(event)) {
+    console.warn('[client-permissions] dropped a prompt answer from an untrusted sender frame');
+    return;
+  }
+  clientPermissionGate.answer(answer, event.sender);
 });
 
 // A workspace asked for an external link no app of its own takes to open
@@ -2661,6 +2779,7 @@ async function onReady() {
   app.on('web-contents-created', (_event, contents) => {
     linkRouter.install(contents);
     contents.setWebRTCIPHandlingPolicy('default_public_interface_only');
+    contents.on('destroyed', () => clientPermissionGate.forgetWebContents(contents));
   });
   registerAppImageDesktopEntry();
   installApplicationMenu();
@@ -3631,14 +3750,15 @@ ipcMain.on('set-immersive', (event, on) => {
 // Which permission requests a session grants (the default session too: no
 // window uses it, but anything created outside a window must not be left
 // unpoliced). Electron grants everything when no handler is installed; this
-// keeps that and writes down the two narrowings: fullscreen, keyboard lock
-// and pointer lock go only to a page whose top-level origin is the chrome's
-// own (the workspace frame's requests count, its top-level page being the
-// chrome), so no Chrome lock prompt can appear inside the app, and
-// openExternal is refused so a page launching another app goes through the
-// link router's ask-first opener. The session holds one handler, so both
-// live here. The check handler answers the same way, so a page that asks
-// whether it may before it requests hears one answer.
+// keeps that and writes down the narrowings: fullscreen, keyboard lock and
+// pointer lock go only to a page whose top-level origin is the chrome's own
+// (the workspace frame's requests count, its top-level page being the
+// chrome), so no Chrome lock prompt can appear inside the app; openExternal
+// is refused so a page launching another app goes through the link router's
+// ask-first opener; and a client permission (the microphone) is decided per
+// workspace by clientPermissionGate. The session holds one handler, so all of
+// them live here. The check handler answers the same way, so a page that
+// asks whether it may before it requests hears one answer.
 function installPermissionHandlers() {
   installPermissionHandlersOn(session.defaultSession);
   for (const ses of preparedSessionsByPartition.values()) installPermissionHandlersOn(ses);

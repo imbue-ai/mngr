@@ -15,6 +15,7 @@ import {
   NotificationsUiController,
 } from "./models/notificationsUi";
 import { consumeWebLoginParams, webLogin } from "./models/webLogin";
+import { clientPermissionPrompt } from "./models/clientPermissions";
 import { installProfiling } from "./profiling";
 import { mountRouter, navigateExternalUrl } from "./router";
 import { ShellState } from "./views/shell/shell-state";
@@ -217,6 +218,10 @@ function main(): void {
     console.warn(`[shared-with-me] the frame on ${report.hostname} landed on the login page (sign-in failed: ${String(report.isSignInFailed)})`);
     void shell.handleSharedFrameLoginLanding(report.isSignInFailed);
   });
+  // Main's ask to decide a client permission (the microphone) for the
+  // workspace this window shows: the Shell draws the prompt over the frame
+  // and the model answers main once the user has.
+  electronBridge.onClientPermissionPrompt((ask) => clientPermissionPrompt.show(ask));
 
   // Register the shared page-level context BEFORE mounting so page
   // components (which the router mounts without attrs) can read the stores.

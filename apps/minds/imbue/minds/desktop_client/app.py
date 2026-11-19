@@ -228,6 +228,7 @@ from imbue.minds.desktop_client.workspace_apps import resolve_workspace_apps
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
 from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsCache
+from imbue.minds.desktop_client.workspace_install_settings_store import WorkspaceInstallSettingsStore
 from imbue.minds.desktop_client.workspace_lifecycle import MindHostAction
 from imbue.minds.desktop_client.workspace_lifecycle import MindHostActionOutcome
 from imbue.minds.desktop_client.workspace_lifecycle import perform_mind_host_action
@@ -248,6 +249,7 @@ from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateSta
 from imbue.minds.desktop_client.workspace_view_refresh import WorkspaceViewRefresher
 from imbue.minds.errors import MindsConfigError
 from imbue.minds.errors import SyncCryptoError
+from imbue.minds.errors import WorkspaceInstallSettingsStoreError
 from imbue.minds.errors import WorkspaceRecordLeaseActiveError
 from imbue.minds.errors import WorkspaceRecordTooNewError
 from imbue.minds.errors import WorkspaceSyncError
@@ -1187,6 +1189,7 @@ def _finalize_and_mark_destroying(
     session_store: MultiAccountSessionStore | None,
     imbue_cloud_cli: ImbueCloudCli | None,
     minds_config: MindsConfig | None,
+    workspace_install_settings_store: WorkspaceInstallSettingsStore | None,
 ) -> dict[str, str]:
     """Walk ``<paths.data_dir>/destroying/``, finalize DONE records, return marker map.
 
@@ -1211,7 +1214,9 @@ def _finalize_and_mark_destroying(
     marker: dict[str, str] = {}
     for agent_id, record in records.items():
         if record.status == DestroyingStatus.DONE:
-            _finalize_destroyed_workspace(agent_id, paths, session_store, imbue_cloud_cli, minds_config)
+            _finalize_destroyed_workspace(
+                agent_id, paths, session_store, imbue_cloud_cli, minds_config, workspace_install_settings_store
+            )
             continue
         marker[str(agent_id)] = destroy_row_state(record.status)
     return marker
@@ -1223,6 +1228,7 @@ def _finalize_destroyed_workspace(
     session_store: MultiAccountSessionStore | None,
     imbue_cloud_cli: ImbueCloudCli | None,
     minds_config: MindsConfig | None,
+    workspace_install_settings_store: WorkspaceInstallSettingsStore | None,
 ) -> None:
     """Tombstone a fully-destroyed workspace's record, drop its own settings, then delete the destroying marker.
 
@@ -1265,6 +1271,11 @@ def _finalize_destroyed_workspace(
             minds_config.set_workspace_auto_update_override(str(agent_id), None)
         except MindsConfigError as e:
             logger.warning("Could not drop destroyed agent {}'s auto-update setting: {}", agent_id, e)
+    if workspace_install_settings_store is not None:
+        try:
+            workspace_install_settings_store.forget_workspace(str(agent_id))
+        except WorkspaceInstallSettingsStoreError as e:
+            logger.warning("Could not drop destroyed agent {}'s client permissions: {}", agent_id, e)
     delete_destroying(agent_id, paths)
 
 
@@ -2349,7 +2360,12 @@ def _derive_ui_workspaces_message(
         # any request handler) is what deletes the destroying marker, the
         # machine's share, and the account association once the host is gone.
         destroying_marker = _finalize_and_mark_destroying(
-            paths, backend_resolver, session_store, get_state().imbue_cloud_cli, get_state().minds_config
+            paths,
+            backend_resolver,
+            session_store,
+            get_state().imbue_cloud_cli,
+            get_state().minds_config,
+            get_state().workspace_install_settings_store,
         )
         # Workspaces shared with each signed-in account ride the same list,
         # flagged ``is_owned=False`` and carrying their share, so a window
@@ -3067,6 +3083,7 @@ def create_desktop_client(
     workspace_facts_cache: WorkspaceFactsCache | None = None,
     workspace_profile_writer: WorkspaceProfileWriter | None = None,
     shared_with_me_store: SharedWithMeStore | None = None,
+    workspace_install_settings_store: WorkspaceInstallSettingsStore | None = None,
 ) -> Flask:
     """Create the bare-origin Imbue Studio Flask application.
 
@@ -3297,6 +3314,14 @@ def create_desktop_client(
             store=(None if paths is None else FolderSyncStore(records_dir=paths.data_dir / "folder_syncs")),
         )
 
+    # Without a data directory there is nowhere to keep client-permission
+    # decisions, so every workspace resolves to the defaults.
+    resolved_workspace_install_settings_store = (
+        workspace_install_settings_store
+        if workspace_install_settings_store is not None or paths is None
+        else WorkspaceInstallSettingsStore(records_dir=paths.data_dir / "workspace_install_settings")
+    )
+
     state = DesktopClientState(
         auth_store=auth_store,
         backend_resolver=backend_resolver,
@@ -3363,6 +3388,7 @@ def create_desktop_client(
         wallpaper_refresher=wallpaper_refresher,
         workspace_facts_cache=workspace_facts_cache,
         workspace_profile_writer=workspace_profile_writer,
+        workspace_install_settings_store=resolved_workspace_install_settings_store,
         ui_channel_broadcaster=ui_channel_broadcaster,
         ui_publisher=ui_publisher,
         machine_stop_kind_tracker=machine_stop_kind_tracker,
@@ -3375,6 +3401,11 @@ def create_desktop_client(
         turn_credential_broker=turn_credential_broker,
     )
     set_state(app, state)
+
+    # The chrome derives state from client-permission decisions, so a changed
+    # decision wakes the publisher like every other producer (spec section 5.6).
+    if resolved_workspace_install_settings_store is not None:
+        resolved_workspace_install_settings_store.add_on_change_callback(ui_publisher.notify_change)
 
     # Wire the channel publisher into every producer of derived state:
     # resolver changes, health edges, and discovery-health changes. One-shot

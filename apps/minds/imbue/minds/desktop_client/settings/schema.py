@@ -9,18 +9,24 @@ models fix (account-keyed). Settings with bespoke semantics beyond plain
 resolution (the consent flags, the per-provider regions, the Electron files)
 are deliberately not declared: they stay on their own accessors.
 
-Install-keyed settings have no override and a single scope, so reading them
-straight from storage already is their resolution; only account-keyed readers
-must go through ``resolve.py``, which is what let phase 3A move their storage
-without touching behavior.
+Install-keyed settings have no workspace-held override, so reading them
+straight from storage already is their resolution; account-keyed readers, and
+the one install-keyed setting this install holds per workspace (the client
+permissions, ``specs/workspace-microphone-permission/spec.md``), go through
+``resolve.py``, which is what let phase 3A move their storage without touching
+behavior.
 """
 
+from collections.abc import Mapping
 from enum import auto
 from typing import Final
 
+from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import field_validator
 
+from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.minds_config import AutoUpdatePromptDecision
@@ -42,11 +48,13 @@ class SettingScope(UpperCaseStrEnum):
 
 
 class SettingOverrideKind(UpperCaseStrEnum):
-    """Whether one workspace may hold its own value, and whether that value is per user."""
+    """Who may hold a value per workspace: nobody, the workspace itself (for everyone or per user), or this install."""
 
     NONE = auto()
     WORKSPACE = auto()
     WORKSPACE_PER_USER = auto()
+    # This install holds one value per workspace; nothing syncs, nothing enters the workspace.
+    INSTALL_WORKSPACE = auto()
 
 
 class SettingDeclaration(FrozenModel):
@@ -55,6 +63,70 @@ class SettingDeclaration(FrozenModel):
     key: str = Field(description="The setting's name: a carrier model field, and the future document key")
     scope: SettingScope = Field(description="Which carrier holds the value")
     override_kind: SettingOverrideKind = Field(description="Whether a workspace may override it")
+
+
+class ClientPermissionName(LowerCaseStrEnum):
+    """A capability of this computer a workspace's pages may use, named as its W3C Permissions Policy feature.
+
+    The lowercase values are the wire strings the client-permission routes serve
+    and accept verbatim, the keys of the per-workspace records, and the name a
+    page passes to ``document.featurePolicy.allowsFeature``.
+    """
+
+    MICROPHONE = auto()
+
+
+class ClientPermissionDecision(LowerCaseStrEnum):
+    """What this install decided about one client permission for one workspace.
+
+    The lowercase values are the wire strings the client-permission routes serve
+    and accept verbatim (and what the per-workspace records store).
+    """
+
+    GRANTED = auto()
+    DENIED = auto()
+    ASK = auto()
+
+
+class ClientPermissionSource(LowerCaseStrEnum):
+    """Which level of the resolution order decided a client permission (spec section 5.3)."""
+
+    WORKSPACE = auto()
+    DEFAULT = auto()
+
+
+# The decision Studio ships for each declared permission, where nothing else
+# decides it: every resolution ends here (spec D4).
+IMBUE_DEFAULT_CLIENT_PERMISSIONS: Final[Mapping[ClientPermissionName, ClientPermissionDecision]] = {
+    ClientPermissionName.MICROPHONE: ClientPermissionDecision.ASK,
+}
+# The same table keyed the way the carriers hold it: by the name string, so a
+# name a newer build declared round-trips through an older one unread.
+_IMBUE_DEFAULT_CLIENT_PERMISSIONS_BY_NAME: Final[Mapping[str, ClientPermissionDecision]] = {
+    name.value: decision for name, decision in IMBUE_DEFAULT_CLIENT_PERMISSIONS.items()
+}
+_CLIENT_PERMISSION_DECISION_VALUES: Final[frozenset[str]] = frozenset(
+    decision.value for decision in ClientPermissionDecision
+)
+
+
+def _is_client_permission_decision(value: object) -> bool:
+    return isinstance(value, str) and value in _CLIENT_PERMISSION_DECISION_VALUES
+
+
+def _without_unparseable_decisions(raw: object) -> object:
+    """Drop the entries whose decision this build cannot parse, one warning each; the rest validate as usual."""
+    if not isinstance(raw, Mapping):
+        return raw
+    kept: dict[object, object] = {}
+    for name, decision in raw.items():
+        if _is_client_permission_decision(decision):
+            kept[name] = decision
+        else:
+            logger.warning(
+                "Dropping the client permission entry {!r}: {!r} is not a decision this build knows", name, decision
+            )
+    return kept
 
 
 class InstallSettings(FrozenModel):
@@ -81,6 +153,13 @@ class InstallSettings(FrozenModel):
         description=(
             "Whether an approved workspace's agents may run commands on this device as the user; "
             "install-keyed on purpose, so enabling it on one device never enables it on another"
+        ),
+    )
+    client_permissions: Mapping[str, ClientPermissionDecision] = Field(
+        default=_IMBUE_DEFAULT_CLIENT_PERMISSIONS_BY_NAME,
+        description=(
+            "The decision in effect for each client permission (by name) where a workspace holds none of its own; "
+            "nothing writes it yet, so it is the Imbue default table (spec section 5.2)"
         ),
     )
 
@@ -118,6 +197,31 @@ class AccountSettings(FrozenModel):
             "only assignments that differ from the app's defaults are stored (spec section 10.1)"
         ),
     )
+
+
+class WorkspaceInstallSettings(FrozenModel):
+    """Values this install holds for one workspace: this computer's decisions about that workspace.
+
+    One record per workspace, held by the install and never synced
+    (``specs/workspace-microphone-permission/spec.md``, D1). Unknown keys are
+    kept (``extra="allow"``), and so is an entry naming a permission this build
+    does not declare: both round-trip a newer build's record. Only an entry
+    whose decision cannot be parsed is dropped, with a warning, so one bad value
+    does not cost the workspace its other answers.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="allow", arbitrary_types_allowed=False)
+
+    settings_format: int = Field(default=SUPPORTED_SETTINGS_FORMAT, description="The record's shape version")
+    client_permissions: Mapping[str, ClientPermissionDecision] = Field(
+        default_factory=dict,
+        description="This workspace's own decisions, by permission name; an absent name defers to the next level",
+    )
+
+    @field_validator("client_permissions", mode="before")
+    @classmethod
+    def _drop_unparseable_decisions(cls, raw: object) -> object:
+        return _without_unparseable_decisions(raw)
 
 
 # The update window hours are the one declared override in effect: the
@@ -158,6 +262,13 @@ NOTIFICATION_STYLE: Final[SettingDeclaration] = SettingDeclaration(
 ALLOW_AGENT_COMMAND_EXECUTION: Final[SettingDeclaration] = SettingDeclaration(
     key="allow_agent_command_execution", scope=SettingScope.INSTALL, override_kind=SettingOverrideKind.NONE
 )
+# This computer's decisions about a workspace live in its
+# WorkspaceInstallSettings record and win over the install's value. The
+# override is held by the install, never by the workspace, so nothing inside a
+# workspace depends on the device (spec D5).
+CLIENT_PERMISSIONS: Final[SettingDeclaration] = SettingDeclaration(
+    key="client_permissions", scope=SettingScope.INSTALL, override_kind=SettingOverrideKind.INSTALL_WORKSPACE
+)
 
 SETTING_DECLARATIONS: Final[tuple[SettingDeclaration, ...]] = (
     UPDATE_WINDOW_START_HOUR,
@@ -170,6 +281,7 @@ SETTING_DECLARATIONS: Final[tuple[SettingDeclaration, ...]] = (
     REPORT_UNEXPECTED_ERRORS,
     NOTIFICATION_STYLE,
     ALLOW_AGENT_COMMAND_EXECUTION,
+    CLIENT_PERMISSIONS,
 )
 
 

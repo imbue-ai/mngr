@@ -100,13 +100,25 @@ function workspaceIdOfHost(hostname) {
   return match ? match[1].toLowerCase() : null;
 }
 
+// The workspace id an http(s) URL's host names (`[<app>.]agent-<hex>.localhost`,
+// or the legacy host form), lowercased, or null for any other URL.
+function workspaceIdOfUrl(url) {
+  const parsed = parseHttpUrl(url);
+  return parsed === null ? null : workspaceIdOfHost(parsed.hostname);
+}
+
+// Whether `workspaceId` (as workspaceIdOfUrl spells it) is the mounted
+// workspace, under any of the ids it goes by.
+function isAliasOfMount(workspaceId, mount) {
+  if (workspaceId === null || mount === null) return false;
+  const wanted = workspaceId.toLowerCase();
+  return mount.workspaceIds.some((id) => id.toLowerCase() === wanted);
+}
+
 // Whether `url` (a page's URL, or a referrer) is on the mounted workspace's
 // own origin family.
 function isOfMountedWorkspace(url, mount) {
-  const parsed = parseHttpUrl(url);
-  const workspaceId = parsed === null ? null : workspaceIdOfHost(parsed.hostname);
-  if (workspaceId === null) return false;
-  return mount.workspaceIds.map((id) => id.toLowerCase()).includes(workspaceId);
+  return isAliasOfMount(workspaceIdOfUrl(url), mount);
 }
 
 // A frame that has shown nothing yet (a cold start, before the rows reached
@@ -407,12 +419,15 @@ function createLinkRouter({
   isSharedWorkspaceUrl = () => false,
   isSharedWorkspaceShown = () => false,
 }) {
-  const mounts = new WeakMap();
+  // A Map rather than a WeakMap because mountShowing iterates it, so install's
+  // 'destroyed' listener drops a dead webContents instead of the collector.
+  const mounts = new Map();
 
   function mountFor(webContents) {
     const mounted = mounts.get(webContents);
     if (mounted === undefined) return null;
     return {
+      workspaceId: mounted.workspaceId,
       workspaceIds: workspaceAliases(mounted.workspaceId),
       opensLinks: mounted.opensLinks,
       opensCustomSchemeLinks: mounted.opensCustomSchemeLinks,
@@ -457,6 +472,27 @@ function createLinkRouter({
       mounts.delete(webContents);
     },
 
+    /**
+     * The workspace the window's page has mounted, as `{ workspaceId,
+     * workspaceIds, opensLinks, opensCustomSchemeLinks }` (the canonical id
+     * the page reported, then every id it goes by), or null.
+     */
+    mountOf(webContents) {
+      return mountFor(webContents);
+    },
+
+    /**
+     * A mount of `workspaceId` (any of its aliases) in any window, or null:
+     * for a permission check Electron attributes to no webContents.
+     */
+    mountShowing(workspaceId) {
+      for (const webContents of mounts.keys()) {
+        const mount = mountFor(webContents);
+        if (isAliasOfMount(workspaceId, mount)) return mount;
+      }
+      return null;
+    },
+
     /** The workspace the window's page has mounted, or null. */
     workspaceOf(webContents) {
       return mountedWorkspaceId(webContents);
@@ -481,6 +517,9 @@ function createLinkRouter({
     },
 
     install(webContents) {
+      webContents.on('destroyed', () => {
+        mounts.delete(webContents);
+      });
       webContents.setWindowOpenHandler((details) => {
         const referrer = details.referrer ? details.referrer.url : '';
         const mount = mountFor(webContents);
@@ -537,6 +576,8 @@ module.exports = {
   POPUP_ACTIONS,
   isExternalUrl,
   isCustomSchemeUrl,
+  workspaceIdOfUrl,
+  isAliasOfMount,
   decidePopup,
   decideFrameNavigation,
   isSharedFlowRedirectRefused,

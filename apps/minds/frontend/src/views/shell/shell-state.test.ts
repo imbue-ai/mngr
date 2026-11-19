@@ -7,6 +7,9 @@ import { recoveryRoute } from "../../models/create";
 import { takePendingHelpLaunch } from "../../models/help";
 import { ErrorDialogQueue } from "../../models/errorDialog";
 import { WebLoginModel } from "../../models/webLogin";
+import type { ClientPermissionAnswer } from "../../electron-bridge";
+import { ClientPermissionPromptModel } from "../../models/clientPermissions";
+import { clientPermissionAsk } from "../../models/clientPermissions.testing";
 import type { UiChannelClient } from "../../channel/client";
 import {
   SHARED_WORKSPACE_DOMAIN,
@@ -1789,6 +1792,31 @@ describe("ShellState.handleEscape", () => {
 
     expect(webLoginModel.isOpen).toBe(false);
     expect(shell.isNotificationsOpen).toBe(true);
+  });
+
+  it("gives the key to the client-permission prompt over the sign-in modal, answering a one-time Don't allow", () => {
+    // The Shell paints the prompt last of all the z-[110] surfaces, so it is
+    // closed first, and closing it answers main rather than leaving the
+    // page's request waiting.
+    const webLoginModel = new WebLoginModel(
+      undefined,
+      () => {},
+      () => {},
+    );
+    webLoginModel.state = "waiting";
+    const answers: ClientPermissionAnswer[] = [];
+    const prompt = new ClientPermissionPromptModel({
+      redraw: () => undefined,
+      answer: (answer) => answers.push(answer),
+    });
+    prompt.show(clientPermissionAsk());
+    shell = new ShellState(createEmptyStores(), webLoginModel, undefined, undefined, prompt);
+
+    expect(shell.handleEscape()).toBe(true);
+
+    expect(prompt.isOpen).toBe(false);
+    expect(answers).toEqual([{ promptId: "prompt-1", decision: "denied", isRemembered: false }]);
+    expect(webLoginModel.isOpen).toBe(true);
   });
 
   it("gives the key to the notification feed over an open card", () => {

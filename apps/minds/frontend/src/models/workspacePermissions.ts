@@ -46,6 +46,7 @@ import { errorFromSentenceResponse, reasonFromBody, refusalDetailFromBody, remed
 import { defaultFetchJson } from "./workspaceOptions";
 import type { ErrorDialogQueue } from "./errorDialog";
 import { errorDialogs } from "./errorDialog";
+import { ClientPermissionsModel } from "./clientPermissions";
 import {
   forgetWarmedPermissionsOverview,
   readWarmedPermissionsOverview,
@@ -79,6 +80,7 @@ export const ADD_CONNECTION_SECTION = "add-connection";
 export const LOCAL_FILES_SECTION = "local-files";
 export const OTHER_MACHINES_SECTION = "other-machines";
 export const THIS_COMPUTER_SECTION = "this-computer";
+export const CLIENT_PERMISSIONS_SECTION = "client-permissions";
 
 const FIXED_SECTIONS: readonly string[] = [
   WAITING_SECTION,
@@ -86,6 +88,7 @@ const FIXED_SECTIONS: readonly string[] = [
   LOCAL_FILES_SECTION,
   OTHER_MACHINES_SECTION,
   THIS_COMPUTER_SECTION,
+  CLIENT_PERMISSIONS_SECTION,
 ];
 
 /** Left-nav key for a connection. Keyed by (service, account) rather than by
@@ -349,6 +352,10 @@ export class PermissionsModel {
   /** Set when a re-read the user did not ask for failed: the pane on screen is
    * the last one that loaded, and says so. */
   refreshError: UserFacingError | null = null;
+  /** The Client permissions section's own model. Its read never leaves this
+   * computer, so it is loaded and answers on its own: the section stands when
+   * the gateway behind everything else here cannot be reached. */
+  readonly clientPermissions: ClientPermissionsModel;
   /** Service whose credential form is open in Add connection, or null. */
   credentialFormServiceName: string | null = null;
   /** What the user typed into that form, keyed by parameter name. */
@@ -381,6 +388,7 @@ export class PermissionsModel {
     this.fetchJsonImpl = dependencies.fetchJson ?? defaultFetchJson;
     this.redrawImpl = dependencies.redraw ?? m.redraw;
     this.errorDialogs = dependencies.errorDialogs ?? errorDialogs;
+    this.clientPermissions = new ClientPermissionsModel(agentId, dependencies);
   }
 
   /** Start the first read. The tab mounts on every visit, so later calls are

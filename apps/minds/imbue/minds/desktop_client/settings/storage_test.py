@@ -5,8 +5,12 @@ from imbue.minds.desktop_client.minds_config import AutoUpdatePromptDecision
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.minds_config import NotificationStyle
 from imbue.minds.desktop_client.settings.schema import AccountSettings
+from imbue.minds.desktop_client.settings.schema import ClientPermissionDecision
+from imbue.minds.desktop_client.settings.schema import ClientPermissionName
 from imbue.minds.desktop_client.settings.schema import InstallSettings
 from imbue.minds.desktop_client.settings.storage import load_settings_context
+from imbue.minds.desktop_client.workspace_install_settings_store import WorkspaceInstallSettingsStore
+from imbue.mngr.primitives import AgentId
 
 
 def test_the_context_carries_the_stored_values_of_the_named_account(tmp_path: Path) -> None:
@@ -41,6 +45,7 @@ def test_the_context_carries_the_stored_values_of_the_named_account(tmp_path: Pa
     )
     assert context.workspace_override_by_key == {}
     assert context.user_override_by_key == {}
+    assert context.install_workspace_override_by_key == {}
 
 
 def test_each_account_resolves_from_its_own_record(tmp_path: Path) -> None:
@@ -68,3 +73,43 @@ def test_a_fresh_install_reads_as_the_declared_defaults(tmp_path: Path) -> None:
 
     assert context.account == AccountSettings()
     assert context.install == InstallSettings()
+
+
+def test_the_context_carries_what_the_install_holds_for_the_named_workspace(tmp_path: Path) -> None:
+    store = WorkspaceInstallSettingsStore(records_dir=tmp_path / "workspace_install_settings")
+    workspace_id = AgentId.generate()
+    store.set_client_permission(str(workspace_id), ClientPermissionName.MICROPHONE, ClientPermissionDecision.DENIED)
+
+    context = load_settings_context(
+        None, None, "local", workspace_id=workspace_id, workspace_install_settings_store=store
+    )
+
+    assert context.install_workspace_override_by_key == {
+        "client_permissions": {"microphone": ClientPermissionDecision.DENIED}
+    }
+    assert context.install == InstallSettings()
+
+
+def test_a_workspace_the_install_holds_nothing_for_passes_no_install_override(tmp_path: Path) -> None:
+    """An absent entry defers (spec D3), so the override map must stay empty rather than carry an empty mapping."""
+    store = WorkspaceInstallSettingsStore(records_dir=tmp_path / "workspace_install_settings")
+    other_workspace_id = AgentId.generate()
+    store.set_client_permission(
+        str(other_workspace_id), ClientPermissionName.MICROPHONE, ClientPermissionDecision.GRANTED
+    )
+
+    context = load_settings_context(
+        None, None, "local", workspace_id=AgentId.generate(), workspace_install_settings_store=store
+    )
+
+    assert context.install_workspace_override_by_key == {}
+
+
+def test_a_read_outside_any_workspace_passes_no_install_override_even_with_a_store(tmp_path: Path) -> None:
+    store = WorkspaceInstallSettingsStore(records_dir=tmp_path / "workspace_install_settings")
+    workspace_id = AgentId.generate()
+    store.set_client_permission(str(workspace_id), ClientPermissionName.MICROPHONE, ClientPermissionDecision.DENIED)
+
+    context = load_settings_context(None, None, "local", workspace_install_settings_store=store)
+
+    assert context.install_workspace_override_by_key == {}

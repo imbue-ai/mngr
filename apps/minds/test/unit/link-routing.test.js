@@ -16,6 +16,8 @@ const {
   externalOpenPrompt,
   createExternalOpener,
   createLinkRouter,
+  workspaceIdOfUrl,
+  isAliasOfMount,
 } = require('../../electron/link-routing');
 const EXTERNALITY_VECTORS = require('../../electron/link-externality-vectors.json');
 
@@ -658,4 +660,62 @@ test('a window gets one question per scheme at a time; launches while it is open
   for (const answer of pendingAnswers.splice(0)) answer({ accepted: true, remember: false });
   await next;
   assert.deepEqual(opened, ['paseo://open?a', 'mailto:someone@example.com', 'paseo://open?c', 'paseo://open?d']);
+});
+
+test('workspaceIdOfUrl names the workspace an app address is of, lowercased, and null for any other URL', () => {
+  assert.equal(workspaceIdOfUrl(workspaceAddress(AGENT)), AGENT);
+  assert.equal(workspaceIdOfUrl(shellAddress(AGENT)), AGENT);
+  assert.equal(workspaceIdOfUrl(workspaceAddress(HOST, 'terminal')), HOST);
+  assert.equal(workspaceIdOfUrl(workspaceAddress(AGENT.toUpperCase())), AGENT);
+  assert.equal(workspaceIdOfUrl(`http://a.b.${AGENT}.localhost/`), AGENT);
+  for (const url of [
+    `${BACKEND_ORIGIN}/workspace/${AGENT}`,
+    LOCAL_URL,
+    'https://example.com/',
+    `ws://${AGENT}.localhost:8421/socket`,
+    `blob:${shellAddress(AGENT)}0f1e2d3c`,
+    'about:blank',
+    '',
+    'not a url',
+    null,
+    undefined,
+  ]) {
+    assert.equal(workspaceIdOfUrl(url), null, String(url));
+  }
+});
+
+test('isAliasOfMount answers whether an id is one the mounted workspace goes by, under any spelling', () => {
+  assert.equal(isAliasOfMount(AGENT, ANNOUNCING), true);
+  assert.equal(isAliasOfMount(HOST, ANNOUNCING), true);
+  assert.equal(isAliasOfMount(AGENT.toUpperCase(), ANNOUNCING), true);
+  assert.equal(isAliasOfMount(OTHER_AGENT, ANNOUNCING), false);
+  assert.equal(isAliasOfMount(AGENT, null), false);
+  assert.equal(isAliasOfMount(null, ANNOUNCING), false);
+});
+
+test("the router reports a window's mount by its canonical id and every alias, and finds a workspace's mount in any window", () => {
+  const { router } = makeRouter();
+  const mainWindow = makeWebContents();
+  const popoutWindow = makeWebContents();
+  router.install(mainWindow);
+  router.install(popoutWindow);
+  assert.equal(router.mountOf(mainWindow), null);
+  assert.equal(router.mountShowing(AGENT), null);
+  router.recordMount(mainWindow, { workspaceId: AGENT, opensLinks: true, opensCustomSchemeLinks: false });
+  router.recordMount(popoutWindow, { workspaceId: OTHER_AGENT, opensLinks: false, opensCustomSchemeLinks: false });
+  const mainMount = { workspaceId: AGENT, workspaceIds: [AGENT, HOST], opensLinks: true, opensCustomSchemeLinks: false };
+  const popoutMount = { workspaceId: OTHER_AGENT, workspaceIds: [OTHER_AGENT], opensLinks: false, opensCustomSchemeLinks: false };
+  assert.deepEqual(router.mountOf(mainWindow), mainMount);
+  assert.deepEqual(router.mountOf(popoutWindow), popoutMount);
+  // By any alias, under any spelling; the canonical id comes back.
+  assert.deepEqual(router.mountShowing(HOST), mainMount);
+  assert.deepEqual(router.mountShowing(AGENT.toUpperCase()), mainMount);
+  assert.deepEqual(router.mountShowing(OTHER_AGENT), popoutMount);
+  assert.equal(router.mountShowing('agent-000000000000'), null);
+  assert.equal(router.mountShowing(null), null);
+  // A destroyed window's mount is gone with it; the other window's stays.
+  mainWindow.listeners.destroyed();
+  assert.equal(router.mountOf(mainWindow), null);
+  assert.equal(router.mountShowing(AGENT), null);
+  assert.deepEqual(router.mountShowing(OTHER_AGENT), popoutMount);
 });

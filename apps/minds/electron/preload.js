@@ -165,6 +165,14 @@ contextBridge.exposeInMainWorld('mindsNative', {
       if (typeof url === 'string') callback(url);
     });
   },
+
+  // Client permissions (electron/client-permission-policy.js): main asks the
+  // window's page to draw the prompt, and the page answers it.
+  onClientPermissionPrompt: (callback) => {
+    ipcRenderer.on('client-permission-prompt', (_event, prompt) => callback(prompt));
+  },
+  answerClientPermission: (answer) => ipcRenderer.send('client-permission-answer', answer),
+
   openNotificationInExistingWindow: (route, entry) => ipcRenderer.invoke('open-notification-in-existing-window', route, entry),
   onOpenNotification: (callback) => {
     notificationListener = callback;
