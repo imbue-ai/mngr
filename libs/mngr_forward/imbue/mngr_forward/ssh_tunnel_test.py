@@ -35,6 +35,7 @@ from loguru import logger
 from paramiko.common import AUTH_FAILED
 from paramiko.common import AUTH_SUCCESSFUL
 from paramiko.common import OPEN_FAILED_CONNECT_FAILED
+from paramiko.common import OPEN_SUCCEEDED
 from pydantic import PrivateAttr
 
 from imbue.imbue_common.primitives import NonNegativeInt
@@ -46,6 +47,7 @@ from imbue.mngr.providers.ssh_utils import save_ssh_keypair
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_forward.primitives import ReverseTunnelSpec
+from imbue.mngr_forward.relay import relay_data
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import ReverseTunnelInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
@@ -58,6 +60,7 @@ from imbue.mngr_forward.ssh_tunnel import _TransportFailureHandler
 from imbue.mngr_forward.ssh_tunnel import _create_short_path_tmpdir
 from imbue.mngr_forward.ssh_tunnel import _create_ssh_client
 from imbue.mngr_forward.ssh_tunnel import _create_tunnel_listener
+from imbue.mngr_forward.ssh_tunnel import _is_compression_worthwhile_for_host
 from imbue.mngr_forward.ssh_tunnel import _is_transport_unusable
 from imbue.mngr_forward.ssh_tunnel import _load_private_key
 from imbue.mngr_forward.ssh_tunnel import _log_authentication_failure
@@ -245,7 +248,7 @@ def test_create_ssh_client_refuses_to_connect_without_a_known_hosts_file(tmp_pat
     ssh_info = RemoteSSHInfo(user="root", host="203.0.113.5", port=22, key_path=key_path)
 
     with pytest.raises(SSHTunnelError, match="known_hosts") as exc_info:
-        _create_ssh_client(ssh_info)
+        _create_ssh_client(ssh_info, is_compressed=False)
     assert exc_info.value.phase is SSHTunnelPhase.LOCAL_SETUP
 
 
@@ -264,7 +267,7 @@ def test_create_ssh_client_refuses_to_connect_without_the_private_key(tmp_path: 
     ssh_info = RemoteSSHInfo(user="root", host="203.0.113.5", port=22, key_path=key_path)
 
     with pytest.raises(SSHTunnelError, match="No SSH key") as exc_info:
-        _create_ssh_client(ssh_info)
+        _create_ssh_client(ssh_info, is_compressed=False)
     assert exc_info.value.phase is SSHTunnelPhase.LOCAL_SETUP
 
 
@@ -282,7 +285,7 @@ def test_create_ssh_client_refuses_a_key_path_that_is_not_a_file(tmp_path: Path)
 
     ssh_info = RemoteSSHInfo(user="root", host="203.0.113.5", port=22, key_path=tmp_path)
     with pytest.raises(SSHTunnelError, match="No SSH key file") as exc_info:
-        _create_ssh_client(ssh_info)
+        _create_ssh_client(ssh_info, is_compressed=False)
     assert exc_info.value.phase is SSHTunnelPhase.LOCAL_SETUP
 
 
@@ -294,7 +297,7 @@ def test_create_ssh_client_refuses_a_key_file_it_cannot_load(tmp_path: Path) -> 
     ssh_info = RemoteSSHInfo(user="root", host="203.0.113.5", port=22, key_path=key_path)
 
     with pytest.raises(SSHTunnelError, match="Could not parse SSH private key") as exc_info:
-        _create_ssh_client(ssh_info)
+        _create_ssh_client(ssh_info, is_compressed=False)
     assert exc_info.value.phase is SSHTunnelPhase.LOCAL_SETUP
 
 
@@ -320,7 +323,7 @@ def test_create_ssh_client_refusal_names_both_candidate_paths(tmp_path: Path) ->
     )
 
     with pytest.raises(SSHTunnelError, match=rf"{explicit_path}.*{key_path.parent / 'known_hosts'}"):
-        _create_ssh_client(ssh_info)
+        _create_ssh_client(ssh_info, is_compressed=False)
 
 
 def test_create_ssh_client_refusal_names_one_path_when_the_candidates_coincide(tmp_path: Path) -> None:
@@ -339,7 +342,7 @@ def test_create_ssh_client_refusal_names_one_path_when_the_candidates_coincide(t
     )
 
     with pytest.raises(SSHTunnelError) as exc_info:
-        _create_ssh_client(ssh_info)
+        _create_ssh_client(ssh_info, is_compressed=False)
     assert str(exc_info.value).count(str(sibling_path)) == 1
 
 
@@ -407,7 +410,7 @@ def test_create_ssh_client_refusal_names_the_user_known_hosts_for_credential_def
     ssh_info = RemoteSSHInfo(user="root", host="203.0.113.5", port=22, key_path=Path(""))
 
     with pytest.raises(SSHTunnelError, match=str(home / ".ssh" / "known_hosts")):
-        _create_ssh_client(ssh_info)
+        _create_ssh_client(ssh_info, is_compressed=False)
 
 
 def test_resolve_known_hosts_path_returns_none_when_no_candidate_exists(tmp_path: Path) -> None:
@@ -1961,6 +1964,9 @@ def _loopback_sshd(
                 return
             transport = paramiko.Transport(connection)
             transport.add_server_key(host_key)
+            # Offered the way OpenSSH's default ``Compression yes`` offers it, so
+            # whether a connection is compressed is the client's choice alone.
+            transport.use_compression(True)
             try:
                 transport.start_server(server=server)
             except (paramiko.SSHException, EOFError, ConnectionError) as e:
@@ -2055,7 +2061,7 @@ def test_a_real_sshd_rejecting_the_key_logs_the_offered_key_and_reraises(tmp_pat
         offered_fingerprint = paramiko.Ed25519Key.from_private_key_file(str(ssh_info.key_path)).fingerprint
         with capture_loguru("WARNING") as log_output:
             with pytest.raises(paramiko.AuthenticationException):
-                _create_ssh_client(ssh_info)
+                _create_ssh_client(ssh_info, is_compressed=False)
 
     warnings = log_output.getvalue().splitlines()
     assert len(warnings) == 1, warnings
@@ -2093,7 +2099,7 @@ def test_a_real_sshd_rejecting_an_rsa_or_ecdsa_key_reports_the_rejection(
         offered_key = write_key(ssh_info.key_path)
         with capture_loguru("WARNING") as log_output:
             with pytest.raises(paramiko.AuthenticationException, match="Authentication failed"):
-                _create_ssh_client(ssh_info)
+                _create_ssh_client(ssh_info, is_compressed=False)
 
     warnings = log_output.getvalue().splitlines()
     assert len(warnings) == 1, warnings
@@ -2106,7 +2112,7 @@ def test_a_real_sshd_authorizing_an_rsa_pem_key_accepts_it(tmp_path: Path) -> No
     rsa_key = paramiko.RSAKey.generate(2048)
     with _loopback_sshd(tmp_path, _SingleKeyAcceptingServer.create(rsa_key)) as (ssh_info, _served):
         rsa_key.write_private_key_file(str(ssh_info.key_path))
-        client = _create_ssh_client(ssh_info)
+        client = _create_ssh_client(ssh_info, is_compressed=False)
         try:
             transport = client.get_transport()
             assert transport is not None
@@ -2127,7 +2133,7 @@ def test_a_connection_whose_key_was_rejected_is_closed(tmp_path: Path) -> None:
     with _loopback_sshd(tmp_path, _KeyRejectingServer.create()) as (ssh_info, _served):
         transports_before = _running_client_transports()
         with pytest.raises(paramiko.AuthenticationException):
-            _create_ssh_client(ssh_info)
+            _create_ssh_client(ssh_info, is_compressed=False)
 
         assert poll_until(lambda: not _running_client_transports() - transports_before), (
             "the failed connection was left open"
@@ -2144,7 +2150,7 @@ def test_a_connection_to_a_host_presenting_an_unpinned_host_key_is_closed(tmp_pa
         )
         transports_before = _running_client_transports()
         with pytest.raises(paramiko.BadHostKeyException):
-            _create_ssh_client(ssh_info)
+            _create_ssh_client(ssh_info, is_compressed=False)
 
         assert poll_until(lambda: not _running_client_transports() - transports_before), (
             "the failed connection was left open"
@@ -2162,7 +2168,7 @@ def test_a_host_with_a_key_of_its_own_is_offered_that_key_alone(
     with _loopback_sshd(tmp_path, server) as (ssh_info, _served):
         configured_key_fingerprint = paramiko.PKey.from_path(ssh_info.key_path).fingerprint
         with pytest.raises(paramiko.AuthenticationException):
-            _create_ssh_client(ssh_info)
+            _create_ssh_client(ssh_info, is_compressed=False)
 
     assert [key.fingerprint for key in server.offered_keys] == [configured_key_fingerprint]
 
@@ -2183,7 +2189,7 @@ def test_a_credential_deferring_host_authenticates_with_the_users_own_keys(
             key_path=Path(""),
             known_hosts_path=tmp_path / "known_hosts",
         )
-        client = _create_ssh_client(ssh_info)
+        client = _create_ssh_client(ssh_info, is_compressed=False)
         try:
             transport = client.get_transport()
             assert transport is not None
@@ -2338,7 +2344,7 @@ def test_create_ssh_client_reports_a_host_that_hangs_up_as_a_host_connect_failur
     """
     with _sshd_that_hangs_up_after_the_banner(tmp_path) as ssh_info:
         with pytest.raises(SSHTunnelError) as exc_info:
-            _create_ssh_client(ssh_info)
+            _create_ssh_client(ssh_info, is_compressed=False)
     assert exc_info.value.phase is SSHTunnelPhase.HOST_CONNECT
     assert isinstance(exc_info.value.__cause__, EOFError)
 
@@ -2436,3 +2442,154 @@ def test_cleanup_survives_a_host_that_hung_up_under_the_cancel(tmp_path: Path) -
     manager.cleanup()
 
     assert manager._connections == {}
+
+
+@pytest.mark.parametrize(
+    "host, expected",
+    [
+        ("localhost", False),
+        ("LocalHost", False),
+        ("127.0.0.1", False),
+        ("127.0.0.2", False),
+        ("::1", False),
+        ("135.148.168.234", True),
+        ("10.0.0.5", True),
+        ("2001:db8::1", True),
+        ("remote.example.com", True),
+    ],
+)
+def test_compression_is_requested_for_every_host_but_a_loopback_one(host: str, expected: bool) -> None:
+    assert _is_compression_worthwhile_for_host(host) is expected
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize(
+    "is_compressed, expected_algorithm",
+    [(True, "zlib@openssh.com"), (False, "none")],
+)
+def test_create_ssh_client_compresses_the_connection_only_when_asked(
+    tmp_path: Path, is_compressed: bool, expected_algorithm: str
+) -> None:
+    with _loopback_sshd(tmp_path, _InnerPortRefusingServer()) as (ssh_info, served):
+        client = _create_ssh_client(ssh_info, is_compressed=is_compressed)
+        try:
+            transport = client.get_transport()
+            assert transport is not None
+            assert poll_until(lambda: len(served) == 1), "the sshd never accepted the connection"
+            # Each side's outgoing direction: requests from the client, responses from the server.
+            assert (transport.local_compression, served[0].local_compression) == (
+                expected_algorithm,
+                expected_algorithm,
+            )
+        finally:
+            client.close()
+
+
+@pytest.mark.timeout(60)
+def test_the_manager_leaves_a_connection_to_a_loopback_host_uncompressed(tmp_path: Path) -> None:
+    """The wiring of the host check: the server offers compression, and a loopback connection still declines it."""
+    with _loopback_sshd(tmp_path, _InnerPortRefusingServer()) as (ssh_info, _served):
+        manager = SSHTunnelManager()
+        try:
+            manager.get_tunnel_socket_path(ssh_info, "127.0.0.1", 8000)
+            transport = manager._connections[f"{ssh_info.host}:{ssh_info.port}"].get_transport()
+            assert transport is not None
+            assert transport.local_compression == "none"
+        finally:
+            manager.cleanup()
+
+
+class _DirectTcpipForwardingServer(paramiko.ServerInterface):
+    """An sshd that admits anyone and accepts every ``direct-tcpip`` open, remembering where each one goes."""
+
+    destination_by_channel_id: dict[int, tuple[str, int]]
+
+    @classmethod
+    def create(cls) -> "_DirectTcpipForwardingServer":
+        instance = cls.__new__(cls)
+        object.__setattr__(instance, "destination_by_channel_id", {})
+        return instance
+
+    def get_allowed_auths(self, username: str) -> str:
+        return "publickey"
+
+    def check_auth_publickey(self, username: str, key: paramiko.PKey) -> int:
+        return AUTH_SUCCESSFUL
+
+    def check_channel_direct_tcpip_request(
+        self, chanid: int, origin: tuple[str, int], destination: tuple[str, int]
+    ) -> int:
+        self.destination_by_channel_id[chanid] = destination
+        return OPEN_SUCCEEDED
+
+
+@contextmanager
+def _forwarding_loopback_sshd(tmp_path: Path) -> Generator[RemoteSSHInfo, None, None]:
+    """Run a loopback sshd that connects each ``direct-tcpip`` channel to the loopback port it names."""
+    server = _DirectTcpipForwardingServer.create()
+    stop_event = threading.Event()
+    with _loopback_sshd(tmp_path, server) as (ssh_info, served):
+
+        def connect_channels_to_their_destinations() -> None:
+            while not stop_event.is_set():
+                if not served:
+                    stop_event.wait(_SSHD_ACCEPT_POLL_SECONDS)
+                    continue
+                for transport in tuple(served):
+                    channel = transport.accept(timeout=_SSHD_ACCEPT_POLL_SECONDS)
+                    if channel is None:
+                        continue
+                    backend = socket.create_connection(server.destination_by_channel_id[channel.get_id()])
+                    threading.Thread(target=relay_data, args=(backend, channel), daemon=True).start()
+
+        thread = threading.Thread(target=connect_channels_to_their_destinations, daemon=True, name="test-sshd-fwd")
+        thread.start()
+        try:
+            yield ssh_info
+        finally:
+            stop_event.set()
+            thread.join(timeout=5.0)
+
+
+@contextmanager
+def _padded_backend(body: bytes) -> Generator[int, None, None]:
+    """A loopback backend that answers each connection's request with ``body``, then closes it. Yields its port."""
+
+    def answer(connection: socket.socket) -> None:
+        with connection:
+            connection.settimeout(_BLOCKED_OPEN_HOLD_SECONDS)
+            request = b""
+            while b"\r\n\r\n" not in request:
+                chunk = connection.recv(4096)
+                if not chunk:
+                    return
+                request += chunk
+            connection.sendall(b"HTTP/1.0 200 OK\r\nConnection: close\r\n\r\n" + body)
+
+    def accept(connection: socket.socket) -> None:
+        threading.Thread(target=answer, args=(connection,), daemon=True).start()
+
+    with _loopback_server(accept, "test-backend") as port:
+        yield port
+
+
+@pytest.mark.timeout(60)
+def test_a_compressed_connection_carries_a_response_intact(tmp_path: Path) -> None:
+    body = b"const padding = 'compressible';\n" * 6000
+    with _padded_backend(body) as backend_port, _forwarding_loopback_sshd(tmp_path) as ssh_info:
+        client = _create_ssh_client(ssh_info, is_compressed=True)
+        try:
+            transport = client.get_transport()
+            assert transport is not None
+            channel = transport.open_channel("direct-tcpip", ("127.0.0.1", backend_port), ("127.0.0.1", 0))
+            channel.settimeout(10.0)
+            channel.sendall(b"GET / HTTP/1.0\r\n\r\n")
+            response = b""
+            while chunk := channel.recv(65536):
+                response += chunk
+            channel.close()
+
+            assert transport.local_compression == "zlib@openssh.com"
+            assert response.partition(b"\r\n\r\n")[2] == body
+        finally:
+            client.close()

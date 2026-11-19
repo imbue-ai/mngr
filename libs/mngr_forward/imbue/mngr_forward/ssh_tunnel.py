@@ -1,4 +1,5 @@
 import hashlib
+import ipaddress
 import os
 import socket
 import sys
@@ -22,6 +23,7 @@ from pydantic import PrivateAttr
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.imbue_common.suspension import ClockReading
 from imbue.imbue_common.suspension import read_clocks
 from imbue.imbue_common.suspension import was_suspended_since
@@ -353,7 +355,7 @@ class SSHTunnelManager(MutableModel):
                 logger.trace("Error closing stale SSH connection: {}", e)
 
         logger.debug("Establishing SSH connection to {}:{}", ssh_info.host, ssh_info.port)
-        client = _create_ssh_client(ssh_info)
+        client = _create_ssh_client(ssh_info, is_compressed=_is_compression_worthwhile_for_host(ssh_info.host))
         self._connections[conn_key] = client
         self._connection_established_at[conn_key] = read_clocks()
         return client
@@ -1047,8 +1049,30 @@ def _load_private_key(key_path: Path) -> paramiko.PKey | None:
         raise SSHTunnelError(str(e), SSHTunnelPhase.LOCAL_SETUP) from e
 
 
-def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
+@pure
+def _is_compression_worthwhile_for_host(host: str) -> bool:
+    """Whether an SSH connection to ``host`` should ask for zlib compression.
+
+    Pages an agent's services serve are mostly uncompressed text, and over a WAN link
+    the bytes cost far more than the CPU to compress them. A loopback host, such
+    as a local VM or container reached through a forwarded port, has no such
+    link to save. Decided on the spelling alone, without resolving the name, so
+    it never blocks.
+    """
+    if host.lower() == "localhost":
+        return False
+    try:
+        return not ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return True
+
+
+def _create_ssh_client(ssh_info: RemoteSSHInfo, is_compressed: bool) -> paramiko.SSHClient:
     """Create a paramiko SSH connection to the given host.
+
+    ``is_compressed`` asks the server for zlib compression on every channel of
+    the connection; a server that does not offer it falls back to none, so it
+    never makes the connection fail.
 
     Prefers the explicitly-supplied known_hosts path, falling back to the file
     next to the SSH key (the long-standing "mngr stores it next to the key"
@@ -1130,6 +1154,7 @@ def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
             allow_agent=is_ambient_authentication_used,
             look_for_keys=is_ambient_authentication_used,
             timeout=10.0,
+            compress=is_compressed,
         )
         is_connected = True
     except paramiko.SSHException as e:
