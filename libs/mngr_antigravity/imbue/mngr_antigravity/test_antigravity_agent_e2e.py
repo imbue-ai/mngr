@@ -19,7 +19,8 @@ The model is pinned to a Claude model via the seeded ``settings.json`` (agy read
 model from settings, so the spaces/parens in the display name never reach a shell): agy's
 default Gemini model can hit per-account usage limits, whereas a Claude model is reliable.
 
-Requires the ``agy`` binary on PATH and a logged-in ``~/.gemini`` (``oauth_creds.json``);
+Requires the ``agy`` binary on PATH and a signed-in agy: ``~/.gemini/oauth_creds.json``, or
+``MNGR_AGY_TEST_SIGNED_IN=1`` where agy keeps its sign-in in the OS keyring and writes no file (macOS);
 skipped otherwise. Not run in CI.
 """
 
@@ -31,7 +32,10 @@ import shutil
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
+from typing import Final
 
+import psutil
 import pytest
 
 from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
@@ -39,12 +43,19 @@ from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
 from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
 from imbue.mngr.agents.agent_release_testing import run_message_delivery_journey
 from imbue.mngr.agents.agent_release_testing import run_question_mark_message_delivery
+from imbue.mngr.agents.agent_release_testing import send_expecting_success
 from imbue.mngr.hosts.common import is_macos
+from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import BackgroundTaskKind
+from imbue.mngr.utils.polling import poll_until
+from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import init_git_repo
+from imbue.mngr.utils.testing import mngr_agent_cleanup
 from imbue.mngr.utils.testing import run_mngr_subprocess
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_oauth_token_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_settings_path
+from imbue.mngr_antigravity.resources.testing import read_installed_agy_version
 
 # Resolved at import time, before the autouse fixture redirects $HOME: the real ~/.gemini
 # auth the plugin reads and shares into each per-agent home. agy signs in from the
@@ -72,6 +83,20 @@ _REAL_MACOS_KEYCHAINS = Path.home() / "Library" / "Keychains"
 # per-model) -- must be an exact `agy models` display name. Update the default if the
 # account's available models change.
 _MODEL = os.environ.get("MNGR_AGY_TEST_MODEL", "Claude Sonnet 4.6 (Thinking)")
+
+# Set to 1 to vouch that agy is signed in where it keeps its sign-in in the OS keyring and writes no file to check.
+_SIGNED_IN_ENV_VAR: Final[str] = "MNGR_AGY_TEST_SIGNED_IN"
+
+# Outlasts the turn that starts the command, which the test then ends itself.
+_BACKGROUND_SLEEP_SECONDS: Final[int] = 317
+_BACKGROUND_SLEEP_PROMPT: Final[str] = (
+    f"Use your command tool to run exactly `sleep {_BACKGROUND_SLEEP_SECONDS}`, with nothing else on the command "
+    "line (no `&`), and let the tool leave it running in the background: do not wait for it to finish and do not "
+    "check on it. Then reply with just OK."
+)
+_CREATE_TIMEOUT_SECONDS: Final[float] = 600.0
+_TURN_TIMEOUT_SECONDS: Final[float] = 300.0
+_LIST_TIMEOUT_SECONDS: Final[float] = 120.0
 
 
 class _AntigravityReleaseProfile(AgentReleaseProfile):
@@ -105,8 +130,12 @@ class _AntigravityReleaseProfile(AgentReleaseProfile):
         return (preserved_dir / "root_conversation").read_text().strip()
 
     def unavailable_reason(self) -> str | None:
-        if shutil.which("agy") is None or not (_REAL_GEMINI / "oauth_creds.json").exists():
-            return "Release test requires the `agy` binary on PATH and a logged-in ~/.gemini (oauth_creds.json)."
+        is_signed_in = (_REAL_GEMINI / "oauth_creds.json").exists() or os.environ.get(_SIGNED_IN_ENV_VAR) == "1"
+        if shutil.which("agy") is None or not is_signed_in:
+            return (
+                "Release test requires the `agy` binary on PATH and a signed-in agy: ~/.gemini/oauth_creds.json, or "
+                f"{_SIGNED_IN_ENV_VAR}=1 where agy keeps its sign-in in the OS keyring."
+            )
         return None
 
     def setup(self, tmp_path: Path) -> AgentReleaseContext:
@@ -213,3 +242,88 @@ def test_antigravity_question_mark_messages_are_delivered_whole(tmp_path: Path) 
     swallows the keys after it, so these messages are pasted.
     """
     run_question_mark_message_delivery(_AntigravityReleaseProfile(), tmp_path)
+
+
+def _read_listed_agent(profile: AgentReleaseProfile, ctx: AgentReleaseContext, agent_name: str) -> dict[str, Any]:
+    """The agent as ``mngr list`` reports it."""
+    listing = profile.run_mngr(ctx, "list", "--provider", "local", "--format", "json", timeout=_LIST_TIMEOUT_SECONDS)
+    assert listing.returncode == 0, f"mngr list failed:\n{listing.stdout}\n{listing.stderr}"
+    (listed_agent,) = [agent for agent in json.loads(listing.stdout)["agents"] if agent["name"] == agent_name]
+    return listed_agent
+
+
+def _read_state_and_background_tasks(
+    profile: AgentReleaseProfile, ctx: AgentReleaseContext, agent_name: str
+) -> tuple[str, list[tuple[str, str]]]:
+    """The agent's state and the kind and native type of each of its background tasks, as ``mngr list`` reports them."""
+    listed_agent = _read_listed_agent(profile, ctx, agent_name)
+    return listed_agent["state"], [(task["kind"], task["native_type"]) for task in listed_agent["background_tasks"]]
+
+
+@pytest.mark.release
+@pytest.mark.harness_internals(harness="antigravity")
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(900)
+def test_antigravity_agent_reads_running_background_while_a_backgrounded_command_runs(tmp_path: Path) -> None:
+    """A turn that leaves a command running reads RUNNING_BACKGROUND with one SHELL task, then WAITING once it ends.
+
+    Pins that agy's statusLine payload counts the command in ``task_count`` and stops counting it when it ends.
+    """
+    profile = _AntigravityReleaseProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    ctx = profile.setup(tmp_path)
+    agent_name = f"antigravity-background-{get_short_random_string()}"
+    drift = (
+        f"(agy version: {read_installed_agy_version()}; consumer: statusline.sh, which writes one agy-task-<n> "
+        "record per task the statusLine payload's task_count counts)"
+    )
+    with mngr_agent_cleanup(agent_name, env=dict(ctx.env)):
+        create = profile.run_mngr(
+            ctx,
+            "create",
+            agent_name,
+            profile.agent_type,
+            "--no-connect",
+            "--yes",
+            *profile.create_extra_args(ctx),
+            "-S",
+            "agent_types.antigravity.auto_allow_permissions=true",
+            timeout=_CREATE_TIMEOUT_SECONDS,
+        )
+        assert create.returncode == 0, f"create failed:\n{create.stdout}\n{create.stderr}"
+
+        send_expecting_success(profile, ctx, agent_name, _BACKGROUND_SLEEP_PROMPT)
+        assert poll_until(
+            lambda: _read_state_and_background_tasks(profile, ctx, agent_name)
+            == (AgentLifecycleState.RUNNING_BACKGROUND, [(BackgroundTaskKind.SHELL, "task_count")]),
+            timeout=_TURN_TIMEOUT_SECONDS,
+            poll_interval=2.0,
+        ), (
+            f"after the turn that backgrounded `sleep {_BACKGROUND_SLEEP_SECONDS}` the agent never read "
+            "RUNNING_BACKGROUND with one SHELL task of native type task_count; mngr list reports "
+            f"{_read_state_and_background_tasks(profile, ctx, agent_name)} {drift}"
+        )
+
+        agy_pid = _read_listed_agent(profile, ctx, agent_name)["pid"]
+        sleep_processes = [
+            process
+            for process in psutil.Process(agy_pid).children(recursive=True)
+            if process.as_dict(["cmdline"])["cmdline"] == ["sleep", str(_BACKGROUND_SLEEP_SECONDS)]
+        ]
+        assert len(sleep_processes) == 1, (
+            f"expected one `sleep {_BACKGROUND_SLEEP_SECONDS}` under the agent's process {agy_pid}, "
+            f"found {sleep_processes}"
+        )
+        sleep_processes[0].terminate()
+        assert poll_until(
+            lambda: _read_state_and_background_tasks(profile, ctx, agent_name) == (AgentLifecycleState.WAITING, []),
+            timeout=_TURN_TIMEOUT_SECONDS,
+            poll_interval=2.0,
+        ), (
+            "the agent never read WAITING with no background task after its backgrounded command ended; mngr list "
+            f"reports {_read_state_and_background_tasks(profile, ctx, agent_name)} {drift}"
+        )

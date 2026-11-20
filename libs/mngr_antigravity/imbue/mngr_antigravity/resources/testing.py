@@ -38,6 +38,16 @@ TURN_END_KIND_BY_TERMINATION_REASON: Final[Mapping[str, TurnEndKind]] = {
     "CHAINED": TurnEndKind.INTERRUPTED,
 }
 
+# The JSON keys statusline.sh reads out of agy's statusLine payload, each as its path from the payload's top level.
+STATUSLINE_PAYLOAD_FIELD_PATHS: Final[tuple[tuple[str, ...], ...]] = (
+    ("agent_state",),
+    ("conversation_id",),
+    ("task_count",),
+    ("subagents", "status"),
+    ("model", "id"),
+    ("model", "effort"),
+)
+
 # CortexStepStatus / CortexStepSource values used by the builders.
 STATUS_DONE = 3
 STATUS_GENERATING = 8
@@ -231,6 +241,18 @@ def agent_env(state_dir: Path) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}
     env["MNGR_AGENT_STATE_DIR"] = str(state_dir)
     return env
+
+
+def read_installed_agy_version() -> str:
+    """The version the ``agy`` on PATH reports, e.g. ``1.5.12``, or ``unknown`` when it reports none."""
+    result = subprocess.run(
+        ["agy", "--version"],
+        env={**os.environ, "AGY_CLI_DISABLE_AUTO_UPDATE": "true"},
+        capture_output=True,
+        text=True,
+        timeout=30.0,
+    )
+    return result.stdout.strip() or "unknown"
 
 
 def run_statusline(state_dir: Path, payload: str) -> subprocess.CompletedProcess[str]:

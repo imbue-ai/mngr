@@ -444,12 +444,8 @@ def build_antigravity_hooks_config() -> dict[str, Any]:
     The agent's RUNNING/WAITING lifecycle and message-submission signal are NOT
     hooks: they are driven by the mngr-owned ``statusLine`` command
     (``statusline.sh``; see ``build_antigravity_statusline_settings``), which agy
-    invokes on every agent-state change. agy's top-level ``agent_state`` already
-    aggregates subagent activity (it stays ``working`` continuously while a
-    subagent runs and returns to ``idle`` only when root + subagents are all
-    done; verified live against agy 1.0.6/1.0.7), so a single ``agent_state``
-    check captures the whole-turn busy/idle invariant without per-conversation
-    bookkeeping.
+    invokes on every agent-state change. The same command records the background
+    tasks and running subagents agy reports, which can outlast the root's turn.
 
     Auto-approval of tool permissions is NOT a hook either: agy's documented
     ``PreToolUse`` ``{"decision": "allow"}`` output does not actually gate the

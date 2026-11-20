@@ -4,15 +4,13 @@ agy invokes this on every agent-state change, piping a JSON payload on stdin
 (`agent_state`, `conversation_id`, `model`, ...). The script maintains the
 `active` marker BaseAgent reads for RUNNING/WAITING (active iff `agent_state` is
 a busy state -- a denylist excluding idle/initializing/authenticating/empty),
-records the root `conversation_id` for resume, and fires the tmux submission
+records the root `conversation_id` for resume, rewrites the background-task
+records from `task_count` and `subagents`, and fires the tmux submission
 signal when busy. mngr's statusLine is lifecycle-only and prints nothing of its
 own (agy already shows working/idle), so stdout is empty unless a user statusLine
-is composed, in which case the row is that command's output verbatim. The tests
-pin: marker set when working / cleared on idle/initializing/authenticating,
-root_conversation written from conversation_id and not clobbered by empty/garbage
-payloads, an empty row with no user statusLine (the user's output verbatim when
-one is composed), and loud failure on a missing state dir. (`tmux wait-for` is
-`|| true`-guarded, so it is a no-op without a usable TMUX in tests.)
+is composed, in which case the row is that command's output verbatim.
+`tmux wait-for` is `|| true`-guarded, so it is a no-op without a usable TMUX in
+tests.
 """
 
 from __future__ import annotations
@@ -20,12 +18,23 @@ from __future__ import annotations
 import importlib.resources
 import json
 import os
+import re
+import shutil
 import subprocess
+from collections.abc import Sequence
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 from pathlib import Path
+from typing import Final
 
 import pytest
 
 from imbue.mngr import resources as mngr_resources
+from imbue.mngr.primitives import BackgroundTaskKind
+from imbue.mngr.utils.testing import read_background_task_records_in
+from imbue.mngr_antigravity.resources.testing import STATUSLINE_PAYLOAD_FIELD_PATHS
+from imbue.mngr_antigravity.resources.testing import agent_env
 from imbue.mngr_antigravity.resources.testing import run_statusline as _run
 
 _SCRIPT_PATH = Path(__file__).parent / "statusline.sh"
@@ -33,6 +42,7 @@ _SCRIPT_PATH = Path(__file__).parent / "statusline.sh"
 _ROOT_CONV = "2005e9cc-93d7-4685-b96c-8da612ab8165"
 _OTHER_CONV = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 _MODEL = "Claude Sonnet 4.6 (Thinking)"
+_CLOCK_SLACK: Final[timedelta] = timedelta(seconds=5)
 
 
 def _payload(*, agent_state: str | None, conversation_id: str | None = _ROOT_CONV, model: str | None = _MODEL) -> str:
@@ -285,3 +295,197 @@ def test_switching_to_a_fixed_effort_model_drops_the_recorded_effort(tmp_path: P
     _run(tmp_path, '{"agent_state":"idle","model":{"id":"Gemini 3.8 Flash (High)","effort":"high"}}')
     _run(tmp_path, '{"agent_state":"idle","model":{"id":"Claude Opus 4.6 (Thinking)"}}')
     assert json.loads((tmp_path / "model_state.json").read_text()) == {"model": "Claude Opus 4.6 (Thinking)"}
+
+
+def _install_background_task_lib(state_dir: Path) -> None:
+    commands = state_dir / "commands"
+    commands.mkdir(parents=True, exist_ok=True)
+    library = importlib.resources.files(mngr_resources).joinpath("mngr_background_task_lib.sh").read_text()
+    (commands / "mngr_background_task_lib.sh").write_text(library)
+
+
+def _agy_payload(
+    agent_state: str, *, task_count: int = 0, subagents: Sequence[dict[str, str]] = (), role: str = "Command Runner"
+) -> str:
+    """A statusLine payload in agy 1.5.9's shape: compact, `task_count` present only while above zero."""
+    payload: dict[str, object] = {"conversation_id": _ROOT_CONV, "agent_state": agent_state}
+    if subagents:
+        payload["subagents"] = [{"name": "self", "role": role, "model": _MODEL, **subagent} for subagent in subagents]
+    payload["plan_tier"] = "Antigravity Starter Quota"
+    if task_count:
+        payload["task_count"] = task_count
+    payload["terminal_width"] = 200
+    return json.dumps(payload, separators=(",", ":"))
+
+
+_RUNNING: Final[dict[str, str]] = {"status": "running"}
+_COMPLETED: Final[dict[str, str]] = {"status": "completed"}
+
+
+def _records(state_dir: Path) -> list[tuple[str, BackgroundTaskKind, str]]:
+    return [
+        (background_task.name, background_task.kind, background_task.native_type)
+        for background_task in read_background_task_records_in(state_dir / "background_tasks")
+    ]
+
+
+def test_each_task_agy_counts_gets_a_shell_record_seen_now(tmp_path: Path) -> None:
+    _install_background_task_lib(tmp_path)
+    reported_at = datetime.now(timezone.utc)
+
+    _run(tmp_path, _agy_payload("idle", task_count=2))
+
+    assert _records(tmp_path) == [
+        ("agy-task-1", BackgroundTaskKind.SHELL, "task_count"),
+        ("agy-task-2", BackgroundTaskKind.SHELL, "task_count"),
+    ]
+    for background_task in read_background_task_records_in(tmp_path / "background_tasks"):
+        assert background_task.last_seen_at is not None
+        assert abs(background_task.last_seen_at - reported_at) <= _CLOCK_SLACK
+
+
+def test_each_running_subagent_gets_a_subagent_record_and_a_completed_one_none(tmp_path: Path) -> None:
+    _install_background_task_lib(tmp_path)
+
+    _run(tmp_path, _agy_payload("idle", subagents=(_RUNNING, _COMPLETED, _RUNNING)))
+
+    assert _records(tmp_path) == [
+        ("agy-subagent-1", BackgroundTaskKind.SUBAGENT, "subagents"),
+        ("agy-subagent-2", BackgroundTaskKind.SUBAGENT, "subagents"),
+    ]
+
+
+def test_a_lower_count_removes_the_highest_numbered_records(tmp_path: Path) -> None:
+    _install_background_task_lib(tmp_path)
+    _run(tmp_path, _agy_payload("idle", task_count=3, subagents=(_RUNNING, _RUNNING)))
+
+    _run(tmp_path, _agy_payload("idle", task_count=1, subagents=(_RUNNING, _COMPLETED)))
+
+    assert [name for name, _, _ in _records(tmp_path)] == ["agy-subagent-1", "agy-task-1"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # agy's first payload after a restart: it does not restart tasks.
+        pytest.param(_agy_payload("authenticating"), id="restart"),
+        pytest.param(_agy_payload("idle", subagents=(_COMPLETED,)), id="ended_while_idle"),
+        pytest.param(_agy_payload("working", subagents=(_COMPLETED,)), id="ended_and_woke_the_agent"),
+    ],
+)
+def test_a_payload_reporting_no_task_and_no_running_subagent_clears_the_records(tmp_path: Path, payload: str) -> None:
+    _install_background_task_lib(tmp_path)
+    _run(tmp_path, _agy_payload("idle", task_count=2, subagents=(_RUNNING,)))
+    assert len(_records(tmp_path)) == 3
+
+    _run(tmp_path, payload)
+
+    assert _records(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [pytest.param("not json at all\n", id="garbage"), pytest.param(_payload(agent_state=None), id="no_agent_state")],
+)
+def test_a_payload_without_an_agent_state_leaves_the_records_as_they_were(tmp_path: Path, payload: str) -> None:
+    _install_background_task_lib(tmp_path)
+    _run(tmp_path, _agy_payload("idle", task_count=1, subagents=(_RUNNING,)))
+
+    _run(tmp_path, payload)
+
+    assert [name for name, _, _ in _records(tmp_path)] == ["agy-subagent-1", "agy-task-1"]
+
+
+def test_records_another_writer_owns_are_left_alone(tmp_path: Path) -> None:
+    _install_background_task_lib(tmp_path)
+    (tmp_path / "background_tasks").mkdir()
+    (tmp_path / "background_tasks" / "task-b09b409g6").write_text("seen:1794966000 kind:SHELL native_type:shell\n")
+    _run(tmp_path, _agy_payload("idle", task_count=1))
+    assert [name for name, _, _ in _records(tmp_path)] == ["agy-task-1", "task-b09b409g6"]
+
+    _run(tmp_path, _agy_payload("idle"))
+
+    assert [name for name, _, _ in _records(tmp_path)] == ["task-b09b409g6"]
+
+
+def test_text_in_a_subagent_role_neither_adds_nor_hides_a_running_subagent(tmp_path: Path) -> None:
+    _install_background_task_lib(tmp_path)
+    role_quoting_the_payload = 'Fix [a] and [b], then print {"status":"running"}]'
+
+    _run(tmp_path, _agy_payload("idle", subagents=(_COMPLETED, _RUNNING), role=role_quoting_the_payload))
+
+    assert [name for name, _, _ in _records(tmp_path)] == ["agy-subagent-1"]
+
+
+# Runs the real rm, then logs whether the turn marker and any record are left after it.
+_REMOVAL_WITNESS_SCRIPT: Final[str] = """#!/bin/sh
+{real_rm} "$@"
+removal_status=$?
+active=absent
+[ -e "$MNGR_AGENT_STATE_DIR/active" ] && active=present
+records=$(ls "$MNGR_AGENT_STATE_DIR/background_tasks" 2>/dev/null | wc -l | tr -d ' ')
+echo "active:$active records:$records" >> "$REMOVAL_WITNESS_LOG"
+exit $removal_status
+"""
+
+
+@pytest.mark.parametrize(
+    "payloads",
+    [
+        pytest.param(
+            (
+                _agy_payload("working"),
+                _agy_payload("working", task_count=1),
+                _agy_payload("idle", task_count=1),
+                _agy_payload("working"),
+            ),
+            id="task",
+        ),
+        pytest.param(
+            (_agy_payload("working"), _agy_payload("idle", task_count=1), _agy_payload("working")),
+            id="task_first_reported_at_the_turn_end",
+        ),
+        pytest.param(
+            (
+                _agy_payload("working"),
+                _agy_payload("working", subagents=(_RUNNING,)),
+                _agy_payload("idle", subagents=(_RUNNING,)),
+                _agy_payload("working", subagents=(_RUNNING,)),
+                _agy_payload("working", subagents=(_COMPLETED,)),
+            ),
+            id="subagent",
+        ),
+    ],
+)
+def test_no_removal_leaves_the_agent_reading_waiting_from_a_turn_end_through_the_wake_turn(
+    tmp_path: Path, payloads: tuple[str, ...]
+) -> None:
+    """On agy 1.5.9 and 1.5.12 the turn ends on the old count and the lowered one first arrives in the wake's `working` call."""
+    state_dir = tmp_path / "state"
+    _install_background_task_lib(state_dir)
+    witness_dir = tmp_path / "bin"
+    witness_dir.mkdir()
+    real_rm = shutil.which("rm")
+    assert real_rm is not None
+    (witness_dir / "rm").write_text(_REMOVAL_WITNESS_SCRIPT.format(real_rm=real_rm))
+    (witness_dir / "rm").chmod(0o755)
+    removal_log = tmp_path / "removals.log"
+    env = {
+        **agent_env(state_dir),
+        "PATH": f"{witness_dir}{os.pathsep}{os.environ['PATH']}",
+        "REMOVAL_WITNESS_LOG": str(removal_log),
+    }
+
+    for payload in payloads:
+        subprocess.run(["bash", str(_SCRIPT_PATH)], input=payload, env=env, capture_output=True, text=True, check=True)
+
+    assert removal_log.read_text().splitlines() == ["active:absent records:1", "active:present records:0"]
+
+
+def test_every_payload_key_the_script_reads_is_on_a_pinned_path() -> None:
+    keys_read = set(re.findall(r'"(\w+)"\[\[:space:\]\]\*:', _SCRIPT_PATH.read_text()))
+
+    assert keys_read == {key for path in STATUSLINE_PAYLOAD_FIELD_PATHS for key in path}, (
+        "statusline.sh reads a statusLine payload key that STATUSLINE_PAYLOAD_FIELD_PATHS does not list, or the "
+        "reverse; the release test that checks the agy binary pins only the listed paths"
+    )

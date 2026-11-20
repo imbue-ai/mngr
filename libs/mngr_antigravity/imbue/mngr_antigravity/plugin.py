@@ -50,10 +50,9 @@ change (JSON payload on stdin), and ``statusline.sh`` is the single source of
 truth (see ``build_antigravity_statusline_settings``). It maintains an
 ``active`` marker that ``BaseAgent.get_lifecycle_state`` reads to report RUNNING
 while the agent works and WAITING when idle (agy maintains no such marker on its
-own), records the root conversation for resume, and fires the tmux
-message-submission signal. agy's top-level ``agent_state`` already aggregates
-subagent activity (stays ``working`` while a subagent runs), so this single
-state check captures the whole-turn busy/idle invariant on its own.
+own), records the root conversation for resume, records the background tasks
+and running subagents agy reports, which can outlast the root's turn, and fires
+the tmux message-submission signal.
 
 Hooks: a ``PreInvocation`` handler captures every conversation id (incl.
 subagents', which ``statusLine`` does not surface) for transcript scoping, and

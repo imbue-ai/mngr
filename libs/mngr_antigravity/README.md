@@ -69,6 +69,10 @@ mngr create my-agent readonly_agy
 
 `mngr stop` then `mngr start` resumes the agent's prior agy conversation, keeping its full context rather than starting fresh.
 
+## Background tasks
+
+When a turn ends while agy still holds a background task (a command it left running, a timer, a workflow) or a running subagent, the agent reads `RUNNING_BACKGROUND`, and `mngr list` shows one `agy-task-<n>` (kind `SHELL`) per task and one `agy-subagent-<n>` (kind `SUBAGENT`) per running subagent. agy reports how many tasks it holds, not which, so the names are numbers.
+
 ## Caveats
 
 - **`agy` PATH shadowing**: if the Antigravity 2.0 desktop app is installed, its bundled `agy` shim can shadow the standalone CLI in `PATH`. Remove the desktop app's `bin/agy` or override `command` with an absolute path to the Go binary.

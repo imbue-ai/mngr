@@ -6,12 +6,9 @@
 # payload carries `agent_state` (observed vocabulary: initializing,
 # authenticating, idle, working), `conversation_id` (always the ROOT
 # conversation, even while a subagent runs), plus model/context_window/vcs/etc.
-# Crucially, top-level `agent_state` already aggregates subagent activity: it
-# stays `working` continuously while a subagent runs and returns to `idle` only
-# once root + subagents are all done (75 consecutive `working` samples spanning
-# a ~29s subagent run, zero mid-turn `idle` blips). That makes a single
-# `agent_state` check a correct, self-contained signal for whole-turn busy/idle
-# state -- no per-conversation bookkeeping needed.
+# It also carries `task_count`, agy's count of background tasks, left out at
+# zero, and `subagents`, each with a `status` of `running` or `completed`; agy
+# can end the root's turn while a subagent still runs.
 #
 # On each invocation this script:
 #   1. Parses `agent_state` and `conversation_id` (POSIX grep/sed only -- no jq;
@@ -20,7 +17,9 @@
 #   3. Maintains the `active` marker BaseAgent reads for RUNNING/WAITING: active
 #      iff `agent_state` is NOT in {idle, initializing, authenticating, ""}
 #      (a denylist, so any present/future busy state counts as RUNNING; `idle`
-#      is the canonical done state).
+#      is the canonical done state). Around it, rewrites the background task
+#      records, one `agy-task-<n>` per counted task and one `agy-subagent-<n>`
+#      per running subagent: before removing `active`, after creating it.
 #   4. When busy, fires the tmux wait-for submission signal that OLDER mngr
 #      versions wait on. FIXME: remove the signal once released senders no
 #      longer wait on it. Current mngr confirms sends by polling the `active`
@@ -56,6 +55,23 @@ agent_state=$(
         | grep -oE '"agent_state"[[:space:]]*:[[:space:]]*"[^"]*"' \
         | head -n 1 \
         | sed -E 's/.*:[[:space:]]*"([^"]*)".*/\1/'
+)
+
+# Parse agy's count of background tasks.
+task_count=$(
+    printf '%s' "$payload" \
+        | grep -oE '"task_count"[[:space:]]*:[[:space:]]*[0-9]+' \
+        | head -n 1 \
+        | sed -E 's/.*:[[:space:]]*//'
+)
+
+# Count the running subagents, matching each string whole so text inside one cannot end the list.
+running_subagent_count=$(
+    printf '%s' "$payload" \
+        | grep -oE '"subagents"[[:space:]]*:[[:space:]]*\[("([^"\\]|\\.)*"|[^]"])*\]' \
+        | head -n 1 \
+        | grep -oE '"status"[[:space:]]*:[[:space:]]*"running"' \
+        | wc -l
 )
 
 # Parse the (root) conversation id -- a full UUID.
@@ -143,11 +159,41 @@ if [ -r "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh" ]; then
     # shellcheck source=../../../mngr/imbue/mngr/resources/mngr_common_transcript_lib.sh
     source "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh"
 fi
+if [ -r "$MNGR_AGENT_STATE_DIR/commands/mngr_background_task_lib.sh" ]; then
+    # shellcheck source=../../../mngr/imbue/mngr/resources/mngr_background_task_lib.sh
+    source "$MNGR_AGENT_STATE_DIR/commands/mngr_background_task_lib.sh"
+fi
+
+# _rewrite_background_tasks <prefix> <count> <kind> <native_type>: write <prefix>1 to <prefix><count>, then remove every other <prefix> record.
+_rewrite_background_tasks() {
+    local prefix="$1" count="$2" kind="$3" native_type="$4" index record_path
+    for ((index = 1; index <= count; index++)); do
+        mngr_background_task_write "$prefix$index" "$kind" "$native_type"
+    done
+    for record_path in "$(mngr_background_task_dir)/$prefix"*; do
+        [ -e "$record_path" ] || continue
+        index="${record_path##*/"$prefix"}"
+        case "$index" in
+            '' | *[!0-9]* | 0*) ;;
+            *) [ "$index" -gt "$count" ] || continue ;;
+        esac
+        rm -f "$record_path"
+    done
+}
+
+# Rewrite the records from what this payload reports running, unless it could not be read.
+# agy gives no task type, so a record's native type is the name of the payload field it came from.
+_record_background_tasks() {
+    [ -n "$agent_state" ] && command -v mngr_background_task_write >/dev/null 2>&1 || return 0
+    _rewrite_background_tasks agy-task- "$((10#${task_count:-0}))" SHELL task_count
+    _rewrite_background_tasks agy-subagent- "$((running_subagent_count))" SUBAGENT subagents
+}
 
 # Busy = any state that is not a known not-working state. Denylist so any
 # current/future busy state (working, ...) keeps the agent RUNNING.
 case "$agent_state" in
     idle | initializing | authenticating | "")
+        _record_background_tasks
         # Flush the transcript pipeline so a consumer that harvests the final
         # message from the common transcript on the WAITING transition (e.g.
         # Catalyst's mngr_runner) can't outrun the converter. Only on the
@@ -161,6 +207,7 @@ case "$agent_state" in
         ;;
     *)
         touch "$marker_file"
+        _record_background_tasks
         # Submission signal for OLDER mngr senders only: current mngr confirms
         # sends by polling the `active` marker touched above and never waits on
         # this channel (see the header FIXME for why the signal is scheduled
