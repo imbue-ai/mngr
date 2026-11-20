@@ -64,8 +64,17 @@ def test_a_valid_keybindings_value_has_no_problem() -> None:
         ({"files": {"Rename!": ["f2"]}}, "not an action id"),
         ({"files": {"rename": "f2"}}, "list of chords"),
         ({"files": {"rename": ["F2"]}}, "not a canonical chord"),
+        ({"files": {"rename": ["alt+meta+delete"]}}, "belongs to the operating system"),
     ],
-    ids=["not-a-map", "bad-app-name", "no-action-level", "bad-action-id", "chords-not-a-list", "bad-chord"],
+    ids=[
+        "not-a-map",
+        "bad-app-name",
+        "no-action-level",
+        "bad-action-id",
+        "chords-not-a-list",
+        "bad-chord",
+        "refused-chord",
+    ],
 )
 def test_keybindings_value_problems_are_named(value: object, problem_fragment: str) -> None:
     problem = describe_keybindings_value_problem(value)

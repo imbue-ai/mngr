@@ -129,6 +129,29 @@ contextBridge.exposeInMainWorld('mindsNative', {
   // close-active-tab) pause, so every key reaches the frame.
   setImmersive: (on) => ipcRenderer.send('set-immersive', Boolean(on)),
 
+  // The workspace's shortcuts (the keyboard-shortcuts spec, section 6): the
+  // displayed workspace's chords, which main runs before any page sees the
+  // key, and whether this window's shortcut recorder is listening, during
+  // which main matches none and hands the recorder the keys the OS would act on.
+  setShellShortcuts: (workspaceId, shortcuts) =>
+    ipcRenderer.send('set-shell-shortcuts', { workspaceId, shortcuts }),
+  setShortcutRecording: (isRecording) => ipcRenderer.send('set-shortcut-recording', Boolean(isRecording)),
+  onRunShortcut: (callback) => {
+    ipcRenderer.on('run-shortcut', (_event, action) => {
+      if (typeof action === 'string') callback(action);
+    });
+  },
+  onRunChord: (callback) => {
+    ipcRenderer.on('run-chord', (_event, chord) => {
+      if (typeof chord === 'string') callback(chord);
+    });
+  },
+  onRecordChord: (callback) => {
+    ipcRenderer.on('record-chord', (_event, chord) => {
+      if (typeof chord === 'string') callback(chord);
+    });
+  },
+
   // Shared workspaces (specs/shared-with-me, 4.7 and 4.8). The page navigates
   // the workspace frame to the reverse handoff's redeem URL, which signs this
   // window's session partition in on the accounts origin and sends the frame

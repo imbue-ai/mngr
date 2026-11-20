@@ -1,4 +1,4 @@
-// The Workspace settings pane: General / Account / Backup / Updates groups
+// The Workspace settings pane: General / Account / Backup / Updates / Keyboard shortcuts groups
 // behind a left nav, rendered by the options panel's Settings tab
 // (WorkspaceSettingsSections.jinja's successor; the old standalone
 // /workspace/<id>/settings page now redirects into that tab).
@@ -42,6 +42,7 @@ import { MachineSizeInput } from "../../components/MachineSizeInput";
 import { updateNavDotFor } from "../../../models/updateSurfaces";
 import { shownUpdatePill } from "../../shell/workspace-notices";
 import { BackupGroup } from "./BackupGroup";
+import { KeyboardShortcutsGroup } from "./KeyboardShortcutsGroup";
 import { UpdatesGroup } from "./UpdatesGroup";
 import { Spinner } from "../../components/Spinner";
 import { navEntryClass, splitPane } from "../../components/SplitPane";
@@ -51,6 +52,7 @@ const GROUPS: { id: SettingsGroup; icon: IconName; label: string }[] = [
   { id: "account", icon: "user", label: "Account" },
   { id: "backup", icon: "cloud", label: "Backup" },
   { id: "updates", icon: "restart", label: "Updates" },
+  { id: "keyboard", icon: "keyboard", label: "Keyboard shortcuts" },
 ];
 
 export interface SettingsGroupsAttrs {
@@ -128,6 +130,17 @@ export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
               : null,
             selectedGroup === "updates"
               ? m(UpdatesGroup, { agentId: data.agent_id })
+              : null,
+            // Keyed in a wrapper of its own, so a route to another workspace
+            // remakes the frame and its readiness wait rather than reusing them.
+            selectedGroup === "keyboard"
+              ? m("div", [
+                  m(KeyboardShortcutsGroup, {
+                    key: data.agent_id,
+                    agentId: data.agent_id,
+                    onOpenUpdates: () => onSelectGroup("updates"),
+                  }),
+                ])
               : null,
           ],
           extra: "mt-8",
