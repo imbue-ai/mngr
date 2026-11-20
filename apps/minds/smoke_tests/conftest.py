@@ -122,7 +122,7 @@ def studio_binary(request: pytest.FixtureRequest, backend: SmokeBackend) -> Stud
 
 @pytest.fixture(scope="session")
 def is_dwt_tests_skipped() -> bool:
-    """Whether the journey skips default-workspace-template's CI tests, by ``MINDS_SMOKE_SKIP_DWT_TESTS``."""
+    """Whether the journey skips its default-workspace-template steps, by ``MINDS_SMOKE_SKIP_DWT_TESTS``."""
     return is_dwt_tests_skip_requested(os.environ)
 
 

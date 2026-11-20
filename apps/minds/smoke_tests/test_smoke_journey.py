@@ -3,7 +3,7 @@
 Launch the app and reach its landing page; sign in to Imbue Cloud through the
 app's own web-login flow, completing the hosted page in the suite's browser;
 create an Imbue Cloud workspace; run default-workspace-template's CI test
-suites inside it; have its agent build and register a hello-world web app;
+suites and its OOM drill inside it; have its agent build and register a hello-world web app;
 stop the workspace from the home page, start it again, and have the agent
 bring the app back; share the workspace from the Share tab and open the app's
 route through the share as the owner; turn sharing off; destroy the workspace.
@@ -81,6 +81,11 @@ from imbue.minds.smoke_tests.dwt_suites import dwt_results_markdown
 from imbue.minds.smoke_tests.dwt_suites import dwt_subtest_label
 from imbue.minds.smoke_tests.dwt_suites import run_dwt_ci_suites_in_workspace
 from imbue.minds.smoke_tests.manifest import record_created_resource
+from imbue.minds.smoke_tests.oom_drill import OOM_DRILL_DEADLINE_SECONDS
+from imbue.minds.smoke_tests.oom_drill import OOM_DRILL_TIMEOUT_SECONDS
+from imbue.minds.smoke_tests.oom_drill import OOM_DRILL_WORKSPACE_RESULTS_ROOT
+from imbue.minds.smoke_tests.oom_drill import oom_drill_markdown
+from imbue.minds.smoke_tests.oom_drill import run_oom_drill_in_workspace
 from imbue.minds.smoke_tests.primitives import SMOKE_EMAIL_PREFIX
 from imbue.minds.smoke_tests.primitives import SMOKE_EXPECTED_TEMPLATE_REF_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_SKIP_DWT_TESTS_ENV_VAR
@@ -101,21 +106,32 @@ _DWT_ENV_CONVERGE_WAIT_SECONDS: Final[int] = 20 * 60
 _DWT_POLL_INTERVAL_SECONDS: Final[float] = 30.0
 # Reading the configs, starting and stopping the runner, and fetching its results, around the run itself.
 _DWT_STEP_OVERHEAD_SECONDS: Final[int] = 10 * 60
+_OOM_DRILL_POLL_INTERVAL_SECONDS: Final[float] = 15.0
+# Starting the drill's runner and fetching its verdict, around the run itself.
+_OOM_DRILL_STEP_OVERHEAD_SECONDS: Final[int] = 3 * 60
 # The journey's steps, as its run report's step table names them.
 _LAUNCH_STEP_LABEL: Final[str] = "Step 1: launch the app and reach its landing page"
 _SIGN_IN_STEP_LABEL: Final[str] = "Step 2: sign in to Imbue Cloud through the app's web login"
 _CREATE_STEP_LABEL: Final[str] = "Step 3: create an Imbue Cloud workspace"
 _DWT_STEP_LABEL: Final[str] = "Step 3b: run default-workspace-template's CI suites in the workspace"
+_OOM_DRILL_STEP_LABEL: Final[str] = "Step 3c: run default-workspace-template's OOM drill in the workspace"
 _BUILD_STEP_LABEL: Final[str] = "Step 4: have the workspace's agent build and register the hello app"
 _STOP_START_STEP_LABEL: Final[str] = "Step 4b: stop and start the workspace from the home page"
 _SHARE_STEP_LABEL: Final[str] = "Step 5: share the workspace and open the app through the share"
 _UNSHARE_STEP_LABEL: Final[str] = "Step 6: turn sharing off"
 _DESTROY_STEP_LABEL: Final[str] = "Step 7: destroy the workspace"
 _DWT_RESULTS_DIR_NAME: Final[str] = "dwt"
+_OOM_DRILL_RESULTS_DIR_NAME: Final[str] = "oom-drill"
 # Beside the results; the smoke workflow adds it to its job's summary page.
 _DWT_SUMMARY_FILE_NAME: Final[str] = "summary.md"
-# An hour for every step but the template's CI suites, whose own deadline and overhead come on top.
-_JOURNEY_TIMEOUT_SECONDS: Final[int] = 60 * 60 + int(_DWT_SUITES_DEADLINE_SECONDS) + _DWT_STEP_OVERHEAD_SECONDS
+# An hour for every step but the default-workspace-template ones, whose own deadlines and overheads come on top.
+_JOURNEY_TIMEOUT_SECONDS: Final[int] = (
+    60 * 60
+    + int(_DWT_SUITES_DEADLINE_SECONDS)
+    + _DWT_STEP_OVERHEAD_SECONDS
+    + int(OOM_DRILL_DEADLINE_SECONDS)
+    + _OOM_DRILL_STEP_OVERHEAD_SECONDS
+)
 _HOSTED_LOGIN_REDIRECT_TIMEOUT_MS: Final[float] = 90_000.0
 _ACCOUNT_LISTED_TIMEOUT_SECONDS: Final[float] = 120.0
 _AGENT_REPLY_TIMEOUT_SECONDS: Final[float] = 12 * 60
@@ -406,6 +422,40 @@ def _run_dwt_ci_suites_reporting_each_test(
         )
 
 
+def _run_oom_drill_reporting_its_result(
+    subtests: pytest.Subtests,
+    studio_app: StudioAppSession,
+    workspace_row: Mapping[str, Any],
+    run_id: SmokeRunId,
+    output_dir: Path,
+    template_ref: str | None,
+) -> None:
+    """Run the template's OOM drill in the workspace and report its result as a template test's subtest.
+
+    A failed drill fails its own subtest and the journey goes on, as a failed
+    template test does. The step's own failure -- the drill could not be
+    started or its verdict fetched -- is the step's subtest.
+    """
+    with subtests.test(msg=_OOM_DRILL_STEP_LABEL):
+        result = run_oom_drill_in_workspace(
+            workspace=_workspace_shell(studio_app, workspace_row),
+            repo_root=DWT_WORKSPACE_REPO_ROOT,
+            workspace_results_dir=OOM_DRILL_WORKSPACE_RESULTS_ROOT / str(run_id),
+            local_results_dir=output_dir,
+            drill_timeout_seconds=OOM_DRILL_TIMEOUT_SECONDS,
+            deadline_seconds=OOM_DRILL_DEADLINE_SECONDS,
+            poll_interval_seconds=_OOM_DRILL_POLL_INTERVAL_SECONDS,
+        )
+        (output_dir / _DWT_SUMMARY_FILE_NAME).write_text(oom_drill_markdown(result, template_ref=template_ref))
+        with subtests.test(msg=dwt_subtest_label(result)):
+            _assert_dwt_result_passed(result)
+        logger.info(
+            "Step 3c: the OOM drill {} in the workspace (results in {})",
+            "passed" if result.outcome == DwtTestOutcome.PASSED else "failed",
+            output_dir,
+        )
+
+
 @pytest.mark.timeout(_JOURNEY_TIMEOUT_SECONDS)
 def test_the_build_signs_in_creates_builds_stops_starts_shares_and_destroys_a_workspace(
     is_dwt_tests_skipped: bool,
@@ -459,10 +509,11 @@ def test_the_build_signs_in_creates_builds_stops_starts_shares_and_destroys_a_wo
                 _assert_workspace_is_at_expected_template(expected_template_ref, leased_template_ref, host_db_id)
 
         if is_dwt_tests_skipped:
-            skip_reason = f"{SMOKE_SKIP_DWT_TESTS_ENV_VAR}=1 skips default-workspace-template's CI tests"
-            record_skipped_step(smoke_steps_path, _DWT_STEP_LABEL, skip_reason)
-            with subtests.test(msg=_DWT_STEP_LABEL):
-                pytest.skip(skip_reason)
+            skip_reason = f"{SMOKE_SKIP_DWT_TESTS_ENV_VAR}=1 skips default-workspace-template's CI tests and OOM drill"
+            for skipped_label in (_DWT_STEP_LABEL, _OOM_DRILL_STEP_LABEL):
+                record_skipped_step(smoke_steps_path, skipped_label, skip_reason)
+                with subtests.test(msg=skipped_label):
+                    pytest.skip(skip_reason)
         else:
             with recorded_step(smoke_steps_path, _DWT_STEP_LABEL):
                 _run_dwt_ci_suites_reporting_each_test(
@@ -471,6 +522,15 @@ def test_the_build_signs_in_creates_builds_stops_starts_shares_and_destroys_a_wo
                     row,
                     smoke_run_id,
                     smoke_output_dir / _DWT_RESULTS_DIR_NAME,
+                    leased_template_ref,
+                )
+            with recorded_step(smoke_steps_path, _OOM_DRILL_STEP_LABEL):
+                _run_oom_drill_reporting_its_result(
+                    subtests,
+                    studio_app,
+                    row,
+                    smoke_run_id,
+                    smoke_output_dir / _OOM_DRILL_RESULTS_DIR_NAME,
                     leased_template_ref,
                 )
 

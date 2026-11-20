@@ -1,18 +1,10 @@
 """The text the smoke suite runs inside a workspace to run default-workspace-template's CI suites there.
 
-Nothing here runs in the suite's own process: it is the fixed part of the bash
-runner, and the shell and Python one-liners that read the template's offload
-configs, start the runner, and look at it, all executed in the workspace.
+Nothing here runs in the suite's own process: all of it is executed in the workspace.
 :mod:`imbue.minds.smoke_tests.dwt_suites` fills in the per-run parts.
 """
 
 from typing import Final
-
-# What the runner leaves directly under its results directory, as its text below names them: its pid, its own
-# output, and ``done`` once it has ended, however it ended.
-RUNNER_DONE_FILE_NAME: Final[str] = "done"
-RUNNER_PID_FILE_NAME: Final[str] = "runner.pid"
-RUNNER_LOG_FILE_NAME: Final[str] = "runner.log"
 
 OFFLOAD_CONFIG_GLOB: Final[str] = "offload-modal*.toml"
 # Prints every offload config at the repo root as one JSON object, file name to text.
@@ -22,27 +14,8 @@ READ_OFFLOAD_CONFIGS_COMMAND: Final[str] = (
     "'"
 )
 
-# Starts the runner in a session of its own, so it outlives the command that started it and can be stopped
-# whole, and gives it nothing to hold the command's output open with.
-DETACH_PROGRAM: Final[str] = (
-    "import subprocess, sys; "
-    "subprocess.Popen(['bash', sys.argv[1]], start_new_session=True, stdin=subprocess.DEVNULL, "
-    "stdout=open(sys.argv[2], 'wb'), stderr=subprocess.STDOUT)"
-)
-# Prints the runner's state, then the last line it logged.
-RUNNER_STATE_COMMAND_TEMPLATE: Final[str] = (
-    "if [ -e {done} ]; then echo FINISHED; "
-    "elif [ ! -s {pid} ]; then echo STARTING; "
-    'elif kill -0 "$(cat {pid})" 2>/dev/null; then echo RUNNING; '
-    "else echo VANISHED; fi; "
-    "tail -n 1 {log} 2>/dev/null || true"
-)
-
 # The runner's fixed part. The variables above it are set per run; one ``run_group`` line per group follows it.
 RUNNER_FUNCTIONS: Final[str] = r"""
-echo "$$" > "$results_dir/runner.pid"
-trap 'date -u +%Y-%m-%dT%H:%M:%SZ > "$results_dir/done"' EXIT
-
 # A fresh workspace installs its browser stack in env-converge, a one-shot
 # supervisord program that does not hold up boot; the suites expect what it installs.
 wait_for_env_converge() {

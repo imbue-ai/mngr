@@ -8,20 +8,13 @@ workspace was created from -- and runs every group the way offload would,
 inside the workspace's own gVisor container rather than a Modal sandbox.
 """
 
-import base64
-import binascii
-import io
 import itertools
 import re
 import shlex
 import shutil
-import tarfile
-import threading
-import time
 import tomllib
 from collections.abc import Mapping
 from collections.abc import Sequence
-from enum import auto
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Annotated
@@ -36,12 +29,7 @@ from pydantic import Field
 from pydantic import StringConstraints
 from pydantic import TypeAdapter
 from pydantic import ValidationError
-from tenacity import retry
-from tenacity import retry_if_exception_type
-from tenacity import stop_after_attempt
-from tenacity import wait_exponential
 
-from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.primitives import NonEmptyStr
@@ -55,20 +43,25 @@ from imbue.minds.smoke_tests.data_types import DwtTestOutcome
 from imbue.minds.smoke_tests.data_types import DwtTestResult
 from imbue.minds.smoke_tests.data_types import DwtTestSuite
 from imbue.minds.smoke_tests.data_types import SmokeRunVerdict
-from imbue.minds.smoke_tests.dwt_workspace_scripts import DETACH_PROGRAM
 from imbue.minds.smoke_tests.dwt_workspace_scripts import OFFLOAD_CONFIG_GLOB
 from imbue.minds.smoke_tests.dwt_workspace_scripts import READ_OFFLOAD_CONFIGS_COMMAND
-from imbue.minds.smoke_tests.dwt_workspace_scripts import RUNNER_DONE_FILE_NAME
 from imbue.minds.smoke_tests.dwt_workspace_scripts import RUNNER_FUNCTIONS
-from imbue.minds.smoke_tests.dwt_workspace_scripts import RUNNER_LOG_FILE_NAME
-from imbue.minds.smoke_tests.dwt_workspace_scripts import RUNNER_PID_FILE_NAME
-from imbue.minds.smoke_tests.dwt_workspace_scripts import RUNNER_STATE_COMMAND_TEMPLATE
 from imbue.minds.smoke_tests.interfaces import WorkspaceShellInterface
 from imbue.minds.smoke_tests.primitives import SMOKE_SKIP_DWT_TESTS_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SmokeConfigError
 from imbue.minds.smoke_tests.primitives import SmokeDwtReportError
 from imbue.minds.smoke_tests.primitives import SmokeWorkspaceExecError
 from imbue.minds.smoke_tests.primitives import is_smoke_switch_on
+from imbue.minds.smoke_tests.workspace_runner import RunnerEnd
+from imbue.minds.smoke_tests.workspace_runner import SHORT_COMMAND_TIMEOUT_SECONDS
+from imbue.minds.smoke_tests.workspace_runner import fetch_workspace_directory
+from imbue.minds.smoke_tests.workspace_runner import log_tail_of
+from imbue.minds.smoke_tests.workspace_runner import read_exit_code_or_none
+from imbue.minds.smoke_tests.workspace_runner import start_detached_runner
+from imbue.minds.smoke_tests.workspace_runner import stop_detached_runner
+from imbue.minds.smoke_tests.workspace_runner import wait_for_detached_runner
+from imbue.minds.smoke_tests.workspace_runner_scripts import RUNNER_LOG_FILE_NAME
+from imbue.minds.smoke_tests.workspace_runner_scripts import RUNNER_PREAMBLE
 
 # Every default-workspace-template test is reported as a subtest labelled with this prefix, which is how the
 # smoke run's verdict tells their failures from the journey's own.
@@ -97,8 +90,6 @@ _GROUP_RUN_TEST_ID_TEMPLATE: Final[str] = "[{group} group]"
 _ATTEMPT_LOG_FILE_TEMPLATE: Final[str] = "attempt-{number}.log"
 _ATTEMPT_EXIT_FILE_TEMPLATE: Final[str] = "attempt-{number}.exit"
 _ATTEMPT_REPORT_FILE_TEMPLATE: Final[str] = "attempt-{number}.xml"
-# Enough of an attempt's output to show why a run went wrong without burying the report.
-_LOG_TAIL_LINE_COUNT: Final[int] = 40
 
 # The template's repo root inside a workspace: where its seed puts the tree, and where its offload configs run from.
 DWT_WORKSPACE_REPO_ROOT: Final[PurePosixPath] = PurePosixPath("/home/user/workspace")
@@ -107,10 +98,6 @@ DWT_WORKSPACE_REPO_ROOT: Final[PurePosixPath] = PurePosixPath("/home/user/worksp
 DWT_WORKSPACE_RESULTS_ROOT: Final[PurePosixPath] = PurePosixPath("/var/tmp/studio-smoke-dwt")
 _CONFIG_TEXT_BY_FILE_NAME_ADAPTER: Final[TypeAdapter[dict[str, str]]] = TypeAdapter(dict[str, str])
 _LOCAL_CONFIGS_DIR_NAME: Final[str] = "offload-configs"
-_RUNNER_SCRIPT_FILE_NAME: Final[str] = "run.sh"
-_RUNNER_STATE_READ_ATTEMPT_COUNT: Final[int] = 4
-_SHORT_COMMAND_TIMEOUT_SECONDS: Final[float] = 120.0
-_FETCH_TIMEOUT_SECONDS: Final[float] = 600.0
 _RUNNER_SUITE_NAME: Final[str] = "runner"
 _RUNNER_TEST_ID: Final[str] = "[run]"
 
@@ -394,7 +381,7 @@ def smoke_run_verdict(own_failure_count: int, failed_subtest_labels: Sequence[st
 
 @pure
 def is_dwt_tests_skip_requested(environ: Mapping[str, str]) -> bool:
-    """Whether ``MINDS_SMOKE_SKIP_DWT_TESTS=1`` skips the template's CI tests; unset or ``0`` runs them."""
+    """Whether ``MINDS_SMOKE_SKIP_DWT_TESTS`` has the journey skip its default-workspace-template steps."""
     return is_smoke_switch_on(environ, SMOKE_SKIP_DWT_TESTS_ENV_VAR, "skip", "run")
 
 
@@ -429,7 +416,7 @@ def build_dwt_suites_runner_script(
         for suite in suites
         for group in suite.groups
     )
-    return "\n".join((*header, RUNNER_FUNCTIONS, *group_lines)) + "\n"
+    return "\n".join((*header, RUNNER_PREAMBLE, RUNNER_FUNCTIONS, *group_lines)) + "\n"
 
 
 def read_dwt_results(results_dir: Path, suites: Sequence[DwtTestSuite]) -> tuple[DwtTestResult, ...]:
@@ -454,23 +441,12 @@ def read_dwt_group_attempts(group_dir: Path) -> tuple[DwtGroupAttempt, ...]:
         attempts.append(
             DwtGroupAttempt(
                 number=PositiveInt(number),
-                exit_code=_read_exit_code_or_none(group_dir / _ATTEMPT_EXIT_FILE_TEMPLATE.format(number=number)),
+                exit_code=read_exit_code_or_none(group_dir / _ATTEMPT_EXIT_FILE_TEMPLATE.format(number=number)),
                 cases=_read_junit_cases_or_none(group_dir / _ATTEMPT_REPORT_FILE_TEMPLATE.format(number=number)),
-                log_tail=_log_tail_of(log_path),
+                log_tail=log_tail_of(log_path),
             )
         )
     return tuple(attempts)
-
-
-def _read_exit_code_or_none(exit_path: Path) -> int | None:
-    """The exit code an attempt recorded, or None when it never recorded one."""
-    if not exit_path.is_file():
-        return None
-    text = exit_path.read_text().strip()
-    if not text.isdigit():
-        logger.warning("Read the exit file {} holding {!r} as no exit code", exit_path, text)
-        return None
-    return int(text)
 
 
 def _read_junit_cases_or_none(report_path: Path) -> tuple[DwtJunitCase, ...] | None:
@@ -482,23 +458,6 @@ def _read_junit_cases_or_none(report_path: Path) -> tuple[DwtJunitCase, ...] | N
     except SmokeDwtReportError as exc:
         logger.warning("Read the unreadable junit report {} as no report: {}", report_path, exc)
         return None
-
-
-class DwtRunnerEnd(UpperCaseStrEnum):
-    """How the wait for the runner in the workspace ended."""
-
-    FINISHED = auto()
-    VANISHED = auto()
-    OUT_OF_TIME = auto()
-
-
-class _DwtRunnerState(UpperCaseStrEnum):
-    """What one look at the runner in the workspace found."""
-
-    STARTING = auto()
-    RUNNING = auto()
-    FINISHED = auto()
-    VANISHED = auto()
 
 
 def run_dwt_ci_suites_in_workspace(
@@ -524,15 +483,15 @@ def run_dwt_ci_suites_in_workspace(
     suites = read_dwt_suites_from_workspace(workspace, repo_root, local_results_dir)
     script = build_dwt_suites_runner_script(suites, workspace_results_dir, repo_root, env_converge_wait_seconds)
     with log_span("Starting default-workspace-template's CI suites in the workspace under {}", workspace_results_dir):
-        _start_dwt_runner(workspace, script, workspace_results_dir, repo_root)
-    runner_end = _wait_for_dwt_runner(
+        start_detached_runner(workspace, script, workspace_results_dir, repo_root)
+    runner_end = wait_for_detached_runner(
         workspace, workspace_results_dir, repo_root, deadline_seconds, poll_interval_seconds
     )
-    if runner_end == DwtRunnerEnd.OUT_OF_TIME:
-        _stop_dwt_runner(workspace, workspace_results_dir, repo_root)
+    if runner_end == RunnerEnd.OUT_OF_TIME:
+        stop_detached_runner(workspace, workspace_results_dir, repo_root)
     with log_span("Fetching the suites' results from the workspace into {}", local_results_dir):
         fetch_workspace_directory(workspace, workspace_results_dir, local_results_dir, repo_root)
-    runner_log_tail = _log_tail_of(local_results_dir / RUNNER_LOG_FILE_NAME)
+    runner_log_tail = log_tail_of(local_results_dir / RUNNER_LOG_FILE_NAME)
     return (
         *read_dwt_results(local_results_dir, suites),
         *_runner_end_failures(runner_end, deadline_seconds, runner_log_tail),
@@ -543,7 +502,7 @@ def read_dwt_suites_from_workspace(
     workspace: WorkspaceShellInterface, repo_root: PurePosixPath, local_results_dir: Path
 ) -> tuple[DwtTestSuite, ...]:
     """The suites the template's offload configs describe, as the workspace holds them; each config is kept locally."""
-    stdout = workspace.run(READ_OFFLOAD_CONFIGS_COMMAND, repo_root, _SHORT_COMMAND_TIMEOUT_SECONDS)
+    stdout = workspace.run(READ_OFFLOAD_CONFIGS_COMMAND, repo_root, SHORT_COMMAND_TIMEOUT_SECONDS)
     try:
         config_text_by_file_name = _CONFIG_TEXT_BY_FILE_NAME_ADAPTER.validate_json(stdout)
     except ValidationError as exc:
@@ -562,129 +521,17 @@ def read_dwt_suites_from_workspace(
     )
 
 
-def _start_dwt_runner(
-    workspace: WorkspaceShellInterface, script: str, workspace_results_dir: PurePosixPath, repo_root: PurePosixPath
-) -> None:
-    """Write the runner into a fresh results directory and start it in a session of its own."""
-    script_path = workspace_results_dir / _RUNNER_SCRIPT_FILE_NAME
-    encoded_script = base64.b64encode(script.encode()).decode()
-    command = " && ".join(
-        (
-            f"rm -rf {shlex.quote(str(workspace_results_dir))}",
-            f"mkdir -p {shlex.quote(str(workspace_results_dir))}",
-            f"printf '%s' {shlex.quote(encoded_script)} | base64 -d > {shlex.quote(str(script_path))}",
-            " ".join(
-                (
-                    "python3 -c",
-                    shlex.quote(DETACH_PROGRAM),
-                    shlex.quote(str(script_path)),
-                    shlex.quote(str(workspace_results_dir / RUNNER_LOG_FILE_NAME)),
-                )
-            ),
-        )
-    )
-    workspace.run(command, repo_root, _SHORT_COMMAND_TIMEOUT_SECONDS)
-
-
-def _wait_for_dwt_runner(
-    workspace: WorkspaceShellInterface,
-    workspace_results_dir: PurePosixPath,
-    repo_root: PurePosixPath,
-    deadline_seconds: float,
-    poll_interval_seconds: float,
-) -> DwtRunnerEnd:
-    """Poll the runner until it finishes, vanishes, or outlives the deadline, logging each step it reaches."""
-    deadline = time.monotonic() + deadline_seconds
-    last_progress = ""
-    while time.monotonic() < deadline:
-        threading.Event().wait(timeout=poll_interval_seconds)
-        state, progress = _read_dwt_runner_state(workspace, workspace_results_dir, repo_root)
-        if progress and progress != last_progress:
-            logger.info("The runner in the workspace is on: {}", progress)
-            last_progress = progress
-        match state:
-            case _DwtRunnerState.FINISHED:
-                return DwtRunnerEnd.FINISHED
-            case _DwtRunnerState.VANISHED:
-                return DwtRunnerEnd.VANISHED
-            case _DwtRunnerState.STARTING | _DwtRunnerState.RUNNING:
-                pass
-            case _ as unreachable:
-                assert_never(unreachable)
-    return DwtRunnerEnd.OUT_OF_TIME
-
-
-@retry(
-    retry=retry_if_exception_type(SmokeWorkspaceExecError),
-    stop=stop_after_attempt(_RUNNER_STATE_READ_ATTEMPT_COUNT),
-    wait=wait_exponential(multiplier=2, min=2, max=30),
-    reraise=True,
-)
-def _read_dwt_runner_state(
-    workspace: WorkspaceShellInterface, workspace_results_dir: PurePosixPath, repo_root: PurePosixPath
-) -> tuple[_DwtRunnerState, str]:
-    """The runner's state, and the last line it logged; a dropped connection is retried before it counts."""
-    stdout = workspace.run(
-        RUNNER_STATE_COMMAND_TEMPLATE.format(
-            done=shlex.quote(str(workspace_results_dir / RUNNER_DONE_FILE_NAME)),
-            pid=shlex.quote(str(workspace_results_dir / RUNNER_PID_FILE_NAME)),
-            log=shlex.quote(str(workspace_results_dir / RUNNER_LOG_FILE_NAME)),
-        ),
-        repo_root,
-        _SHORT_COMMAND_TIMEOUT_SECONDS,
-    )
-    state_line, _, progress = stdout.partition("\n")
-    try:
-        state = _DwtRunnerState(state_line.strip())
-    except ValueError as exc:
-        raise SmokeWorkspaceExecError(f"The runner's state read as {stdout[:200]!r}, not one of its states.") from exc
-    return state, progress.strip()
-
-
-def _stop_dwt_runner(
-    workspace: WorkspaceShellInterface, workspace_results_dir: PurePosixPath, repo_root: PurePosixPath
-) -> None:
-    """End the runner's whole session, the pytest it is waiting on included."""
-    pid_path = shlex.quote(str(workspace_results_dir / RUNNER_PID_FILE_NAME))
-    with log_span("Stopping the runner in the workspace, which outlived its deadline"):
-        workspace.run(
-            f'kill -TERM -- -"$(cat {pid_path})" 2>/dev/null; true', repo_root, _SHORT_COMMAND_TIMEOUT_SECONDS
-        )
-
-
-def fetch_workspace_directory(
-    workspace: WorkspaceShellInterface, workspace_dir: PurePosixPath, local_dir: Path, cwd: PurePosixPath
-) -> None:
-    """Copy everything under ``workspace_dir`` into ``local_dir``, as a gzipped tarball over the command's stdout."""
-    encoded_archive = workspace.run(
-        f"tar -C {shlex.quote(str(workspace_dir))} -czf - . | base64", cwd, _FETCH_TIMEOUT_SECONDS
-    )
-    local_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        with tarfile.open(fileobj=io.BytesIO(base64.b64decode(encoded_archive)), mode="r:gz") as archive:
-            archive.extractall(local_dir, filter="data")
-    except (binascii.Error, tarfile.TarError, EOFError) as exc:
-        raise SmokeWorkspaceExecError(f"The workspace sent an unreadable archive of {workspace_dir}: {exc}") from exc
-
-
-def _log_tail_of(log_path: Path) -> str:
-    """The last lines of a log the runner left, or nothing when it left none."""
-    if not log_path.is_file():
-        return ""
-    return "\n".join(log_path.read_text(errors="replace").splitlines()[-_LOG_TAIL_LINE_COUNT:])
-
-
 @pure
 def _runner_end_failures(
-    runner_end: DwtRunnerEnd, deadline_seconds: float, runner_log_tail: str
+    runner_end: RunnerEnd, deadline_seconds: float, runner_log_tail: str
 ) -> tuple[DwtTestResult, ...]:
     """The runner's own failure, when the suites did not get to finish."""
     match runner_end:
-        case DwtRunnerEnd.FINISHED:
+        case RunnerEnd.FINISHED:
             return ()
-        case DwtRunnerEnd.VANISHED:
+        case RunnerEnd.VANISHED:
             problem = "The runner's process ended without finishing, as one the workspace's OOM killer sheds does."
-        case DwtRunnerEnd.OUT_OF_TIME:
+        case RunnerEnd.OUT_OF_TIME:
             problem = (
                 f"The suites did not finish within {deadline_seconds / 60:.0f} minutes, so the runner was stopped; "
                 "the groups it had not finished are reported as such."

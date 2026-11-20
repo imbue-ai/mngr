@@ -54,7 +54,7 @@ SMOKE_RUN_ID_ENV_VAR: Final[str] = "MINDS_SMOKE_RUN_ID"
 SMOKE_HANDOFF_FILE_ENV_VAR: Final[str] = "MINDS_SMOKE_HANDOFF_FILE"
 # Where the test job appends the resources it creates, for teardown to read.
 SMOKE_MANIFEST_PATH_ENV_VAR: Final[str] = "MINDS_SMOKE_MANIFEST_PATH"
-# ``1`` skips default-workspace-template's CI tests in the journey's workspace; unset or ``0`` runs them.
+# ``1`` skips the journey's default-workspace-template steps in its workspace; unset or ``0`` runs them.
 SMOKE_SKIP_DWT_TESTS_ENV_VAR: Final[str] = "MINDS_SMOKE_SKIP_DWT_TESTS"
 # An absolute path: the app under test records the run as a Studio profile there
 # (what ``minds run --profile`` writes); unset records nothing.

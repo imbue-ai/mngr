@@ -290,8 +290,9 @@ how to run them. The decisions behind the first shape are recorded in
 against the production backend: launch the published build and reach the landing
 page; sign in to Imbue Cloud through the app's web-login flow, completing the
 hosted login page in the test's own browser; create an Imbue Cloud workspace;
-run default-workspace-template's CI test suites inside it (see "The template's
-CI suites in the workspace" below);
+run default-workspace-template's CI test suites inside it, then its OOM drill
+(see "The template's CI suites in the workspace" and "The template's OOM drill
+in the workspace" below);
 send the chat a prompt that builds a hello-world scaffolding app (a web server
 with a route that answers 200, registered as a workspace app; the prompt is
 optimized to be minimally expensive while still building that server); stop the
@@ -521,8 +522,9 @@ counting failed template tests apart from every other failure: the workflow
 skips its rerun when those are the only failures, and adds each `summary.md` to
 the job's summary page.
 
-`MINDS_SMOKE_SKIP_DWT_TESTS=1` skips step 3b: the journey reports it as a
-`SUBSKIPPED` subtest and goes on. Unset or `0` runs it, and any other value
+`MINDS_SMOKE_SKIP_DWT_TESTS=1` skips step 3b and step 3c (the OOM drill,
+below): the journey reports each as a `SUBSKIPPED` subtest and goes on. Unset or
+`0` runs them, and any other value
 errors the journey before the app launches. A dispatch of the workflow sets it
 through the `skip_dwt_tests` input, where `true` skips and the default is
 `false`. The dispatch `minds-admin env deploy` starts after a production deploy
@@ -537,6 +539,42 @@ staging run is made from the checkout at the release commit with
 where a new template tag meets its own CI tests in a real workspace, and the
 release rule is that nothing of the release is deployed, baked or promoted on
 production until it has passed.
+
+**The template's OOM drill in the workspace.** Under memory pressure a
+workspace's earlyoom sheds processes in the order the template's shed policy
+sets (`system/services/oom_priority/src/oom_priority/bands.py`). The template's
+drill, `system/services/oom_priority/bin/oom_drill.py`, checks that order
+against the real earlyoom: it starts one memory-holding sleeper at each score
+the policy assigns, from an aged chat (1000) down to a user agent (300), grows
+memory until earlyoom has shed them all, and checks each kill against a
+prediction of earlyoom's own choice. Its unit tests in the template hold its
+scores to the policy, so a policy change that does not move the drill fails the
+template's CI. Step 3c, right after step 3b, runs the drill the workspace holds
+in a gVisor container on a pool host, which no CI run of the template does:
+
+- It runs the way step 3b's runner does, detached under
+  `/var/tmp/studio-smoke-oom-drill/<run id>/` through the app's own mngr, and
+  is polled; it needs no preparation, since the drill stops the Screen's desktop
+  itself and the journey's chat has not started yet. The drill gives up after
+  six minutes and the step after seven.
+- Its result is one template test, `dwt:oom-drill::system/services/oom_priority/bin/oom_drill.py`:
+  a failed drill is a `SUBFAILED` result carrying the drill's reason, the order
+  it shed the sleepers in and how it judged each kill, and, like any failed
+  template test, it skips the workflow's rerun. Its verdict, its log and its
+  runner's files land in `.test_output/smoke/<test name>/oom-drill/`, beside the
+  `summary.md` the workflow adds to the job's summary page.
+- The step's own failure, when the drill cannot be started or its verdict
+  fetched, fails the `Step 3c` subtest instead.
+- It runs only where step 3b does, so the automated run after a production
+  deploy does not drill. Whether it should is undecided; making it drill is a
+  small change, since step 3c would only have to stop following
+  `MINDS_SMOKE_SKIP_DWT_TESTS` (`specs/minds-smoke-tests/spec.md`, "Later").
+
+The same drill runs from a laptop, against any template checkout, with
+`just dwt-oom-drill [template_dir]`: a throwaway local Docker workspace built
+from the checkout, drilled and destroyed. That workspace runs under runc, not
+gVisor, so it is the check for a policy change before it lands, and this step
+is the one in the production runtime.
 
 **Running it locally.** The suite also runs from a developer laptop against
 staging or production with nothing but this checkout, so a developer can see
@@ -597,9 +635,9 @@ path; `MINDS_SMOKE_EXPECTED_TEMPLATE_REF=minds-v<version>` fails the journey
 in that case, for a run meant to certify a release's template). A pool with no
 row to lease there at all fails the run, which is a true thing to report about
 the tier. The run then mints one LiteLLM key
-for the persistent account, runs default-workspace-template's CI suites in the
-workspace (up to 75 minutes; `MINDS_SMOKE_SKIP_DWT_TESTS=1` skips them, which
-every run except a new desktop release on staging should), and
+for the persistent account, runs default-workspace-template's CI suites and its
+OOM drill in the workspace (up to 75 and 7 minutes; `MINDS_SMOKE_SKIP_DWT_TESTS=1`
+skips both, which every run except a new desktop release on staging should), and
 has a real agent build the hello-world app, and stops and starts the workspace
 (`MINDS_SMOKE_RESTORE_FROM_STORAGE=1` waits out the retention window first, so
 the start restores it from object storage); a

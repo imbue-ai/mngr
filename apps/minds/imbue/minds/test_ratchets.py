@@ -18,6 +18,7 @@ _EMBEDDED_CONTAINER_SCRIPTS: tuple[str, ...] = (
     "test_litellm_via_workspace.py",
     "*/desktop_client/update_program_stubs_testing.py",
     "*/smoke_tests/dwt_workspace_scripts.py",
+    "*/smoke_tests/workspace_runner_scripts.py",
 )
 
 # The programs the app runs inside a workspace (see workspace_programs/README.md). They are
