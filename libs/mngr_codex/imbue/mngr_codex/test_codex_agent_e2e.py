@@ -47,6 +47,7 @@ from imbue.mngr.agents.agent_release_testing import run_message_delivery_journey
 from imbue.mngr.agents.agent_release_testing import send_expecting_success
 from imbue.mngr.agents.agent_release_testing import wait_for_records
 from imbue.mngr.hosts.background_tasks import TURN_END_FILE_NAME
+from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import get_subprocess_test_env
@@ -628,6 +629,89 @@ def test_codex_agent_turn_end_never_outlives_its_turn_and_survives_a_compaction(
         f"a compaction started as a turn ended left {after_turn_then_compaction!r}, not that turn's COMPLETED "
         f"{compaction_consumer}"
     )
+
+
+_BACKGROUND_TASK_CONSUMER: Final[str] = (
+    "record_background_tasks.py, which reads codex's thread/loaded/list, thread/read (status, parentThreadId, "
+    "threadSource) and thread/backgroundTerminals/list (itemId)"
+)
+
+
+def _wait_for_state(
+    profile: _CodexReleaseProfile, ctx: AgentReleaseContext, agent_name: str, state: str, timeout: float
+) -> tuple[dict[str, Any], list[str]]:
+    """Poll until the published agent reads ``state``; return it, and every state read on the way."""
+    states_read: list[str] = []
+
+    def _agent_in_state() -> dict[str, Any] | None:
+        agent = _published_agent(profile, ctx, agent_name)
+        states_read.append(agent["state"])
+        return agent if agent["state"] == state else None
+
+    agent, _, _ = poll_for_value(_agent_in_state, timeout, poll_interval=1)
+    assert agent is not None, f"mngr list never published {state}, only {states_read}; {_BACKGROUND_TASK_CONSUMER}"
+    return agent, states_read
+
+
+def _states_once_the_turn_opened(states_read: Sequence[str]) -> list[str]:
+    return list(states_read[states_read.index("RUNNING") :]) if "RUNNING" in states_read else []
+
+
+def _kinds_and_native_types(agent: dict[str, Any]) -> list[tuple[str, str]]:
+    return [(task["kind"], task["native_type"]) for task in agent["background_tasks"]]
+
+
+@pytest.mark.release
+@pytest.mark.harness_internals(harness="codex")
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(900)
+def test_codex_agent_reads_running_background_while_a_terminal_or_a_subagent_outlives_its_turn(
+    tmp_path: Path,
+) -> None:
+    """A terminal, then a subagent, left running past a turn read RUNNING_BACKGROUND from the turn's end until done."""
+    profile = _CodexReleaseProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+    ctx = profile.setup(tmp_path)
+    agent_name = f"codex-background-{get_short_random_string()}"
+    with _created_codex_agent(profile, ctx, agent_name, *profile.create_extra_args(ctx)):
+        send_expecting_success(
+            profile,
+            ctx,
+            agent_name,
+            "Use your shell tool to start the command 'sleep 45' with a yield time of about 1 second so that it keeps "
+            "running in the background, then end your turn right away with a one-line reply. Do not wait for it, "
+            "poll it or stop it.",
+        )
+        terminal, states_to_terminal = _wait_for_state(profile, ctx, agent_name, "RUNNING_BACKGROUND", timeout=180)
+        after_terminal, _ = _wait_for_state(profile, ctx, agent_name, "WAITING", timeout=120)
+
+        send_expecting_success(
+            profile,
+            ctx,
+            agent_name,
+            "Use spawn_agent to start one subagent whose task is: run the shell command 'sleep 45' and wait for it to "
+            "finish, then reply done. As soon as it is spawned, end your own turn with a one-line reply. Do not wait "
+            "for the subagent and do not check on it.",
+        )
+        subagent, states_to_subagent = _wait_for_state(profile, ctx, agent_name, "RUNNING_BACKGROUND", timeout=180)
+        after_subagent, _ = _wait_for_state(profile, ctx, agent_name, "WAITING", timeout=180)
+
+    assert "WAITING" not in _states_once_the_turn_opened(states_to_terminal), (
+        f"{states_to_terminal}; {_BACKGROUND_TASK_CONSUMER}"
+    )
+    assert "WAITING" not in _states_once_the_turn_opened(states_to_subagent), (
+        f"{states_to_subagent}; {_BACKGROUND_TASK_CONSUMER}"
+    )
+    assert _kinds_and_native_types(terminal) == [("SHELL", "backgroundTerminals")], (
+        f"{terminal['background_tasks']}; {_BACKGROUND_TASK_CONSUMER}"
+    )
+    assert _kinds_and_native_types(subagent) == [("SUBAGENT", "subagent")], (
+        f"{subagent['background_tasks']}; {_BACKGROUND_TASK_CONSUMER}"
+    )
+    assert after_terminal["background_tasks"] == [] and after_subagent["background_tasks"] == []
 
 
 def _run_compaction(client: CodexAppServerClient, state_dir: Path) -> tuple[dict[str, Any], set[str]]:

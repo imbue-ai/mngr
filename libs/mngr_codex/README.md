@@ -64,6 +64,17 @@ turn that fails, which runs no `Stop` hook, and comes only after the continuatio
 that a `Stop` hook in the repo's `.codex/hooks.json` keeps going (exit code 2), so such a turn
 reads `RUNNING` throughout.
 
+With no turn open, an agent reads `RUNNING_BACKGROUND` while codex's app-server lists work left
+running: a background terminal (a command still running after its turn ended, recorded as kind
+`SHELL`, native type `backgroundTerminals`) or a subagent thread whose turn is open (kind
+`SUBAGENT`, native type its `threadSource`, e.g. `subagent`). The records under
+`background_tasks/task-<id>` are rewritten from the app-server on the agent's own host by
+codex's `Stop` and `Interrupt` hooks before the turn ends, and every 5 seconds by the agent's
+background supervisor, so work that ends while the agent is idle drops off up to 5 seconds
+late. The supervisor clears the records at each launch. The writer runs `python3` on the
+agent's host; on a host without it (e.g. a docker image with only mngr's required packages)
+the agent reads `WAITING` once its turn ends.
+
 `mngr list` shows a `waiting_reason` for each codex agent:
 
 - `PERMISSIONS` — blocked on a tool-approval dialog or on a question codex asked you (plan
@@ -78,10 +89,16 @@ With `auto_allow_permissions = true` codex never asks for an approval.
   and a declined one until the turn's next tool finishes or the turn ends: codex runs no hook
   when you answer.
 - Only the root thread's turn, approvals and questions count. A subagent still working after
-  the root turn ended reads `WAITING`, and a subagent's approval or question is not shown.
+  the root turn ended reads `RUNNING_BACKGROUND`, even while it waits on an approval or a
+  question.
+- A turn that fails runs no `Stop` hook, so work it leaves running reads `WAITING` for up to 5
+  seconds after it.
+- Work left running after a turn does not count as the agent's activity, so it does not keep a
+  docker, lima, vps or modal host with idle detection on from stopping.
 - codex runs mngr's hooks only once they are trusted. mngr trusts them when it creates an
   agent on a local host. On a remote host, codex shows "Hooks need review" in the agent's
   terminal after its first restart. Until someone picks "Trust all" there, turns still read
-  `RUNNING` and `WAITING` from the rollout, but an approval or a question reads `RUNNING`.
+  `RUNNING` and `WAITING` from the rollout, but an approval or a question reads `RUNNING`, and
+  work a turn leaves running reads `WAITING` for up to 5 seconds after it.
 - An agent created before the turn hook reads its turn from codex's app-server instead, on a
   local host only, until it is re-provisioned (`mngr create <name> --reuse --update`).

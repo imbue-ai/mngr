@@ -38,7 +38,9 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(0), excluded_patterns=("common_transcript_convert.py",))
+    rc.check_bare_print(
+        _DIR, snapshot(0), excluded_patterns=("common_transcript_convert.py", "record_background_tasks.py")
+    )
 
 
 # ratchet_group("Exception handling")

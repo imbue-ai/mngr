@@ -72,6 +72,7 @@ from imbue.mngr_codex.app_server_client import TransportClosedError
 from imbue.mngr_codex.codex_config import ACTIVE_MARKER_FILENAME
 from imbue.mngr_codex.codex_config import APP_SERVER_THREAD_FILENAME
 from imbue.mngr_codex.codex_config import PERMISSIONS_WAITING_FILENAME
+from imbue.mngr_codex.codex_config import RECORD_BACKGROUND_TASKS_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import RECORD_SESSION_POINTERS_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import ROOT_SESSION_FILENAME
 from imbue.mngr_codex.codex_config import TRANSCRIPT_PATH_FILENAME
@@ -1484,7 +1485,11 @@ def test_provision_builds_the_codex_home_tree(codex_agent: CodexAgent, isolated_
     hooks_path = get_codex_hooks_path(codex_home)
     assert hooks_path.exists()
     assert json.loads(hooks_path.read_text()) == build_codex_hooks_config()
-    for script_name in (RECORD_SESSION_POINTERS_SCRIPT_NAME, TURN_HOOK_SCRIPT_NAME):
+    for script_name in (
+        RECORD_SESSION_POINTERS_SCRIPT_NAME,
+        TURN_HOOK_SCRIPT_NAME,
+        RECORD_BACKGROUND_TASKS_SCRIPT_NAME,
+    ):
         assert (codex_agent._get_agent_dir() / "commands" / script_name).exists()
 
     # auth.json is a symlink to the shared user auth.json. With the shared auth

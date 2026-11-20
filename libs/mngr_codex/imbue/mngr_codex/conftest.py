@@ -32,6 +32,13 @@ def codex_large_frame_socket() -> Iterator[Path]:
 
 
 @pytest.fixture
+def short_socket_path() -> Iterator[Path]:
+    """A unix socket path short enough for macOS as well as Linux, in a directory removed afterwards."""
+    with TemporaryDirectory(prefix="codex-ws-", dir="/tmp") as directory:
+        yield Path(directory) / "app-server.sock"
+
+
+@pytest.fixture
 def isolated_codex_home(tmp_path: Path) -> Path:
     """Seed the shared codex auth.json into the autouse-isolated HOME, and return it.
 

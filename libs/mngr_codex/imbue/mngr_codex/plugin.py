@@ -32,6 +32,9 @@ Lifecycle: codex's hooks keep the ``active`` turn marker and the
 ``permissions_waiting`` dialog marker (``codex_turn_hook.sh``), which mngr's shared
 state probe reads on any host; the transcript streamer also opens and closes the turn
 marker from the rollout's task records, and the background supervisor clears both at launch.
+``record_background_tasks.py`` rewrites the ``background_tasks/task-*`` records from what the
+daemon lists, run by the root turn's ``Stop`` and ``Interrupt`` hook and by the supervisor on each
+pass; the supervisor clears them at launch.
 ``record_session_pointers.sh`` records the rollout session id + transcript path and
 removes ``turn_end`` at ``UserPromptSubmit``; see :func:`codex_config.build_codex_hooks_config`.
 
@@ -167,6 +170,7 @@ from imbue.mngr_codex.codex_config import DEVELOPER_INSTRUCTIONS_SEPARATOR
 from imbue.mngr_codex.codex_config import PERMISSIONS_WAITING_FILENAME
 from imbue.mngr_codex.codex_config import PROCESS_STARTED_MARKER_FILENAME
 from imbue.mngr_codex.codex_config import RAW_TRANSCRIPT_SCRIPT_NAME
+from imbue.mngr_codex.codex_config import RECORD_BACKGROUND_TASKS_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import RECORD_SESSION_POINTERS_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import ROOT_SESSION_FILENAME
 from imbue.mngr_codex.codex_config import RUST_LOG_VALUE
@@ -1284,7 +1288,7 @@ class CodexAgent(
            never fatal (an outdated codex still runs).
         4. Build the per-agent ``CODEX_HOME`` (config.toml, hooks.json, the
            auth.json symlink, the NUX-skip marker).
-        5. Install the transcript scripts, background supervisor and hook scripts under
+        5. Install the transcript scripts, background supervisor, background task record writer and hook scripts under
            ``$MNGR_AGENT_STATE_DIR/commands/``.
         """
         if self.agent_config.check_installation:
@@ -1306,6 +1310,9 @@ class CodexAgent(
                         RECORD_SESSION_POINTERS_SCRIPT_NAME
                     ),
                     TURN_HOOK_SCRIPT_NAME: _load_codex_resource_script(TURN_HOOK_SCRIPT_NAME),
+                    RECORD_BACKGROUND_TASKS_SCRIPT_NAME: _load_codex_resource_script(
+                        RECORD_BACKGROUND_TASKS_SCRIPT_NAME
+                    ),
                 },
                 concurrency_group,
             )

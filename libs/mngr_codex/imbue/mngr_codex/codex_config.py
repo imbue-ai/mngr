@@ -209,6 +209,8 @@ RECORD_SESSION_POINTERS_SCRIPT_NAME: str = "record_session_pointers.sh"
 # The hook that keeps ``active`` and ``permissions_waiting``.
 TURN_HOOK_SCRIPT_NAME: Final[str] = "codex_turn_hook.sh"
 BACKGROUND_TASKS_SCRIPT_NAME: str = "codex_background_tasks.sh"
+# Rewrites the agent's background task records from what codex's app-server lists.
+RECORD_BACKGROUND_TASKS_SCRIPT_NAME: Final[str] = "record_background_tasks.py"
 RAW_TRANSCRIPT_SCRIPT_NAME: str = "stream_transcript.sh"
 COMMON_TRANSCRIPT_SCRIPT_NAME: str = "common_transcript.sh"
 # The python converter that common_transcript.sh invokes (python3
@@ -580,7 +582,8 @@ def build_codex_hooks_config() -> dict[str, Any]:
 
     ``UserPromptSubmit`` runs ``record_session_pointers.sh``, which records the rollout session
     id and transcript path and removes ``turn_end``. Every event in ``_TURN_HOOK_EVENTS`` runs ``codex_turn_hook.sh``,
-    which keeps the ``active`` and ``permissions_waiting`` markers mngr's state probe reads.
+    which keeps the ``active`` and ``permissions_waiting`` markers mngr's state probe reads and, at the
+    root turn's ``Stop`` and ``Interrupt``, has ``record_background_tasks.py`` rewrite the background task records.
 
     Guards a repo wants on its own agents go in its ``.codex/hooks.json``, which codex loads
     as its own config layer and runs alongside this one.

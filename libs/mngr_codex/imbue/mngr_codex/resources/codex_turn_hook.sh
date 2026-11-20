@@ -4,8 +4,10 @@
 # Usage: codex_turn_hook.sh <UserPromptSubmit|Stop|Interrupt|PermissionRequest|PreToolUse|PostToolUse>, codex's payload on stdin.
 #
 #   UserPromptSubmit   writes the payload's turn_id into `active` and removes `permissions_waiting`
-#   Stop               removes `permissions_waiting`
-#   Interrupt          removes `active` and `permissions_waiting`
+#   Stop               rewrites the background task records with this turn counted as over, then removes
+#                      `permissions_waiting`
+#   Interrupt          rewrites the background task records with this turn counted as over, then removes
+#                      `active` and `permissions_waiting`
 #   PermissionRequest  touches `permissions_waiting`
 #   PreToolUse         touches `permissions_waiting` when the tool is request_user_input
 #   PostToolUse        removes `permissions_waiting`
@@ -33,6 +35,13 @@ _field() {
     printf '%s' "$payload" | { grep -oE "\"$1\":\"[^\"]*\"" || :; } | sed -n -E "1s/^\"$1\":\"(.*)\"\$/\1/p"
 }
 
+# Rewrite the background task records, counting the root thread's turn as over.
+_record_background_tasks() {
+    local writer="$MNGR_AGENT_STATE_DIR/commands/record_background_tasks.py"
+    [ -f "$writer" ] && command -v python3 >/dev/null 2>&1 || return 0
+    python3 "$writer" --turn-ended "$(_field session_id)" >/dev/null 2>&1 || :
+}
+
 case "$payload" in
     *'"agent_id":"'*) exit 0 ;;
 esac
@@ -48,9 +57,11 @@ case "${1:-}" in
         rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting" || :
         ;;
     Stop)
+        _record_background_tasks
         rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting" || :
         ;;
     Interrupt)
+        _record_background_tasks
         rm -f "$MNGR_AGENT_STATE_DIR/active" "$MNGR_AGENT_STATE_DIR/permissions_waiting" || :
         ;;
     PermissionRequest)

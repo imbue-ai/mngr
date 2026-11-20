@@ -11,10 +11,13 @@
 #      $MNGR_AGENT_STATE_DIR/events/codex/common_transcript/events.jsonl.
 #      Only launched if the script is present in commands/ (provision() writes
 #      it when emit_common_transcript=True).
+#   3. Background task records: every pass, record_background_tasks.py rewrites
+#      $MNGR_AGENT_STATE_DIR/background_tasks/task-* from what codex's app-server
+#      lists, and each new outcome is logged.
 #
-# At start it removes the `active` and `permissions_waiting` markers a previous
-# codex process left behind, and exports the launch time to stream_transcript.sh
-# as MNGR_CODEX_LAUNCHED_AT.
+# At start it removes the `active` and `permissions_waiting` markers and the
+# task-* records a previous codex process left behind, and exports the launch time
+# to stream_transcript.sh as MNGR_CODEX_LAUNCHED_AT.
 #
 # Restart dead children, clean them up on exit, and dedup via pidfile so
 # concurrent re-runs (e.g. agent restart) don't pile up watchers racing on the
@@ -38,7 +41,14 @@ if [ -z "$SESSION_NAME" ]; then
     exit 1
 fi
 
+# shellcheck source=/dev/null
+[ -f "$MNGR_AGENT_STATE_DIR/commands/mngr_background_task_lib.sh" ] \
+    && source "$MNGR_AGENT_STATE_DIR/commands/mngr_background_task_lib.sh"
+
 rm -f "$MNGR_AGENT_STATE_DIR/active" "$MNGR_AGENT_STATE_DIR/permissions_waiting"
+if command -v mngr_background_task_clear >/dev/null 2>&1; then
+    mngr_background_task_clear task-
+fi
 MNGR_CODEX_LAUNCHED_AT=$(date +%s)
 export MNGR_CODEX_LAUNCHED_AT
 
@@ -77,6 +87,8 @@ COMMON_TRANSCRIPT_SCRIPT="$MNGR_AGENT_STATE_DIR/commands/common_transcript.sh"
 # items. Only launched if present in commands/ -- mngr_codex_usage installs it,
 # so usage events are written only when their reader is installed.
 USAGE_SCRIPT="$MNGR_AGENT_STATE_DIR/commands/codex_usage.sh"
+RECORD_SCRIPT="$MNGR_AGENT_STATE_DIR/commands/record_background_tasks.py"
+_LAST_RECORD_OUTCOME=""
 _STREAM_PID=""
 _COMMON_TRANSCRIPT_PID=""
 _USAGE_PID=""
@@ -115,6 +127,17 @@ _start_usage_if_needed() {
     fi
 }
 
+# Rewrite the background task records from codex's app-server, logging the outcome when it changes.
+_record_background_tasks() {
+    local outcome
+    if [ ! -f "$RECORD_SCRIPT" ] || ! command -v python3 >/dev/null 2>&1; then return 0; fi
+    outcome=$(python3 "$RECORD_SCRIPT" 2>&1) || :
+    if [ "$outcome" != "$_LAST_RECORD_OUTCOME" ]; then
+        log_info "Background task records: $outcome"
+        _LAST_RECORD_OUTCOME="$outcome"
+    fi
+}
+
 _start_stream_if_needed
 _start_common_if_needed
 _start_usage_if_needed
@@ -144,7 +167,8 @@ while [ -n "$SESSION_ID" ] && tmux has-session -t "$SESSION_ID" 2>/dev/null; do
     _start_stream_if_needed
     _start_common_if_needed
     _start_usage_if_needed
-    sleep 15
+    _record_background_tasks
+    sleep 5
 done
 
 log_info "Background tasks finished for session $SESSION_NAME (session ended)"

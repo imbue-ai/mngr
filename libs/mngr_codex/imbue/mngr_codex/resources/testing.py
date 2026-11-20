@@ -7,15 +7,31 @@ running. ``provision_commands_dir`` does that provisioning.
 The ``rollout_*`` builders mint codex rollout lines as plain dicts, the wire shape
 common_transcript_convert.py reads (``{"timestamp":..,"type":<t>,"payload":<p>}``). They are
 shared by the converter's unit tests and the shell-level tests, which JSON-encode them.
+
+``FakeCodexAppServer`` answers the app-server requests record_background_tasks.py makes, over a real
+WebSocket on a unix socket (``serving_fake_codex_app_server``).
 """
 
 from __future__ import annotations
 
+import json
 import shutil
+from collections.abc import Generator
+from collections.abc import Mapping
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from pydantic import Field
+from websockets.sync.server import ServerConnection
+from websockets.sync.server import unix_serve
+
+from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr_codex.codex_config import get_codex_app_server_socket_path
+from imbue.mngr_codex.codex_config import get_codex_home
 
 _RESOURCES_DIR = Path(__file__).parent
 
@@ -210,3 +226,117 @@ def rollout_token_count(
             "rate_limits": None,
         },
     )
+
+
+def codex_thread(
+    thread_id: str,
+    status_type: str = "idle",
+    active_flags: Sequence[str] = (),
+    parent_thread_id: str | None = None,
+    thread_source: str | None = None,
+) -> dict[str, Any]:
+    """A loaded thread as codex 0.163.0's ``thread/read`` returns it, trimmed to the fields that vary here."""
+    status: dict[str, Any] = {"type": status_type}
+    if status_type == "active":
+        status["activeFlags"] = list(active_flags)
+    return {
+        "id": thread_id,
+        "status": status,
+        "parentThreadId": parent_thread_id,
+        "source": "vscode" if parent_thread_id is None else {"subAgent": {"thread_spawn": {"depth": 1}}},
+        "threadSource": thread_source,
+        "agentNickname": None if parent_thread_id is None else "Planck",
+        "createdAt": 1795073526,
+        "updatedAt": 1795073531,
+        "turns": [],
+    }
+
+
+def codex_background_terminal(item_id: str, command: str = "sleep 47213") -> dict[str, Any]:
+    """One entry of codex 0.163.0's ``thread/backgroundTerminals/list``."""
+    return {
+        "itemId": item_id,
+        "processId": "38373",
+        "command": command,
+        "cwd": "/home/user/work",
+        "osPid": None,
+        "cpuPercent": None,
+        "rssKb": None,
+    }
+
+
+class FakeCodexAppServer(FrozenModel):
+    """Answers the requests of one codex app-server client: each loaded thread, and each thread's background terminals.
+
+    Each reply follows an ``account/updated`` notification. A reply in ``replies_by_method`` replaces the one built
+    from the listing; ``page_size`` splits each list into pages; ``is_framing_varied`` sends each reply after a ping,
+    in three fragments; ``is_silent`` never replies.
+    """
+
+    threads: tuple[Mapping[str, Any], ...] = ()
+    background_terminals: Mapping[str, tuple[Mapping[str, Any], ...]] = Field(default_factory=dict)
+    replies_by_method: Mapping[str, Mapping[str, Any]] = Field(default_factory=dict)
+    page_size: int | None = None
+    is_framing_varied: bool = False
+    is_silent: bool = False
+
+    def answer(self, method: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
+        if method in self.replies_by_method:
+            return self.replies_by_method[method]
+        if method == "initialize":
+            return {"result": {"userAgent": "mngr/0.163.0", "codexHome": "/home/user/.codex"}}
+        if method == "thread/loaded/list":
+            return {"result": self._page([thread["id"] for thread in self.threads], params)}
+        if method == "thread/read":
+            (thread,) = [thread for thread in self.threads if thread["id"] == params["threadId"]]
+            return {"result": {"thread": thread, "readState": None}}
+        if method == "thread/backgroundTerminals/list":
+            return {"result": self._page(self.background_terminals.get(params["threadId"], ()), params)}
+        return {"error": {"code": -32601, "message": f"unknown method {method}"}}
+
+    def _page(self, items: Sequence[Any], params: Mapping[str, Any]) -> dict[str, Any]:
+        if self.page_size is None:
+            return {"data": list(items), "nextCursor": None}
+        start = int(params.get("cursor") or 0)
+        end = start + self.page_size
+        return {"data": list(items[start:end]), "nextCursor": str(end) if end < len(items) else None}
+
+    def handle(self, connection: ServerConnection) -> None:
+        for message in connection:
+            request = json.loads(message)
+            if "id" not in request or self.is_silent:
+                continue
+            connection.send(json.dumps({"method": "account/updated", "params": {}}))
+            reply = json.dumps({"id": request["id"], **self.answer(request["method"], request.get("params") or {})})
+            if self.is_framing_varied:
+                connection.ping()
+                third = len(reply) // 3
+                connection.send([reply[:third], reply[third : 2 * third], reply[2 * third :]])
+            else:
+                connection.send(reply)
+
+
+@contextmanager
+def serving_fake_codex_app_server(socket_path: Path, server: FakeCodexAppServer) -> Generator[None, None, None]:
+    """Serve ``server`` on ``socket_path`` the way codex's app-server serves its clients: WebSocket over a unix socket."""
+    with unix_serve(server.handle, path=str(socket_path), compression=None) as websocket_server:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            executor.submit(websocket_server.serve_forever)
+            try:
+                yield
+            finally:
+                websocket_server.shutdown()
+
+
+@contextmanager
+def serving_fake_codex_app_server_for_agent(
+    state_dir: Path, server: FakeCodexAppServer
+) -> Generator[None, None, None]:
+    """Serve ``server`` on the socket the agent at ``state_dir`` launches its app-server on, removing it afterwards."""
+    socket_path = get_codex_app_server_socket_path(get_codex_home(state_dir))
+    socket_path.parent.mkdir(mode=0o700)
+    try:
+        with serving_fake_codex_app_server(socket_path, server):
+            yield
+    finally:
+        shutil.rmtree(socket_path.parent, ignore_errors=True)
