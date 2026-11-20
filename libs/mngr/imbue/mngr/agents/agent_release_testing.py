@@ -194,16 +194,16 @@ class AgentReleaseProfile(abc.ABC):
     def is_waiting_after_create(self, host_dir: Path) -> bool:
         """Whether the just-created, un-messaged agent reports WAITING (not running a turn).
 
-        Default: the ``active`` marker is absent. A harness whose lifecycle is read live rather
-        than from a marker (codex reads the daemon's ``thread/status``) overrides this.
+        Default: the ``active`` marker is absent. A harness whose lifecycle is not read from that
+        marker overrides this.
         """
         return not marker_path(host_dir).exists()
 
     def is_reporting_running(self, host_dir: Path) -> bool:
         """Whether the agent is reporting RUNNING (a turn in flight).
 
-        Default: the ``active`` marker exists. Overridden by a harness whose RUNNING signal is
-        read live (codex: a turn in flight is ``thread/status`` ``active``).
+        Default: the ``active`` marker exists. A harness whose RUNNING signal is not that marker
+        overrides this.
         """
         return marker_path(host_dir).exists()
 
@@ -431,8 +431,7 @@ def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) ->
         assert create.returncode == 0, f"create failed:\n{create.stdout}\n{create.stderr}"
         assert profile.is_waiting_after_create(host_dir), "expected WAITING (no turn in flight) right after create"
 
-        # 2. Seed the secret and observe RUNNING (every agent surfaces it -- via the active marker,
-        #    or, for a live-lifecycle harness like codex, the daemon's thread/status).
+        # 2. Seed the secret and observe RUNNING (``profile.is_reporting_running``).
         seed = profile.run_mngr(
             ctx, "message", agent_name, "--message", profile.seed_prompt(secret), timeout=_MESSAGE_TIMEOUT_SECONDS
         )

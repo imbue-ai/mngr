@@ -12,6 +12,10 @@
 #      Only launched if the script is present in commands/ (provision() writes
 #      it when emit_common_transcript=True).
 #
+# At start it removes the `active` and `permissions_waiting` markers a previous
+# codex process left behind, and exports the launch time to stream_transcript.sh
+# as MNGR_CODEX_LAUNCHED_AT.
+#
 # Restart dead children, clean them up on exit, and dedup via pidfile so
 # concurrent re-runs (e.g. agent restart) don't pile up watchers racing on the
 # same offset files and output file.
@@ -33,6 +37,10 @@ if [ -z "$SESSION_NAME" ]; then
     echo "Usage: codex_background_tasks.sh <tmux_session_name>" >&2
     exit 1
 fi
+
+rm -f "$MNGR_AGENT_STATE_DIR/active" "$MNGR_AGENT_STATE_DIR/permissions_waiting"
+MNGR_CODEX_LAUNCHED_AT=$(date +%s)
+export MNGR_CODEX_LAUNCHED_AT
 
 _MNGR_CODEX_LOCK="/tmp/mngr_codex_${MNGR_AGENT_ID:-$SESSION_NAME}.pid"
 

@@ -22,11 +22,15 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
+from collections.abc import Callable
 from collections.abc import Generator
+from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -37,6 +41,7 @@ from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
 from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
 from imbue.mngr.agents.agent_release_testing import agent_state_dir
 from imbue.mngr.agents.agent_release_testing import is_step_from
+from imbue.mngr.agents.agent_release_testing import marker_path
 from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
 from imbue.mngr.agents.agent_release_testing import run_message_delivery_journey
 from imbue.mngr.agents.agent_release_testing import send_expecting_success
@@ -46,11 +51,14 @@ from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import init_git_repo
+from imbue.mngr.utils.testing import run_git_command
 from imbue.mngr.utils.testing import run_mngr_subprocess
 from imbue.mngr_codex.app_server_client import CodexAppServerClient
 from imbue.mngr_codex.app_server_client import CodexAppServerError
 from imbue.mngr_codex.app_server_client import connect_app_server_transport
+from imbue.mngr_codex.codex_config import ACTIVE_MARKER_FILENAME
 from imbue.mngr_codex.codex_config import APP_SERVER_THREAD_FILENAME
+from imbue.mngr_codex.codex_config import PERMISSIONS_WAITING_FILENAME
 from imbue.mngr_codex.codex_config import get_codex_app_server_socket_path
 from imbue.mngr_codex.codex_config import get_codex_home
 
@@ -106,41 +114,6 @@ class _CodexReleaseProfile(AgentReleaseProfile):
         if _CODEX_BIN is None or not _REAL_AUTH.exists():
             return "codex CLI not installed or ~/.codex/auth.json missing (not logged in)"
         return None
-
-    # codex has no ``active`` marker: RUNNING vs WAITING is read live from the daemon's
-    # ``thread/status``. A turn in flight is ``active``; idle (or no daemon yet) is WAITING.
-    def is_waiting_after_create(self, host_dir: Path) -> bool:
-        return self._thread_status_type(host_dir) != "active"
-
-    def is_reporting_running(self, host_dir: Path) -> bool:
-        return self._thread_status_type(host_dir) == "active"
-
-    def _thread_status_type(self, host_dir: Path) -> str | None:
-        """The bound root thread's live status tag, or ``None`` when the daemon is unreachable.
-
-        Mirrors the plugin's send-path bind (persisted root id, else the single loaded thread) and
-        reads ``thread/status`` -- the same source the live lifecycle uses -- over a short-lived
-        connection. Any failure (no socket yet, no bindable thread) reads as "not active".
-        """
-        agent_dirs = [path for path in (host_dir / "agents").glob("*") if path.is_dir()]
-        if len(agent_dirs) != 1:
-            return None
-        socket_path = get_codex_app_server_socket_path(get_codex_home(agent_dirs[0]))
-        if not socket_path.exists():
-            return None
-        try:
-            client = CodexAppServerClient(transport=connect_app_server_transport(socket_path))
-        except OSError:
-            return None
-        try:
-            client.initialize("mngr-codex-release-test", "0")
-            if not self._bind_root_thread(client, agent_dirs[0]):
-                return None
-            return client.read_thread_status().status_type
-        except (CodexAppServerError, OSError):
-            return None
-        finally:
-            client.close()
 
     def _bind_root_thread(self, client: CodexAppServerClient, agent_state_dir: Path) -> bool:
         """Bind the agent's root thread (persisted id, else the single loaded one); False if none."""
@@ -353,11 +326,15 @@ _TURN_END_CONSUMER: Final[str] = (
 )
 
 
-def _published_turn_end(profile: _CodexReleaseProfile, ctx: AgentReleaseContext, agent_name: str) -> dict[str, Any]:
+def _published_agent(profile: _CodexReleaseProfile, ctx: AgentReleaseContext, agent_name: str) -> dict[str, Any]:
     listing = profile.run_mngr(ctx, "list", "--provider", "local", "--format", "json", timeout=120)
     assert listing.returncode == 0, f"mngr list failed:\n{listing.stdout}\n{listing.stderr}"
     (agent,) = [agent for agent in json.loads(listing.stdout)["agents"] if agent["name"] == agent_name]
-    return agent.get("turn_end") or {}
+    return agent
+
+
+def _published_turn_end(profile: _CodexReleaseProfile, ctx: AgentReleaseContext, agent_name: str) -> dict[str, Any]:
+    return _published_agent(profile, ctx, agent_name).get("turn_end") or {}
 
 
 def _wait_for_turn_end(
@@ -386,12 +363,24 @@ def _root_thread_client(
         client.close()
 
 
-def _interrupt_running_turn(profile: _CodexReleaseProfile, ctx: AgentReleaseContext) -> None:
-    """Send ``turn/interrupt`` to the daemon for the root thread's turn in progress."""
+def _running_turn_id(profile: _CodexReleaseProfile, ctx: AgentReleaseContext) -> str:
+    """The id of the root thread's turn in progress, as codex's daemon reports it."""
     with _root_thread_client(profile, ctx) as client:
         turns = client.thread_read(include_turns=True)["thread"]["turns"]
-        (turn_id,) = [turn["id"] for turn in turns if turn.get("status") == "inProgress"]
+    (turn_id,) = [turn["id"] for turn in turns if turn.get("status") == "inProgress"]
+    return turn_id
+
+
+def _interrupt_turn(profile: _CodexReleaseProfile, ctx: AgentReleaseContext, turn_id: str) -> None:
+    with _root_thread_client(profile, ctx) as client:
         client.interrupt(turn_id)
+
+
+_TURN_MARKER_CONSUMER: Final[str] = (
+    "codex_turn_hook.sh, which writes the UserPromptSubmit payload's turn_id into `active`, leaves it at Stop and "
+    "removes it at Interrupt, and stream_transcript.sh, which writes a task_started's turn_id into `active` and "
+    "removes it at the rollout's end record of that turn_id"
+)
 
 
 @pytest.mark.release
@@ -413,11 +402,19 @@ def test_codex_agent_publishes_a_completed_and_an_interrupted_turn_end(tmp_path:
 
         send_expecting_success(profile, ctx, agent_name, "Run `sleep 120` in the shell, wait for it, then reply DONE.")
         assert poll_until(lambda: profile.is_reporting_running(ctx.host_dir), timeout=120, poll_interval=1)
-        assert _published_turn_end(profile, ctx, agent_name) == {}
-        _interrupt_running_turn(profile, ctx)
+        marked_turn = marker_path(ctx.host_dir).read_text().strip()
+        running = _published_agent(profile, ctx, agent_name)
+        running_turn = _running_turn_id(profile, ctx)
+        _interrupt_turn(profile, ctx, running_turn)
         interrupted = _wait_for_turn_end(profile, ctx, agent_name, "INTERRUPTED")
+        after_interrupt = _published_agent(profile, ctx, agent_name)
 
     assert completed["native_type"] == ""
+    assert (running["state"], running.get("turn_end")) == ("RUNNING", None), running
+    assert marked_turn == running_turn, (
+        f"`active` names {marked_turn!r}, not {running_turn!r}; {_TURN_MARKER_CONSUMER}"
+    )
+    assert after_interrupt["state"] == "WAITING", f"{after_interrupt['state']}; {_TURN_MARKER_CONSUMER}"
     assert interrupted["native_type"] == "interrupted", f"{interrupted!r}; {_TURN_END_CONSUMER}"
 
 
@@ -447,8 +444,103 @@ def test_codex_agent_publishes_a_failed_turn_end_named_by_codex(tmp_path: Path) 
     ):
         send_expecting_success(profile, ctx, agent_name, "Reply with just OK.")
         failed = _wait_for_turn_end(profile, ctx, agent_name, "FAILED")
+        assert poll_until(lambda: not profile.is_reporting_running(ctx.host_dir), timeout=30, poll_interval=1)
+        after_failure = _published_agent(profile, ctx, agent_name)
 
     assert failed["native_type"], f"{failed!r} names no codex_error_info; {_TURN_END_CONSUMER}"
+    assert after_failure["state"] == "WAITING", f"{after_failure['state']}; {_TURN_MARKER_CONSUMER}"
+
+
+def _streamed_rollout_records(state_dir: Path) -> list[dict[str, Any]]:
+    """The rollout records the transcript streamer has copied so far."""
+    events_path = state_dir / "logs" / "codex_transcript" / "events.jsonl"
+    if not events_path.exists():
+        return []
+    return [json.loads(line) for line in events_path.read_text().splitlines()]
+
+
+def _is_tool_call_naming(record: Mapping[str, Any], text: str) -> bool:
+    """Whether a rollout record is a tool call whose record contains ``text``."""
+    payload = record.get("payload") or {}
+    return (
+        record.get("type") == "response_item"
+        and str(payload.get("type", "")).endswith("_call")
+        and text in json.dumps(payload)
+    )
+
+
+@pytest.mark.release
+@pytest.mark.harness_internals(harness="codex")
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(900)
+def test_codex_agent_reads_running_through_a_turn_a_repo_stop_hook_keeps_going(tmp_path: Path) -> None:
+    """A turn whose end a repo's own Stop hook blocks (exit 2) reads RUNNING until codex's continuation ends.
+
+    Also pins codex running the continuation inside the same task: the rollout's only task_started and
+    task_complete name the turn, and the continuation's tool call lies between them.
+    """
+    profile = _CodexReleaseProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+    ctx = profile.setup(tmp_path)
+    blocked_marker = tmp_path / "turn-end-blocked"
+    release = tmp_path / "continuation-release"
+    feedback = (
+        f"Before you finish, run exactly this shell command and wait for it to exit: "
+        f"until [ -e {shlex.quote(str(release))} ]; do sleep 1; done. Then reply with just AGAIN."
+    )
+    hook_script = tmp_path / "block_first_turn_end.sh"
+    hook_script.write_text(
+        "cat > /dev/null\n"
+        f"[ -e {shlex.quote(str(blocked_marker))} ] && exit 0\n"
+        f"touch {shlex.quote(str(blocked_marker))}\n"
+        f"echo {shlex.quote(feedback)} >&2\n"
+        "exit 2\n"
+    )
+    hook = {"type": "command", "command": f"bash {shlex.quote(str(hook_script))}"}
+    (ctx.project_dir / ".codex").mkdir()
+    (ctx.project_dir / ".codex" / "hooks.json").write_text(json.dumps({"hooks": {"Stop": [{"hooks": [hook]}]}}))
+    run_git_command(ctx.project_dir, "add", ".codex")
+    run_git_command(ctx.project_dir, "commit", "-m", "Add a Stop hook that blocks the first turn end")
+    agent_name = f"codex-stop-block-{get_short_random_string()}"
+    with _created_codex_agent(profile, ctx, agent_name, *profile.create_extra_args(ctx)):
+        state_dir = agent_state_dir(ctx.host_dir)
+        send_expecting_success(profile, ctx, agent_name, "Reply with just OK.")
+        assert poll_until(
+            lambda: any(_is_tool_call_naming(record, str(release)) for record in _streamed_rollout_records(state_dir)),
+            timeout=180,
+            poll_interval=1,
+        ), f"the continuation never ran its held command (the repo's Stop hook blocked: {blocked_marker.exists()})"
+        active = state_dir / ACTIVE_MARKER_FILENAME
+        marked_turn = active.read_text().strip() if active.exists() else None
+        during_continuation = _published_agent(profile, ctx, agent_name)
+        release.touch()
+        _wait_for_turn_end(profile, ctx, agent_name, "COMPLETED")
+        poll_until(lambda: not profile.is_reporting_running(ctx.host_dir), timeout=30, poll_interval=0.5)
+        after_continuation = _published_agent(profile, ctx, agent_name)
+        records = _streamed_rollout_records(state_dir)
+
+    assert blocked_marker.exists(), "the repo's Stop hook never ran"
+    assert during_continuation["state"] == "RUNNING", (
+        f"{during_continuation['state']} while codex ran the continuation of a turn a Stop hook blocked; "
+        f"{_TURN_MARKER_CONSUMER}"
+    )
+    assert after_continuation["state"] == "WAITING", f"{after_continuation['state']}; {_TURN_MARKER_CONSUMER}"
+    task_records = [
+        (index, record["payload"]["type"], record["payload"].get("turn_id"))
+        for index, record in enumerate(records)
+        if record.get("type") == "event_msg" and record["payload"].get("type") in ("task_started", "task_complete")
+    ]
+    held_calls = [index for index, record in enumerate(records) if _is_tool_call_naming(record, str(release))]
+    assert [(kind, turn_id) for _, kind, turn_id in task_records] == [
+        ("task_started", marked_turn),
+        ("task_complete", marked_turn),
+    ], f"{task_records}, `active` named {marked_turn!r}; {_TURN_MARKER_CONSUMER}"
+    assert held_calls and task_records[0][0] < held_calls[0] < task_records[1][0], (
+        f"the continuation's tool call at {held_calls} is outside the task {task_records}; {_TURN_MARKER_CONSUMER}"
+    )
 
 
 @pytest.mark.release
@@ -494,7 +586,7 @@ def test_codex_agent_turn_end_never_outlives_its_turn_and_survives_a_compaction(
 
         with _root_thread_client(profile, ctx) as client:
             client.settings_update(model=_CODEX_MODEL)
-            compaction = _run_compaction(client)
+            compaction, compaction_marks = _run_compaction(client, state_dir)
         _wait_for_streamed_task_complete(state_dir, compaction["id"])
         after_compaction = _published_turn_end(profile, ctx, agent_name)
 
@@ -506,7 +598,7 @@ def test_codex_agent_turn_end_never_outlives_its_turn_and_survives_a_compaction(
             assert poll_until(
                 lambda: client.read_thread_status().status_type != "active", timeout=180, poll_interval=0.01
             )
-            turn_then_compaction = _run_compaction(client)
+            turn_then_compaction, turn_then_compaction_marks = _run_compaction(client, state_dir)
         _wait_for_streamed_task_complete(state_dir, turn_then_compaction["id"])
         after_turn_then_compaction = _published_turn_end(profile, ctx, agent_name)
 
@@ -520,6 +612,14 @@ def test_codex_agent_turn_end_never_outlives_its_turn_and_survives_a_compaction(
         "turn_attribution the rollout's other task_started records carry)"
     )
     assert compaction.get("status") == "completed", compaction
+    compaction_marker_consumer = (
+        "(consumer: stream_transcript.sh's _replay_turn_markers, which writes a task_started's turn_id into `active` "
+        "when its started_at is at or after MNGR_CODEX_LAUNCHED_AT)"
+    )
+    assert compaction["id"] in compaction_marks, f"{compaction_marks} {compaction_marker_consumer}"
+    assert turn_then_compaction["id"] in turn_then_compaction_marks, (
+        f"{turn_then_compaction_marks} {compaction_marker_consumer}"
+    )
     assert after_compaction == failed, (
         f"a compaction replaced {failed!r} with {after_compaction!r} {compaction_consumer}"
     )
@@ -530,17 +630,20 @@ def test_codex_agent_turn_end_never_outlives_its_turn_and_survives_a_compaction(
     )
 
 
-def _run_compaction(client: CodexAppServerClient) -> dict[str, Any]:
-    """Start a compaction of the root thread and return its turn once it has ended."""
+def _run_compaction(client: CodexAppServerClient, state_dir: Path) -> tuple[dict[str, Any], set[str]]:
+    """Start a compaction of the root thread; return its turn once it has ended, and the turns `active` named meanwhile."""
     turn_count = len(client.thread_read(include_turns=True)["thread"]["turns"])
+    marked_turns: set[str] = set()
     client.thread_compact_start()
 
     def is_compaction_over() -> bool:
+        with suppress(FileNotFoundError):
+            marked_turns.add((state_dir / ACTIVE_MARKER_FILENAME).read_text().strip())
         turns = client.thread_read(include_turns=True)["thread"]["turns"]
         return len(turns) > turn_count and turns[-1].get("status") != "inProgress"
 
-    assert poll_until(is_compaction_over, timeout=180, poll_interval=1)
-    return client.thread_read(include_turns=True)["thread"]["turns"][-1]
+    assert poll_until(is_compaction_over, timeout=180, poll_interval=0.1)
+    return client.thread_read(include_turns=True)["thread"]["turns"][-1], marked_turns
 
 
 def _wait_for_streamed_task_complete(state_dir: Path, turn_id: str) -> None:
@@ -552,3 +655,158 @@ def _wait_for_streamed_task_complete(state_dir: Path, turn_id: str) -> None:
         timeout=60,
         poll_interval=1,
     )
+
+
+_DIALOG_MARKER_CONSUMER: Final[str] = (
+    "codex_turn_hook.sh, which touches `permissions_waiting` at PermissionRequest and at a PreToolUse whose "
+    "tool_name is request_user_input, and removes it at PostToolUse"
+)
+_TURN_START_REQUEST_ID: Final[int] = 1_000_000
+
+
+@pytest.mark.release
+@pytest.mark.harness_internals(harness="codex")
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(900)
+def test_codex_agent_waits_on_a_command_approval_until_it_is_approved(tmp_path: Path) -> None:
+    """A command codex asks to approve reads WAITING with reason PERMISSIONS until it is approved."""
+    profile = _CodexReleaseProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+    ctx = profile.setup(tmp_path)
+    agent_name = f"codex-approval-{get_short_random_string()}"
+    with _created_codex_agent(profile, ctx, agent_name, *profile.create_extra_args(ctx)):
+        while_asked, is_cleared_by_the_answer, after_turn = _answer_the_dialog_of_a_turn(
+            profile,
+            ctx,
+            agent_name,
+            {
+                "input": [{"type": "text", "text": "Run `mkdir -p approval-probe` in the shell, then reply DONE."}],
+                "approvalPolicy": "untrusted",
+            },
+            "item/commandExecution/requestApproval",
+            lambda params: {"decision": "accept"},
+        )
+
+    _assert_the_dialog_is_read_until_answered(while_asked, is_cleared_by_the_answer, after_turn)
+
+
+@pytest.mark.release
+@pytest.mark.harness_internals(harness="codex")
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(900)
+def test_codex_agent_waits_on_a_question_until_it_is_answered(tmp_path: Path) -> None:
+    """A question codex asks in plan mode reads WAITING with reason PERMISSIONS until it is answered."""
+    profile = _CodexReleaseProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+    ctx = profile.setup(tmp_path)
+    agent_name = f"codex-question-{get_short_random_string()}"
+    prompt = (
+        "Before planning anything, use your request_user_input tool to ask me one question: which color I "
+        "prefer, red or blue. Then reply with just the color I chose."
+    )
+    with _created_codex_agent(profile, ctx, agent_name, *profile.create_extra_args(ctx)):
+        while_asked, is_cleared_by_the_answer, after_turn = _answer_the_dialog_of_a_turn(
+            profile,
+            ctx,
+            agent_name,
+            {
+                "input": [{"type": "text", "text": prompt}],
+                "collaborationMode": {
+                    "mode": "plan",
+                    "settings": {"model": _CODEX_MODEL, "developer_instructions": None},
+                },
+            },
+            "item/tool/requestUserInput",
+            lambda params: {"answers": {question["id"]: {"answers": ["Blue"]} for question in params["questions"]}},
+        )
+
+    _assert_the_dialog_is_read_until_answered(while_asked, is_cleared_by_the_answer, after_turn)
+
+
+def _answer_the_dialog_of_a_turn(
+    profile: _CodexReleaseProfile,
+    ctx: AgentReleaseContext,
+    agent_name: str,
+    turn_params: Mapping[str, Any],
+    dialog_method: str,
+    answer: Callable[[Mapping[str, Any]], Mapping[str, Any]],
+) -> tuple[dict[str, Any], bool, dict[str, Any]]:
+    """Start a root-thread turn with ``turn_params`` and answer the ``dialog_method`` request codex sends for it.
+
+    Returns the agent ``mngr list`` publishes while the request waits, whether `permissions_waiting` went away
+    while `active` still marked the turn, and the agent ``mngr list`` publishes once the turn's end reached `active`.
+    """
+    state_dir = agent_state_dir(ctx.host_dir)
+    thread_id = (state_dir / APP_SERVER_THREAD_FILENAME).read_text().strip()
+    cleared_while_active: list[bool] = []
+
+    def observe_dialog_marker() -> None:
+        if not cleared_while_active and not (state_dir / PERMISSIONS_WAITING_FILENAME).exists():
+            cleared_while_active.append((state_dir / ACTIVE_MARKER_FILENAME).exists())
+
+    def is_on_root_thread(frame: Mapping[str, Any]) -> bool:
+        return (frame.get("params") or {}).get("threadId") == thread_id
+
+    client = CodexAppServerClient(
+        transport=connect_app_server_transport(get_codex_app_server_socket_path(get_codex_home(state_dir)))
+    )
+    try:
+        client.initialize("mngr-codex-release-test", "0")
+        # codex sends a turn's dialog requests to the connections that resumed its thread.
+        client.thread_resume(thread_id)
+        turn_start = {"threadId": thread_id, **turn_params}
+        client.transport.send(
+            json.dumps({"jsonrpc": "2.0", "id": _TURN_START_REQUEST_ID, "method": "turn/start", "params": turn_start})
+        )
+        dialog = _await_frame(
+            client,
+            lambda frame: frame.get("method") == dialog_method and "id" in frame and is_on_root_thread(frame),
+            observe=lambda: None,
+        )
+        while_asked = _published_agent(profile, ctx, agent_name)
+        client.transport.send(json.dumps({"jsonrpc": "2.0", "id": dialog["id"], "result": answer(dialog["params"])}))
+        _await_frame(
+            client,
+            lambda frame: frame.get("method") == "turn/completed" and is_on_root_thread(frame),
+            observe=observe_dialog_marker,
+        )
+    finally:
+        client.close()
+    poll_until(lambda: not (state_dir / ACTIVE_MARKER_FILENAME).exists(), timeout=30, poll_interval=0.2)
+    return while_asked, cleared_while_active == [True], _published_agent(profile, ctx, agent_name)
+
+
+def _await_frame(
+    client: CodexAppServerClient, is_wanted: Callable[[Mapping[str, Any]], bool], observe: Callable[[], None]
+) -> dict[str, Any]:
+    """The first frame from the daemon that ``is_wanted`` accepts, calling ``observe`` before each read."""
+    wanted: list[dict[str, Any]] = []
+
+    def is_seen() -> bool:
+        observe()
+        with suppress(TimeoutError):
+            while not wanted:
+                frame = json.loads(client.transport.receive(0.0))
+                if is_wanted(frame):
+                    wanted.append(frame)
+        return bool(wanted)
+
+    assert poll_until(is_seen, timeout=180, poll_interval=0.02), "codex never sent the awaited frame"
+    return wanted[0]
+
+
+def _assert_the_dialog_is_read_until_answered(
+    while_asked: Mapping[str, Any], is_cleared_by_the_answer: bool, after_turn: Mapping[str, Any]
+) -> None:
+    def reading(agent: Mapping[str, Any]) -> tuple[str, str | None]:
+        return agent["state"], agent["plugin"].get("codex", {}).get("waiting_reason")
+
+    assert reading(while_asked) == ("WAITING", "PERMISSIONS"), f"{reading(while_asked)}; {_DIALOG_MARKER_CONSUMER}"
+    assert is_cleared_by_the_answer, f"`permissions_waiting` outlived the answer; {_DIALOG_MARKER_CONSUMER}"
+    assert reading(after_turn) == ("WAITING", "END_OF_TURN"), f"{reading(after_turn)}; {_TURN_MARKER_CONSUMER}"

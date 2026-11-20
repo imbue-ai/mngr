@@ -5,9 +5,7 @@ The Codex CLI (the Rust ``codex`` binary) has a hook system
 override env var, file-based auth, resume-by-id, and an append-as-you-go session
 JSONL.
 
-Per-agent ``CODEX_HOME`` (the isolation lever)
-----------------------------------------------
-Codex resolves its whole config/auth/session/hook tree from ``CODEX_HOME``
+Isolation: codex resolves its whole config/auth/session/hook tree from ``CODEX_HOME``
 (default ``~/.codex``). Pointing each agent at its own ``CODEX_HOME`` under the
 agent state dir -- injected only on the codex process via ``env CODEX_HOME=...``
 -- isolates the agent's config/permissions/transcripts while leaving the user's
@@ -18,7 +16,7 @@ The per-agent ``CODEX_HOME`` tree (mngr-owned files rewritten each provision;
 see :mod:`imbue.mngr_codex.codex_config`)::
 
     config.toml              # model, sandbox, approval, credential-store pin, [notice], trust
-    hooks.json               # the session-pointer recorder hook (guards live in the repo's .codex/hooks.json)
+    hooks.json               # the session-pointer recorder and turn hooks (guards live in the repo's .codex/hooks.json)
     auth.json -> ~/.codex/auth.json   # symlink: shared login, write-through refresh
     .personality_migration   # empty NUX-skip marker
     sessions/.../rollout-*.jsonl      # codex-owned transcripts
@@ -30,16 +28,12 @@ authenticate every agent and propagates refreshes. ``cli_auth_credentials_store
 = "file"`` is pinned in config.toml so codex never falls back to a keyring store
 keyed by the (per-agent) ``CODEX_HOME`` path, which would defeat sharing.
 
-Lifecycle: ``CodexAgent.get_lifecycle_state`` reads the daemon's live
-``thread/status`` as the SOLE RUNNING-vs-WAITING source (a turn in flight ->
-RUNNING; parked on an approval/input it cannot self-clear -> WAITING); process
-presence (tmux/ps) answers only alive/dead (STOPPED/DONE/REPLACED). There is no
-lifecycle marker and no marker fallback -- the daemon is authoritative, and its
-death takes the ``--remote`` window down so a dead daemon reads STOPPED. The one
-mngr hook, ``UserPromptSubmit`` -> ``record_session_pointers.sh``, records only
-the rollout session id + transcript path (non-lifecycle pointers the
-adopt/preserve and raw-transcript machinery need) and removes ``turn_end``; see
-:func:`codex_config.build_codex_hooks_config`.
+Lifecycle: codex's hooks keep the ``active`` turn marker and the
+``permissions_waiting`` dialog marker (``codex_turn_hook.sh``), which mngr's shared
+state probe reads on any host; the transcript streamer also opens and closes the turn
+marker from the rollout's task records, and the background supervisor clears both at launch.
+``record_session_pointers.sh`` records the rollout session id + transcript path and
+removes ``turn_end`` at ``UserPromptSubmit``; see :func:`codex_config.build_codex_hooks_config`.
 
 Readiness: a successful ``initialize`` handshake with the ``codex app-server``
 daemon over its unix socket -- an unambiguous programmatic signal, unlike the
@@ -164,11 +158,13 @@ from imbue.mngr_codex.app_server_client import ThreadInfo
 from imbue.mngr_codex.app_server_client import ThreadStatusSnapshot
 from imbue.mngr_codex.app_server_client import TransportClosedError
 from imbue.mngr_codex.app_server_client import connect_app_server_transport
+from imbue.mngr_codex.codex_config import ACTIVE_MARKER_FILENAME
 from imbue.mngr_codex.codex_config import APP_SERVER_THREAD_FILENAME
 from imbue.mngr_codex.codex_config import BACKGROUND_TASKS_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import COMMON_TRANSCRIPT_CONVERT_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import COMMON_TRANSCRIPT_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import DEVELOPER_INSTRUCTIONS_SEPARATOR
+from imbue.mngr_codex.codex_config import PERMISSIONS_WAITING_FILENAME
 from imbue.mngr_codex.codex_config import PROCESS_STARTED_MARKER_FILENAME
 from imbue.mngr_codex.codex_config import RAW_TRANSCRIPT_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import RECORD_SESSION_POINTERS_SCRIPT_NAME
@@ -176,6 +172,7 @@ from imbue.mngr_codex.codex_config import ROOT_SESSION_FILENAME
 from imbue.mngr_codex.codex_config import RUST_LOG_VALUE
 from imbue.mngr_codex.codex_config import SESSIONS_RELATIVE_PATH
 from imbue.mngr_codex.codex_config import TRANSCRIPT_PATH_FILENAME
+from imbue.mngr_codex.codex_config import TURN_HOOK_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import build_codex_config
 from imbue.mngr_codex.codex_config import build_codex_hooks_config
 from imbue.mngr_codex.codex_config import extract_latest_codex_version
@@ -190,6 +187,7 @@ from imbue.mngr_codex.codex_config import get_codex_version_cache_path
 from imbue.mngr_codex.codex_config import get_shared_output_styles_dir
 from imbue.mngr_codex.codex_config import is_codex_update_available
 from imbue.mngr_codex.codex_config import is_project_trusted
+from imbue.mngr_codex.codex_config import is_turn_hook_installed
 from imbue.mngr_codex.codex_config import merge_project_trust
 from imbue.mngr_codex.codex_config import parse_codex_cli_version
 from imbue.mngr_codex.codex_config import read_codex_config
@@ -279,29 +277,17 @@ _ROOT_MATERIALIZE_ITEMS: Final[tuple[Mapping[str, Any], ...]] = ({"type": "envir
 # a guard against the find racing the write.
 _ROLLOUT_MATERIALIZE_TIMEOUT_SECONDS: Final[float] = 5.0
 
-# The ``ThreadStatus`` tag that means a turn is in flight (the thread is doing work or is
-# parked awaiting the user mid-turn). Its complement, ``idle``, means the turn is done and
-# the agent is waiting for the next message. This is the event-sourced replacement for the
-# ``active`` marker's RUNNING-vs-WAITING split.
+# The ``ThreadStatus`` tag that means a turn is in flight, including one parked on an approval.
 _THREAD_STATUS_ACTIVE: Final[str] = "active"
 
-# Lifecycle states in which the agent's process is present (its primary window is alive).
-# Only for these does the daemon's live status re-derive the RUNNING/WAITING split; the
-# other states (STOPPED/DONE/REPLACED, and UNKNOWN when tmux/ps could not be read) are
-# kept verbatim so ``mngr ls`` never misreports a dead, replaced or unreadable agent as running.
-_PROCESS_PRESENT_STATES: Final[frozenset[AgentLifecycleState]] = frozenset(
-    {AgentLifecycleState.RUNNING, AgentLifecycleState.WAITING}
+# The states the shared probe reports for a live agent with no turn marker.
+_TURNLESS_PROBE_STATES: Final[frozenset[AgentLifecycleState]] = frozenset(
+    {AgentLifecycleState.WAITING, AgentLifecycleState.RUNNING_BACKGROUND}
 )
 
 
 class _LiveActivity(FrozenModel):
-    """The two lifecycle signals the daemon's live thread status yields.
-
-    ``is_active`` -- a turn is in flight (RUNNING); its absence is WAITING (END_OF_TURN).
-    ``is_blocked`` -- the turn is parked awaiting an approval/input the agent cannot
-    self-clear (promotes RUNNING -> WAITING with reason PERMISSIONS). These are the
-    event-sourced replacements for the ``active`` / ``permissions_waiting`` markers.
-    """
+    """The daemon's live thread status: whether a turn is in flight, and whether it waits on an approval or input."""
 
     is_active: bool
     is_blocked: bool
@@ -561,15 +547,9 @@ class CodexAgent(
     the first-party client on a ChatGPT login, authenticate with an API key (the documented
     path for programmatic workflows).
 
-    Lifecycle/activity are event-sourced: ``get_lifecycle_state`` / ``probe_lifecycle`` /
-    ``is_running`` / ``waiting_reason`` read the daemon's live ``thread/status`` (a turn is in
-    flight -> RUNNING; parked on an approval/input -> WAITING; idle -> WAITING/END_OF_TURN) as
-    the SOLE RUNNING-vs-WAITING source -- there is no ``active`` / ``permissions_waiting`` marker
-    and no marker fallback. Process presence (STOPPED / DONE / REPLACED) comes from tmux/ps, so a
-    dead or replaced window is reported correctly; the ``--remote`` window's life is tied to the
-    daemon, so a dead daemon reads STOPPED. When the daemon cannot be reached (a remote host, a
-    not-yet-ready or already-stopped daemon, a transient failure), the split degrades to WAITING
-    rather than consulting any marker.
+    The lifecycle state comes from the shared probe over the ``active`` and
+    ``permissions_waiting`` markers codex's hooks and the transcript streamer keep; the
+    ``--remote`` window's life is tied to the daemon, so a dead daemon reads STOPPED.
 
     This class subclasses ``BaseAgent`` directly (not ``SendKeysAgent`` / ``InteractiveTuiAgent``)
     because codex is driven over the app-server and sends nothing through the send-keys /
@@ -581,101 +561,48 @@ class CodexAgent(
     # The codex CLI is a single Rust binary; ps/tmux show the literal name.
     fixed_process_name: ClassVar[str | None] = "codex"
 
-    def get_lifecycle_state(self) -> AgentLifecycleState:
-        """Get lifecycle state, sourcing RUNNING/WAITING from the daemon's live thread status.
-
-        Process presence comes from the base tmux/ps probe: STOPPED / DONE / REPLACED are
-        pure "is the window's process there?" facts and pass through unchanged (so a dead or
-        replaced agent is never misreported as running), as does UNKNOWN (the host's tmux and
-        ps could not be read). When the process IS present, the RUNNING-vs-WAITING split is
-        derived SOLELY from the daemon:
-
-        * a turn in flight -> RUNNING; promoted to WAITING when the turn is parked awaiting an
-          approval/input the agent cannot self-clear (``thread/status`` ``active`` with
-          ``waitingOnApproval`` / ``waitingOnUserInput``);
-        * an idle thread -> WAITING (END_OF_TURN).
-
-        There is no marker fallback: when the daemon cannot be read (a remote host, a
-        not-yet-ready or already-stopped daemon, a transient failure) the split degrades to
-        WAITING -- the conservative "not actively running" default, honest since a live turn
-        cannot be confirmed. The permission promotion stays in
-        ``_resolve_lifecycle_state_for_permission`` so it is unit-testable without a live pane.
-        """
-        base_probe = self._base_probe_lifecycle(self.host.read_lifecycle_snapshot())
-        if base_probe.state not in _PROCESS_PRESENT_STATES:
-            return base_probe.state
-        activity = self._resolve_live_activity()
-        if activity is None:
-            return AgentLifecycleState.WAITING
-        live_state = AgentLifecycleState.RUNNING if activity.is_active else AgentLifecycleState.WAITING
-        return _resolve_lifecycle_state_for_permission(live_state, activity.is_blocked)
-
-    def _base_probe_lifecycle(self, lifecycle_snapshot: HostLifecycleSnapshot | None) -> LifecycleProbeResult:
-        """The tmux/ps process-presence probe (STOPPED/DONE/REPLACED/UNKNOWN + pid), before live re-sourcing.
-
-        A thin wrapper over ``BaseAgent.probe_lifecycle_from_snapshot`` so the process-presence half
-        can be driven in unit tests without a live tmux pane, independently of the daemon status seam.
-        """
-        return super().probe_lifecycle_from_snapshot(lifecycle_snapshot)
-
     def probe_lifecycle_from_snapshot(self, lifecycle_snapshot: HostLifecycleSnapshot | None) -> LifecycleProbeResult:
-        """Probe lifecycle state + pid, sourcing the RUNNING/WAITING split from live status.
-
-        The base probe supplies process presence and the pid; when the process is present its
-        RUNNING/WAITING split is replaced with the daemon's live activity (a turn in flight ->
-        RUNNING, idle -> WAITING), keeping this consistent with ``get_lifecycle_state``. The
-        pid is preserved from the base probe. There is no marker fallback: when the daemon
-        cannot be read the split degrades to WAITING (pid preserved). The permission promotion
-        is applied only by ``get_lifecycle_state`` (matching the base contract, where
-        ``probe_lifecycle`` reports the raw split and the promotion layers on top). The base
-        probe's ``turn_end`` is kept unless the daemon reports a turn in flight.
-        """
-        base_probe = self._base_probe_lifecycle(lifecycle_snapshot)
-        if base_probe.state not in _PROCESS_PRESENT_STATES:
-            return base_probe
-        activity = self._resolve_live_activity()
-        if activity is not None and activity.is_active:
-            return LifecycleProbeResult(state=AgentLifecycleState.RUNNING, pid=base_probe.pid)
-        return LifecycleProbeResult(
-            state=AgentLifecycleState.WAITING, pid=base_probe.pid, turn_end=base_probe.turn_end
-        )
+        """The shared probe, or for an agent whose hooks keep no turn marker, the turn its daemon reports."""
+        probe = super().probe_lifecycle_from_snapshot(lifecycle_snapshot)
+        if probe.state not in _TURNLESS_PROBE_STATES:
+            return probe
+        activity = self._read_daemon_turn_without_turn_hook()
+        if activity is None or not activity.is_active:
+            return probe
+        state = AgentLifecycleState.WAITING if activity.is_blocked else AgentLifecycleState.RUNNING
+        return LifecycleProbeResult(state=state, pid=probe.pid)
 
     def is_blocked_on_dialog(self) -> bool:
-        """Whether codex is parked on an approval/input it cannot self-clear.
-
-        Sourced from the daemon's live ``thread/status`` (``waitingOnApproval`` /
-        ``waitingOnUserInput``), not from a ``permissions_waiting`` marker file: this
-        harness has no lifecycle markers, the daemon is authoritative. Best-effort per
-        the interface contract -- an unreadable daemon yields False (nothing detected),
-        matching the WAITING degrade the lifecycle path already takes.
-        """
-        activity = self._resolve_live_activity()
-        return activity is not None and activity.is_blocked
+        """Whether codex's hooks recorded an approval or a question the root thread's turn waits on."""
+        return self._check_file_exists(self._get_agent_dir() / PERMISSIONS_WAITING_FILENAME)
 
     def compute_waiting_reason(self) -> WaitingReason | None:
-        """Return why the agent is waiting (or None if actively running), from live status.
+        """Why the agent is waiting, or None while its turn runs, from its turn and dialog markers."""
+        is_active = self._check_file_exists(self._get_agent_dir() / ACTIVE_MARKER_FILENAME)
+        if not is_active:
+            activity = self._read_daemon_turn_without_turn_hook()
+            if activity is not None:
+                return classify_waiting_reason(activity.is_active, activity.is_blocked)
+        return classify_waiting_reason(is_active, is_active and self.is_blocked_on_dialog())
 
-        Sources ``is_active`` / ``is_blocked`` the same way as ``get_lifecycle_state`` -- the
-        daemon's live thread status, the SOLE source -- then delegates the verdict to the shared
-        ``classify_waiting_reason`` so this and the lifecycle promotion cannot drift. When the
-        daemon cannot be read there is no marker fallback: the reason degrades to END_OF_TURN,
-        matching ``get_lifecycle_state``'s WAITING degrade (an unconfirmable turn is treated as
-        not running).
-        """
-        activity = self._resolve_live_activity()
-        if activity is None:
-            return classify_waiting_reason(is_active=False, is_blocked_on_permission=False)
-        return classify_waiting_reason(activity.is_active, activity.is_blocked)
+    # CLEANUP: drop this method, _resolve_live_activity, _read_live_thread_status, _bind_existing_thread,
+    # _LiveActivity, _THREAD_STATUS_ACTIVE, _TURNLESS_PROBE_STATES and codex_config.is_turn_hook_installed
+    # once no codex agent created before codex_turn_hook.sh remains; such an agent gains the hook when
+    # `mngr create <name> --reuse --update` re-provisions it.
+    def _read_daemon_turn_without_turn_hook(self) -> _LiveActivity | None:
+        """The daemon's live turn for an agent on a local host whose ``hooks.json`` predates the turn hook, else None."""
+        if not self.host.is_local:
+            return None
+        try:
+            hooks_json_text = self.host.read_text_file(get_codex_hooks_path(self._get_codex_home()))
+        except FileNotFoundError:
+            hooks_json_text = ""
+        if is_turn_hook_installed(hooks_json_text):
+            return None
+        return self._resolve_live_activity()
 
     def _resolve_live_activity(self) -> _LiveActivity | None:
-        """Read the daemon's live thread status into ``(is_active, is_blocked)``, or None.
-
-        Returns None when the daemon cannot be queried (a remote host whose unix socket the
-        mngr process cannot reach, a not-yet-ready or already-stopped daemon, or any transient
-        transport failure); callers then degrade to WAITING (there is no marker fallback). A
-        live read maps ``thread/status`` ``active`` -> ``is_active`` and its
-        ``waitingOnApproval`` / ``waitingOnUserInput`` flags -> ``is_blocked``.
-        """
+        """Read the daemon's live thread status into ``(is_active, is_blocked)``, or None when it cannot be read."""
         snapshot = self._read_live_thread_status()
         if snapshot is None:
             return None
@@ -690,9 +617,7 @@ class CodexAgent(
         Uses a short-lived connection through the same ``_connect_app_server_transport`` seam as
         ``send_message`` (so tests inject a scripted transport). Binds the agent's ROOT thread
         without ever starting a fresh one -- a status probe must not create a conversation -- and
-        returns None when no root thread is bound/loadable. Every failure path (remote socket
-        unreachable, handshake error, transport hiccup, no thread) yields None so a lifecycle
-        probe never raises; the caller then degrades to WAITING (no marker fallback).
+        returns None when no root thread is bound/loadable or on any failure, so a probe never raises.
         """
         if not self.host.is_local:
             return None
@@ -720,7 +645,7 @@ class CodexAgent(
         probe must be side-effect-light and must never create a conversation. Prefers the persisted
         root id (already loaded, else reloaded from its rollout via ``thread/resume``); with no
         persisted id, adopts a single loaded thread (e.g. the visible ``--remote`` TUI's). Returns
-        False when there is no unambiguous root to read (the caller then degrades to WAITING).
+        False when there is no unambiguous root to read.
         """
         persisted_thread_id = self._read_persisted_thread_id()
         loaded_thread_ids = client.thread_loaded_list()
@@ -1359,7 +1284,7 @@ class CodexAgent(
            never fatal (an outdated codex still runs).
         4. Build the per-agent ``CODEX_HOME`` (config.toml, hooks.json, the
            auth.json symlink, the NUX-skip marker).
-        5. Install the transcript scripts + background supervisor under
+        5. Install the transcript scripts, background supervisor and hook scripts under
            ``$MNGR_AGENT_STATE_DIR/commands/``.
         """
         if self.agent_config.check_installation:
@@ -1377,10 +1302,10 @@ class CodexAgent(
                 self._get_agent_dir(),
                 {
                     BACKGROUND_TASKS_SCRIPT_NAME: _load_codex_resource_script(BACKGROUND_TASKS_SCRIPT_NAME),
-                    # The UserPromptSubmit hook; see build_codex_hooks_config.
                     RECORD_SESSION_POINTERS_SCRIPT_NAME: _load_codex_resource_script(
                         RECORD_SESSION_POINTERS_SCRIPT_NAME
                     ),
+                    TURN_HOOK_SCRIPT_NAME: _load_codex_resource_script(TURN_HOOK_SCRIPT_NAME),
                 },
                 concurrency_group,
             )
@@ -1753,10 +1678,9 @@ class CodexAgent(
         auto-respawn; ``mngr start`` relaunches both). This is what lets process
         presence alone answer STOPPED without any marker.
 
-        No lifecycle-marker reset is needed (the lifecycle no longer reads any marker;
-        RUNNING vs WAITING comes from the daemon's ``thread/status``). The process-start
-        stamp is retained (the system_interface activity tracker still uses its mtime as a
-        stale-tail gate). The primary window resumes the persisted root conversation with
+        The supervisor clears the turn and dialog markers a previous process left. The
+        process-start stamp is retained (the system_interface activity tracker uses its
+        mtime as a stale-tail gate). The primary window resumes the persisted root conversation with
         ``codex resume <root_session_id> --remote`` (self-healing: fresh ``codex --remote`` when
         there is no persisted root), after a bounded wait for mngr to write ``codex_root_session``.
 
@@ -2235,41 +2159,8 @@ def register_agent_type() -> tuple[str, type[AgentInterface] | None, type[AgentT
     return ("codex", CodexAgent, CodexAgentConfig)
 
 
-def _resolve_lifecycle_state_for_permission(
-    base_state: AgentLifecycleState, is_blocked_on_permission: bool
-) -> AgentLifecycleState:
-    """Layer the daemon's blocked-on-input signal onto the base lifecycle state.
-
-    Promotes RUNNING -> WAITING while codex's turn is parked awaiting an approval/input
-    it cannot self-clear (``is_blocked_on_permission`` from ``thread/status``), which
-    would otherwise read RUNNING since the turn is still in flight. Every non-RUNNING
-    base state passes through unchanged. Kept pure (no agent/host) so
-    ``get_lifecycle_state``'s promotion rule is unit-testable without standing up a
-    tmux pane.
-
-    Defers the gating decision to the shared ``classify_waiting_reason``: a RUNNING
-    base state means a turn is in flight, so the classifier's ``is_active`` gate is
-    satisfied and a PERMISSIONS verdict is what promotes RUNNING to WAITING. Sharing
-    that one function keeps this promotion and the ``waiting_reason`` field generator
-    from drifting apart.
-    """
-    if base_state != AgentLifecycleState.RUNNING:
-        return base_state
-    reason = classify_waiting_reason(is_active=True, is_blocked_on_permission=is_blocked_on_permission)
-    return AgentLifecycleState.WAITING if reason is WaitingReason.PERMISSIONS else base_state
-
-
 def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> WaitingReason | None:
-    """Return why the agent is waiting (or None if actively running), from live thread status.
-
-    Delegates to :meth:`CodexAgent.compute_waiting_reason`, which reads the daemon's live
-    ``thread/status`` (a turn in flight -> None; a turn parked on an approval/input -> PERMISSIONS;
-    idle -> END_OF_TURN) as the SOLE source. The shared ``classify_waiting_reason`` produces the
-    verdict, so this field and the ``get_lifecycle_state`` RUNNING -> WAITING promotion cannot drift.
-
-    Field generators run for every listed agent whatever its type, so the isinstance guard is
-    what keeps this field off agents of other types.
-    """
+    """Why a codex agent is waiting (see ``CodexAgent.compute_waiting_reason``); None for an agent of another type."""
     return agent.compute_waiting_reason() if isinstance(agent, CodexAgent) else None
 
 

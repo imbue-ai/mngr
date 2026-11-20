@@ -32,12 +32,19 @@
 #
 # Each pass also records how the last turn among the lines it streamed ended in
 # $MNGR_AGENT_STATE_DIR/turn_end, or removes that file when a turn opened; a
-# compaction does neither.
+# compaction does neither. It then replays every task those lines start or end,
+# compactions included, onto the turn markers: a task that started since this
+# launch writes its turn id into an absent `active`, and a task's end removes
+# `active` and `permissions_waiting` when `active` names its turn. That covers
+# what codex_turn_hook.sh's events do not report: a compaction, a `!` shell
+# command typed in the TUI, and the end of every turn but an interrupted one.
 #
 # Usage: stream_transcript.sh [--single-pass]
 #
 # Environment:
-#   MNGR_AGENT_STATE_DIR  - agent state directory (contains commands/)
+#   MNGR_AGENT_STATE_DIR    - agent state directory (contains commands/)
+#   MNGR_CODEX_LAUNCHED_AT  - epoch second codex_background_tasks.sh started this launch;
+#                             unset, no task opens `active`
 
 set -euo pipefail
 
@@ -120,6 +127,43 @@ _rollout_field() {
     printf '%s' "$2" | { grep -oE "\"$1\":[{]?\"[^\"]*\"" || :; } | sed -n -E "1s/^\"$1\":[{]?\"(.*)\"\$/\1/p"
 }
 
+# Remove the turn and dialog markers when `active` names turn $1.
+_clear_turn_markers_of() {
+    local marked_turn=""
+    [ -f "$MNGR_AGENT_STATE_DIR/active" ] || return 0
+    IFS= read -r marked_turn < "$MNGR_AGENT_STATE_DIR/active" || :
+    [ -n "$1" ] && [ "$marked_turn" = "$1" ] || return 0
+    rm -f "$MNGR_AGENT_STATE_DIR/active" "$MNGR_AGENT_STATE_DIR/permissions_waiting"
+}
+
+# Write the turn id of task_started record $1 into an absent `active` when the task started at or after MNGR_CODEX_LAUNCHED_AT.
+_open_turn_marker_of() {
+    local started_at_pattern='"started_at":([0-9]+)' turn_id
+    [ -n "${MNGR_CODEX_LAUNCHED_AT:-}" ] && [ ! -e "$MNGR_AGENT_STATE_DIR/active" ] || return 0
+    [[ "$1" =~ $started_at_pattern ]] && [ "${BASH_REMATCH[1]}" -ge "$MNGR_CODEX_LAUNCHED_AT" ] || return 0
+    turn_id=$(_rollout_field turn_id "$1")
+    [ -n "$turn_id" ] || return 0
+    printf '%s\n' "$turn_id" > "$MNGR_AGENT_STATE_DIR/active"
+}
+
+# Print the task records among lines $2..$3 of rollout $1, compactions included.
+_task_records_among() {
+    sed -n "${2},${3}p" "$1" | { grep -E "$_TURN_RECORD_PATTERN" || :; }
+}
+
+# Replay the task records among lines $2..$3 of rollout $1, in order, onto the turn markers.
+_replay_turn_markers() {
+    local task_records task_record
+    task_records=$(_task_records_among "$1" "$2" "$3")
+    [ -n "$task_records" ] || return 0
+    while IFS= read -r task_record; do
+        case "$task_record" in
+            *'"payload":{"type":"task_started"'*) _open_turn_marker_of "$task_record" ;;
+            *) _clear_turn_markers_of "$(_rollout_field turn_id "$task_record")" ;;
+        esac
+    done <<< "$task_records"
+}
+
 # Print `"turn_id":"<id>"` for each compaction in rollout $1: a task_started without the turn_attribution its other task_started records carry.
 _compaction_turn_ids() {
     local turn_starts
@@ -133,7 +177,7 @@ _compaction_turn_ids() {
 _record_turn_end() {
     command -v mngr_turn_end_write >/dev/null 2>&1 || return 0
     local turn_records compactions turn_record native_type
-    turn_records=$(sed -n "${2},${3}p" "$1" | { grep -E "$_TURN_RECORD_PATTERN" || :; })
+    turn_records=$(_task_records_among "$1" "$2" "$3")
     [ -n "$turn_records" ] || return 0
     compactions=$(_compaction_turn_ids "$1")
     if [ -n "$compactions" ]; then
@@ -203,6 +247,8 @@ _emit_new_lines() {
     sed -n "${start},${end}p" "$rollout_path" >> "$OUTPUT_FILE"
 
     _record_turn_end "$rollout_path" "$start" "$end" || true
+    # turn_end is written before the replay clears `active`, the order its readers rely on.
+    _replay_turn_markers "$rollout_path" "$start" "$end" || true
 
     _save_offset "$key" "$file_lines"
 

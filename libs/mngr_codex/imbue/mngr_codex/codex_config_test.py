@@ -13,6 +13,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_codex.codex_config import RECORD_SESSION_POINTERS_SCRIPT_NAME
+from imbue.mngr_codex.codex_config import TURN_HOOK_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import build_codex_config
 from imbue.mngr_codex.codex_config import build_codex_hooks_config
 from imbue.mngr_codex.codex_config import extract_latest_codex_version
@@ -25,6 +26,7 @@ from imbue.mngr_codex.codex_config import get_codex_personality_migration_path
 from imbue.mngr_codex.codex_config import get_codex_version_cache_path
 from imbue.mngr_codex.codex_config import is_codex_update_available
 from imbue.mngr_codex.codex_config import is_project_trusted
+from imbue.mngr_codex.codex_config import is_turn_hook_installed
 from imbue.mngr_codex.codex_config import merge_project_trust
 from imbue.mngr_codex.codex_config import parse_codex_cli_version
 from imbue.mngr_codex.codex_config import read_codex_config
@@ -263,15 +265,42 @@ def test_is_project_trusted() -> None:
 # hooks builders
 
 
-def test_build_codex_hooks_config_carries_only_the_session_pointer_recorder() -> None:
-    """mngr provisions one hook, and it is bookkeeping. Guards belong to the repo the
-    agent runs in, which codex reads from its own `.codex/` config layer."""
+def test_build_codex_hooks_config_runs_the_turn_hook_for_each_turn_event() -> None:
+    """Guards belong to the repo the agent runs in, which codex reads from its own `.codex/` config layer."""
     hooks = build_codex_hooks_config()["hooks"]
-    assert set(hooks) == {"UserPromptSubmit"}
-    commands = [h["command"] for h in hooks["UserPromptSubmit"][0]["hooks"]]
-    assert len(commands) == 1
-    assert RECORD_SESSION_POINTERS_SCRIPT_NAME in commands[0]
-    assert hooks["UserPromptSubmit"][0]["hooks"][0]["type"] == "command"
+    commands_by_event = {event: [hook["command"] for hook in groups[0]["hooks"]] for event, groups in hooks.items()}
+
+    assert commands_by_event == {
+        "UserPromptSubmit": [
+            f'bash "$MNGR_AGENT_STATE_DIR/commands/{RECORD_SESSION_POINTERS_SCRIPT_NAME}"',
+            f'bash "$MNGR_AGENT_STATE_DIR/commands/{TURN_HOOK_SCRIPT_NAME}" UserPromptSubmit',
+        ],
+        **{
+            event: [f'bash "$MNGR_AGENT_STATE_DIR/commands/{TURN_HOOK_SCRIPT_NAME}" {event}']
+            for event in ("Stop", "Interrupt", "PermissionRequest", "PreToolUse", "PostToolUse")
+        },
+    }
+
+
+def test_is_turn_hook_installed_tells_current_hooks_from_those_written_before_the_turn_hook() -> None:
+    hooks_written_before = {
+        "hooks": {
+            "UserPromptSubmit": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": 'bash "$MNGR_AGENT_STATE_DIR/commands/record_session_pointers.sh"',
+                        }
+                    ]
+                }
+            ]
+        }
+    }
+
+    assert is_turn_hook_installed(serialize_codex_hooks(build_codex_hooks_config()))
+    assert not is_turn_hook_installed(serialize_codex_hooks(hooks_written_before))
+    assert not is_turn_hook_installed("")
 
 
 def test_serialize_codex_hooks_round_trips_to_json() -> None:

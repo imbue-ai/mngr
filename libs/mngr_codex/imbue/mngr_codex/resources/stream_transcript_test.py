@@ -23,6 +23,10 @@ The streamer's contract:
     flush never re-emit lines the other already streamed.
   - Record how the last turn among the streamed lines ended in turn_end, and
     remove it when that turn record opens a turn; a compaction does neither.
+  - Replay each task the streamed lines start or end onto the markers: a task
+    started since MNGR_CODEX_LAUNCHED_AT writes its turn id into an absent
+    `active`, and a task's end removes `active` and `permissions_waiting` when
+    `active` names it.
 """
 
 from __future__ import annotations
@@ -46,6 +50,8 @@ from imbue.mngr import resources as mngr_resources
 from imbue.mngr.hosts.background_tasks import TURN_END_FILE_NAME
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import read_turn_end_in
+from imbue.mngr_codex.codex_config import ACTIVE_MARKER_FILENAME
+from imbue.mngr_codex.codex_config import PERMISSIONS_WAITING_FILENAME
 
 _SCRIPT_PATH = Path(__file__).parent / "stream_transcript.sh"
 # A real rollout captured from the patched codex-cli 0.146.0 build (one full
@@ -121,10 +127,14 @@ def _offset_dir(state_dir: Path) -> Path:
     return state_dir / "plugin" / "codex" / ".transcript_offsets"
 
 
-def _run_streamer(state_dir: Path) -> subprocess.CompletedProcess[str]:
+def _run_streamer(state_dir: Path, launched_at: int | None = None) -> subprocess.CompletedProcess[str]:
+    env = {**os.environ, "MNGR_AGENT_STATE_DIR": str(state_dir)}
+    env.pop("MNGR_CODEX_LAUNCHED_AT", None)
+    if launched_at is not None:
+        env["MNGR_CODEX_LAUNCHED_AT"] = str(launched_at)
     result = subprocess.run(
         ["bash", str(_SCRIPT_PATH), "--single-pass"],
-        env={**os.environ, "MNGR_AGENT_STATE_DIR": str(state_dir)},
+        env=env,
         capture_output=True,
         text=True,
         check=True,
@@ -542,3 +552,147 @@ def test_the_streamer_records_no_turn_end_without_the_background_task_library(
     assert result.stderr == ""
     assert _output_file(state_dir).read_text() == rollout.read_text()
     assert read_turn_end_in(state_dir) is None
+
+
+def _turn_id(line: str) -> str:
+    return json.loads(line)["payload"]["turn_id"]
+
+
+def _mark_turn(state_dir: Path, turn_id: str) -> None:
+    (state_dir / ACTIVE_MARKER_FILENAME).write_text(f"{turn_id}\n")
+    (state_dir / PERMISSIONS_WAITING_FILENAME).touch()
+
+
+def _markers_present(state_dir: Path) -> tuple[bool, bool]:
+    return ((state_dir / ACTIVE_MARKER_FILENAME).exists(), (state_dir / PERMISSIONS_WAITING_FILENAME).exists())
+
+
+@pytest.mark.parametrize(
+    "turn_lines",
+    [
+        pytest.param(_REAL_0163_TURN_ENDS[0:2], id="completed"),
+        pytest.param(_REAL_0163_TURN_ENDS[2:4], id="interrupted"),
+        pytest.param(_REAL_0163_TURN_ENDS[4:6], id="failed"),
+    ],
+)
+def test_a_turns_end_record_removes_the_markers_that_name_it(
+    turn_lines: tuple[str, ...], tmp_path: Path, stub_mngr_log_sh: str
+) -> None:
+    state_dir = _state_dir(tmp_path, stub_mngr_log_sh)
+    rollout = _write_rollout(tmp_path, "rollout-a.jsonl", list(turn_lines[:1]))
+    _set_transcript_path(state_dir, rollout)
+    _mark_turn(state_dir, _turn_id(turn_lines[0]))
+    _run_streamer(state_dir)
+    after_start = _markers_present(state_dir)
+
+    with rollout.open("a") as f:
+        f.write(turn_lines[1] + "\n")
+    _run_streamer(state_dir)
+
+    assert after_start == (True, True)
+    assert _markers_present(state_dir) == (False, False)
+    assert read_turn_end_in(state_dir) is not None
+
+
+def test_an_earlier_turns_end_record_leaves_the_markers_of_the_turn_that_followed(
+    tmp_path: Path, stub_mngr_log_sh: str
+) -> None:
+    state_dir = _state_dir(tmp_path, stub_mngr_log_sh)
+    rollout = _write_rollout(tmp_path, "rollout-a.jsonl", list(_REAL_0163_TURN_ENDS[0:2]))
+    _set_transcript_path(state_dir, rollout)
+    _mark_turn(state_dir, _turn_id(_REAL_0163_TURN_ENDS[2]))
+
+    _run_streamer(state_dir)
+
+    assert _markers_present(state_dir) == (True, True)
+    assert _turn_end_word(state_dir) == "COMPLETED/"
+
+
+def test_a_compactions_end_leaves_the_markers_of_the_open_turn(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    state_dir = _state_dir(tmp_path, stub_mngr_log_sh)
+    rollout = _write_rollout(tmp_path, "rollout-a.jsonl", [_REAL_0163_TURN_ENDS[0], *_REAL_0163_COMPACTION])
+    _set_transcript_path(state_dir, rollout)
+    _mark_turn(state_dir, _turn_id(_REAL_0163_TURN_ENDS[0]))
+
+    _run_streamer(state_dir)
+
+    assert _markers_present(state_dir) == (True, True)
+
+
+def _started_at(line: str) -> int:
+    return json.loads(line)["payload"]["started_at"]
+
+
+def _active_turn(state_dir: Path) -> str | None:
+    active = state_dir / ACTIVE_MARKER_FILENAME
+    return active.read_text().strip() if active.exists() else None
+
+
+@pytest.mark.parametrize(
+    "task_lines",
+    [
+        pytest.param(_REAL_0163_TURN_ENDS[0:2], id="completed_turn"),
+        pytest.param(_REAL_0163_TURN_ENDS[4:6], id="failed_turn"),
+        pytest.param(_REAL_0163_COMPACTION, id="compaction"),
+    ],
+)
+def test_a_task_started_since_the_launch_holds_the_turn_marker_until_it_ends(
+    task_lines: tuple[str, ...], tmp_path: Path, stub_mngr_log_sh: str
+) -> None:
+    state_dir = _state_dir(tmp_path, stub_mngr_log_sh)
+    rollout = _write_rollout(tmp_path, "rollout-a.jsonl", list(task_lines[:1]))
+    _set_transcript_path(state_dir, rollout)
+    launched_at = _started_at(task_lines[0])
+    _run_streamer(state_dir, launched_at)
+    while_running = _active_turn(state_dir)
+
+    with rollout.open("a") as f:
+        f.write(task_lines[1] + "\n")
+    _run_streamer(state_dir, launched_at)
+
+    assert while_running == _turn_id(task_lines[0])
+    assert _active_turn(state_dir) is None
+
+
+@pytest.mark.parametrize(
+    "launched_after",
+    [pytest.param(1, id="started_before_the_launch"), pytest.param(None, id="launch_unknown")],
+)
+def test_a_task_not_known_to_start_since_the_launch_leaves_the_turn_closed(
+    launched_after: int | None, tmp_path: Path, stub_mngr_log_sh: str
+) -> None:
+    state_dir = _state_dir(tmp_path, stub_mngr_log_sh)
+    task_start = _REAL_0163_TURN_ENDS[0]
+    _set_transcript_path(state_dir, _write_rollout(tmp_path, "rollout-a.jsonl", [task_start]))
+    launched_at = None if launched_after is None else _started_at(task_start) + launched_after
+
+    _run_streamer(state_dir, launched_at)
+
+    assert _active_turn(state_dir) is None
+
+
+def test_one_pass_closes_a_failed_turn_and_opens_the_compaction_after_it(
+    tmp_path: Path, stub_mngr_log_sh: str
+) -> None:
+    state_dir = _state_dir(tmp_path, stub_mngr_log_sh)
+    lines = [*_REAL_0163_TURN_ENDS[4:6], _REAL_0163_COMPACTION[0]]
+    _set_transcript_path(state_dir, _write_rollout(tmp_path, "rollout-a.jsonl", lines))
+    _mark_turn(state_dir, _turn_id(lines[0]))
+
+    _run_streamer(state_dir, _started_at(lines[0]))
+
+    assert _active_turn(state_dir) == _turn_id(_REAL_0163_COMPACTION[0])
+    assert _markers_present(state_dir) == (True, False)
+    assert _turn_end_word(state_dir) == "FAILED/other"
+
+
+def test_a_turn_the_hook_marked_keeps_its_marker_when_an_earlier_task_starts(
+    tmp_path: Path, stub_mngr_log_sh: str
+) -> None:
+    state_dir = _state_dir(tmp_path, stub_mngr_log_sh)
+    _set_transcript_path(state_dir, _write_rollout(tmp_path, "rollout-a.jsonl", [_REAL_0163_TURN_ENDS[0]]))
+    _mark_turn(state_dir, "turn-the-hook-opened")
+
+    _run_streamer(state_dir, _started_at(_REAL_0163_TURN_ENDS[0]))
+
+    assert _active_turn(state_dir) == "turn-the-hook-opened"

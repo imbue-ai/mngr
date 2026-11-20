@@ -7,7 +7,7 @@ resolves its entire config/auth/session/hook tree from ``CODEX_HOME``:
 
     <CODEX_HOME>/
       config.toml        # model, approval, sandbox, trust, notices (mngr-owned)
-      hooks.json         # the session-pointer recorder (mngr-owned)
+      hooks.json         # the session-pointer recorder and the turn hook (mngr-owned)
       auth.json          # credentials -- a symlink to the user's shared ~/.codex/auth.json
       .personality_migration  # NUX skip marker (mngr-owned, empty)
       sessions/YYYY/MM/DD/rollout-*-<uuid>.jsonl   # codex-owned transcripts
@@ -23,14 +23,12 @@ This module holds the pure, host-agnostic pieces of that scheme:
   (applied last, so it wins). Pinning ``cli_auth_credentials_store = "file"`` is
   load-bearing: the keyring/auto backends hash ``CODEX_HOME`` into the secret
   key, which would make the shared-auth symlink unusable.
-* ``build_codex_hooks_config`` -- the single non-lifecycle hook written to
-  ``<CODEX_HOME>/hooks.json``: ``UserPromptSubmit`` -> ``record_session_pointers.sh``,
-  which records the rollout session id + transcript path (the non-lifecycle pointers
-  the adopt/preserve and raw-transcript machinery need) and removes ``turn_end``. Lifecycle/activity are NOT
-  tracked by hooks: RUNNING vs WAITING is read live from the daemon's
-  ``thread/status``. Guards a repo wants on its own agents are not mngr's: they go in
-  that repo's ``.codex/hooks.json``, which codex loads as its own config layer and
-  runs alongside this file.
+* ``build_codex_hooks_config`` -- the hooks written to ``<CODEX_HOME>/hooks.json``:
+  ``record_session_pointers.sh`` records the rollout session id + transcript path and
+  removes ``turn_end`` at ``UserPromptSubmit``, and ``codex_turn_hook.sh`` keeps the ``active`` and
+  ``permissions_waiting`` markers mngr's state probe reads. Guards a repo wants on its
+  own agents are not mngr's: they go in that repo's ``.codex/hooks.json``, which codex
+  loads as its own config layer and runs alongside this file.
 * ``merge_project_trust`` -- the additive, idempotent ``[projects."<path>"]
   trust_level = "trusted"`` write used both to persist durable trust in the
   user's global ``config.toml`` and to seed the per-agent one.
@@ -197,14 +195,19 @@ APP_SERVER_THREAD_FILENAME: str = "codex_app_server_thread"
 # ``record_session_pointers.sh`` writes it. Both hardcode this same literal.
 TRANSCRIPT_PATH_FILENAME: str = "codex_transcript_path"
 
+# Marker files (in ``$MNGR_AGENT_STATE_DIR``) that ``codex_turn_hook.sh`` and ``stream_transcript.sh``
+# keep: ``active`` while the root thread's turn is open, holding its turn id, and
+# ``permissions_waiting`` while that turn waits on an approval or a question.
+ACTIVE_MARKER_FILENAME: Final[str] = "active"
+PERMISSIONS_WAITING_FILENAME: Final[str] = "permissions_waiting"
+
 # Scripts provisioned into ``$MNGR_AGENT_STATE_DIR/commands/``; names kept in
 # sync with the resource files under ``resources/``.
 #
-# UserPromptSubmit hook that removes ``turn_end`` and records the rollout session id +
-# transcript path (the non-lifecycle pointers the adopt/preserve and raw-transcript
-# machinery need). It does NO lifecycle-marker work: RUNNING vs WAITING is read from
-# the daemon's live ``thread/status``, not from any on-disk marker.
+# UserPromptSubmit hook that removes ``turn_end`` and records the rollout session id + transcript path.
 RECORD_SESSION_POINTERS_SCRIPT_NAME: str = "record_session_pointers.sh"
+# The hook that keeps ``active`` and ``permissions_waiting``.
+TURN_HOOK_SCRIPT_NAME: Final[str] = "codex_turn_hook.sh"
 BACKGROUND_TASKS_SCRIPT_NAME: str = "codex_background_tasks.sh"
 RAW_TRANSCRIPT_SCRIPT_NAME: str = "stream_transcript.sh"
 COMMON_TRANSCRIPT_SCRIPT_NAME: str = "common_transcript.sh"
@@ -551,36 +554,54 @@ def _parse_semver_tuple(version: str) -> tuple[int, ...] | None:
 
 # hooks.json
 
-# Command codex runs for each hook event (``type: "command"`` handlers receive the
-# event JSON on stdin). ``$MNGR_AGENT_STATE_DIR`` expands in codex's shell at
-# hook-execution time. The script lives in the agent's commands/ dir (provisioned
-# by the plugin). This is the only mngr-provisioned hook; it records the rollout
-# session id + transcript path and does NO lifecycle-state work (the daemon's
-# ``thread/status`` is the sole RUNNING-vs-WAITING source).
+# Commands codex runs for a hook event, with the event JSON on stdin. ``$MNGR_AGENT_STATE_DIR``
+# expands in codex's shell when the hook runs; the scripts live in the agent's commands/ dir.
 _RECORD_SESSION_POINTERS_COMMAND: str = f'bash "$MNGR_AGENT_STATE_DIR/commands/{RECORD_SESSION_POINTERS_SCRIPT_NAME}"'
+
+# The events ``codex_turn_hook.sh`` handles, each passed to it as its argument.
+_TURN_HOOK_EVENTS: Final[tuple[str, ...]] = (
+    "UserPromptSubmit",
+    "Stop",
+    "Interrupt",
+    "PermissionRequest",
+    "PreToolUse",
+    "PostToolUse",
+)
+
+
+@pure
+def _command_hook(command: str) -> dict[str, str]:
+    return {"type": "command", "command": command}
 
 
 @pure
 def build_codex_hooks_config() -> dict[str, Any]:
     """Build the per-agent ``hooks.json`` body for the codex agent.
 
-    One hook, and it is bookkeeping: ``UserPromptSubmit`` -> ``record_session_pointers.sh``
-    records the rollout session id + transcript path, which the adopt/preserve and
-    raw-transcript machinery need, and removes ``turn_end``. It does NO lifecycle-state work -- RUNNING vs WAITING is
-    read live from the daemon's ``thread/status``, so there is no ``active`` /
-    ``permissions_waiting`` marker and no subagent-tracking recompute.
+    ``UserPromptSubmit`` runs ``record_session_pointers.sh``, which records the rollout session
+    id and transcript path and removes ``turn_end``. Every event in ``_TURN_HOOK_EVENTS`` runs ``codex_turn_hook.sh``,
+    which keeps the ``active`` and ``permissions_waiting`` markers mngr's state probe reads.
 
     Guards a repo wants on its own agents go in its ``.codex/hooks.json``, which codex loads
     as its own config layer and runs alongside this one.
 
-    The file is mngr-owned and rewritten from scratch each provision, so no
-    merge-with-existing logic is needed. Codex requires command hooks to be trusted before
-    they run; the plugin passes ``--dangerously-bypass-hook-trust`` (consent-gated) rather
-    than seeding a brittle, version-specific trust hash.
+    The file is mngr-owned and rewritten from scratch each provision. Codex requires command
+    hooks to be trusted before they run; the plugin passes ``--dangerously-bypass-hook-trust``
+    (consent-gated).
     """
-    return {
-        "hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": _RECORD_SESSION_POINTERS_COMMAND}]}]}
-    }
+    hooks: dict[str, list[dict[str, Any]]] = {}
+    for event in _TURN_HOOK_EVENTS:
+        commands = [_command_hook(f'bash "$MNGR_AGENT_STATE_DIR/commands/{TURN_HOOK_SCRIPT_NAME}" {event}')]
+        if event == "UserPromptSubmit":
+            commands.insert(0, _command_hook(_RECORD_SESSION_POINTERS_COMMAND))
+        hooks[event] = [{"hooks": commands}]
+    return {"hooks": hooks}
+
+
+@pure
+def is_turn_hook_installed(hooks_json_text: str) -> bool:
+    """Whether a ``hooks.json`` body runs ``codex_turn_hook.sh``."""
+    return TURN_HOOK_SCRIPT_NAME in hooks_json_text
 
 
 @pure

@@ -52,18 +52,36 @@ supports (e.g. `"gpt-5.5"`), or authenticate with an API key (which carries the 
 model entitlement). To pin a model for every account while tolerating ones whose plan lacks
 it, also set `fall_back_to_account_default_model = true`.
 
-## Waiting reason
+## State
+
+codex's hooks and mngr's transcript streamer keep the agent's turn marker on its host, so
+`mngr list` reads a codex agent's state on any host. A turn reads `RUNNING` from codex's
+`UserPromptSubmit` hook, or within a second from the rollout's record that a task started,
+which also covers turns that hook does not report (a compaction, a `!` shell command typed in
+the TUI). It ends at codex's `Interrupt` hook, or up to about a second after codex's `Stop`
+hook, when the streamer reads the rollout's record of the turn's end. That record also ends a
+turn that fails, which runs no `Stop` hook, and comes only after the continuation of a turn
+that a `Stop` hook in the repo's `.codex/hooks.json` keeps going (exit code 2), so such a turn
+reads `RUNNING` throughout.
 
 `mngr list` shows a `waiting_reason` for each codex agent:
 
-- `PERMISSIONS` — blocked on a tool-approval dialog, waiting for you to respond.
+- `PERMISSIONS` — blocked on a tool-approval dialog or on a question codex asked you (plan
+  mode), waiting for you to respond.
 - `END_OF_TURN` — idle, its turn complete, waiting for your next message.
 
-With `auto_allow_permissions = true` codex never prompts, so an agent never waits with
-reason `PERMISSIONS`.
+With `auto_allow_permissions = true` codex never asks for an approval.
 
 ## Limitations
 
-- If you cancel an approval dialog (Esc / "No"), the `waiting_reason` may briefly read
-  `PERMISSIONS` rather than `END_OF_TURN` until the next turn completes. The
-  `WAITING`/`RUNNING` state itself is always correct.
+- An approved command keeps reading `WAITING` with reason `PERMISSIONS` until it finishes,
+  and a declined one until the turn's next tool finishes or the turn ends: codex runs no hook
+  when you answer.
+- Only the root thread's turn, approvals and questions count. A subagent still working after
+  the root turn ended reads `WAITING`, and a subagent's approval or question is not shown.
+- codex runs mngr's hooks only once they are trusted. mngr trusts them when it creates an
+  agent on a local host. On a remote host, codex shows "Hooks need review" in the agent's
+  terminal after its first restart. Until someone picks "Trust all" there, turns still read
+  `RUNNING` and `WAITING` from the rollout, but an approval or a question reads `RUNNING`.
+- An agent created before the turn hook reads its turn from codex's app-server instead, on a
+  local host only, until it is re-provisioned (`mngr create <name> --reuse --update`).

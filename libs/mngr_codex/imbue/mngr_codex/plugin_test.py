@@ -16,6 +16,7 @@ from datetime import timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from typing import Final
 from typing import cast
 
 import pytest
@@ -36,6 +37,8 @@ from imbue.mngr.errors import MessageDeliveredButBlockedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.background_tasks import BACKGROUND_TASK_DIR_NAME
+from imbue.mngr.hosts.background_tasks import TURN_END_FILE_NAME
 from imbue.mngr.hosts.common import resolve_expected_process_name
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.tmux import PANE_SESSION_NAME_SHELL_EXPRESSION
@@ -44,6 +47,7 @@ from imbue.mngr.interfaces.agent import InteractiveAgentMixin
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import HostLifecycleSnapshot
+from imbue.mngr.interfaces.data_types import TmuxPaneListing
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -54,10 +58,8 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import LifecycleProbeResult
 from imbue.mngr.primitives import OutputStyleName
 from imbue.mngr.primitives import SystemPromptText
-from imbue.mngr.primitives import TurnEnd
 from imbue.mngr.primitives import TurnEndKind
 from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
@@ -67,10 +69,14 @@ from imbue.mngr.utils.testing import make_local_host_of_class
 from imbue.mngr.utils.testing import put_fake_cli_reporting_version_on_path
 from imbue.mngr_codex.app_server_client import AppServerTransport
 from imbue.mngr_codex.app_server_client import TransportClosedError
+from imbue.mngr_codex.codex_config import ACTIVE_MARKER_FILENAME
 from imbue.mngr_codex.codex_config import APP_SERVER_THREAD_FILENAME
+from imbue.mngr_codex.codex_config import PERMISSIONS_WAITING_FILENAME
 from imbue.mngr_codex.codex_config import RECORD_SESSION_POINTERS_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import ROOT_SESSION_FILENAME
 from imbue.mngr_codex.codex_config import TRANSCRIPT_PATH_FILENAME
+from imbue.mngr_codex.codex_config import TURN_HOOK_SCRIPT_NAME
+from imbue.mngr_codex.codex_config import build_codex_hooks_config
 from imbue.mngr_codex.codex_config import get_codex_app_server_socket_path
 from imbue.mngr_codex.codex_config import get_codex_auth_path
 from imbue.mngr_codex.codex_config import get_codex_config_path
@@ -78,13 +84,13 @@ from imbue.mngr_codex.codex_config import get_codex_home
 from imbue.mngr_codex.codex_config import get_codex_hooks_path
 from imbue.mngr_codex.codex_config import get_codex_personality_migration_path
 from imbue.mngr_codex.codex_config import is_project_trusted
+from imbue.mngr_codex.codex_config import serialize_codex_hooks
 from imbue.mngr_codex.plugin import CodexAgent
 from imbue.mngr_codex.plugin import CodexAgentConfig
 from imbue.mngr_codex.plugin import CodexUpdatePolicy
 from imbue.mngr_codex.plugin import _APP_SERVER_WINDOW_SPAWN_PREFIX
 from imbue.mngr_codex.plugin import _app_server_client_version
 from imbue.mngr_codex.plugin import _resolve_adopt_session
-from imbue.mngr_codex.plugin import _resolve_lifecycle_state_for_permission
 from imbue.mngr_codex.plugin import _session_id_from_rollout_path
 from imbue.mngr_codex.plugin import _sessions_root_for_rollout
 from imbue.mngr_codex.plugin import _user_native_codex_home
@@ -339,13 +345,6 @@ def _make_codex_agent(
         agent_config=agent_config,
         host=host,
     )
-
-
-class _UnlistedTmuxHost(Host):
-    """A local host that lists no tmux panes, for tests that fix the process-presence probe themselves."""
-
-    def read_lifecycle_snapshot(self) -> HostLifecycleSnapshot | None:
-        return HostLifecycleSnapshot(panes=(), ps_output="")
 
 
 class _ConfirmingCodexAgent(CodexAgent):
@@ -701,7 +700,7 @@ def test_send_message_fails_without_starting_a_thread_when_model_list_hits_a_dea
     assert "thread/start" not in transport.sent_methods()
 
 
-# Lifecycle / waiting_reason re-sourced from live thread status (event-sourced)
+# Lifecycle and waiting_reason
 
 
 def _status_transport(
@@ -710,11 +709,7 @@ def _status_transport(
     *,
     loaded: list[str] | None = None,
 ) -> _ScriptedTransport:
-    """A scripted transport that answers a lifecycle status probe of the root thread.
-
-    Responds to the handshake, ``thread/loaded/list`` (the root ``thread-1`` is loaded by
-    default), and ``thread/read`` with the given ``status`` / ``turns``.
-    """
+    """A scripted transport that answers a status probe of the root ``thread-1``."""
     transport = _ScriptedTransport()
     transport.respond_result("initialize", _initialize_result())
     transport.respond_result("thread/loaded/list", {"data": ["thread-1"] if loaded is None else loaded})
@@ -722,191 +717,217 @@ def _status_transport(
     return transport
 
 
-def _live_codex_agent(
+_TURN_IN_FLIGHT: Final[tuple[Mapping[str, Any], ...]] = ({"id": "turn-1", "status": "inProgress"},)
+_HOOKS_BEFORE_THE_TURN_HOOK: Final[str] = json.dumps(
+    {
+        "hooks": {
+            "UserPromptSubmit": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": 'bash "$MNGR_AGENT_STATE_DIR/commands/record_session_pointers.sh"',
+                        }
+                    ]
+                }
+            ]
+        }
+    }
+)
+
+
+def _codex_pane_agent(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     transport: _ScriptedTransport,
-    base_state: AgentLifecycleState,
     *,
-    base_pid: int | None = None,
-    base_turn_end: TurnEnd | None = None,
+    hooks_json_text: str | None = None,
 ) -> CodexAgent:
-    """A codex agent whose daemon status is scripted AND whose process-presence probe is fixed.
+    """A codex agent whose host lists its primary window running codex, with the given ``hooks.json``.
 
-    The scripted transport drives ``_read_live_thread_status``; the fixed base probe stands in
-    for the tmux/ps process-presence result (RUNNING/WAITING = window alive) so the live
-    RUNNING-vs-WAITING re-derivation is exercised without a real pane. The root thread id is
-    persisted so the status probe binds it.
+    ``hooks_json_text`` defaults to the hooks mngr provisions; the agent's daemon answers on ``transport``.
     """
+    panes: list[TmuxPaneListing] = []
 
-    class _LiveCodexAgent(CodexAgent):
+    class _CodexPaneHost(Host):
+        def read_lifecycle_snapshot(self) -> HostLifecycleSnapshot | None:
+            return HostLifecycleSnapshot(panes=tuple(panes), ps_output="4242 1 codex\n")
+
+    class _DaemonCodexAgent(CodexAgent):
         def _connect_app_server_transport(self) -> AppServerTransport:
             return transport
 
-        def _base_probe_lifecycle(self, lifecycle_snapshot: HostLifecycleSnapshot | None) -> LifecycleProbeResult:
-            return LifecycleProbeResult(state=base_state, pid=base_pid, turn_end=base_turn_end)
-
     agent = _make_codex_agent(
-        _LiveCodexAgent,
+        _DaemonCodexAgent,
         local_provider,
         tmp_path,
         CodexAgentConfig(),
         is_auto_approve=True,
-        host_class=_UnlistedTmuxHost,
+        host_class=_CodexPaneHost,
+    )
+    panes.append(
+        TmuxPaneListing(
+            session_name=agent.session_name,
+            session_agent_id=str(agent.id),
+            window_name=agent.mngr_ctx.config.tmux.primary_window_name,
+            pane_info="0|codex|4242",
+        )
+    )
+    agent.host.write_text_file(
+        get_codex_hooks_path(agent._get_codex_home()),
+        serialize_codex_hooks(build_codex_hooks_config()) if hooks_json_text is None else hooks_json_text,
     )
     agent.host.write_text_file(agent._get_agent_dir() / APP_SERVER_THREAD_FILENAME, "thread-1")
     return agent
 
 
-def test_get_lifecycle_state_running_when_turn_in_flight(
-    local_provider: LocalProviderInstance, tmp_path: Path
+def _write_markers(agent: CodexAgent, *, is_active: bool, is_dialog_open: bool, has_record: bool) -> None:
+    agent_dir = agent._get_agent_dir()
+    if is_active:
+        agent.host.write_text_file(agent_dir / ACTIVE_MARKER_FILENAME, "turn-1\n")
+    if is_dialog_open:
+        agent.host.write_text_file(agent_dir / PERMISSIONS_WAITING_FILENAME, "")
+    if has_record:
+        agent.host.write_text_file(
+            agent_dir / BACKGROUND_TASK_DIR_NAME / "task-shell-1", "seen:1795089000 kind:SHELL\n"
+        )
+
+
+@pytest.mark.parametrize(
+    ("is_active", "is_dialog_open", "has_record", "expected_state", "expected_reason"),
+    [
+        pytest.param(False, False, False, AgentLifecycleState.WAITING, WaitingReason.END_OF_TURN, id="idle"),
+        pytest.param(True, False, False, AgentLifecycleState.RUNNING, None, id="turn_open"),
+        pytest.param(True, True, False, AgentLifecycleState.WAITING, WaitingReason.PERMISSIONS, id="approval"),
+        pytest.param(True, False, True, AgentLifecycleState.RUNNING, None, id="record_during_a_turn"),
+        pytest.param(
+            False, False, True, AgentLifecycleState.RUNNING_BACKGROUND, WaitingReason.END_OF_TURN, id="record"
+        ),
+        pytest.param(
+            True, True, True, AgentLifecycleState.WAITING, WaitingReason.PERMISSIONS, id="record_and_approval"
+        ),
+        pytest.param(
+            False, True, False, AgentLifecycleState.WAITING, WaitingReason.END_OF_TURN, id="stranded_dialog_marker"
+        ),
+    ],
+)
+def test_a_codex_agent_reads_its_state_from_the_markers_its_hooks_keep(
+    is_active: bool,
+    is_dialog_open: bool,
+    has_record: bool,
+    expected_state: AgentLifecycleState,
+    expected_reason: WaitingReason | None,
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
 ) -> None:
-    """A live turn (thread active, in-progress turn) reads RUNNING."""
-    transport = _status_transport({"type": "active", "activeFlags": []}, [{"id": "turn-1", "status": "inProgress"}])
-    agent = _live_codex_agent(local_provider, tmp_path, transport, AgentLifecycleState.RUNNING)
-    assert agent.get_lifecycle_state() == AgentLifecycleState.RUNNING
+    """The daemon would report a turn in flight; an agent whose hooks keep the markers never asks it."""
+    transport = _status_transport({"type": "active", "activeFlags": []}, _TURN_IN_FLIGHT)
+    agent = _codex_pane_agent(local_provider, tmp_path, transport)
+    _write_markers(agent, is_active=is_active, is_dialog_open=is_dialog_open, has_record=has_record)
 
+    probe = agent.probe_lifecycle()
 
-def test_get_lifecycle_state_waiting_when_thread_idle_even_if_marker_lags(
-    local_provider: LocalProviderInstance, tmp_path: Path
-) -> None:
-    """An idle thread reads WAITING immediately -- even though the process is present (base RUNNING).
-
-    This is the A6/lifecycle fix: once the turn completes the daemon is idle, so the state flips to
-    WAITING at once instead of lingering on a stale ``active`` marker (base RUNNING) until a hook fires.
-    """
-    transport = _status_transport({"type": "idle"}, [])
-    agent = _live_codex_agent(local_provider, tmp_path, transport, AgentLifecycleState.RUNNING)
-    assert agent.get_lifecycle_state() == AgentLifecycleState.WAITING
-
-
-def test_get_lifecycle_state_promotes_to_waiting_on_approval(
-    local_provider: LocalProviderInstance, tmp_path: Path
-) -> None:
-    """A turn parked awaiting approval promotes RUNNING -> WAITING (no permissions_waiting marker)."""
-    transport = _status_transport(
-        {"type": "active", "activeFlags": ["waitingOnApproval"]}, [{"id": "turn-1", "status": "inProgress"}]
-    )
-    agent = _live_codex_agent(local_provider, tmp_path, transport, AgentLifecycleState.RUNNING)
-    assert agent.get_lifecycle_state() == AgentLifecycleState.WAITING
-
-
-def test_get_lifecycle_state_stays_running_through_the_flush_tail_until_completed(
-    local_provider: LocalProviderInstance, tmp_path: Path
-) -> None:
-    """RUNNING lasts until the turn is FULLY done (contract A6), not when token-generation stops.
-
-    While the daemon reports the thread ``active`` with an in-progress turn -- including the flush
-    tail after the model has stopped producing tokens but before ``turn/completed`` -- the state is
-    RUNNING (no ``waitingOn*`` flag, so it is not a parked WAITING). Only when the turn completes
-    and the thread goes ``idle`` does the state flip to WAITING; there is no earlier idle blip.
-    """
-    # The flush tail: the turn is still in progress (active, no waiting flags) even though tokens
-    # may have stopped. This must read RUNNING, not WAITING.
-    running = _status_transport({"type": "active", "activeFlags": []}, [{"id": "turn-1", "status": "inProgress"}])
-    agent = _live_codex_agent(local_provider, tmp_path, running, AgentLifecycleState.RUNNING)
-    assert agent.get_lifecycle_state() == AgentLifecycleState.RUNNING
-
-    # turn/completed: the thread is now idle, so the state flips to WAITING at once.
-    completed = _status_transport({"type": "idle"}, [])
-    idle_agent = _live_codex_agent(local_provider, tmp_path, completed, AgentLifecycleState.RUNNING)
-    assert idle_agent.get_lifecycle_state() == AgentLifecycleState.WAITING
-
-
-@pytest.mark.parametrize("base_state", [AgentLifecycleState.STOPPED, AgentLifecycleState.UNKNOWN])
-def test_get_lifecycle_state_keeps_an_absent_or_unreadable_process_without_querying_the_daemon(
-    base_state: AgentLifecycleState, local_provider: LocalProviderInstance, tmp_path: Path
-) -> None:
-    """A dead/absent window (base STOPPED) or an unreadable host (base UNKNOWN) is reported verbatim.
-
-    Process presence is authoritative for STOPPED/DONE/REPLACED/UNKNOWN, so no WebSocket connection
-    is opened for such an agent (no per-``mngr ls`` churn against a daemon that may be gone).
-    """
-    transport = _status_transport({"type": "idle"}, [])
-    agent = _live_codex_agent(local_provider, tmp_path, transport, base_state)
-    assert agent.get_lifecycle_state() == base_state
+    assert (probe.state, probe.pid) == (expected_state, 4242)
+    assert _waiting_reason(agent, agent.host) == expected_reason
     assert transport.sent == []
 
 
-def test_probe_lifecycle_resources_split_and_preserves_pid(
+def test_a_codex_agent_publishes_its_turn_end_only_with_no_turn_open(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    """``probe_lifecycle`` re-derives the RUNNING/WAITING split from live status, keeping the pid."""
-    transport = _status_transport({"type": "idle"}, [])
-    agent = _live_codex_agent(local_provider, tmp_path, transport, AgentLifecycleState.RUNNING, base_pid=4242)
-    probe = agent.probe_lifecycle()
-    assert probe.state == AgentLifecycleState.WAITING
-    assert probe.pid == 4242
+    agent = _codex_pane_agent(local_provider, tmp_path, _ScriptedTransport())
+    agent.host.write_text_file(
+        agent._get_agent_dir() / TURN_END_FILE_NAME, "ended:1795089000 kind:FAILED native_type:other\n"
+    )
+    after_the_turn = agent.probe_lifecycle()
 
+    _write_markers(agent, is_active=True, is_dialog_open=False, has_record=False)
+    during_the_next_turn = agent.probe_lifecycle()
 
-_FAILED_TURN_END = TurnEnd(
-    kind=TurnEndKind.FAILED, native_type="other", ended_at=datetime(2026, 1, 2, 12, 0, 0, tzinfo=timezone.utc)
-)
+    assert after_the_turn.turn_end is not None and after_the_turn.turn_end.kind is TurnEndKind.FAILED
+    assert during_the_next_turn.turn_end is None
 
 
 @pytest.mark.parametrize(
-    ("status", "expected_state", "expected_turn_end"),
+    ("status", "turns", "expected_state", "expected_reason"),
     [
-        pytest.param({"type": "idle"}, AgentLifecycleState.WAITING, _FAILED_TURN_END, id="idle"),
-        pytest.param({"type": "active", "activeFlags": []}, AgentLifecycleState.RUNNING, None, id="turn_in_flight"),
+        pytest.param(
+            {"type": "active", "activeFlags": []}, _TURN_IN_FLIGHT, AgentLifecycleState.RUNNING, None, id="turn"
+        ),
         pytest.param(
             {"type": "active", "activeFlags": ["waitingOnApproval"]},
-            AgentLifecycleState.RUNNING,
-            None,
-            id="turn_waiting_on_approval",
+            _TURN_IN_FLIGHT,
+            AgentLifecycleState.WAITING,
+            WaitingReason.PERMISSIONS,
+            id="approval",
         ),
-        pytest.param(None, AgentLifecycleState.WAITING, _FAILED_TURN_END, id="daemon_unreachable"),
+        pytest.param({"type": "idle"}, (), AgentLifecycleState.WAITING, WaitingReason.END_OF_TURN, id="idle"),
     ],
 )
-def test_probe_lifecycle_publishes_the_turn_end_unless_the_daemon_reports_a_turn_in_flight(
-    status: Mapping[str, Any] | None,
+def test_an_agent_whose_hooks_predate_the_turn_hook_reads_its_turn_from_the_daemon(
+    status: Mapping[str, Any],
+    turns: Sequence[Mapping[str, Any]],
     expected_state: AgentLifecycleState,
-    expected_turn_end: TurnEnd | None,
+    expected_reason: WaitingReason | None,
     local_provider: LocalProviderInstance,
     tmp_path: Path,
 ) -> None:
-    if status is None:
-        transport = _ScriptedTransport()
-        transport.respond_error("initialize", -32600, "handshake refused")
-    else:
-        transport = _status_transport(status, [{"id": "turn-1", "status": "inProgress"}])
-    agent = _live_codex_agent(
-        local_provider, tmp_path, transport, AgentLifecycleState.WAITING, base_turn_end=_FAILED_TURN_END
+    agent = _codex_pane_agent(
+        local_provider, tmp_path, _status_transport(status, turns), hooks_json_text=_HOOKS_BEFORE_THE_TURN_HOOK
     )
+
+    assert agent.probe_lifecycle().state == expected_state
+    assert _waiting_reason(agent, agent.host) == expected_reason
+
+
+def test_an_agent_whose_hooks_predate_the_turn_hook_keeps_its_turn_end_while_its_daemon_is_idle(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    agent = _codex_pane_agent(
+        local_provider,
+        tmp_path,
+        _status_transport({"type": "idle"}, ()),
+        hooks_json_text=_HOOKS_BEFORE_THE_TURN_HOOK,
+    )
+    agent.host.write_text_file(agent._get_agent_dir() / TURN_END_FILE_NAME, "ended:1795089000 kind:COMPLETED\n")
 
     probe = agent.probe_lifecycle()
 
-    assert (probe.state, probe.turn_end) == (expected_state, expected_turn_end)
+    assert probe.state == AgentLifecycleState.WAITING
+    assert probe.turn_end is not None and probe.turn_end.kind is TurnEndKind.COMPLETED
+
+
+def test_an_agent_whose_hooks_predate_the_turn_hook_reads_waiting_when_its_daemon_is_unreachable(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    transport = _ScriptedTransport()
+    transport.respond_error("initialize", -32600, "handshake refused")
+    agent = _codex_pane_agent(local_provider, tmp_path, transport, hooks_json_text=_HOOKS_BEFORE_THE_TURN_HOOK)
+
+    assert agent.probe_lifecycle().state == AgentLifecycleState.WAITING
+    assert _waiting_reason(agent, agent.host) == WaitingReason.END_OF_TURN
 
 
 @pytest.mark.parametrize(
-    "status, flags, expected",
+    ("lifecycle_snapshot", "expected_state"),
     [
-        ("active", [], None),
-        ("idle", [], WaitingReason.END_OF_TURN),
-        ("active", ["waitingOnApproval"], WaitingReason.PERMISSIONS),
-        ("active", ["waitingOnUserInput"], WaitingReason.PERMISSIONS),
+        pytest.param(HostLifecycleSnapshot(panes=(), ps_output=""), AgentLifecycleState.STOPPED, id="no_window"),
+        pytest.param(None, AgentLifecycleState.UNKNOWN, id="unreadable_host"),
     ],
 )
-def test_compute_waiting_reason_from_live_status(
+def test_an_agent_whose_hooks_predate_the_turn_hook_is_not_read_from_its_daemon_while_stopped_or_unknown(
+    lifecycle_snapshot: HostLifecycleSnapshot | None,
+    expected_state: AgentLifecycleState,
     local_provider: LocalProviderInstance,
     tmp_path: Path,
-    status: str,
-    flags: list[str],
-    expected: WaitingReason | None,
 ) -> None:
-    """The waiting reason is read live from thread status (running -> None; parked -> PERMISSIONS)."""
-    turns = [{"id": "turn-1", "status": "inProgress"}] if status == "active" else []
-    transport = _status_transport({"type": status, "activeFlags": flags}, turns)
-    agent = _live_codex_agent(local_provider, tmp_path, transport, AgentLifecycleState.RUNNING)
-    assert agent.compute_waiting_reason() == expected
+    transport = _status_transport({"type": "active", "activeFlags": []}, _TURN_IN_FLIGHT)
+    agent = _codex_pane_agent(local_provider, tmp_path, transport, hooks_json_text=_HOOKS_BEFORE_THE_TURN_HOOK)
 
+    probe = agent.probe_lifecycle_from_snapshot(lifecycle_snapshot)
 
-def test_waiting_reason_generator_uses_live_status(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
-    """The ``waiting_reason`` field generator delegates to the live-status read for a codex agent."""
-    transport = _status_transport({"type": "active", "activeFlags": []}, [{"id": "turn-1", "status": "inProgress"}])
-    agent = _live_codex_agent(local_provider, tmp_path, transport, AgentLifecycleState.RUNNING)
-    assert _waiting_reason(agent, agent.host) is None
+    assert probe.state == expected_state
+    assert transport.sent == []
 
 
 def test_status_probe_never_starts_a_thread(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
@@ -933,25 +954,9 @@ def test_status_probe_never_starts_a_thread(local_provider: LocalProviderInstanc
 def test_read_live_thread_status_returns_none_on_remote_host(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    """A remote host's unix socket is unreachable from the mngr process -> None (no marker fallback)."""
+    """A remote host's unix socket is unreachable from the mngr process -> None."""
     agent = _make_remote_codex_agent(local_provider, tmp_path, {})
     assert agent._read_live_thread_status() is None
-
-
-def test_get_lifecycle_state_degrades_to_waiting_when_daemon_unreachable(
-    local_provider: LocalProviderInstance, tmp_path: Path
-) -> None:
-    """When the daemon can't be read, the split degrades to WAITING -- there is NO marker fallback.
-
-    A failed ``initialize`` yields no live status. With the marker path deleted, an alive-but-
-    unreadable daemon is reported WAITING (the conservative "cannot confirm a running turn"
-    default), regardless of any on-disk file. ``waiting_reason`` likewise degrades to END_OF_TURN.
-    """
-    transport = _ScriptedTransport()
-    transport.respond_error("initialize", -32600, "handshake refused")
-    agent = _live_codex_agent(local_provider, tmp_path, transport, AgentLifecycleState.RUNNING)
-    assert agent.get_lifecycle_state() == AgentLifecycleState.WAITING
-    assert agent.compute_waiting_reason() == WaitingReason.END_OF_TURN
 
 
 # Simple accessors
@@ -1117,14 +1122,9 @@ def test_assemble_command_daemon_window_sources_agent_env(codex_agent: CodexAgen
 
 
 def test_assemble_command_has_no_marker_reset_but_stamps_process_start(codex_agent: CodexAgent) -> None:
-    """The lifecycle no longer reads any marker, so the launch prelude resets none.
+    """The launch command removes no state file itself: the supervisor it starts clears the turn and dialog markers.
 
-    RUNNING/WAITING comes from the daemon's thread/status, so there is no stale ``active`` /
-    ``codex_root_active`` / ``codex_subagents`` / lock to clear on relaunch. The process-start
-    stamp is still written (the system_interface activity tracker uses its mtime as a stale-tail
-    gate). The primary window READS ``codex_root_session`` to resume the root conversation, but
-    only reads it (``cat``) -- it is never removed or overwritten -- and the transcript path is
-    left untouched.
+    It stamps the process start, only reads ``codex_root_session``, and leaves the transcript path untouched.
     """
     command = str(codex_agent.assemble_command(codex_agent.host, (), None))
     assert "rm -rf" not in command
@@ -1483,14 +1483,9 @@ def test_provision_builds_the_codex_home_tree(codex_agent: CodexAgent, isolated_
 
     hooks_path = get_codex_hooks_path(codex_home)
     assert hooks_path.exists()
-    hooks_text = hooks_path.read_text()
-    # The one mngr hook records the session/transcript pointers; no lifecycle-marker hooks.
-    assert RECORD_SESSION_POINTERS_SCRIPT_NAME in hooks_text
-    assert "set_active_marker.sh" not in hooks_text
-    assert "clear_active_marker.sh" not in hooks_text
-    assert "permissions_waiting" not in hooks_text
-    # The session-pointer recorder script is provisioned into commands/.
-    assert (codex_agent._get_agent_dir() / "commands" / RECORD_SESSION_POINTERS_SCRIPT_NAME).exists()
+    assert json.loads(hooks_path.read_text()) == build_codex_hooks_config()
+    for script_name in (RECORD_SESSION_POINTERS_SCRIPT_NAME, TURN_HOOK_SCRIPT_NAME):
+        assert (codex_agent._get_agent_dir() / "commands" / script_name).exists()
 
     # auth.json is a symlink to the shared user auth.json. With the shared auth
     # seeded (isolated_codex_home), the symlink resolves to that real file rather
@@ -1889,31 +1884,7 @@ def test_on_destroy_skips_preservation_when_disabled(local_provider: LocalProvid
     assert not dest_dir.exists()
 
 
-# Lifecycle promotion + waiting_reason field generator
-
-
-@pytest.mark.parametrize(
-    "base_state, is_blocked, expected",
-    [
-        # Only a RUNNING base is promoted, and only while blocked on a dialog.
-        (AgentLifecycleState.RUNNING, True, AgentLifecycleState.WAITING),
-        (AgentLifecycleState.RUNNING, False, AgentLifecycleState.RUNNING),
-        # Every non-RUNNING base passes through unchanged, blocked or not.
-        (AgentLifecycleState.WAITING, True, AgentLifecycleState.WAITING),
-        (AgentLifecycleState.STOPPED, True, AgentLifecycleState.STOPPED),
-        (AgentLifecycleState.REPLACED, True, AgentLifecycleState.REPLACED),
-        (AgentLifecycleState.DONE, True, AgentLifecycleState.DONE),
-        (
-            AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
-            True,
-            AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
-        ),
-    ],
-)
-def test_resolve_lifecycle_state_for_permission(
-    base_state: AgentLifecycleState, is_blocked: bool, expected: AgentLifecycleState
-) -> None:
-    assert _resolve_lifecycle_state_for_permission(base_state, is_blocked) == expected
+# waiting_reason field generator
 
 
 def test_agent_field_generators_exposes_codex_waiting_reason() -> None:
@@ -1923,26 +1894,6 @@ def test_agent_field_generators_exposes_codex_waiting_reason() -> None:
     assert plugin_name == "codex"
     assert "waiting_reason" in generators
     assert callable(generators["waiting_reason"])
-
-
-def test_waiting_reason_generator_reports_permissions_from_live_status(
-    local_provider: LocalProviderInstance, tmp_path: Path
-) -> None:
-    """The field generator delegates to the live-status read: a parked approval -> PERMISSIONS."""
-    transport = _status_transport(
-        {"type": "active", "activeFlags": ["waitingOnApproval"]}, [{"id": "turn-1", "status": "inProgress"}]
-    )
-    agent = _live_codex_agent(local_provider, tmp_path, transport, AgentLifecycleState.RUNNING)
-    assert _waiting_reason(agent, agent.host) == WaitingReason.PERMISSIONS
-
-
-def test_waiting_reason_generator_returns_end_of_turn_for_an_idle_daemon(
-    local_provider: LocalProviderInstance, tmp_path: Path
-) -> None:
-    """An idle live thread reads END_OF_TURN through the generator (the daemon is the sole source)."""
-    transport = _status_transport({"type": "idle"}, [])
-    agent = _live_codex_agent(local_provider, tmp_path, transport, AgentLifecycleState.RUNNING)
-    assert _waiting_reason(agent, agent.host) == WaitingReason.END_OF_TURN
 
 
 # Session adoption
