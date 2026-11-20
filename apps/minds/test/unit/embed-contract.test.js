@@ -558,7 +558,7 @@ test('embedder endpoint never honours an open-link, which only travels to the wo
 });
 
 test('the contract is at version 15', () => {
-  assert.strictEqual(contract.CONTRACT_VERSION, '15');
+  assert.strictEqual(contract.CONTRACT_VERSION, '16');
 });
 
 test('embedder endpoint takes an immersive request only with a window id and a boolean on', () => {
@@ -680,5 +680,67 @@ test('workspace endpoint never honours a highlight-chrome, which only travels to
   const seen = [];
   contract.createWorkspaceEndpoint({ handlers: { [contract.HIGHLIGHT_CHROME]: (msg) => seen.push(msg) } });
   win.deliver({ source: parentWin, origin: 'o', data: { type: contract.HIGHLIGHT_CHROME, anchor: 'share' } });
+  assert.deepStrictEqual(seen, []);
+});
+
+test('embedder endpoint takes a keyboard-shortcuts-page from its frame only with a sane height and a recording flag', () => {
+  const frameWin = makeWindowDouble();
+  const seen = [];
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    isExpectedOrigin: () => true,
+    handlers: { [contract.KEYBOARD_SHORTCUTS_PAGE]: (msg) => seen.push([msg.height, msg.isRecording]) },
+  });
+  const from = (source, fields) =>
+    win.deliver({ source, origin: 'o', data: { type: contract.KEYBOARD_SHORTCUTS_PAGE, ...fields } });
+  from(makeWindowDouble(), { height: 480, isRecording: false });
+  from(frameWin, { height: 480 });
+  from(frameWin, { height: '480', isRecording: false });
+  from(frameWin, { height: -1, isRecording: false });
+  from(frameWin, { height: Number.POSITIVE_INFINITY, isRecording: false });
+  from(frameWin, { height: contract.MAX_KEYBOARD_SHORTCUTS_PAGE_HEIGHT + 1, isRecording: false });
+  from(frameWin, { height: 480, isRecording: 'yes' });
+  assert.deepStrictEqual(seen, []);
+  from(frameWin, { height: 0, isRecording: false });
+  from(frameWin, { height: 612.5, isRecording: true });
+  assert.deepStrictEqual(seen, [[0, false], [612.5, true]]);
+});
+
+test('workspace endpoint never honours a keyboard-shortcuts-page, which only travels to the embedder', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({ handlers: { [contract.KEYBOARD_SHORTCUTS_PAGE]: (msg) => seen.push(msg) } });
+  win.deliver({ source: parentWin, origin: 'o', data: { type: contract.KEYBOARD_SHORTCUTS_PAGE, height: 1, isRecording: false } });
+  assert.deepStrictEqual(seen, []);
+});
+
+test('workspace endpoint takes an opensKeyboardShortcuts capability only as a boolean', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({
+    handlers: { [contract.EMBEDDER_CAPABILITIES]: (msg) => seen.push(msg.opensKeyboardShortcuts) },
+  });
+  const deliver = (fields) =>
+    win.deliver({ source: parentWin, origin: 'http://chrome', data: { type: contract.EMBEDDER_CAPABILITIES, canPopOut: false, ...fields } });
+  deliver({});
+  deliver({ opensKeyboardShortcuts: true });
+  deliver({ opensKeyboardShortcuts: 'yes' });
+  assert.deepStrictEqual(seen, [undefined, true]);
+});
+
+test('embedder endpoint takes an open-keyboard-shortcuts ask, which carries nothing', () => {
+  const frameWin = makeWindowDouble();
+  const seen = [];
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    isExpectedOrigin: () => true,
+    handlers: { [contract.OPEN_KEYBOARD_SHORTCUTS]: (msg) => seen.push(msg.type) },
+  });
+  win.deliver({ source: frameWin, origin: 'o', data: { type: contract.OPEN_KEYBOARD_SHORTCUTS } });
+  assert.deepStrictEqual(seen, ['minds:open-keyboard-shortcuts']);
+});
+
+test('workspace endpoint never honours an open-keyboard-shortcuts, which only travels to the embedder', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({ handlers: { [contract.OPEN_KEYBOARD_SHORTCUTS]: (msg) => seen.push(msg) } });
+  win.deliver({ source: parentWin, origin: 'o', data: { type: contract.OPEN_KEYBOARD_SHORTCUTS } });
   assert.deepStrictEqual(seen, []);
 });

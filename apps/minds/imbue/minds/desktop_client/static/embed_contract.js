@@ -30,7 +30,7 @@
 // types, or by adding optional fields to an existing type. CONTRACT_VERSION
 // below tracks doc revisions only.
 
-export const CONTRACT_VERSION = "15";
+export const CONTRACT_VERSION = "16";
 
 // workspace -> embedder: open the shell's permission-request modal focused on
 // one request. Payload: { requestId }.
@@ -132,6 +132,25 @@ export const HIGHLIGHT_CHROME = "minds:highlight-chrome";
 // the gesture's activation for the fullscreen request). The chrome answers
 // with IMMERSIVE_CHANGED.
 export const IMMERSIVE_REQUEST = "minds:immersive-request";
+// workspace -> embedder: the state of the workspace's keyboard shortcuts page,
+// which the chrome's Workspace settings frames. Payload: { height,
+// isRecording }: the page's height in CSS px (the frame takes it, so the
+// settings pane scrolls the page with everything else), and whether its
+// recorder is listening for a new shortcut (while it is, Escape does not
+// close the settings panel and the close-tab chord closes no window). The first
+// one says the page has loaded: the pane keeps the frame hidden until then, as
+// a workspace too old to serve the page answers its path with the whole
+// desktop, which never sends it.
+export const KEYBOARD_SHORTCUTS_PAGE = "minds:keyboard-shortcuts-page";
+// workspace -> embedder: open the shell's workspace-options panel on its
+// Workspace settings tab at the Keyboard shortcuts group. Payload: {}. Sent
+// only to a chrome whose EMBEDDER_CAPABILITIES carried
+// `opensKeyboardShortcuts: true`; without it the workspace opens its own
+// keyboard shortcuts dialog.
+export const OPEN_KEYBOARD_SHORTCUTS = "minds:open-keyboard-shortcuts";
+// The tallest page height the chrome takes: a sanity bound, far above any real
+// list of shortcuts.
+export const MAX_KEYBOARD_SHORTCUTS_PAGE_HEIGHT = 100000;
 
 // embedder -> workspace: the user pressed the close-tab shortcut while this
 // workspace was displayed; close the focused window. Payload: {}.
@@ -395,6 +414,18 @@ const WORKSPACE_TO_EMBEDDER_VALIDATORS = {
   [HIGHLIGHT_CHROME]: function (data) {
     return data.anchor === null || CHROME_ANCHORS.indexOf(data.anchor) !== -1;
   },
+  [OPEN_KEYBOARD_SHORTCUTS]: function () {
+    return true;
+  },
+  [KEYBOARD_SHORTCUTS_PAGE]: function (data) {
+    return (
+      typeof data.height === 'number' &&
+      Number.isFinite(data.height) &&
+      data.height >= 0 &&
+      data.height <= MAX_KEYBOARD_SHORTCUTS_PAGE_HEIGHT &&
+      typeof data.isRecording === 'boolean'
+    );
+  },
 };
 
 function isResolutionEntryValid(entry) {
@@ -428,6 +459,7 @@ const EMBEDDER_TO_WORKSPACE_VALIDATORS = {
       isOptionalBoolean(data.opensExternalLinks) &&
       isOptionalBoolean(data.opensCustomSchemeLinks) &&
       isOptionalBoolean(data.opensLocalFiles) &&
+      isOptionalBoolean(data.opensKeyboardShortcuts) &&
       isOptionalBoolean(data.immersive)
     );
   },
