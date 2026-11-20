@@ -5,6 +5,7 @@ from imbue.minds.deployment_tests.primitives import MAILTM_JWT_ENV_VAR
 from imbue.minds.smoke_tests.data_types import HANDOFF_ENV_VARS
 from imbue.minds.smoke_tests.data_types import HANDOFF_VAULT_KEYS
 from imbue.minds.smoke_tests.data_types import SmokeRunHandoff
+from imbue.minds.smoke_tests.primitives import SMOKE_RUN_ID_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_THROWAWAY_PASSWORD_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_TIER_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SmokeConfigError
@@ -42,8 +43,17 @@ def test_an_environment_carrying_no_handoff_reads_as_none() -> None:
     assert SmokeRunHandoff.from_env_or_none({"PATH": "/usr/bin"}) is None
 
 
-def test_an_environment_naming_only_the_tier_carries_no_handoff() -> None:
-    assert SmokeRunHandoff.from_env_or_none({SMOKE_TIER_ENV_VAR: "staging"}) is None
+@pytest.mark.parametrize(
+    "run_environment",
+    [
+        {SMOKE_TIER_ENV_VAR: "staging"},
+        {SMOKE_RUN_ID_ENV_VAR: "20261014t101500z"},
+        {SMOKE_RUN_ID_ENV_VAR: "20261014t101500z", SMOKE_TIER_ENV_VAR: "staging"},
+    ],
+    ids=["the-tier", "the-run-id", "the-run-id-and-tier"],
+)
+def test_an_environment_naming_only_the_run_carries_no_handoff(run_environment: dict[str, str]) -> None:
+    assert SmokeRunHandoff.from_env_or_none(run_environment) is None
 
 
 def test_a_half_populated_environment_is_refused_rather_than_half_read(

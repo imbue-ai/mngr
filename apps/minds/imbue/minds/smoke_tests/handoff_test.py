@@ -8,7 +8,9 @@ from imbue.minds.smoke_tests.handoff import resolve_handoff_or_none
 from imbue.minds.smoke_tests.handoff import resolve_test_job_handoff_or_none
 from imbue.minds.smoke_tests.handoff import write_handoff_state_file
 from imbue.minds.smoke_tests.primitives import SMOKE_HANDOFF_FILE_ENV_VAR
+from imbue.minds.smoke_tests.primitives import SMOKE_RUN_ID_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_THROWAWAY_PASSWORD_ENV_VAR
+from imbue.minds.smoke_tests.primitives import SMOKE_TIER_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SmokeRunId
 
 
@@ -68,14 +70,19 @@ def test_the_test_job_reads_the_handoff_the_environment_exports(smoke_run_handof
     assert resolved == smoke_run_handoff
 
 
+@pytest.mark.parametrize(
+    "run_environment",
+    [{}, {SMOKE_RUN_ID_ENV_VAR: "20261014t101500z", SMOKE_TIER_ENV_VAR: "staging"}],
+    ids=["the-file-alone", "the-file-beside-the-run-id-and-tier"],
+)
 def test_the_test_job_reads_the_handoff_file_a_local_run_names(
-    tmp_path: Path, smoke_run_handoff: SmokeRunHandoff
+    tmp_path: Path, smoke_run_handoff: SmokeRunHandoff, run_environment: dict[str, str]
 ) -> None:
     state_path = tmp_path / "smoke-run.json"
     write_handoff_state_file(smoke_run_handoff, state_path)
 
     resolved = resolve_test_job_handoff_or_none(
-        {SMOKE_HANDOFF_FILE_ENV_VAR: str(state_path)}, tier=str(smoke_run_handoff.tier)
+        {**run_environment, SMOKE_HANDOFF_FILE_ENV_VAR: str(state_path)}, tier=str(smoke_run_handoff.tier)
     )
 
     assert resolved == smoke_run_handoff

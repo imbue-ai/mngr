@@ -167,9 +167,9 @@ class SmokeRunHandoff(FrozenModel):
         a teardown invoked by hand reads its state file or Vault instead.
         """
         values = {name: environ.get(name, "") for name in HANDOFF_ENV_VARS}
-        # The tier is exported by every smoke run, handoff or not, so it alone
-        # does not mean a run was handed over.
-        if not any(value for name, value in values.items() if name != SMOKE_TIER_ENV_VAR):
+        # The tier and the run id name a smoke run whether or not it was handed
+        # an account, so they alone do not mean a handoff.
+        if not any(value for name, value in values.items() if name not in (SMOKE_TIER_ENV_VAR, SMOKE_RUN_ID_ENV_VAR)):
             return None
         require_handoff_values(values, source="the environment")
         return cls._from_env_values(values)
