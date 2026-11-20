@@ -1759,7 +1759,7 @@ def test_reload_provider_config_reads_a_provider_added_alongside_a_disable_for_a
 
 
 @contextmanager
-def _exiting_concurrency_group() -> Iterator[ConcurrencyGroup]:
+def _exiting_concurrency_group() -> Generator[ConcurrencyGroup, None, None]:
     """Yield a real concurrency group held in EXITING, as the forward's is while it tears down.
 
     ``__exit__`` runs on a thread of its own and waits on a strand that blocks
