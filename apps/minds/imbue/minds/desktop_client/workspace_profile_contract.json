@@ -46,5 +46,220 @@
     "f10",
     "f11",
     "f12"
-  ]
+  ],
+  "refused_chords": [
+    "alt+meta+delete"
+  ],
+  "browser_reserved_chords": {
+    "mac": [
+      "meta+t",
+      "shift+meta+t",
+      "meta+n",
+      "shift+meta+n",
+      "meta+w",
+      "shift+meta+w",
+      "ctrl+tab",
+      "ctrl+shift+tab",
+      "shift+meta+}",
+      "shift+meta+{",
+      "alt+meta+arrowleft",
+      "alt+meta+arrowright",
+      "meta+q",
+      "meta+h",
+      "meta+m"
+    ],
+    "windows": [
+      "meta+t",
+      "shift+meta+t",
+      "meta+n",
+      "shift+meta+n",
+      "meta+w",
+      "shift+meta+w",
+      "meta+tab",
+      "shift+meta+tab",
+      "meta+pageup",
+      "meta+pagedown",
+      "meta+f4"
+    ],
+    "linux": [
+      "meta+t",
+      "shift+meta+t",
+      "meta+n",
+      "shift+meta+n",
+      "meta+w",
+      "shift+meta+w",
+      "meta+tab",
+      "shift+meta+tab",
+      "meta+pageup",
+      "meta+pagedown",
+      "meta+f4",
+      "shift+meta+q"
+    ]
+  },
+  "os_kept_chords": {
+    "mac": [
+      {
+        "chord": "meta+tab",
+        "reason": "the app switcher"
+      },
+      {
+        "chord": "shift+meta+tab",
+        "reason": "the app switcher"
+      },
+      {
+        "chord": "meta+space",
+        "reason": "Spotlight"
+      },
+      {
+        "chord": "alt+meta+space",
+        "reason": "Spotlight"
+      },
+      {
+        "chord": "ctrl+space",
+        "reason": "switching input sources"
+      },
+      {
+        "chord": "ctrl+alt+space",
+        "reason": "switching input sources"
+      },
+      {
+        "chord": "shift+meta+#",
+        "reason": "screenshots"
+      },
+      {
+        "chord": "shift+meta+$",
+        "reason": "screenshots"
+      },
+      {
+        "chord": "shift+meta+%",
+        "reason": "screenshots"
+      },
+      {
+        "chord": "ctrl+arrowup",
+        "reason": "Mission Control"
+      },
+      {
+        "chord": "ctrl+arrowdown",
+        "reason": "Mission Control"
+      },
+      {
+        "chord": "ctrl+arrowleft",
+        "reason": "switching Spaces"
+      },
+      {
+        "chord": "ctrl+arrowright",
+        "reason": "switching Spaces"
+      },
+      {
+        "chord": "ctrl+meta+q",
+        "reason": "locking the screen"
+      },
+      {
+        "chord": "alt+meta+escape",
+        "reason": "Force Quit"
+      },
+      {
+        "chord": "alt+meta+d",
+        "reason": "hiding the Dock"
+      },
+      {
+        "chord": "meta+`",
+        "reason": "switching between an app's windows"
+      },
+      {
+        "chord": "ctrl+meta+space",
+        "reason": "the emoji picker"
+      }
+    ],
+    "windows": [
+      {
+        "chord": "alt+tab",
+        "reason": "the window switcher"
+      },
+      {
+        "chord": "alt+shift+tab",
+        "reason": "the window switcher"
+      },
+      {
+        "chord": "alt+escape",
+        "reason": "window cycling"
+      },
+      {
+        "chord": "meta+escape",
+        "reason": "the Start menu"
+      },
+      {
+        "chord": "shift+meta+escape",
+        "reason": "Task Manager"
+      }
+    ],
+    "linux": [
+      {
+        "chord": "alt+tab",
+        "reason": "the window switcher"
+      },
+      {
+        "chord": "alt+shift+tab",
+        "reason": "the window switcher"
+      },
+      {
+        "chord": "alt+escape",
+        "reason": "window cycling"
+      },
+      {
+        "chord": "alt+f1",
+        "reason": "the activities overview"
+      },
+      {
+        "chord": "alt+f2",
+        "reason": "the run dialog"
+      },
+      {
+        "chord": "alt+meta+t",
+        "reason": "opening a terminal"
+      },
+      {
+        "chord": "alt+meta+l",
+        "reason": "locking the screen"
+      },
+      {
+        "chord": "alt+meta+arrowup",
+        "reason": "switching workspaces"
+      },
+      {
+        "chord": "alt+meta+arrowdown",
+        "reason": "switching workspaces"
+      },
+      {
+        "chord": "alt+meta+arrowleft",
+        "reason": "switching workspaces"
+      },
+      {
+        "chord": "alt+meta+arrowright",
+        "reason": "switching workspaces"
+      },
+      {
+        "chord": "alt+f4",
+        "reason": "closing the window"
+      },
+      {
+        "chord": "alt+space",
+        "reason": "the window menu"
+      }
+    ]
+  },
+  "host_acted_chords": {
+    "mac": [],
+    "windows": [
+      {
+        "chord": "alt+f4",
+        "reason": "closing the window"
+      },
+      {
+        "chord": "alt+space",
+        "reason": "the window menu"
+      }
+    ],
+    "linux": []
+  }
 }

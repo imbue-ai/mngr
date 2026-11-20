@@ -8,6 +8,8 @@ from imbue.minds.desktop_client.account_settings_store import AccountSettingsSto
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.settings.keybindings import CHORD_MODIFIER_ORDER
 from imbue.minds.desktop_client.settings.keybindings import CHORD_NAMED_KEYS
+from imbue.minds.desktop_client.settings.keybindings import REFUSED_CHORDS
+from imbue.minds.desktop_client.settings.keybindings import is_canonical_chord
 from imbue.minds.desktop_client.testing import decode_written_profile_snapshot
 from imbue.minds.desktop_client.workspace_profile_writer import SNAPSHOT_FORMAT
 from imbue.minds.desktop_client.workspace_profile_writer import USER_TIMEZONE_PATH
@@ -56,6 +58,23 @@ def test_the_chord_grammar_vocabulary_matches_the_published_contract_fixture() -
 
     assert tuple(contract["chord_modifier_order"]) == CHORD_MODIFIER_ORDER
     assert tuple(contract["chord_named_keys"]) == CHORD_NAMED_KEYS
+    assert tuple(contract["refused_chords"]) == REFUSED_CHORDS
+
+
+def test_the_chord_lists_of_the_contract_fixture_are_canonical() -> None:
+    """Every chord the fixture lists per platform must be one the grammar spells, or no mirror could match it."""
+    contract = json.loads(_CONTRACT_PATH.read_text(encoding="utf-8"))
+    platforms = {"mac", "windows", "linux"}
+    listed: list[str] = list(contract["refused_chords"])
+    assert set(contract["browser_reserved_chords"]) == platforms
+    for chords in contract["browser_reserved_chords"].values():
+        listed.extend(chords)
+    for field in ("os_kept_chords", "host_acted_chords"):
+        assert set(contract[field]) == platforms
+        for entries in contract[field].values():
+            listed.extend(entry["chord"] for entry in entries)
+            assert all(entry["reason"] for entry in entries)
+    assert [chord for chord in listed if not is_canonical_chord(chord)] == []
 
 
 def test_the_content_hash_ignores_the_write_stamp_but_not_the_account() -> None:

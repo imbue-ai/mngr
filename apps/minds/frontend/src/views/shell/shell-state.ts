@@ -9,6 +9,7 @@ import type { WorkspaceHealth } from "../../models/health";
 import type { UiChannelClient } from "../../channel/client";
 import type { RequestVerdict, ResolvedRequest } from "../../models/inbox";
 import type { NotificationsUiController } from "../../models/notificationsUi";
+import { AppShortcutsModel } from "../../models/appShortcuts";
 import { AutoUpdatePromptModel } from "../../models/autoUpdatePrompt";
 import type { UpdateActionResult } from "../../models/updates";
 import {
@@ -210,6 +211,8 @@ export class ShellState {
   /** The one-time auto-update offer, one per window, so its answer and a
    * put-away hold across every surface the window shows. */
   readonly autoUpdatePrompt: AutoUpdatePromptModel;
+  /** Imbue Studio's own shortcuts for this window's account, which main runs. */
+  readonly appShortcuts: AppShortcutsModel;
   private pendingUpdatesTabArrival: UpdatesTabArrival | null = null;
   private updatesTabArrivalCount = 0;
   private readonly webLogin: WebLoginModel;
@@ -256,6 +259,9 @@ export class ShellState {
   displayedWorkspaceAnyId: string | null = null;
   /** The chrome control the displayed workspace's tour is talking about, ringed in the titlebar; null for none. */
   highlightedChromeAnchor: ChromeAnchor | null = null;
+  /** Whether the workspace's keyboard shortcuts page, framed in Workspace settings, is recording a new shortcut:
+   * Escape then closes nothing in the chrome (main, told the same, runs no shortcut meanwhile). */
+  isWorkspaceShortcutRecording = false;
   /** The workspace-options route an app modal was opened over, so the Shell can
    * keep that panel painted (and mounted) beneath the modal: the live route is
    * the modal's, which carries none of the panel's params. Null whenever no
@@ -371,12 +377,14 @@ export class ShellState {
     autoUpdatePrompt: AutoUpdatePromptModel = new AutoUpdatePromptModel(),
     errorDialogQueue: ErrorDialogQueue = errorDialogs,
     clientPermissionPromptModel: ClientPermissionPromptModel = clientPermissionPrompt,
+    appShortcuts: AppShortcutsModel = new AppShortcutsModel(),
   ) {
     this.stores = stores;
     this.webLogin = webLoginModel;
     this.autoUpdatePrompt = autoUpdatePrompt;
     this.errorDialogs = errorDialogQueue;
     this.clientPermissionPrompt = clientPermissionPromptModel;
+    this.appShortcuts = appShortcuts;
   }
 
   /** Whether this window's workspace frame is showing the workspace named. */
@@ -1482,6 +1490,7 @@ export class ShellState {
       this.errorDialogs.dismiss();
       return true;
     }
+    if (this.isWorkspaceShortcutRecording) return false;
     if (this.isSidebarOpen) {
       this.closeSidebar();
       return true;

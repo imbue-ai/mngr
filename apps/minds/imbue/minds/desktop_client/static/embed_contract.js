@@ -30,7 +30,7 @@
 // types, or by adding optional fields to an existing type. CONTRACT_VERSION
 // below tracks doc revisions only.
 
-export const CONTRACT_VERSION = "15";
+export const CONTRACT_VERSION = "16";
 
 // workspace -> embedder: open the shell's permission-request modal focused on
 // one request. Payload: { requestId }.
@@ -132,10 +132,80 @@ export const HIGHLIGHT_CHROME = "minds:highlight-chrome";
 // the gesture's activation for the fullscreen request). The chrome answers
 // with IMMERSIVE_CHANGED.
 export const IMMERSIVE_REQUEST = "minds:immersive-request";
+// workspace -> embedder: the state of the workspace's keyboard shortcuts page,
+// which the chrome's Workspace settings frames. Payload: { height,
+// isRecording }: the page's height in CSS px (the frame takes it, so the
+// settings pane scrolls the page with everything else), and whether its
+// recorder is listening for a new shortcut (while it is, Escape does not
+// close the settings panel, and the desktop app runs no shortcut and hands the
+// recorder every key with RECORD_CHORD). The first one says the page has
+// loaded: the pane keeps the frame hidden until then, as a workspace too old to
+// serve the page answers its path with the whole desktop, which never sends it.
+export const KEYBOARD_SHORTCUTS_PAGE = "minds:keyboard-shortcuts-page";
+// workspace -> embedder: open the shell's workspace-options panel on its
+// Workspace settings tab at the Keyboard shortcuts group. Payload: {}. Sent
+// only to a chrome whose EMBEDDER_CAPABILITIES carried
+// `opensKeyboardShortcuts: true`; without it the workspace opens its own
+// keyboard shortcuts dialog.
+export const OPEN_KEYBOARD_SHORTCUTS = "minds:open-keyboard-shortcuts";
+// The tallest page height the chrome takes: a sanity bound, far above any real
+// list of shortcuts.
+export const MAX_KEYBOARD_SHORTCUTS_PAGE_HEIGHT = 100000;
+// workspace -> embedder: the chords of the workspace's workspace-wide actions
+// and of every app's actions, so the desktop app can run them where the shell
+// hears no key (inside the terminal, the Screen, a pulled-out window) and take
+// from the OS a key it would act on for an app's own action (the
+// keyboard-shortcuts spec, section 6). Payload: { chords_by_action,
+// claimed_chords }: each workspace-wide action's active chords by action id,
+// and every active chord of every app, both without the chords that cannot
+// arrive where the workspace runs. Sent after WORKSPACE_READY (once the
+// chrome's EMBEDDER_CAPABILITIES has arrived) and on every keybindings change;
+// until one arrives the chrome keeps its own close-tab chord (CLOSE_ACTIVE_TAB).
+export const SHELL_SHORTCUTS = "minds:shell-shortcuts";
+// Upper bounds on a SHELL_SHORTCUTS payload, bounding the work it can demand.
+export const MAX_SHELL_SHORTCUT_ACTIONS = 64;
+export const MAX_CHORDS_PER_ACTION = 16;
+export const MAX_CLAIMED_CHORDS = 1024;
+// the workspace's keyboard shortcuts page -> embedder: save one of Imbue
+// Studio's own shortcuts (CHROME_SHORTCUTS) to the account. Payload:
+// { id, chords }: the action's id and its new chords, an empty list for Off.
+// The chrome answers with CHROME_SHORTCUTS once the save is done or failed.
+export const SAVE_CHROME_SHORTCUT = "minds:save-chrome-shortcut";
 
 // embedder -> workspace: the user pressed the close-tab shortcut while this
-// workspace was displayed; close the focused window. Payload: {}.
+// workspace was displayed; close the focused window. Payload: {}. Sent only
+// until the workspace's SHELL_SHORTCUTS arrives, so a workspace too old to send
+// it closes its focused window as before, and only while Imbue Studio's own
+// Close window does not hold the close-tab chord (by default it does, and the
+// desktop app runs it first).
 export const CLOSE_ACTIVE_TAB = "minds:close-active-tab";
+// embedder -> workspace: run one of the workspace's workspace-wide actions,
+// whose chord the desktop app took (see SHELL_SHORTCUTS). Payload: { action },
+// the action's id.
+export const RUN_SHORTCUT = "minds:run-shortcut";
+// embedder -> workspace: a chord the desktop app took from the OS (which would
+// otherwise act on it: Alt+F4 on Windows) because an app of the workspace
+// binds it; the workspace hands it to the focused window's page. Payload:
+// { chord }.
+export const RUN_CHORD = "minds:run-chord";
+// embedder -> the workspace's keyboard shortcuts page (framed in the chrome's
+// Workspace settings): a key the desktop app took while the page's recorder
+// was listening, so that nothing (the OS, a menu, Imbue Studio itself) acted
+// on it; the recorder takes it as pressed. Payload: { chord }.
+export const RECORD_CHORD = "minds:record-chord";
+// embedder -> the workspace's keyboard shortcuts page: Imbue Studio's own
+// shortcuts (new window, close window, quit, zoom), which the page lists in a
+// section of their own and saves with SAVE_CHROME_SHORTCUT. Payload:
+// { actions: [{ id, label, defaultChords, chords }], error? }: each action's
+// id, label, default chords and the chords it has now, and, after a save that
+// failed, a sentence saying so. Only the desktop app sends it, once the page's
+// first KEYBOARD_SHORTCUTS_PAGE arrives and after every save; a page that
+// never receives it shows no such section.
+export const CHROME_SHORTCUTS = "minds:chrome-shortcuts";
+// Upper bounds on a CHROME_SHORTCUTS payload.
+export const MAX_CHROME_SHORTCUT_ACTIONS = 64;
+export const MAX_CHROME_SHORTCUT_LABEL_LENGTH = 80;
+export const MAX_CHROME_SHORTCUTS_ERROR_LENGTH = 300;
 // embedder -> workspace: ack for OPEN_AI_KEYS_PAGE (see above). Payload: {}.
 export const OPEN_AI_KEYS_ACK = "minds:open-ai-keys-ack";
 // embedder -> workspace: permission-request verdicts, each entry
@@ -163,13 +233,18 @@ export const FOCUS_CHAT = "minds:focus-chat";
 export const PROVIDER_SIGN_IN_ACK = "minds:provider-sign-in-ack";
 // embedder -> workspace: what this chrome can do, sent right after
 // WORKSPACE_READY. Payload: { canPopOut, opensExternalLinks?,
-// opensCustomSchemeLinks?, opensLocalFiles?, immersive? }: `opensExternalLinks: true`
-// says it takes OPEN_EXTERNAL, `opensCustomSchemeLinks: true` that it takes
-// custom-scheme links there too, `opensLocalFiles: true` that it takes
-// OPEN_LOCAL_FILES, and `immersive: true` that it takes IMMERSIVE_REQUEST. A
-// workspace that never receives it (an older chrome, a plain browser) keeps
-// its pull-out gesture off, opens external links itself, offers no way to
-// reach the Local files settings, and never asks for immersive mode.
+// opensCustomSchemeLinks?, opensLocalFiles?, opensKeyboardShortcuts?,
+// immersive? }: `opensExternalLinks: true` says it takes OPEN_EXTERNAL,
+// `opensCustomSchemeLinks: true` that it takes custom-scheme links there too,
+// `opensLocalFiles: true` that it takes OPEN_LOCAL_FILES,
+// `opensKeyboardShortcuts: true` that it takes OPEN_KEYBOARD_SHORTCUTS, and
+// `immersive: true` that it takes IMMERSIVE_REQUEST. A workspace that never
+// receives it (an older chrome, a plain browser) keeps its pull-out gesture
+// off, opens external links itself, offers no way to reach the Local files
+// settings, and never asks for immersive mode. The chrome sends it to the
+// keyboard shortcuts page it frames as well, once the page's first
+// KEYBOARD_SHORTCUTS_PAGE arrives: `canPopOut` says the page runs in the
+// desktop app, where a browser's own shortcuts reach the workspace.
 export const EMBEDDER_CAPABILITIES = "minds:embedder-capabilities";
 // embedder -> workspace: return a pulled-out window to the desktop, shown and
 // raised. Payload: { windowId, frame? }; `frame` ({ x, y, width, height } in
@@ -250,6 +325,44 @@ export const MAX_SIGN_IN_URL_LENGTH = 8192;
 
 function isSignInUrlShapeValid(value) {
   return typeof value === 'string' && value.length <= MAX_SIGN_IN_URL_LENGTH && value.startsWith('https://');
+}
+
+// A chord in the keybinding grammar's shape: modifiers joined with `+` before
+// one key, a named key or a single character. The receiver matches it against
+// the chords it already holds, so only the shape and the length are checked.
+export const MAX_CHORD_LENGTH = 64;
+const CHORD_SHAPE = /^(?:(?:ctrl|alt|shift|meta)\+)*(?:[a-z0-9]+|[^\s+])$/;
+// A keybinding action id (the app manifest's rule).
+export const KEYBINDING_ACTION_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
+function isChordValid(value) {
+  return typeof value === 'string' && value.length <= MAX_CHORD_LENGTH && CHORD_SHAPE.test(value);
+}
+
+function isChordListValid(value, maxLength) {
+  return Array.isArray(value) && value.length <= maxLength && value.every(isChordValid);
+}
+
+function isChordsByActionValid(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const actions = Object.keys(value);
+  if (actions.length > MAX_SHELL_SHORTCUT_ACTIONS) return false;
+  return actions.every(function (action) {
+    return KEYBINDING_ACTION_ID_PATTERN.test(action) && isChordListValid(value[action], MAX_CHORDS_PER_ACTION);
+  });
+}
+
+function isChromeShortcutActionValid(action) {
+  if (!action || typeof action !== 'object') return false;
+  return (
+    typeof action.id === 'string' &&
+    KEYBINDING_ACTION_ID_PATTERN.test(action.id) &&
+    typeof action.label === 'string' &&
+    action.label.length > 0 &&
+    action.label.length <= MAX_CHROME_SHORTCUT_LABEL_LENGTH &&
+    isChordListValid(action.defaultChords, MAX_CHORDS_PER_ACTION) &&
+    isChordListValid(action.chords, MAX_CHORDS_PER_ACTION)
+  );
 }
 
 // Window ids are minted by the workspace shell (`win-<hex>`).
@@ -395,6 +508,28 @@ const WORKSPACE_TO_EMBEDDER_VALIDATORS = {
   [HIGHLIGHT_CHROME]: function (data) {
     return data.anchor === null || CHROME_ANCHORS.indexOf(data.anchor) !== -1;
   },
+  [OPEN_KEYBOARD_SHORTCUTS]: function () {
+    return true;
+  },
+  [KEYBOARD_SHORTCUTS_PAGE]: function (data) {
+    return (
+      typeof data.height === 'number' &&
+      Number.isFinite(data.height) &&
+      data.height >= 0 &&
+      data.height <= MAX_KEYBOARD_SHORTCUTS_PAGE_HEIGHT &&
+      typeof data.isRecording === 'boolean'
+    );
+  },
+  [SHELL_SHORTCUTS]: function (data) {
+    return isChordsByActionValid(data.chords_by_action) && isChordListValid(data.claimed_chords, MAX_CLAIMED_CHORDS);
+  },
+  [SAVE_CHROME_SHORTCUT]: function (data) {
+    return (
+      typeof data.id === 'string' &&
+      KEYBINDING_ACTION_ID_PATTERN.test(data.id) &&
+      isChordListValid(data.chords, MAX_CHORDS_PER_ACTION)
+    );
+  },
 };
 
 function isResolutionEntryValid(entry) {
@@ -428,6 +563,7 @@ const EMBEDDER_TO_WORKSPACE_VALIDATORS = {
       isOptionalBoolean(data.opensExternalLinks) &&
       isOptionalBoolean(data.opensCustomSchemeLinks) &&
       isOptionalBoolean(data.opensLocalFiles) &&
+      isOptionalBoolean(data.opensKeyboardShortcuts) &&
       isOptionalBoolean(data.immersive)
     );
   },
@@ -444,6 +580,21 @@ const EMBEDDER_TO_WORKSPACE_VALIDATORS = {
     if (typeof data.on !== 'boolean' || typeof data.keyboardLocked !== 'boolean') return false;
     if (data.error === undefined) return true;
     return typeof data.error === 'string' && data.error.length <= MAX_IMMERSIVE_ERROR_LENGTH;
+  },
+  [RUN_SHORTCUT]: function (data) {
+    return typeof data.action === 'string' && KEYBINDING_ACTION_ID_PATTERN.test(data.action);
+  },
+  [RUN_CHORD]: function (data) {
+    return isChordValid(data.chord);
+  },
+  [RECORD_CHORD]: function (data) {
+    return isChordValid(data.chord);
+  },
+  [CHROME_SHORTCUTS]: function (data) {
+    if (!Array.isArray(data.actions) || data.actions.length > MAX_CHROME_SHORTCUT_ACTIONS) return false;
+    if (!data.actions.every(isChromeShortcutActionValid)) return false;
+    if (data.error === undefined) return true;
+    return typeof data.error === 'string' && data.error.length <= MAX_CHROME_SHORTCUTS_ERROR_LENGTH;
   },
 };
 
