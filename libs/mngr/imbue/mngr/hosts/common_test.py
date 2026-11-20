@@ -1,5 +1,6 @@
 import os
 import shlex
+import shutil
 import subprocess
 import types
 from datetime import datetime
@@ -7,6 +8,7 @@ from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 from typing import ClassVar
+from typing import Final
 from typing import cast
 
 import pytest
@@ -19,6 +21,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.hosts.common import PROCESS_TABLE_SNAPSHOT_COMMAND
 from imbue.mngr.hosts.common import TMUX_PANES_SNAPSHOT_COMMAND
 from imbue.mngr.hosts.common import add_safe_directory_on_remote
+from imbue.mngr.hosts.common import build_orphaned_agent_helper_pids_command
 from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import classify_waiting_reason
@@ -935,3 +938,129 @@ def test_tmux_panes_snapshot_reads_a_host_without_tmux_as_having_no_panes(tmp_pa
 
     assert run.returncode == 0, run.stderr
     assert parse_tmux_pane_listings(run.stdout) == ()
+
+
+_SCANNING_USER_UID: Final[int] = 50731
+_OTHER_USER_UID: Final[int] = 50732
+
+
+def _write_orphan_scan_programs(bin_dir: Path, ps_lines: list[str]) -> None:
+    """A fake ``ps`` listing ``ps_lines`` and a fake ``id`` naming the scanning user, beside the real ``awk``."""
+    _write_fake_program(bin_dir, "ps", "printf '%s\\n' " + " ".join(shlex.quote(line) for line in ps_lines))
+    _write_fake_program(bin_dir, "id", f"echo {_SCANNING_USER_UID}")
+    awk_path = shutil.which("awk")
+    assert awk_path is not None
+    (bin_dir / "awk").symlink_to(awk_path)
+
+
+@pytest.mark.parametrize(
+    ("ps_line", "is_selected"),
+    [
+        pytest.param(
+            "  4101     1 {uid} bash             bash {agent_dir}/commands/claude_background_tasks.sh mngr-fx agent",
+            True,
+            id="supervisor-under-pid-1",
+        ),
+        pytest.param(
+            "  4102     1 {uid} ttyd             ttyd -p 0 -a -I {agent_dir}/commands/ttyd/index.html bash",
+            True,
+            id="ttyd-under-pid-1",
+        ),
+        pytest.param(
+            "  4103     1 {uid} sh               sh {agent_dir}/commands/helper.sh",
+            True,
+            id="sh-helper-under-pid-1",
+        ),
+        pytest.param(
+            "  4104  4100 {uid} bash             bash {agent_dir}/commands/claude_background_tasks.sh mngr-fx agent",
+            False,
+            id="supervisor-with-a-live-parent",
+        ),
+        pytest.param(
+            "  4105     1 {other_uid} bash             "
+            "bash {agent_dir}/commands/claude_background_tasks.sh mngr-fx agent",
+            False,
+            id="another-users-supervisor",
+        ),
+        pytest.param(
+            "  4106     1 {uid} bash             bash -c . {agent_dir}/env; sleep 1",
+            False,
+            id="shell-naming-only-the-agent-dir",
+        ),
+        pytest.param(
+            "  4107     1 {uid} tmux             tmux new-session -d -s mngr-fx bash {agent_dir}/commands/launch.sh",
+            False,
+            id="tmux-server",
+        ),
+        pytest.param(
+            "  4108     1 {uid} Code Helper (Ren /Applications/Visual Studio Code.app/Contents/Frameworks/"
+            "Code Helper (Renderer).app/Contents/MacOS/Code Helper (Renderer) {agent_dir}/commands/notes.txt",
+            False,
+            id="vscode-helper",
+        ),
+        pytest.param(
+            "  4109     1 {uid} Cursor           /Applications/Cursor.app/Contents/MacOS/Cursor "
+            "{agent_dir}/commands/notes.txt",
+            False,
+            id="cursor",
+        ),
+        pytest.param(
+            "  4110     1 {uid} TextEdit         /System/Applications/TextEdit.app/Contents/MacOS/TextEdit "
+            "{agent_dir}/commands/notes.txt",
+            False,
+            id="textedit",
+        ),
+        pytest.param(
+            "  4111     1 {uid} bash             "
+            "bash {other_agent_dir}/commands/claude_background_tasks.sh mngr-other agent",
+            False,
+            id="another-agents-supervisor",
+        ),
+        pytest.param(
+            "  4112     1 {uid} sh Helper        /Applications/X.app/Contents/MacOS/sh Helper "
+            "{agent_dir}/commands/notes.txt",
+            False,
+            id="app-whose-name-starts-with-sh",
+        ),
+        pytest.param(
+            "  4113     1 {uid} ttyd Helper      /Applications/X.app/Contents/MacOS/ttyd Helper "
+            "{agent_dir}/commands/notes.txt",
+            False,
+            id="app-whose-name-starts-with-ttyd",
+        ),
+    ],
+)
+def test_orphaned_agent_helper_pids_command_selects_only_the_agents_helpers_under_pid_1(
+    ps_line: str, is_selected: bool, tmp_path: Path
+) -> None:
+    """Only the user's own ttyd, bash and sh under pid 1 whose arguments name the agent's commands dir are selected."""
+    agent_id = AgentId.generate()
+    line = ps_line.format(
+        uid=_SCANNING_USER_UID,
+        other_uid=_OTHER_USER_UID,
+        agent_dir=f"/Users/fx/.mngr/agents/{agent_id}",
+        other_agent_dir=f"/Users/fx/.mngr/agents/{AgentId.generate()}",
+    )
+    bin_dir = tmp_path / "bin"
+    _write_orphan_scan_programs(bin_dir, [line])
+
+    run = _run_snapshot_command(build_orphaned_agent_helper_pids_command(agent_id), bin_dir)
+
+    assert run.stderr == ""
+    assert run.stdout.split() == ([line.split()[0]] if is_selected else [])
+
+
+@pytest.mark.parametrize("failing_program", ["ps", "awk"])
+def test_orphaned_agent_helper_pids_command_reports_a_failing_ps_or_awk_on_stderr(
+    failing_program: str, tmp_path: Path
+) -> None:
+    """A ps or awk that fails without a message still leaves stderr, which the cleanup records as a failure."""
+    bin_dir = tmp_path / "bin"
+    _write_orphan_scan_programs(bin_dir, [])
+    (bin_dir / failing_program).unlink()
+    _write_fake_program(bin_dir, failing_program, "exit 3")
+
+    run = _run_snapshot_command(build_orphaned_agent_helper_pids_command(AgentId.generate()), bin_dir)
+
+    assert failing_program in run.stderr
+    assert run.stdout == ""

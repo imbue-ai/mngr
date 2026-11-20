@@ -63,6 +63,7 @@ from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import PROCESS_TABLE_SNAPSHOT_COMMAND
 from imbue.mngr.hosts.common import TMUX_PANES_SNAPSHOT_COMMAND
+from imbue.mngr.hosts.common import build_orphaned_agent_helper_pids_command
 from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import get_agents_root_dir
@@ -484,7 +485,7 @@ _TMUX_SET_TITLES_STRING: Final[str] = "#S  #T"
 
 # Per-command timeout for the individual shell steps that make up the
 # stop/cleanup path (tmux list-windows/list-panes/kill-session, the ps
-# process-table snapshot, and the MNGR_AGENT_ID env scan). A wedged tmux client can
+# process-table snapshot, and the scan for processes carrying the agent's id). A wedged tmux client can
 # hang indefinitely -- tmux occasionally fails to return under CI load, which
 # is why the test-cleanup helpers in utils/testing.py already bound every tmux
 # subprocess. Without a bound here, a single stuck `tmux list-panes` blocks
@@ -3730,28 +3731,27 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 all_pids.extend(get_descendant_pids(pane_pid, ps_result.stdout))
         return all_pids
 
-    def _collect_pids_by_agent_id_env(
+    def _collect_pids_carrying_agent_id(
         self, agent_id: AgentId, failures: list[CleanupFailure], agent_name: AgentName | None
     ) -> list[str]:
-        """Find all PIDs whose MNGR_AGENT_ID environment matches agent_id.
+        """Find the PIDs of processes carrying agent_id: in their environment on Linux, in their arguments on macOS.
 
-        Appends a failure to ``failures`` only if the scan itself times out; the command
-        is constructed to exit 0 (see the ``; true`` below) and suppresses per-pid grep
-        noise, so it does not otherwise produce a real failure.
+        Appends a failure to ``failures`` if the scan fails. The command exits 0 on both systems
+        (the trailing ``; true``); a failure is a timeout, or on macOS a line on stderr from ``ps``
+        or ``awk``.
 
-        The agent's env file (sourced via `set -a`) exports MNGR_AGENT_ID into every
+        On Linux, the agent's env file (sourced via `set -a`) exports MNGR_AGENT_ID into every
         process spawned in its tmux session. Scanning by env var catches orphans
         whose ancestor died abruptly (SIGKILL, OOM, segfault) -- their reparenting
         to PID 1 hides them from the tmux pane descendant walk.
 
         Linux: walks /proc/<pid>/environ. The file is NUL-separated KEY=VALUE
         records, so `grep -z` is used and `^` anchors at the start of each record
-        (see the inline comment below for why anchoring matters). macOS: ps -E
-        does not expose env for processes once they've reparented to launchd
-        (SIP restriction), so this is a best-effort no-op there -- the tree walk
-        handles the typical macOS case where the pane process is still alive.
+        (see the inline comment below for why anchoring matters). macOS: the agent's
+        helpers orphaned to pid 1 (see ``build_orphaned_agent_helper_pids_command``), since
+        ``ps -E`` hides the environment of Apple's own binaries such as /bin/bash.
 
-        The shared tmux server (comm ``tmux: server``) is exempt from the scan even
+        The shared tmux server (comm ``tmux: server``) is exempt from the Linux scan even
         when its environ carries the marker. The server hosts *every* agent's session
         on the host, so it is never a legitimate member of one agent's process tree --
         but it inherits the environment of whichever process happens to fork it, and
@@ -3818,6 +3818,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             '    case "$(cat "/proc/$pid/comm" 2>/dev/null)" in "tmux: server") continue ;; esac; '
             '    echo "$pid"; '
             "  done; "
+            'elif [ "$(uname -s)" = "Darwin" ]; then '
+            f"  {build_orphaned_agent_helper_pids_command(agent_id)}; "
             "fi; true"
         )
         result, failure = self._run_classified_cleanup_command(
@@ -3834,12 +3836,12 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
     def _collect_agent_process_pids(self, agent: AgentInterface, failures: list[CleanupFailure]) -> list[str]:
         """Collect every pid belonging to ``agent``: the pane descendants of its tmux
-        session plus any ``MNGR_AGENT_ID``-tagged orphans that reparented to PID 1 after
-        an abrupt ancestor death. Deduplicated, order-preserving.
+        session plus the processes carrying its id (see ``_collect_pids_carrying_agent_id``),
+        which include orphans reparented to PID 1. Deduplicated, order-preserving.
         """
         session_name = self.mngr_ctx.config.agent_session_name(agent.name)
         pids = self._collect_session_pids(session_name, failures, agent.name)
-        pids.extend(self._collect_pids_by_agent_id_env(agent.id, failures, agent.name))
+        pids.extend(self._collect_pids_carrying_agent_id(agent.id, failures, agent.name))
         return list(dict.fromkeys(pids))
 
     def _terminate_pids(self, pids: Sequence[str], failures: list[CleanupFailure], *, timeout_seconds: float) -> None:
@@ -3872,8 +3874,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             failures.append(failure)
 
     def reap_agent_process_tree(self, agent: AgentInterface, *, timeout_seconds: float = 5.0) -> list[CleanupFailure]:
-        """Kill every process belonging to ``agent`` (pane/session descendants plus any
-        ``MNGR_AGENT_ID``-tagged orphans reparented to PID 1) with SIGTERM then SIGKILL.
+        """Kill every process belonging to ``agent`` (pane/session descendants plus the
+        processes carrying its id, which include orphans reparented to PID 1) with SIGTERM then SIGKILL.
 
         Does NOT kill the tmux session itself -- callers that want a full stop do that
         separately. Returns the cleanup failures so the caller decides whether to raise
@@ -3881,7 +3883,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
         This is the single mechanism that guarantees a long-lived daemon launched under
         an agent (e.g. the DEFAULT_WORKSPACE_TEMPLATE bootstrap's ``supervisord`` and its children, like a ttyd
-        bound to a fixed port) cannot outlive the agent: the env marker is inherited by
+        bound to a fixed port) cannot outlive the agent on Linux: the env marker is inherited by
         every descendant and survives reparenting, so it catches orphans that a
         pane/process-tree walk would miss.
         """
@@ -3926,7 +3928,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         specs/cleanup-error-aggregation.md).
 
         This ensures all processes in all panes are terminated by:
-        1. Getting all PIDs (panes + descendants + orphans matched by MNGR_AGENT_ID env)
+        1. Getting all PIDs (panes + descendants + processes carrying the agent's id)
         2. Sending SIGTERM to each individual process
         3. Waiting briefly, then sending SIGKILL to any survivors
         4. Finally killing the tmux session itself
@@ -3943,8 +3945,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         continue
 
                     current_agents.append(agent)
-                    # Pane descendants plus orphans (e.g. children of an OOM-killed claude,
-                    # or a bootstrap daemon reparented to PID 1) matched by MNGR_AGENT_ID.
+                    # Pane descendants plus the processes carrying the agent's id (on Linux any
+                    # orphan with its MNGR_AGENT_ID; on macOS only its orphaned helpers).
                     all_pids.extend(self._collect_agent_process_pids(agent, failures))
 
                 # Deduplicate while preserving order (a pid may appear under >1 agent).
@@ -4316,7 +4318,7 @@ def _build_start_agent_shell_command(
     # sweep would then treat the server -- and with it every agent's session on the
     # host -- as that agent's process tree. The pane does not need this variable from
     # the environment: its command sources the agent's own env file. (The sweep also
-    # exempts the server by comm; see _collect_pids_by_agent_id_env.)
+    # exempts the server by comm; see _collect_pids_carrying_agent_id.)
     steps.append("unset MNGR_AGENT_ID")
 
     # Create a detached tmux session with env vars sourced.

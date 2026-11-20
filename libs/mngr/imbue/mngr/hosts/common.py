@@ -425,6 +425,34 @@ TMUX_PANES_SNAPSHOT_COMMAND: Final[str] = (
 # a ps that is there but fails fails the command.
 PROCESS_TABLE_SNAPSHOT_COMMAND: Final[str] = "if command -v ps >/dev/null 2>&1; then ps -e -o pid=,ppid=,comm=; fi"
 
+# Binaries an agent's helper processes run as.
+_AGENT_HELPER_BINARY_NAMES: Final[tuple[str, ...]] = ("ttyd", "bash", "sh")
+
+# MAXCOMLEN: macOS ``ps`` pads ``ucomm``, which may contain spaces, to this width.
+_MACOS_PS_UCOMM_COLUMN_WIDTH: Final[int] = 16
+
+
+@pure
+def build_orphaned_agent_helper_pids_command(agent_id: AgentId) -> str:
+    """Shell command (macOS ``ps``) printing the pids of agent_id's helpers that this user runs under pid 1.
+
+    A helper runs one of _AGENT_HELPER_BINARY_NAMES with arguments naming the agent's ``commands/`` dir. A failing
+    ``ps`` or ``awk`` writes to stderr.
+    """
+    is_helper_binary = " || ".join(f'binary == "{name}"' for name in _AGENT_HELPER_BINARY_NAMES)
+    selection = (
+        "$2 == 1 && $3 == uid && match($0, /^ *[0-9]+ +[0-9]+ +[0-9]+ /) { "
+        f"binary = substr($0, RLENGTH + 1, {_MACOS_PS_UCOMM_COLUMN_WIDTH}); "
+        'sub(/ +$/, "", binary); '
+        f"if (({is_helper_binary}) && index($0, commands_dir)) print $1 "
+        "}"
+    )
+    return (
+        '{ LC_ALL=C ps -ww -axo pid=,ppid=,uid=,ucomm=,command= || echo "ps exited with status $?" >&2; } | '
+        f'LC_ALL=C awk -v uid="$(id -u)" -v commands_dir={shlex.quote(f"/agents/{agent_id}/commands/")} '
+        f'{shlex.quote(selection)} || echo "awk exited with status $?" >&2'
+    )
+
 
 @pure
 def parse_tmux_pane_listings(block: str) -> tuple[TmuxPaneListing, ...]:

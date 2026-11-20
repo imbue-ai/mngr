@@ -10,10 +10,12 @@ import os
 import shlex
 import stat
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
 from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -55,6 +57,7 @@ from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import UploadFileSpec
 from imbue.mngr.primitives import ActivitySource
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
@@ -1267,8 +1270,7 @@ def test_stop_agent_kills_multi_pane_processes(
 @pytest.mark.tmux
 @pytest.mark.skipif(
     is_macos(),
-    reason="macOS ps -E cannot read env of reparented processes (SIP restriction); "
-    "env-scan fix is Linux-only by design",
+    reason="the MNGR_AGENT_ID env sweep is Linux-only; macOS matches only orphaned helpers, by their arguments",
 )
 def test_stop_agent_kills_orphaned_processes_by_env_marker(
     temp_host_dir: Path,
@@ -1399,6 +1401,70 @@ def test_stop_agent_kills_orphaned_processes_by_env_marker(
             host._run_shell_command(StringCommand(f"kill -KILL {orphan_pid} 2>/dev/null || true"))
 
 
+@contextmanager
+def _agent_leaving_orphan(
+    host: Host, work_dir: Path, pid_file: Path, orphan_command: str
+) -> Generator[tuple[AgentInterface, psutil.Process], None, None]:
+    """Start an agent whose command leaves ``orphan_command`` running outside its panes; kill the orphan on exit."""
+    options = CreateAgentOptions(
+        name=AgentName("orphan-test"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString(
+            f"({orphan_command} </dev/null >/dev/null 2>&1 & echo $! > {pid_file}) </dev/null >/dev/null 2>&1; "
+            "sleep 1000"
+        ),
+    )
+    agent = host.create_agent_state(work_dir_path=work_dir, options=options)
+    host.provision_agent(agent, options, host.mngr_ctx)
+    host.start_agents([agent.id])
+    wait_for(
+        lambda: pid_file.exists() and pid_file.read_text().strip() != "",
+        timeout=15.0,
+        error_message="Orphan pid file was not written",
+    )
+    orphan = psutil.Process(int(pid_file.read_text()))
+    try:
+        assert str(orphan.pid) not in host._collect_session_pids(agent.session_name, [], None), (
+            f"Test setup invalid: orphan {orphan.pid} is still a pane descendant"
+        )
+        yield agent, orphan
+    finally:
+        host._run_shell_command(StringCommand(f"kill -KILL {orphan.pid} 2>/dev/null || true"))
+
+
+@pytest.mark.tmux
+def test_stop_agents_kills_orphaned_helper_in_agent_commands_dir(
+    local_host: Host, temp_work_dir: Path, tmp_path: Path
+) -> None:
+    """stop_agents kills an orphaned shell whose arguments name the agent's commands dir, like its supervisor."""
+    helper = "bash -c 'while :; do sleep 1; done' \"$MNGR_AGENT_STATE_DIR/commands/helper.sh\""
+    with _agent_leaving_orphan(local_host, temp_work_dir, tmp_path / "orphan_pid", helper) as (agent, orphan):
+        local_host.stop_agents([agent.id], timeout_seconds=3.0)
+        wait_for(
+            lambda: not psutil.pid_exists(orphan.pid),
+            timeout=10.0,
+            error_message=f"Orphaned helper {orphan.pid} survived stop_agents",
+        )
+
+
+@pytest.mark.tmux
+@pytest.mark.skipif(not is_macos(), reason="Linux reaps every process carrying MNGR_AGENT_ID by design")
+def test_stop_agents_on_macos_spares_non_helper_orphan_naming_agent_commands_dir(
+    local_host: Host, temp_work_dir: Path, tmp_path: Path
+) -> None:
+    """On macOS stop_agents spares an orphan that is not a helper binary, like an editor on a file in commands/."""
+    pause = f"{shlex.quote(sys.executable)} -c 'import signal; signal.pause()'"
+    editor = f'{pause} "$MNGR_AGENT_STATE_DIR/commands/notes.txt"'
+    with _agent_leaving_orphan(local_host, temp_work_dir, tmp_path / "orphan_pid", editor) as (agent, orphan):
+        assert orphan.environ().get("MNGR_AGENT_ID") == str(agent.id), (
+            f"Test setup invalid: orphan {orphan.pid} does not carry MNGR_AGENT_ID={agent.id}"
+        )
+        local_host.stop_agents([agent.id], timeout_seconds=3.0)
+        assert orphan.is_running() and orphan.status() != psutil.STATUS_ZOMBIE, (
+            f"stop_agents killed orphan {orphan.pid}, which is not one of the agent's helpers"
+        )
+
+
 def _make_local_host_for_tmux_isolation(
     temp_host_dir: Path,
     per_host_dir: Path,
@@ -1447,8 +1513,7 @@ def _isolated_tmux_server_pid(host: Host) -> str:
 @pytest.mark.tmux
 @pytest.mark.skipif(
     is_macos(),
-    reason="the MNGR_AGENT_ID env sweep reads /proc and is Linux-only by design, "
-    "so on macOS a branded server is never at risk",
+    reason="a server branded with MNGR_AGENT_ID is at risk only from the Linux env sweep, which reads /proc",
 )
 def test_stop_agents_spares_shared_tmux_server_branded_with_agent_env(
     temp_host_dir: Path,
@@ -1555,6 +1620,45 @@ def test_stop_agents_spares_shared_tmux_server_branded_with_agent_env(
         # The whole server is private to this test (TMUX_TMPDIR), so kill-server is
         # both safe and the only teardown that also reaps the anchor session's sleep.
         host._run_shell_command(StringCommand("tmux kill-server 2>/dev/null || true"))
+
+
+@pytest.mark.tmux
+def test_stop_agents_spares_tmux_server_forked_by_the_agents_own_start(
+    local_host: Host, tmp_path: Path, mngr_test_prefix: str
+) -> None:
+    """stop_agents spares the shared tmux server the agent's start forked, though its arguments name the commands dir."""
+    agent_id = AgentId.generate()
+    agent_commands_dir_marker = f"/agents/{agent_id}/commands/"
+    work_dir = tmp_path / f"project{agent_commands_dir_marker}work"
+    work_dir.mkdir(parents=True)
+    options = CreateAgentOptions(
+        agent_id=agent_id,
+        name=AgentName("server-forking-test"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1000"),
+    )
+    agent = local_host.create_agent_state(work_dir_path=work_dir, options=options)
+    local_host.provision_agent(agent, options, local_host.mngr_ctx)
+    local_host.start_agents([agent.id])
+    server = psutil.Process(int(_isolated_tmux_server_pid(local_host)))
+    assert agent_commands_dir_marker in " ".join(server.cmdline()), (
+        f"Test setup invalid: tmux server {server.pid} arguments do not name {agent_commands_dir_marker}"
+    )
+    bystander_session = f"{mngr_test_prefix}bystander"
+    success, _ = local_host._run_shell_command(
+        StringCommand(f"tmux new-session -d -s {shlex.quote(bystander_session)} 'sleep 1000'")
+    )
+    assert success, "Could not start the bystander session"
+
+    local_host.stop_agents([agent.id], timeout_seconds=3.0)
+
+    assert server.is_running() and server.status() != psutil.STATUS_ZOMBIE, (
+        f"stop_agents killed the shared tmux server {server.pid}, and every session on it"
+    )
+    success, _ = local_host._run_shell_command(
+        StringCommand(f"tmux has-session -t {TmuxSessionTarget(session_name=bystander_session).as_shell_arg()}")
+    )
+    assert success, "Bystander session on the shared server did not survive the stop"
 
 
 @pytest.mark.tmux
