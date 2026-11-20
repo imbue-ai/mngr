@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: opencode agents record `turn_end`: `COMPLETED` on a final reply, `FAILED` on an opencode error, `INTERRUPTED` on an abort or a declined permission/question; existing agents need `mngr c <name> --reuse --update`.
+
 ## [v0.3.1] - 2026-10-28
 
 ### Added

@@ -4,6 +4,10 @@ Full, unedited changelog entries for the `mngr_opencode` project, consolidated n
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-19
+
+opencode agents record how each turn ended, which mngr publishes as `turn_end`: `COMPLETED` when opencode ends the turn on a final reply, with its `finish` (e.g. `stop`) as `native_type`; `FAILED` on an opencode error, with its name (e.g. `APIError`), or on a final reply whose `finish` is `error`; and `INTERRUPTED` on a `MessageAbortedError` or a declined permission or question (`PermissionRejectedError` or `QuestionRejectedError`). A new turn removes it, and a turn that leaves none of that evidence (a stop before a step's reply exists or during a subtask, a `!` shell command) reads null. Agents created before this version write nothing until `mngr c <name> --reuse --update`.
+
 ## 2026-11-13
 
 The real-CLI release tests run on OpenCode Zen's `deepseek-v4.1-flash-free` (was `deepseek-v4-flash-free`). Zen retired the old free model, which now fails every request with a server error, so the agent never replied.

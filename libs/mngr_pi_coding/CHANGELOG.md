@@ -9,6 +9,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Added
 
 - Added: The pi lifecycle extension streams pi's in-progress assistant message to `$MNGR_AGENT_STATE_DIR/pi_reply_draft` (updated from pi's `message_update` events, cleared when the turn ends or a new session starts), so Imbue Studio can show a pi reply while it is being written.
+- Added: On pi 1.1.0+, pi agents record `turn_end` at `agent_settled` (`INTERRUPTED`, `FAILED` or `COMPLETED` from the last reply's stop reason); existing agents need `mngr c <name> --reuse --update`.
+
+### Changed
+
+- Changed: On pi 1.1.0+, a pi agent stays `RUNNING` until `agent_settled` instead of `agent_end`, so pi's retries no longer read `WAITING`.
 
 ## [v0.2.1] - 2026-10-28
 

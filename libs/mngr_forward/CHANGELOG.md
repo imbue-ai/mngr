@@ -15,6 +15,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: The `httpx2` dependency floor moves from 2.12.0 to 2.13.1, the version the rest of the repo now requires.
 - Changed: `mngr forward` follows each agent's services with `mngr event <agent>@<host>.<provider>`, skipping a discovery pass so a new workspace's origins route sooner; it logs each stream's time to first event.
 - Changed: A broken-off connection gets a page with Try again and "See details", a spent sign-in link offers the path it was for, and framed proxy pages post their reason to the parent window.
+- Changed: `mngr forward` requests zlib compression on SSH connections to non-loopback hosts, so remote workspace pages load faster (~2.8 s vs ~4 s in one measurement).
 
 ### Fixed
 

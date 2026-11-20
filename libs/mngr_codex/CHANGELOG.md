@@ -9,6 +9,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Added
 
 - Added: Codex common-transcript agent steps carry `extra.harness_session_id` and `extra.harness_turn_id`, joinable to an LLM proxy's per-request log.
+- Added: codex agents record `turn_end` from the rollout: `COMPLETED`/`FAILED` at `task_complete`, `INTERRUPTED` at `turn_aborted`; existing agents need `mngr c <name> --reuse --update`.
 
 ### Changed
 

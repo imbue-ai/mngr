@@ -11,6 +11,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: The VPS providers publish ports declared with `mngr create --publish` (recorded as `published_endpoints`); cloud VPS providers gain a `firewall_published_ports` config key their `prepare` opens (published-ports contract).
 - Added: VPS hosts run an every-boot `mngr-vps-container-meminfo.service` publishing each container's cgroup memory headroom to `/mngr-vol/.host-meminfo` for in-container earlyoom under gVisor.
 - Added: `ParsedVpsBuildOptions.root_disk_gb` and the shared `extract_root_disk_gb` parser behind `--<prefix>-root-disk-gb=N`.
+- Added: Agent listings publish `turn_end`, read in the same listing command as the state.
 
 ### Changed
 

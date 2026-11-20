@@ -19,13 +19,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
-- Changed: Bumped Latchkey to 3.24.0, which is also the remote-host version and the new minimum locally-installed version (`LATCHKEY_MIN_VERSION`); the bundled service catalog now includes Asana.
+- Changed: Bumped Latchkey to 3.25.0, which is also the remote-host version and the new minimum locally-installed version (`LATCHKEY_MIN_VERSION`); the bundled service catalog now includes Asana.
 - Changed: Custom services belong to their machine (each machine store has its own `config.json`, migrated from the old symlink) and are deregistered with their last account; adds `Latchkey.deregister_custom_service` and `ServicesCatalog(is_including_every_machine=True)`.
 - Changed: The services catalog marks protocol-handshake permissions `is_implicit`; `ServicePermissionInfo` lists them under `implicit_permission_schemas` and `with_implicit_permissions` adds them to any non-empty grant.
 - Changed: `Latchkey.auth_browser` pins Imbue Studio's redirect URI before every MCP OAuth sign-in that registers a client (builtin `*-mcp` and custom `mcp` flow, per new `is_mcp_oauth_service`); `MINDS_OAUTH_REDIRECT_URI` replaces `MINDS_OAUTH_REDIRECT_URI_BY_SERVICE`.
 - Changed: The `minds-workspaces-backups-manage` verb admits `/backup-service/setup/retry`.
 - Changed: A wiring-step failure that retrying cannot fix now names the step and when it last succeeded for the host.
 - Changed: Discovery reports a wiring step that failed from file-descriptor exhaustion as an error at once instead of after 10 transient cycles.
+- Changed: Remote machine commands (`read-state`, `apply-state`, `announce-device`, `forget-request`, `list-requests`) raise `MachineTransferError` (a `RemoteGatewayError`) with typed `sent`/`expected` parts and take the host id instead of `failure_description`; failing to store a read machine state locally is now a `LatchkeyStoreError`.
 
 ### Removed
 
@@ -38,6 +39,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: A machine policy with no rules is treated as unprovisioned, so a read or provisioning pass seeds it from this computer's policy instead of adopting the deny-all default.
 - Fixed: Host policies are sent without whitespace, so long-lived remote workspaces no longer exceed the 100,000-byte remote command cap on sign-ins and grants.
 - Fixed: `mngr latchkey register-agent` adopts the remote machine's policy before registering and pushing, so grants made from another computer survive.
+- Fixed: A provider that cannot reach its backend while opening a remote host's outer host (e.g. a brief DNS failure) is treated as a transient wiring failure and retried, instead of reported as an error at once (or, in VPS gateway provisioning, escaping the worker thread).
 
 ### Security
 

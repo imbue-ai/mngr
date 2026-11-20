@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-19
+
+`mngr forward` loads a remote workspace's pages faster: its SSH connections to remote hosts now ask for zlib compression, so the uncompressed scripts and stylesheets a workspace serves cross the link at about a third of their size. Connections to a loopback host (a local VM or container behind a forwarded port) stay uncompressed, and a server that does not offer compression is connected to without it.
+
+Measured against a real Imbue Cloud workspace over a lossy link, replaying the chat frame's request chain on a fresh connection took about 2.8 s instead of 3.9-4.0 s.
+
 ## 2026-11-13
 
 Every 502, 503 or 504 the forward proxy answers itself now says why and whether the request ever reached the backend: an `X-Mngr-Forward-Reason` header names the case (discovery not reported yet, no known agent, no route, a connection that could not be built on this device, an unreachable host, a backend not listening or not answering, a response that broke off or timed out, an exhausted connection pool), and `X-Mngr-Forward-Request-Sent` is `no` only when the request never reached the backend, so a client can say "nothing was changed" exactly when that is true. A backend's own 502/503/504 carries neither header.

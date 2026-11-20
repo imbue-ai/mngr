@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-19
+
+Agent listings publish `turn_end`, how and when the agent's last turn ended, read in the same listing command as the state.
+
 ## 2026-11-18
 
 Follows mngr's rename of `LifecycleProbeResult.leases` to `background_tasks` and of `imbue.mngr.hosts.work_leases` to `imbue.mngr.hosts.background_tasks`. What an agent listing publishes is unchanged.

@@ -1,1 +1,0 @@
-- The bundled latchkey moves to 3.25.0, which tries to keep the browser window from flickering during a sign-in.

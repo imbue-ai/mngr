@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-19
+
+The Claude common transcript (what `mngr transcript` prints and ATIF readers consume) files the progress updates Claude 5 models write between tool calls as the step's `message`, beside its text. The API returns each as a thinking block, so they used to land in `reasoning_content` and print as "(thinking)". Blocks whose signature marks them as reasoning stay in `reasoning_content`.
+
+claude agents record how each turn ended, which mngr publishes as `turn_end`: `COMPLETED` at `Stop`, `FAILED` at `StopFailure` with the payload's `error` (e.g. `model_not_found`) as `native_type`, and `INTERRUPTED` when the transcript streamer heals the marker an Esc left behind. A new prompt removes it. A turn stopped from Studio's stop button, or by an Esc the heal does not see (before the first reply, or when Claude Code writes session records after the interrupt line, as it often does during a streamed reply), reads null. Agents created before this version write nothing until `mngr c <name> --reuse --update`.
+
 ## 2026-11-18
 
 The Stop hook mngr installs for Claude agents now finds code-guardian's success marker (`.reviewer/outputs/orchestrator_success`) at the project root. It used to look in whatever folder the agent's shell was in. An agent that ended its turn in a subfolder skipped uploading that commit's autofix issues and left the marker behind for a later turn. A project with no git commit to upload for no longer stops the hook before it marks the agent idle.

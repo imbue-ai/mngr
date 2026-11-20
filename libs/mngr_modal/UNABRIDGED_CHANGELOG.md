@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-19
+
+Agent listings publish `turn_end`, how and when the agent's last turn ended, read in the same listing command as the state.
+
 ## 2026-11-18
 
 Test-only (MIND-717): `test_provision_statusline_shim_on_modal_host` is marked `@pytest.mark.flaky`, like the other Modal acceptance tests that write a host record, because Modal sometimes stalls that write on every attempt its retry budget allows. When such a write fails, its error now names the step of Modal's upload it was stuck in (see `modal_proxy`).

@@ -17,6 +17,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: The JSONL `error` event carries an error's structured facts under `details` (`MngrError.event_details()`); `ProviderUnavailableError` reports `short_reason` and `short_remediation` there.
 - Added: A warning when SSH connection retries are exhausted, naming the attempt count, time spent, deadline, why it stopped and the underlying paramiko exception class.
 - Added: `SendKeysAgent._is_message_delivered_as_paste` lets an agent type paste (bracketed paste) a message instead of typing it.
+- Added: `mngr list`, `mngr observe` and `AgentDetails` publish `turn_end` (`kind` `COMPLETED`/`FAILED`/`INTERRUPTED`, `native_type`, `ended_at`), recorded by each harness plugin (shell scripts use `mngr_turn_end_write`); null while a turn is open or when the harness records none.
 
 ### Changed
 
@@ -39,6 +40,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: A message containing a NUL character sent to a tmux-input agent is refused with `SendMessageError` before anything is typed, instead of crashing the send or pasting the NULs.
 - Fixed: A local host command that cannot start raises `CommandStartError` (a `MngrError`) instead of `ProcessSetupError`, so `mngr message` with `ErrorBehavior.CONTINUE` records the agent as failed rather than aborting.
 - Fixed: Outer-host SSH connections through a `ProxyCommand` from `~/.ssh/config` no longer leak the proxy process and its pipes, which exhausted file descriptors in long-running processes like `mngr latchkey forward`.
+- Fixed: On macOS, an agent no longer loses its background-task supervisor (or leaks a `ttyd`) after `mngr create --reuse --update` on a stopped agent or two concurrent restarts; `mngr stop`/`start`/`destroy` now also kill the agent's reparented helpers whose arguments name its `commands/` directory.
 
 ### Security
 

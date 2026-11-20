@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-19
+
+The shared async/await ratchet no longer counts an `await` at the start of a line. Formatted Python has the keyword only inside an indented function body, so a line-leading one is another language held in a Python string, such as the JavaScript that drives pi's extension in its tests. Across the repo this removes only those JavaScript lines, so `mngr_pi_coding`'s recorded count drops from 7 to 5; no other project's matches change.
+
 ## 2026-11-18
 
 `check_no_type_errors` now runs `uv run --no-sync ty check`, so it type-checks the project's environment as it is instead of locking and syncing it first. That sync could rebuild editable installs uv no longer considered fresh and fetch their build backend from PyPI, which in default-workspace-template's CI sandboxes put network and build time inside the type ratchet, the likely cause of its occasional runs past the 10s test timeout (MIND-684). An environment that is out of date now shows up as unresolved imports in the failure message; run `uv sync --all-packages` and re-run. The failure message now suggests `uv run --no-sync ty check` to reproduce, the same command the check runs.

@@ -14,6 +14,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Experimental connectors: Studio installs its pinned latchkey plugins (Garmin Connect, Spotify, Strava) locally and on every remote workspace's machine, and the Permissions tab offers their services under an **Experimental connectors** heading with a "Use at your own risk" warning.
 - Added: A workspace create on Imbue Cloud refused because the account is on the waitlist now offers **Retry**, to select after accepting the invite in the invitation email.
 - Added: "Send the email again" in the Share tab when an invitation or Mobile Access Link is refused for an unverified email; Create from Template waits on an unverified account's emailed link with the create form's "Resend email".
+- Added: Desktop microphone permission per workspace: a workspace's first request prompts (Allow / Don't allow, remembered on this computer or for the session), a remembered refusal shows a toast, and the Permissions tab's new **Client permissions** section sets it; answers never leave this computer.
+- Added: Resource warnings for the computer Studio runs on: a titlebar pill when disk (default on), memory or CPU (opt-in) runs low, opening Settings > This computer > Resource warnings.
 
 ### Changed
 
@@ -23,6 +25,12 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Under WSL, Studio's windows keep the native title bar instead of being frameless, so clicks land where the pointer is.
 - Changed: A new remote workspace is no longer pointed at the reverse-tunneled gateway `http://127.0.0.1:1989` when its container lacks the `host.docker.internal` mapping; pool hosts must be baked by an mngr that creates containers with it.
 - Changed: Every email resend reports its outcome (failed, already verified, or sent), including the Accounts page's "Resend email".
+- Changed: The bundled latchkey moves to 3.25.0.
+- Changed: When the background carry of a remote workspace's registered agents gives up, it logs one error with the failure attached (type, cause chain, the failed machine command), so Sentry groups it by failure.
+
+### Removed
+
+- Removed: The check for the retired `MINDS_DATA_HOME`; a launcher exporting only that name now gets the real roots instead of an error.
 
 ### Fixed
 
@@ -31,6 +39,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: The Landing list no longer shows a greyed duplicate row of a workspace while it is being created.
 - Fixed: On macOS, the first click on a background Studio window reaches the page.
 - Fixed: Under WSL, links and sign-in pages open in the Windows default browser (re-run `scripts/install-linux.sh` to get the handler).
+- Fixed: Studio no longer sticks on "Starting Imbue Studio..." when its window is minimized, hidden or fully covered during startup.
 
 ## [minds-v0.10.5] - 2026-11-17
 

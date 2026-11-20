@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-19
+
+grok agents record how each root turn ended, which mngr publishes as `turn_end`: `COMPLETED` (`end_turn`) at the turn's `turn_completed{end_turn}`, `FAILED` at `StopFailure` with the payload's `error`, and `INTERRUPTED` at `StopCancelled` with its `reason` (`user_interrupt` for a Ctrl+C, including one during a stop hook). Each writes only when its `promptId` is the agent's latest root prompt, the last line of `plugin/grok/submissions.log`, so a late report for an older turn records nothing, and neither does a bash-mode `!` command, interrupted or not. A new root prompt removes `turn_end`. The transcript streamer now passes the turn's stop reason to `grok_hook.py --turn-completed`, and the hook log notes each write as `turn_end:<KIND>` and each skip as `turn_end:skipped-not-latest-prompt`. A root prompt's `submissions.log` line no longer runs onto a last line that an interrupted write left unfinished.
+
 ## 2026-11-18
 
 The outcome grok's hook appends to `logs/grok_hooks.log` reads `background_tasks=N` where it read `leases=N`, and the hook's constants are `BACKGROUND_TASK_DIRNAME`, `BACKGROUND_TASK_NAME_PREFIX`, `BACKGROUND_TASK_KIND_BY_TASK_TYPE` and `OTHER_BACKGROUND_TASK_KIND`. `grok_background_tasks.sh` sources `mngr_background_task_lib.sh` and calls `mngr_background_task_any_recent` for its heartbeat, following mngr's rename of its work-lease library. The README names the setting `HOOK_BACKGROUND_TASK_KEEPALIVE_SECONDS`, renamed from `HOOK_WORK_LEASE_TTL_SECONDS`. The records the hook writes are unchanged.

@@ -11,11 +11,13 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Claude agents' Stop hook records each in-flight background task from the Stop payload's `background_tasks` under `background_tasks/`, with its `kind` and claude's own `native_type`, so they report `RUNNING_BACKGROUND` until that work wakes them; records carry no deadline and a restart drops them. Agents created before this change write under `leases/`, which mngr does not read, so they never report `RUNNING_BACKGROUND`.
 - Added: Claude common-transcript agent steps carry the claude session id as `extra.harness_session_id`, joinable to an LLM proxy's per-request log.
 - Added: A blocking unrecognized Claude Code dialog logs a warning with the installed claude version, its pin, and the dialog's shape (never its text).
+- Added: claude agents record `turn_end`: `COMPLETED` at `Stop`, `FAILED` at `StopFailure` (with its `error` as `native_type`), `INTERRUPTED` when an Esc is healed; existing agents need `mngr c <name> --reuse --update`.
 
 ### Changed
 
 - Changed: `is_shell_command_message` moved from `imbue.mngr_claude.dialogs` to `imbue.mngr.agents.tui_utils`.
 - Changed: The TUI dialog registry is verified against Claude Code 2.1.323; all patterns are unchanged.
+- Changed: The Claude common transcript files the progress updates Claude 5 models write between tool calls as the step's `message` instead of `reasoning_content` ("(thinking)").
 
 ### Fixed
 

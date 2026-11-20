@@ -4,6 +4,10 @@ Full, unedited changelog entries for the `mngr_pi_coding` project, consolidated 
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-19
+
+pi agents on pi 1.1.0 or later record how each turn ended, which mngr publishes as `turn_end`. At `agent_settled`, the turn is `INTERRUPTED` (`aborted`) when pi reports the run aborted (Esc, Studio's stop) or the last reply stopped with `aborted`, `FAILED` (`error`) when the last reply stopped with `error`, and `COMPLETED` with the reply's stop reason (e.g. `stop`, `length`) after any other reply; a turn with neither a reply nor an abort records nothing. A new turn removes it. On those versions, which the extension reads from pi's `VERSION` when it loads, the agent also stays `RUNNING` until `agent_settled` rather than `agent_end`, so pi's retries no longer read `WAITING`. Older pi, or a pi whose version cannot be read, records nothing and still ends turns at `agent_end`. Agents created before this version write nothing until `mngr c <name> --reuse --update`.
+
 ## 2026-11-09
 
 Test-only (MIND-182): `test_ratchets.py` declares `pytest.mark.ratchet_scan(_DIR)` in place of the unused `xdist_group` marker, so this project's ratchet tests load their file scan during pytest setup instead of inside the first ratchet test's 10s timeout.

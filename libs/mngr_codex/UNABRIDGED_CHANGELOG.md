@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-19
+
+codex agents record how each turn ended, which mngr publishes as `turn_end`: the transcript streamer reads codex's own rollout and writes `COMPLETED` at `task_complete`, `FAILED` when that `task_complete` carries an error (with its `codex_error_info`, e.g. `other`, as `native_type`), and `INTERRUPTED` at `turn_aborted` (with its `codex_error_info`, else its `reason`, e.g. `interrupted`). The `UserPromptSubmit` hook and the next `task_started` remove it, a compaction leaves it alone (codex 0.162 and later), and `turn_end` is null while codex's daemon reports a turn in flight. It needs no app-server socket, so it is written on any host the transcript streams from. Agents created before this version read null until `mngr c <name> --reuse --update`.
+
 ## 2026-11-18
 
 The codex agent type's `config_overrides` now accumulates across config layers, as claude's `settings_overrides` does: each layer adds its keys to those of the layers below it. A user-level `agent_types.codex.config_overrides.model_reasoning_summary = "auto"`, for example, now combines with a project config that sets other `config_overrides` keys; before, that combination failed to load with a settings-narrowing error. To merge a nested table that two layers set, write its key with `__extend`.

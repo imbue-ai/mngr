@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-19
+
+An antigravity agent whose turn ended while agy still holds a background task or a running subagent now reads `RUNNING_BACKGROUND` instead of `WAITING`. Its statusLine command writes one record per task in agy's `task_count` (`agy-task-<n>`, kind `SHELL`, native type `task_count`) and one per `subagents` entry whose status is `running` (`agy-subagent-<n>`, kind `SUBAGENT`, native type `subagents`), rewriting the set on each payload, so a finished task's record goes when agy stops counting it and a restart clears the set. The records are written before `active` is removed and after it is created, so the wake turn a finished task starts never reads `WAITING` first. An existing agent gets this once its `commands/` scripts are refreshed, by `mngr c <name> --reuse --update`.
+
+Release tests pin this against real agy: the statusLine payload fields `statusline.sh` reads, in the installed binary, and a signed-in agent's backgrounded command reading `RUNNING_BACKGROUND`. `MNGR_AGY_TEST_SIGNED_IN=1` runs the signed-in agy release tests where agy keeps its sign-in in the OS keyring (macOS).
+
+antigravity agents record how each root turn ended, which mngr publishes as `turn_end`, with agy's `terminationReason` as `native_type`: `COMPLETED` at a `Stop` for `NO_TOOL_CALL`, `FAILED` for `ERROR`, and `INTERRUPTED` for every other reason agy defines but `UNSPECIFIED`, such as `USER_CANCELED`, `MAX_INVOCATIONS` or `TERMINAL_CUSTOM_HOOK`. A root `PreInvocation` removes it. An Esc (agy fires no `Stop` for it) and a `/compact` read null, and subagents' hooks leave it alone; an Esc pressed before agy's first `PreInvocation` fires no hook, so the previous turn's end stays. The per-agent `hooks.json` gains `turn_end_hook.sh` at `PreInvocation` and `Stop`; an agent created before this reads null until `mngr c <name> --reuse --update`.
+
 ## 2026-11-18
 
 Fixed: a message starting with `?` sent to an Antigravity agent no longer opens agy's help screen instead of arriving.

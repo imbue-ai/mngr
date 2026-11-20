@@ -19,6 +19,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Recipient-side sharing commands: `shares shared-with-me` (every active share naming the account, with owner, workspace name, target links and status), `shares shared-with-me-matches`, `shares respond <host_id> --response accepted|declined|reported` and `shares clear-response`; all fail with `shared_with_me_unavailable` against an older connector. New wire models include `SharedWithMeListing`, `SharedWithMeShare` and `SharedWithMeMatches`.
 - Added: `mngr imbue_cloud auth browser-session-code` mints the single-use code the desktop's embedded browser redeems for an accounts-origin session.
 - Added: `shares push-grants` forwards optional `targets` and `workspace_name`; a refused domain grant raises with code `grants_refused` and `ImbueCloudShareRefusedError.refusals`.
+- Added: Agent listings publish `turn_end`, read in the same listing command as the state.
 
 ### Changed
 

@@ -1,3 +1,0 @@
-Studio no longer sticks on "Starting Imbue Studio..." when its window cannot be seen during startup. The first page waited for the opening animation to finish, and that animation only advances while the window is painted, so a window that was minimized, hidden, or (on macOS) fully covered by other windows before the wordmark landed waited until someone brought it forward. Now, once the app is ready, a window nobody can see goes straight to the app. A visible window still plays the animation through and parks the wordmark in the titlebar as before.
-
-A new Electron e2e spec, `test/e2e/intro.spec.js`, runs the loading page in a real window, hidden and visible, with no backend. It does not run in CI.

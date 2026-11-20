@@ -4,6 +4,16 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-19
+
+A failed command against a remote machine now says what it was carrying in each direction, as typed data instead of a description written at the call site. Every failure of `read-state`, `apply-state`, `announce-device`, `forget-request` and `list-requests` raises `MachineTransferError` (a `RemoteGatewayError`) with `sent` (`SentToMachine` members: the parts of the update, the device record, a request withdrawal, a fallback key) and `expected` (`ReceivedFromMachine` members: the parts the command answers with). This includes the SSH connection the first command opens, whose own error stays the cause, so transient-failure detection is unchanged. The parts are read off the document each command sends. The commands take the host id in place of their `failure_description` argument.
+
+When the machine's state was read but cannot be stored here (the policy, its format stamp, the desktop egress rules, the custom services), the failure is now a `LatchkeyStoreError` rather than a `RemoteGatewayError`. A machine sending content this build cannot read is still a `RemoteGatewayError`.
+
+- The latchkey version installed on remote hosts, and the minimum version a local CLI must have (`LATCHKEY_MIN_VERSION`), both move to 3.25.0. The minimum only keeps the pins in lockstep: nothing here depends on 3.25.0.
+
+Latchkey discovery now treats a provider that cannot reach its own backend while opening a remote host's outer host (for example Imbue Cloud while this computer's DNS briefly fails) as a transient wiring failure: it is noted and retried on the next discovery cycle and only reported as an error once the streak reaches the usual threshold, instead of being reported as an error on the first occurrence (and, for VPS gateway provisioning, escaping the worker thread).
+
 ## 2026-11-18
 
 The plugin no longer hooks `mngr create` (`on_host_created`) to point a new VPS-gateway host whose container cannot resolve `host.docker.internal` at the reverse-tunneled `http://127.0.0.1:1989`: a new host's `LATCHKEY_GATEWAY` always stays as `prepare_agent_latchkey` decided it, so an outer host has to create its containers with the mapping. `fall_back_to_reverse_tunneled_gateway_url` and `CONTAINER_HOSTS_FILE_PATH` are removed from `agent_setup`. Existing hosts whose agents name their own loopback keep the VPS->container reverse tunnel.
