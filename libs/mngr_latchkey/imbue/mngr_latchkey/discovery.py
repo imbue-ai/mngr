@@ -49,6 +49,7 @@ from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroupState
 from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -337,6 +338,11 @@ def _is_local_tunnel_setup_failure(error: BaseException) -> bool:
     least possibly evidence that the host is no longer where we think.
     """
     return isinstance(error, SSHTunnelError) and error.phase is SSHTunnelPhase.LOCAL_SETUP
+
+
+def _is_exiting(concurrency_group: ConcurrencyGroup) -> bool:
+    """Whether the group is tearing down, so a refused strand is a shutdown race rather than a fault."""
+    return concurrency_group.state in (ConcurrencyGroupState.EXITING, ConcurrencyGroupState.EXITED)
 
 
 class LatchkeyDiscoveryHandler(MutableModel):
@@ -1047,6 +1053,15 @@ class LatchkeyDiscoveryHandler(MutableModel):
             # coalesced away forever.
             with self._remote_hosts_lock:
                 self._provisioning_hosts.discard(host_id_str)
+            if isinstance(e, InvalidConcurrencyGroupStateError) and _is_exiting(self.concurrency_group):
+                # The forward's group only starts exiting once the supervisor has
+                # returned, so a worker that gets here is racing the shutdown, and
+                # a VPS gateway provisioned now would be torn down at once.
+                logger.debug(
+                    "Skipping VPS-resident Latchkey gateway provisioning for agent {}: the forward is shutting down",
+                    agent_id,
+                )
+                return False
             logger.opt(exception=e).error(
                 "Failed to dispatch VPS-resident Latchkey gateway provisioning for agent {}: {}",
                 agent_id,
@@ -1192,6 +1207,14 @@ class LatchkeyDiscoveryHandler(MutableModel):
         """Read the current provider-instance blocks from settings, or ``None`` on failure."""
         try:
             reloaded = load_config(self.mngr_ctx.pm, self.mngr_ctx.concurrency_group)
+        except InvalidConcurrencyGroupStateError:
+            # A SIGHUP that lands while the forward is exiting: settings are read
+            # through a subprocess on the forward's group, which refuses new
+            # processes by then, and there is nothing left to refresh anyway.
+            if not _is_exiting(self.mngr_ctx.concurrency_group):
+                raise
+            logger.debug("Not reloading the latchkey provider set: the forward is shutting down")
+            return None
         except (MngrError, OSError) as e:
             logger.opt(exception=e).warning(
                 "Could not reload the latchkey provider set; keeping the one loaded at startup: {}", e

@@ -26,6 +26,7 @@ from pydantic import SecretStr
 from pyinfra.api.exceptions import ConnectError
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroupState
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.primitives import PositiveInt
@@ -1757,6 +1758,27 @@ def test_reload_provider_config_reads_a_provider_added_alongside_a_disable_for_a
         assert ProviderInstanceName(added_provider) in handler.mngr_ctx.config.providers
 
 
+@contextmanager
+def _exiting_concurrency_group() -> Iterator[ConcurrencyGroup]:
+    """Yield a real concurrency group held in EXITING, as the forward's is while it tears down.
+
+    ``__exit__`` runs on a thread of its own and waits on a strand that blocks
+    until the block ends, which is exactly how a still-running discovery worker
+    keeps the forward's group in EXITING in production.
+    """
+    release_strand = threading.Event()
+    cg = ConcurrencyGroup(name=f"test-exiting-{uuid4().hex}")
+    cg.__enter__()
+    cg.start_new_thread(target=release_strand.wait, name="test-blocking-strand")
+    with ConcurrencyGroup(name=f"test-exiter-{uuid4().hex}") as exiter_cg:
+        exiter_cg.start_new_thread(target=cg.__exit__, args=(None, None, None), name="test-cg-exiter")
+        try:
+            wait_for(lambda: cg.state == ConcurrencyGroupState.EXITING, error_message="group never began exiting")
+            yield cg
+        finally:
+            release_strand.set()
+
+
 def _wait_for_provisioning_passes(handler: _ProvisionRecordingHandler, expected_count: int) -> None:
     """Wait for ``expected_count`` provisioning passes to have run *and* released the in-flight guard."""
 
@@ -2498,6 +2520,86 @@ def test_provisioning_skips_host_already_provisioned_this_session(tmp_path: Path
         assert handler._provisioned == []
         with handler._remote_hosts_lock:
             assert handler._provisioning_hosts == set()
+
+
+def test_provisioning_dispatch_into_an_exiting_group_is_skipped_quietly(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A worker that reaches provisioning while the forward is tearing down skips it without an error.
+
+    The forward's group only enters EXITING once the supervisor has returned, so
+    a refused dispatch there is an expected shutdown race, not a fault: it must
+    not reach Sentry, and the in-flight flag must still be rolled back.
+    """
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(_make_fake_latchkey_binary(tmp_path)))
+    host_id = HostId()
+    with _exiting_concurrency_group() as cg:
+        handler = _FixedVpsRouteHandler(
+            latchkey=manager,
+            tunnel_manager=_RecordingTunnelManager(),
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
+        )
+        with _captured_log_records() as captured:
+            dispatched = handler._maybe_dispatch_remote_gateway_provisioning(
+                AgentId(), host_id, _CONTAINER_SSH_INFO, "imbue_cloud", None
+            )
+
+    assert dispatched is False
+    assert [message for level, message in captured if level == "ERROR"] == []
+    assert any(level == "DEBUG" and "shutting down" in message for level, message in captured)
+    with handler._remote_hosts_lock:
+        assert handler._provisioning_hosts == set()
+
+
+def test_provisioning_dispatch_into_a_never_entered_group_is_still_an_error(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Only a group that is exiting is a shutdown; a group that was never entered is a real lifecycle bug."""
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(_make_fake_latchkey_binary(tmp_path)))
+    handler = _FixedVpsRouteHandler(
+        latchkey=manager,
+        tunnel_manager=_RecordingTunnelManager(),
+        concurrency_group=ConcurrencyGroup(name=f"test-never-entered-{uuid4().hex}"),
+        mngr_ctx=temp_mngr_ctx,
+        device=_DEVICE,
+    )
+    with _captured_log_records() as captured:
+        dispatched = handler._maybe_dispatch_remote_gateway_provisioning(
+            AgentId(), HostId(), _CONTAINER_SSH_INFO, "imbue_cloud", None
+        )
+
+    assert dispatched is False
+    assert any(level == "ERROR" for level, _ in captured)
+    with handler._remote_hosts_lock:
+        assert handler._provisioning_hosts == set()
+
+
+def test_reload_provider_config_during_teardown_keeps_the_provider_set_quietly(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A SIGHUP reload that lands while the forward is exiting keeps the current providers without an error.
+
+    The reload reads settings through a git subprocess on the forward's group,
+    which refuses new processes once it is exiting.
+    """
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(_make_fake_latchkey_binary(tmp_path)))
+    with _exiting_concurrency_group() as cg:
+        mngr_ctx = temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().concurrency_group, cg))
+        handler = LatchkeyDiscoveryHandler(
+            latchkey=manager,
+            tunnel_manager=_RecordingTunnelManager(),
+            concurrency_group=cg,
+            mngr_ctx=mngr_ctx,
+            device=_DEVICE,
+        )
+        with _captured_log_records() as captured:
+            handler.reload_provider_config()
+
+    assert handler.mngr_ctx is mngr_ctx
+    assert [message for level, message in captured if level in ("ERROR", "WARNING")] == []
+    assert any(level == "DEBUG" and "shutting down" in message for level, message in captured)
 
 
 def _raised_from(error: BaseException, cause: BaseException) -> BaseException:
