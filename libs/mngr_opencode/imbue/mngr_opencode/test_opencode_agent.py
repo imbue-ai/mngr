@@ -1,6 +1,6 @@
 """Release tests: end-to-end flows for the opencode agent type.
 
-Drive the real ``mngr`` CLI against the real ``opencode`` binary (no mocks). Two tests:
+Drive the real ``mngr`` CLI against the real ``opencode`` binary (no mocks):
 
 * ``test_opencode_agent_full_lifecycle`` -- the shared agent release lifecycle
   (create -> WAITING -> message -> transcript -> stop/start resume -> destroy).
@@ -10,8 +10,11 @@ Drive the real ``mngr`` CLI against the real ``opencode`` binary (no mocks). Two
   ``PERMISSIONS``. This is the only check exercising opencode's real
   ``permission.asked`` event wiring live (the sdk type stubs disagree on the name,
   verified against opencode 1.17.7).
+* ``test_opencode_turn_end_reports_a_completed_and_an_interrupted_turn`` and
+  ``test_opencode_turn_end_reports_a_declined_permission_as_interrupted`` -- ``mngr list``
+  publishes the ``turn_end`` the lifecycle plugin writes from opencode's own events.
 
-Both use OpenCode's free OpenCode-Zen model so no API key is required. The lifecycle
+All use OpenCode's free OpenCode-Zen model so no API key is required. The lifecycle
 arc and assertions live in ``imbue.mngr.agents.agent_release_testing``; this file
 supplies opencode's plumbing (free-model seeding, env, source) via an
 :class:`AgentReleaseProfile`.
@@ -31,6 +34,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import urllib.request
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -39,14 +43,18 @@ import pytest
 from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
 from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
 from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
+from imbue.mngr.agents.agent_release_testing import send_expecting_success
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import init_git_repo
+from imbue.mngr.utils.testing import read_turn_end_in
 from imbue.mngr.utils.testing import run_mngr_subprocess
 from imbue.mngr_opencode.opencode_config import ACTIVE_MARKER_FILENAME
 from imbue.mngr_opencode.opencode_config import PERMISSIONS_WAITING_FILENAME
+from imbue.mngr_opencode.opencode_config import RAW_TRANSCRIPT_RELATIVE_PATH
 from imbue.mngr_opencode.opencode_config import ROOT_SESSION_FILENAME
+from imbue.mngr_opencode.opencode_config import SERVER_PORT_FILENAME
 
 # A free model on the OpenCode Zen provider that needs no credentials. Pinned so the
 # test does not depend on the developer's configured default model.
@@ -64,6 +72,13 @@ _BASH_TRIGGER_PROMPT = (
 # How long to wait for the blocking approval prompt to surface the marker (it appeared
 # in ~3s live; generous here to absorb model/launch latency).
 _PERMISSION_MARKER_TIMEOUT_SECONDS = 120.0
+_TURN_TIMEOUT_SECONDS = 180.0
+_SHORT_REPLY_PROMPT = "Reply with exactly the word: done"
+_LONG_BASH_PROMPT = "Use the bash tool to run exactly this shell command and show me its output: sleep 300"
+_TURN_END_CONSUMER = (
+    "mngr_opencode_plugin.ts's writeTurnEnd, which reads the root session's `session.status` busy and idle, "
+    "`session.error`, `permission.replied` and `question.rejected`, and its reply's `finish`, `error` and tool parts"
+)
 
 
 class _OpenCodeReleaseProfile(AgentReleaseProfile):
@@ -216,19 +231,7 @@ def test_opencode_waiting_reason_reports_permissions(tmp_path: Path) -> None:
     ctx = profile.setup(tmp_path)
     agent_name = f"opencode-perm-{get_short_random_string()}"
     try:
-        create = profile.run_mngr(
-            ctx,
-            "create",
-            agent_name,
-            profile.agent_type,
-            "--no-connect",
-            "--yes",
-            *profile.create_extra_args(ctx),
-            timeout=_CREATE_TIMEOUT_SECONDS,
-        )
-        assert create.returncode == 0, f"create failed:\n{create.stdout}\n{create.stderr}"
-
-        state_dir = _opencode_agent_state_dir(ctx.host_dir)
+        state_dir = _create_agent(profile, ctx, agent_name)
         permissions_marker = state_dir / PERMISSIONS_WAITING_FILENAME
         active_marker = state_dir / ACTIVE_MARKER_FILENAME
 
@@ -255,3 +258,165 @@ def test_opencode_waiting_reason_reports_permissions(tmp_path: Path) -> None:
         profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_LIFECYCLE_TIMEOUT_SECONDS)
         if ctx.teardown is not None:
             ctx.teardown()
+
+
+def _create_agent(profile: _OpenCodeReleaseProfile, ctx: AgentReleaseContext, agent_name: str) -> Path:
+    """Create the agent and return its state dir."""
+    create = profile.run_mngr(
+        ctx,
+        "create",
+        agent_name,
+        profile.agent_type,
+        "--no-connect",
+        "--yes",
+        *profile.create_extra_args(ctx),
+        timeout=_CREATE_TIMEOUT_SECONDS,
+    )
+    assert create.returncode == 0, f"create failed:\n{create.stdout}\n{create.stderr}"
+    return _opencode_agent_state_dir(ctx.host_dir)
+
+
+def _wait_for_listed_turn_end(
+    profile: _OpenCodeReleaseProfile, ctx: AgentReleaseContext, agent_name: str, state_dir: Path, turn: str
+) -> tuple[str, str] | None:
+    """Wait for ``turn`` to write turn_end, then return the kind and native type ``mngr list`` publishes."""
+    assert poll_until(
+        condition=lambda: read_turn_end_in(state_dir) is not None,
+        timeout=_TURN_TIMEOUT_SECONDS,
+        poll_interval=0.5,
+    ), f"{turn} never wrote turn_end"
+    listing = profile.run_mngr(
+        ctx, "list", "--provider", "local", "--format", "json", timeout=_LIFECYCLE_TIMEOUT_SECONDS
+    )
+    assert listing.returncode == 0, f"mngr list failed:\n{listing.stdout}\n{listing.stderr}"
+    (listed_agent,) = [agent for agent in json.loads(listing.stdout)["agents"] if agent["name"] == agent_name]
+    turn_end = listed_agent.get("turn_end")
+    return None if turn_end is None else (turn_end["kind"], turn_end["native_type"])
+
+
+def _raw_transcript_lines(state_dir: Path) -> list[str]:
+    raw_transcript = state_dir / RAW_TRANSCRIPT_RELATIVE_PATH
+    return raw_transcript.read_text().splitlines() if raw_transcript.exists() else []
+
+
+def _a_bash_tool_call_is_running(state_dir: Path, lines_before: int) -> bool:
+    new_lines = _raw_transcript_lines(state_dir)[lines_before:]
+    return any('"tool":"bash"' in line and '"status":"running"' in line for line in new_lines)
+
+
+def _server_url_and_root_session(state_dir: Path) -> tuple[str, str]:
+    """The base URL of the agent's opencode server and its root session id."""
+    port = (state_dir / SERVER_PORT_FILENAME).read_text().strip()
+    return f"http://127.0.0.1:{port}", (state_dir / ROOT_SESSION_FILENAME).read_text().strip()
+
+
+def _abort_root_session(state_dir: Path) -> None:
+    """Stop the running turn through the agent's server's `session.abort` endpoint."""
+    server_url, session_id = _server_url_and_root_session(state_dir)
+    request = urllib.request.Request(f"{server_url}/session/{session_id}/abort", method="POST")
+    with urllib.request.urlopen(request, timeout=_LIFECYCLE_TIMEOUT_SECONDS) as response:
+        assert response.status == 200, f"session.abort answered {response.status}"
+
+
+def _reject_pending_permission(state_dir: Path) -> None:
+    """Decline the root session's pending approval prompt through the agent's server's `permission.reply` endpoint."""
+    server_url, session_id = _server_url_and_root_session(state_dir)
+    with urllib.request.urlopen(f"{server_url}/permission", timeout=_LIFECYCLE_TIMEOUT_SECONDS) as response:
+        pending = json.loads(response.read())
+    (request_id,) = [request["id"] for request in pending if request["sessionID"] == session_id]
+    request = urllib.request.Request(
+        f"{server_url}/permission/{request_id}/reply",
+        data=json.dumps({"reply": "reject"}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=_LIFECYCLE_TIMEOUT_SECONDS) as response:
+        assert response.status == 200, f"permission.reply answered {response.status}"
+
+
+@pytest.mark.release
+@pytest.mark.harness_internals(harness="opencode")
+@pytest.mark.tmux
+@pytest.mark.rsync
+# Known-flaky: the same create-readiness timeout as test_opencode_agent_full_lifecycle.
+@pytest.mark.flaky
+@pytest.mark.timeout(900)
+def test_opencode_turn_end_reports_a_completed_and_an_interrupted_turn(tmp_path: Path) -> None:
+    """A finished reply publishes turn_end COMPLETED with its finish, and an aborted turn INTERRUPTED.
+
+    Pins that opencode goes idle after a reply whose ``finish`` is ``stop``, and that a ``session.abort`` during a
+    tool call ends the turn with ``MessageAbortedError``.
+    """
+    profile = _OpenCodeReleaseProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    ctx = profile.setup(tmp_path)
+    agent_name = f"opencode-turn-end-{get_short_random_string()}"
+    try:
+        state_dir = _create_agent(profile, ctx, agent_name)
+
+        send_expecting_success(profile, ctx, agent_name, _SHORT_REPLY_PROMPT)
+        completed_turn_end = _wait_for_listed_turn_end(profile, ctx, agent_name, state_dir, "the first turn")
+
+        lines_before = len(_raw_transcript_lines(state_dir))
+        send_expecting_success(profile, ctx, agent_name, _LONG_BASH_PROMPT)
+        assert poll_until(
+            condition=lambda: _a_bash_tool_call_is_running(state_dir, lines_before),
+            timeout=_TURN_TIMEOUT_SECONDS,
+            poll_interval=0.5,
+        ), "the second turn never started its bash tool call"
+        _abort_root_session(state_dir)
+        interrupted_turn_end = _wait_for_listed_turn_end(profile, ctx, agent_name, state_dir, "the aborted turn")
+    finally:
+        profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_LIFECYCLE_TIMEOUT_SECONDS)
+        if ctx.teardown is not None:
+            ctx.teardown()
+
+    assert completed_turn_end == ("COMPLETED", "stop"), (
+        f"mngr list published turn_end {completed_turn_end!r} after a finished reply; consumer: {_TURN_END_CONSUMER}"
+    )
+    assert interrupted_turn_end == ("INTERRUPTED", "MessageAbortedError"), (
+        f"mngr list published turn_end {interrupted_turn_end!r} after session.abort; consumer: {_TURN_END_CONSUMER}"
+    )
+
+
+@pytest.mark.release
+@pytest.mark.harness_internals(harness="opencode")
+@pytest.mark.tmux
+@pytest.mark.rsync
+# Known-flaky: the same create-readiness timeout as test_opencode_agent_full_lifecycle.
+@pytest.mark.flaky
+@pytest.mark.timeout(900)
+def test_opencode_turn_end_reports_a_declined_permission_as_interrupted(tmp_path: Path) -> None:
+    """Declining an approval prompt publishes turn_end INTERRUPTED with ``PermissionRejectedError``.
+
+    Pins that opencode reports the decline as a root ``permission.replied`` with reply ``reject`` and then ends the
+    turn without a final reply or an error.
+    """
+    profile = _OpenCodePermissionReleaseProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    ctx = profile.setup(tmp_path)
+    agent_name = f"opencode-turn-end-declined-{get_short_random_string()}"
+    try:
+        state_dir = _create_agent(profile, ctx, agent_name)
+        send_expecting_success(profile, ctx, agent_name, _BASH_TRIGGER_PROMPT)
+        assert poll_until(
+            condition=(state_dir / PERMISSIONS_WAITING_FILENAME).exists,
+            timeout=_PERMISSION_MARKER_TIMEOUT_SECONDS,
+            poll_interval=0.5,
+        ), "the bash tool call never blocked on an approval prompt"
+        _reject_pending_permission(state_dir)
+        declined_turn_end = _wait_for_listed_turn_end(profile, ctx, agent_name, state_dir, "the declined turn")
+    finally:
+        profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_LIFECYCLE_TIMEOUT_SECONDS)
+        if ctx.teardown is not None:
+            ctx.teardown()
+
+    assert declined_turn_end == ("INTERRUPTED", "PermissionRejectedError"), (
+        f"mngr list published turn_end {declined_turn_end!r} after a declined permission; consumer: {_TURN_END_CONSUMER}"
+    )

@@ -9,8 +9,10 @@ import pytest
 
 from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.background_tasks import TURN_END_FILE_NAME
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import TurnEndKind
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_opencode import resources as _opencode_resources
@@ -168,6 +170,8 @@ def test_plugin_resource_literals_stay_in_sync_with_constants() -> None:
     assert f'"{ROLE_ENV_VAR}"' in plugin_source
     assert f'"{SERVER_ROLE}"' in plugin_source
     assert f'"{EMIT_COMMON_ENV_VAR}"' in plugin_source
+    assert f'"{TURN_END_FILE_NAME}"' in plugin_source
+    assert "type TurnEndKind = " + " | ".join(f'"{kind.value}"' for kind in TurnEndKind) in plugin_source
 
 
 def test_launch_script_literals_stay_in_sync_with_constants() -> None:

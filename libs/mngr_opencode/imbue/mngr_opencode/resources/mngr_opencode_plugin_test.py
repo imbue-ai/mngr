@@ -20,12 +20,18 @@ import json
 import os
 import shutil
 import subprocess
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
+from imbue.mngr.hosts.background_tasks import TURN_END_FILE_NAME
+from imbue.mngr.primitives import TurnEndKind
+from imbue.mngr.utils.testing import read_turn_end_in
 from imbue.mngr_opencode.opencode_config import PERMISSIONS_WAITING_FILENAME
 
 _PLUGIN_NAME = "mngr_opencode_plugin.ts"
@@ -54,7 +60,7 @@ def _node_supports_typescript(node: str, work_dir: Path) -> bool:
     return result.returncode == 0
 
 
-def _run_plugin(tmp_path: Path, events: list[dict[str, Any]]) -> Path:
+def _run_plugin(tmp_path: Path, events: list[dict[str, Any]], driver: str = _DRIVER_MJS) -> Path:
     """Run the plugin over ``events`` under a fresh state dir; return the state dir."""
     node = shutil.which("node")
     if node is None:
@@ -66,7 +72,7 @@ def _run_plugin(tmp_path: Path, events: list[dict[str, Any]]) -> Path:
 
     (work_dir / _PLUGIN_NAME).write_text(_PLUGIN_PATH.read_text())
     driver_path = work_dir / "driver.mjs"
-    driver_path.write_text(_DRIVER_MJS)
+    driver_path.write_text(driver)
     events_path = work_dir / "events.json"
     events_path.write_text(json.dumps(events))
 
@@ -364,10 +370,10 @@ def _permission_ask(request_id: str, session_id: str = "ses_root") -> dict[str, 
     }
 
 
-def _permission_reply(request_id: str, session_id: str = "ses_root") -> dict[str, Any]:
+def _permission_reply(request_id: str, session_id: str = "ses_root", reply: str = "once") -> dict[str, Any]:
     return {
         "type": "permission.replied",
-        "properties": {"sessionID": session_id, "requestID": request_id, "reply": "once"},
+        "properties": {"sessionID": session_id, "requestID": request_id, "reply": reply},
     }
 
 
@@ -437,3 +443,646 @@ def test_startup_clears_stranded_waiting_marker(tmp_path: Path) -> None:
     returned_state = _run_plugin(tmp_path, [])
     assert returned_state == state_dir
     assert not _marker_present(returned_state)
+
+
+# Turn end. Each sequence is what opencode 1.19.5 publishes to plugins, in order.
+_ROOT = "ses_root"
+_CHILD = "ses_child"
+_PROMPT_ID = "msg_prompt"
+_REPLY_ID = "msg_reply"
+_PROVIDER_ID = "opencode"
+_MODEL_ID = "deepseek-v4.1-flash-free"
+_EARLIER_TURN_END_LINE = "ended:1792575895 kind:FAILED native_type:APIError\n"
+_PERMISSION_REJECTED_MESSAGE = "The user rejected permission to use this specific tool call."
+_QUESTION_REJECTED_MESSAGE = "The user dismissed this question"
+_ABORTED_ERROR = {"name": "MessageAbortedError", "data": {"message": "Aborted"}}
+_API_ERROR = {
+    "name": "APIError",
+    "data": {"message": "Internal server error", "statusCode": 500, "isRetryable": False},
+}
+_AUTH_ERROR = {"name": "ProviderAuthError", "data": {"providerID": _PROVIDER_ID, "message": "Missing API key"}}
+_MODEL_NOT_FOUND_ERROR = {"name": "UnknownError", "data": {"message": "Model not found: opencode/missing-model."}}
+_CONTEXT_OVERFLOW_ERROR = {"name": "ContextOverflowError", "data": {"message": "prompt is too long"}}
+_TASK_INPUT = {"prompt": "Find the README", "description": "Find the README", "subagent_type": "general"}
+
+
+def _session_created(session_id: str, parent_id: str | None = None) -> dict[str, Any]:
+    info: dict[str, Any] = {
+        "id": session_id,
+        "slug": session_id,
+        "projectID": "prj_work",
+        "directory": "/work",
+        "title": "New session",
+        "version": "1.19.5",
+        "time": {"created": 500, "updated": 500},
+    }
+    if parent_id is not None:
+        info["parentID"] = parent_id
+    return {"type": "session.created", "properties": {"sessionID": session_id, "info": info}}
+
+
+def _went_busy(session_id: str = _ROOT) -> dict[str, Any]:
+    return {"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "busy"}}}
+
+
+def _went_retrying() -> dict[str, Any]:
+    status = {"type": "retry", "attempt": 1, "message": "Overloaded", "next": 2000}
+    return {"type": "session.status", "properties": {"sessionID": _ROOT, "status": status}}
+
+
+def _went_idle(session_id: str = _ROOT) -> list[dict[str, Any]]:
+    return [
+        {"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "idle"}}},
+        {"type": "session.idle", "properties": {"sessionID": session_id}},
+    ]
+
+
+def _message_updated(info: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "message.updated", "properties": {"sessionID": info["sessionID"], "info": info}}
+
+
+def _prompt(message_id: str = _PROMPT_ID, created: int = 1000, session_id: str = _ROOT) -> dict[str, Any]:
+    return _message_updated(
+        {
+            "id": message_id,
+            "sessionID": session_id,
+            "role": "user",
+            "time": {"created": created},
+            "agent": "build",
+            "model": {"providerID": _PROVIDER_ID, "modelID": _MODEL_ID},
+        }
+    )
+
+
+def _reply(
+    message_id: str = _REPLY_ID, created: int = 2000, parent_id: str = _PROMPT_ID, **fields: Any
+) -> dict[str, Any]:
+    return _message_updated(
+        {
+            "id": message_id,
+            "sessionID": _ROOT,
+            "role": "assistant",
+            "time": {"created": created},
+            "parentID": parent_id,
+            "modelID": _MODEL_ID,
+            "providerID": _PROVIDER_ID,
+            "mode": "build",
+            "agent": "build",
+            "path": {"cwd": "/work", "root": "/work"},
+            "cost": 0,
+            "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+            **fields,
+        }
+    )
+
+
+def _completed_at(created: int) -> dict[str, int]:
+    return {"created": created, "completed": created + 500}
+
+
+def _step(
+    message_id: str, created: int, finish: str, *events: dict[str, Any], parent_id: str = _PROMPT_ID, **fields: Any
+) -> list[dict[str, Any]]:
+    """One model call: the reply is created, the call goes busy, ``events`` stream, then the finish and completion land."""
+    return [
+        _reply(message_id, created, parent_id, **fields),
+        _went_busy(),
+        *events,
+        _reply(message_id, created, parent_id, finish=finish, **fields),
+        _reply(message_id, created, parent_id, finish=finish, time=_completed_at(created), **fields),
+    ]
+
+
+def _tool_part(
+    part_id: str, state: dict[str, Any], message_id: str = _REPLY_ID, session_id: str = _ROOT, **fields: Any
+) -> dict[str, Any]:
+    part = {
+        "id": part_id,
+        "sessionID": session_id,
+        "messageID": message_id,
+        "type": "tool",
+        "callID": f"call_{part_id}",
+        "tool": "bash",
+        "state": state,
+        **fields,
+    }
+    return {"type": "message.part.updated", "properties": {"sessionID": session_id, "part": part, "time": 2100}}
+
+
+def _running(**fields: Any) -> dict[str, Any]:
+    return {"status": "running", "input": {"command": "ls"}, "time": {"start": 2100}, **fields}
+
+
+def _completed(**fields: Any) -> dict[str, Any]:
+    return {
+        "status": "completed",
+        "input": {"command": "ls"},
+        "output": "README.md\n",
+        "title": "ls",
+        "metadata": {},
+        "time": {"start": 2100, "end": 2200},
+        **fields,
+    }
+
+
+def _failed(error: str, **fields: Any) -> dict[str, Any]:
+    return {
+        "status": "error",
+        "input": {"command": "ls"},
+        "error": error,
+        "time": {"start": 2100, "end": 2200},
+        **fields,
+    }
+
+
+def _session_error(error: dict[str, Any], session_id: str = _ROOT) -> dict[str, Any]:
+    return {"type": "session.error", "properties": {"sessionID": session_id, "error": error}}
+
+
+def _permission_asked(part_id: str, message_id: str = _REPLY_ID, session_id: str = _ROOT) -> dict[str, Any]:
+    request = {
+        "id": "per_1",
+        "sessionID": session_id,
+        "permission": "bash",
+        "patterns": ["ls"],
+        "metadata": {},
+        "always": ["ls *"],
+        "tool": {"messageID": message_id, "callID": f"call_{part_id}"},
+    }
+    return {"type": "permission.asked", "properties": request}
+
+
+def _permission_rejected(session_id: str = _ROOT) -> dict[str, Any]:
+    return _permission_reply("per_1", session_id, reply="reject")
+
+
+def _question_asked(part_id: str, message_id: str = _REPLY_ID, session_id: str = _ROOT) -> dict[str, Any]:
+    question = {
+        "question": "Which file?",
+        "header": "File",
+        "options": [{"label": "a.txt", "description": "The first"}],
+    }
+    request = {
+        "id": "que_1",
+        "sessionID": session_id,
+        "questions": [question],
+        "tool": {"messageID": message_id, "callID": f"call_{part_id}"},
+    }
+    return {"type": "question.asked", "properties": request}
+
+
+def _question_rejected(session_id: str = _ROOT) -> dict[str, Any]:
+    return {"type": "question.rejected", "properties": {"sessionID": session_id, "requestID": "que_1"}}
+
+
+def _compaction_prompt(message_id: str, created: int, is_auto: bool) -> list[dict[str, Any]]:
+    part = {
+        "id": f"prt_{message_id}",
+        "sessionID": _ROOT,
+        "messageID": message_id,
+        "type": "compaction",
+        "auto": is_auto,
+    }
+    return [
+        _prompt(message_id, created),
+        {"type": "message.part.updated", "properties": {"sessionID": _ROOT, "part": part, "time": created}},
+    ]
+
+
+_COMPACTED: dict[str, Any] = {"type": "session.compacted", "properties": {"sessionID": _ROOT}}
+
+
+_TURN_OPENING: list[dict[str, Any]] = [_session_created(_ROOT), _prompt(), _went_busy()]
+# The loop's next iteration goes busy, finds the last reply final and leaves the loop.
+_LOOP_EXIT: list[dict[str, Any]] = [_went_busy(), *_went_idle()]
+
+
+def _child_reply(**fields: Any) -> dict[str, Any]:
+    return _reply("msg_child_reply", 2150, "msg_child_prompt", sessionID=_CHILD, **fields)
+
+
+def _subtask_stopped(*child_events: dict[str, Any]) -> list[dict[str, Any]]:
+    """A stop during a subtask whose child session has emitted ``child_events``; the reply stays `tool-calls`."""
+    return [
+        *_TURN_OPENING,
+        _reply(agent="general", mode="general"),
+        _tool_part("prt_task", _running(input=_TASK_INPUT), tool="task"),
+        _session_created(_CHILD, _ROOT),
+        _prompt("msg_child_prompt", 2100, _CHILD),
+        _went_busy(_CHILD),
+        _child_reply(),
+        _went_busy(_CHILD),
+        *child_events,
+        _reply(agent="general", mode="general", finish="tool-calls", time=_completed_at(2000)),
+        _tool_part("prt_task", _failed("Cancelled", input=_TASK_INPUT), tool="task"),
+        *_went_idle(),
+    ]
+
+
+def _kind_and_native_type(state: Path) -> tuple[TurnEndKind, str] | None:
+    turn_end = read_turn_end_in(state)
+    return None if turn_end is None else (turn_end.kind, turn_end.native_type)
+
+
+def _seed_earlier_turn_end(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(exist_ok=True)
+    (state_dir / TURN_END_FILE_NAME).write_text(_EARLIER_TURN_END_LINE)
+
+
+def test_a_root_turn_ending_on_a_final_reply_records_completed_with_its_finish(tmp_path: Path) -> None:
+    started_at = datetime.now(timezone.utc)
+    state = _run_plugin(
+        tmp_path,
+        [
+            *_TURN_OPENING,
+            *_step(
+                "msg_tool_step", 2000, "tool-calls", _tool_part("prt_ls", _completed(), message_id="msg_tool_step")
+            ),
+            _went_busy(),
+            *_step(_REPLY_ID, 3000, "stop"),
+            *_LOOP_EXIT,
+        ],
+    )
+    turn_end = read_turn_end_in(state)
+    assert turn_end is not None
+    assert (turn_end.kind, turn_end.native_type) == (TurnEndKind.COMPLETED, "stop")
+    assert started_at - timedelta(seconds=1) <= turn_end.ended_at <= datetime.now(timezone.utc)
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_kind"),
+    [
+        pytest.param(_ABORTED_ERROR, TurnEndKind.INTERRUPTED, id="aborted"),
+        pytest.param(_API_ERROR, TurnEndKind.FAILED, id="api-error"),
+        pytest.param(_AUTH_ERROR, TurnEndKind.FAILED, id="auth-error"),
+    ],
+)
+def test_a_root_session_error_ending_the_turn_records_its_kind_and_name(
+    tmp_path: Path, error: dict[str, Any], expected_kind: TurnEndKind
+) -> None:
+    """opencode publishes the error and goes idle, then saves the error on the reply and goes idle again."""
+    state = _run_plugin(
+        tmp_path,
+        [
+            *_TURN_OPENING,
+            _reply(),
+            _went_busy(),
+            _session_error(error),
+            *_went_idle(),
+            _reply(error=error, time=_completed_at(2000)),
+            *_went_idle(),
+        ],
+    )
+    assert _kind_and_native_type(state) == (expected_kind, error["name"])
+
+
+def test_a_failure_before_the_first_reply_records_failed(tmp_path: Path) -> None:
+    """A model opencode cannot find fails the turn with an UnknownError before any reply exists."""
+    state = _run_plugin(tmp_path, [*_TURN_OPENING, _session_error(_MODEL_NOT_FOUND_ERROR), *_went_idle()])
+    assert _kind_and_native_type(state) == (TurnEndKind.FAILED, "UnknownError")
+
+
+def test_a_reply_saved_with_an_abort_error_records_interrupted(tmp_path: Path) -> None:
+    """A stop before the model call saves MessageAbortedError on the reply without publishing a session error."""
+    state = _run_plugin(
+        tmp_path,
+        [*_TURN_OPENING, _reply(), _reply(error=_ABORTED_ERROR, time=_completed_at(2000)), *_went_idle()],
+    )
+    assert _kind_and_native_type(state) == (TurnEndKind.INTERRUPTED, "MessageAbortedError")
+
+
+def test_a_final_reply_with_finish_error_records_failed(tmp_path: Path) -> None:
+    """A provider can end a reply with finish `error` and no error object, e.g. gemini's MALFORMED_FUNCTION_CALL."""
+    state = _run_plugin(tmp_path, [*_TURN_OPENING, *_step(_REPLY_ID, 2000, "error"), *_LOOP_EXIT])
+    assert _kind_and_native_type(state) == (TurnEndKind.FAILED, "error")
+
+
+def test_tool_calls_opencode_does_not_answer_leave_the_reply_final(tmp_path: Path) -> None:
+    """After a retry, cleanup marks the first attempt's tool call interrupted; a provider-executed call needs no answer."""
+    state = _run_plugin(
+        tmp_path,
+        [
+            *_TURN_OPENING,
+            *_step(
+                _REPLY_ID,
+                2000,
+                "stop",
+                _tool_part("prt_orphan", _running()),
+                _went_retrying(),
+                _tool_part("prt_provider", _completed(), metadata={"providerExecuted": True}),
+                _tool_part("prt_orphan", _failed("Tool execution aborted", metadata={"interrupted": True})),
+            ),
+            *_LOOP_EXIT,
+        ],
+    )
+    assert _kind_and_native_type(state) == (TurnEndKind.COMPLETED, "stop")
+
+
+@pytest.mark.parametrize("finish", ["tool-calls", "stop"])
+@pytest.mark.parametrize(
+    ("asked", "rejected", "tool_error", "error_name"),
+    [
+        pytest.param(
+            _permission_asked("prt_declined"),
+            _permission_rejected(),
+            _PERMISSION_REJECTED_MESSAGE,
+            "PermissionRejectedError",
+            id="permission",
+        ),
+        pytest.param(
+            _question_asked("prt_declined"),
+            _question_rejected(),
+            _QUESTION_REJECTED_MESSAGE,
+            "QuestionRejectedError",
+            id="question",
+        ),
+    ],
+)
+def test_a_declined_root_tool_ending_the_turn_records_interrupted(
+    tmp_path: Path,
+    asked: dict[str, Any],
+    rejected: dict[str, Any],
+    tool_error: str,
+    error_name: str,
+    finish: str,
+) -> None:
+    """opencode stops the turn on a declined tool; most providers report the reply's finish as `tool-calls`, some `stop`."""
+    state = _run_plugin(
+        tmp_path,
+        [
+            *_TURN_OPENING,
+            *_step(
+                _REPLY_ID,
+                2000,
+                finish,
+                _tool_part("prt_declined", _running()),
+                asked,
+                rejected,
+                _tool_part("prt_declined", _failed(tool_error)),
+            ),
+            *_went_idle(),
+        ],
+    )
+    assert _kind_and_native_type(state) == (TurnEndKind.INTERRUPTED, error_name)
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        pytest.param(
+            _subtask_stopped(
+                _session_error(_ABORTED_ERROR, _CHILD),
+                *_went_idle(_CHILD),
+                _child_reply(error=_ABORTED_ERROR, time=_completed_at(2150)),
+                *_went_idle(_CHILD),
+            ),
+            id="stop-during-a-subtask",
+        ),
+        pytest.param(
+            _subtask_stopped(
+                _tool_part("prt_child_bash", _running(), "msg_child_reply", _CHILD),
+                _tool_part("prt_child_question", _running(input={}), "msg_child_reply", _CHILD, tool="question"),
+                _permission_asked("prt_child_bash", "msg_child_reply", _CHILD),
+                _question_asked("prt_child_question", "msg_child_reply", _CHILD),
+                _permission_rejected(_CHILD),
+                _question_rejected(_CHILD),
+                _tool_part("prt_child_bash", _failed(_PERMISSION_REJECTED_MESSAGE), "msg_child_reply", _CHILD),
+                _tool_part(
+                    "prt_child_question",
+                    _failed(_QUESTION_REJECTED_MESSAGE, input={}),
+                    "msg_child_reply",
+                    _CHILD,
+                    tool="question",
+                ),
+                _child_reply(finish="tool-calls", time=_completed_at(2150)),
+                *_went_idle(_CHILD),
+            ),
+            id="stop-during-a-subtask-after-its-session-declined-tools",
+        ),
+        pytest.param(
+            [
+                *_TURN_OPENING,
+                *_step(_REPLY_ID, 2000, "tool-calls", _tool_part("prt_ls", _completed())),
+                _went_busy(),
+                *_went_idle(),
+            ],
+            id="stop-between-steps",
+        ),
+        pytest.param(
+            [*_TURN_OPENING, *_step(_REPLY_ID, 2000, "unknown"), _went_busy(), *_went_idle()],
+            id="stop-after-finish-unknown",
+        ),
+        pytest.param(
+            [
+                *_TURN_OPENING,
+                *_step(_REPLY_ID, 2000, "stop", _tool_part("prt_ls", _completed())),
+                _went_busy(),
+                *_went_idle(),
+            ],
+            id="stop-after-a-final-finish-with-a-tool-call-to-answer",
+        ),
+        pytest.param(
+            [
+                _session_created(_ROOT),
+                _prompt("msg_earlier_prompt", 100),
+                _reply("msg_earlier_reply", 200, "msg_earlier_prompt", finish="stop", time=_completed_at(200)),
+                _prompt(),
+                _went_busy(),
+                *_went_idle(),
+            ],
+            id="stop-before-the-first-reply",
+        ),
+        pytest.param(
+            [
+                *_TURN_OPENING,
+                *_step(
+                    "msg_tool_step",
+                    2000,
+                    "tool-calls",
+                    _tool_part("prt_declined", _running(), message_id="msg_tool_step"),
+                    _permission_asked("prt_declined", "msg_tool_step"),
+                    _permission_rejected(),
+                    _tool_part(
+                        "prt_declined",
+                        _failed(f"{_PERMISSION_REJECTED_MESSAGE[:-1]} with the following feedback: use git ls-files"),
+                        message_id="msg_tool_step",
+                    ),
+                ),
+                _went_busy(),
+                *_step(_REPLY_ID, 3000, "tool-calls"),
+                _went_busy(),
+                *_went_idle(),
+            ],
+            id="declined-with-feedback-in-an-earlier-step",
+        ),
+        pytest.param(
+            [
+                _session_created(_ROOT),
+                _went_busy(),
+                _prompt("msg_shell_prompt", 1000),
+                _reply("msg_shell_reply", 1100, "msg_shell_prompt"),
+                _tool_part("prt_shell", _running(), message_id="msg_shell_reply"),
+                _reply("msg_shell_reply", 1100, "msg_shell_prompt", time=_completed_at(1100)),
+                _tool_part("prt_shell", _completed(), message_id="msg_shell_reply"),
+                *_went_idle(),
+            ],
+            id="shell-command",
+        ),
+    ],
+)
+def test_a_turn_without_evidence_of_how_it_ended_removes_the_last_turn_end_and_records_nothing(
+    tmp_path: Path, events: list[dict[str, Any]]
+) -> None:
+    _seed_earlier_turn_end(tmp_path)
+    state = _run_plugin(tmp_path, events)
+    assert not (state / TURN_END_FILE_NAME).exists()
+
+
+def test_a_compaction_records_the_end_of_its_own_turn(tmp_path: Path) -> None:
+    """`/compact` adds a compaction prompt and runs the loop, which replies with a summary."""
+    _seed_earlier_turn_end(tmp_path)
+    state = _run_plugin(
+        tmp_path,
+        [
+            _session_created(_ROOT),
+            *_compaction_prompt("msg_compaction", 1000, is_auto=False),
+            _went_busy(),
+            *_step(
+                "msg_summary",
+                2000,
+                "stop",
+                parent_id="msg_compaction",
+                mode="compaction",
+                agent="compaction",
+                summary=True,
+            ),
+            _COMPACTED,
+            *_LOOP_EXIT,
+        ],
+    )
+    assert _kind_and_native_type(state) == (TurnEndKind.COMPLETED, "stop")
+
+
+# Records, at each removal of the `active` marker, whether `turn_end` exists yet.
+_ACTIVE_CLEAR_PROBE_MJS = (
+    """
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+const stateDir = process.env.MNGR_AGENT_STATE_DIR;
+const rmSync = fs.rmSync;
+fs.rmSync = (path, options) => {
+  if (path === `${stateDir}/active`) {
+    fs.appendFileSync(`${stateDir}/../turn_end_at_active_clear`, `${fs.existsSync(`${stateDir}/turn_end`)}\\n`);
+  }
+  return rmSync(path, options);
+};
+syncBuiltinESMExports();
+"""
+    + _DRIVER_MJS
+)
+
+
+def test_the_turn_end_is_written_before_active_is_cleared(tmp_path: Path) -> None:
+    _run_plugin(
+        tmp_path,
+        [*_TURN_OPENING, *_step(_REPLY_ID, 2000, "stop"), *_LOOP_EXIT],
+        driver=_ACTIVE_CLEAR_PROBE_MJS,
+    )
+    assert (tmp_path / "turn_end_at_active_clear").read_text().splitlines() == ["true", "true"]
+
+
+def test_the_turn_end_line_encodes_its_native_type_as_the_record_format_requires(tmp_path: Path) -> None:
+    """No opencode 1.19.5 name needs encoding, so this name is made up to pin the record format's encoding."""
+    error = {"name": "Error (retry)", "data": {"message": "failed"}}
+    state = _run_plugin(tmp_path, [*_TURN_OPENING, _session_error(error), *_went_idle()])
+    assert (state / TURN_END_FILE_NAME).read_text().split(" ", 1)[1] == "kind:FAILED native_type:Error%20%28retry%29\n"
+
+
+def test_a_failed_turn_end_write_leaves_no_staging_file(tmp_path: Path) -> None:
+    """A `turn_end` the plugin cannot replace (here a directory) fails the rename, and the staged line is removed."""
+    state_dir = tmp_path / "state"
+    (state_dir / TURN_END_FILE_NAME / "occupied").mkdir(parents=True)
+    _run_plugin(tmp_path, [*_TURN_OPENING, *_step(_REPLY_ID, 2000, "stop"), *_LOOP_EXIT])
+    assert [path.name for path in state_dir.iterdir() if path.name.endswith(".tmp")] == []
+
+
+def test_a_session_error_the_turn_recovers_from_does_not_end_it(tmp_path: Path) -> None:
+    """opencode compacts after a ContextOverflowError and goes busy again rather than idle."""
+    state = _run_plugin(
+        tmp_path,
+        [
+            *_TURN_OPENING,
+            _reply("msg_overflowed", 2000),
+            _went_busy(),
+            _session_error(_CONTEXT_OVERFLOW_ERROR),
+            _reply("msg_overflowed", 2000, time=_completed_at(2000)),
+            *_compaction_prompt("msg_compaction", 2600, is_auto=True),
+            _went_busy(),
+            *_step(
+                "msg_summary",
+                2700,
+                "stop",
+                parent_id="msg_compaction",
+                mode="compaction",
+                agent="compaction",
+                summary=True,
+            ),
+            _prompt("msg_continue", 3300),
+            _COMPACTED,
+            _went_busy(),
+            *_step(_REPLY_ID, 3400, "stop", parent_id="msg_continue"),
+            *_LOOP_EXIT,
+        ],
+    )
+    assert _kind_and_native_type(state) == (TurnEndKind.COMPLETED, "stop")
+
+
+def test_a_child_session_neither_ends_nor_labels_the_root_turn(tmp_path: Path) -> None:
+    state = _run_plugin(
+        tmp_path,
+        [
+            *_TURN_OPENING,
+            *_step(
+                "msg_task_step",
+                2000,
+                "tool-calls",
+                _tool_part("prt_task", _running(input=_TASK_INPUT), message_id="msg_task_step", tool="task"),
+                _session_created(_CHILD, _ROOT),
+                _prompt("msg_child_prompt", 2100, _CHILD),
+                _went_busy(_CHILD),
+                _child_reply(),
+                _went_busy(_CHILD),
+                _session_error(_API_ERROR, _CHILD),
+                *_went_idle(_CHILD),
+                _child_reply(error=_API_ERROR, time=_completed_at(2150)),
+                *_went_idle(_CHILD),
+                _tool_part("prt_task", _completed(input=_TASK_INPUT), message_id="msg_task_step", tool="task"),
+            ),
+            _went_busy(),
+            *_step(_REPLY_ID, 3000, "stop"),
+            *_LOOP_EXIT,
+        ],
+    )
+    assert _kind_and_native_type(state) == (TurnEndKind.COMPLETED, "stop")
+
+
+def test_a_root_turn_opening_removes_the_last_turn_end(tmp_path: Path) -> None:
+    _seed_earlier_turn_end(tmp_path)
+    state = _run_plugin(tmp_path, [_session_created(_ROOT), _prompt(), _went_busy()])
+    assert not (state / TURN_END_FILE_NAME).exists()
+
+
+def test_an_idle_without_an_open_turn_keeps_the_last_turn_end(tmp_path: Path) -> None:
+    """A restarted server, or a stop while idle, goes idle without opening a turn."""
+    _seed_earlier_turn_end(tmp_path)
+    state = _run_plugin(
+        tmp_path,
+        [
+            _session_created(_ROOT),
+            _prompt(),
+            _reply(finish="stop", time=_completed_at(2000)),
+            *_went_idle(),
+        ],
+    )
+    assert (state / TURN_END_FILE_NAME).read_text() == _EARLIER_TURN_END_LINE

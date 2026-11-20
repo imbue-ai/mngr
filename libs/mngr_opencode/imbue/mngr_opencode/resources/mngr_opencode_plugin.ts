@@ -12,7 +12,7 @@
 // when MNGR_OPENCODE_ROLE=server -- the role mngr sets exclusively on the serve
 // invocation. In every other process it is inert.
 //
-// In the server process it does four things, keyed off $MNGR_AGENT_STATE_DIR:
+// In the server process it does the following, keyed off $MNGR_AGENT_STATE_DIR:
 //
 //   1. Active marker -> RUNNING vs WAITING. BaseAgent.get_lifecycle_state reads
 //      the presence of $MNGR_AGENT_STATE_DIR/active as "actively working". The
@@ -34,6 +34,10 @@
 //      -- verified against 1.16.2 and 1.17.7. The @opencode-ai/sdk type stubs disagree,
 //      naming them `permission.updated`/`permissionID`. The two handlers accept either,
 //      since opencode self-upgrades.)
+//
+//   1c. Turn end. At the first root idle after a root busy it writes how the turn
+//      ended to $MNGR_AGENT_STATE_DIR/turn_end, e.g. `ended:1792575895 kind:FAILED
+//      native_type:APIError`, and a root busy or retry removes it.
 //
 //   2. Raw transcript. Each message.updated / message.part.updated event is
 //      appended verbatim (as {type, properties}) to
@@ -79,6 +83,17 @@ const COMMON_TRANSCRIPT_EMITTER = "opencode/common_transcript"
 const ROLE_ENV_VAR = "MNGR_OPENCODE_ROLE"
 const SERVER_ROLE = "server"
 const EMIT_COMMON_ENV_VAR = "MNGR_OPENCODE_EMIT_COMMON"
+// Keep in sync with TURN_END_FILE_NAME in imbue/mngr/hosts/background_tasks.py.
+const TURN_END_FILENAME = "turn_end"
+// Keep in sync with TurnEndKind in imbue/mngr/primitives.py.
+type TurnEndKind = "COMPLETED" | "FAILED" | "INTERRUPTED"
+const ABORTED_ERROR_NAME = "MessageAbortedError"
+// The finishes after which opencode runs another step rather than end the turn.
+const NON_FINAL_FINISHES = new Set(["tool-calls", "unknown"])
+const ERROR_FINISH = "error"
+// The errors opencode fails a declined tool with, which end the turn.
+const PERMISSION_REJECTED_ERROR_NAME = "PermissionRejectedError"
+const QUESTION_REJECTED_ERROR_NAME = "QuestionRejectedError"
 
 // The ATIF revision the emitted records follow. Kept in sync with
 // PINNED_ATIF_SCHEMA_VERSION in imbue/mngr/agents/common_transcript_records.py.
@@ -152,6 +167,31 @@ const _toolCallFromPart = (part: any): Record<string, unknown> => ({
   arguments: _argumentsObject(part?.state?.input),
 })
 
+// opencode's own message order: creation time, then id.
+const _isLaterMessage = (info: any, other: any): boolean => {
+  if (other === undefined) {
+    return true
+  }
+  const created = info?.time?.created ?? 0
+  const otherCreated = other?.time?.created ?? 0
+  return created !== otherCreated ? created > otherCreated : info.id > other.id
+}
+
+// A tool call opencode still sends back to the model; cleanup marks abandoned ones `interrupted`.
+const _isToolCallToAnswer = (part: any): boolean =>
+  part?.type === "tool" &&
+  !part?.metadata?.providerExecuted &&
+  !(part?.state?.status === "error" && part?.state?.metadata?.interrupted === true)
+
+// The record format's value encoding: every byte outside RFC 3986's unreserved set as %XX.
+const _encodeRecordValue = (text: string): string =>
+  encodeURIComponent(text).replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)
+
+const _errorTurnEnd = (errorName: string): [TurnEndKind, string] => [
+  errorName === ABORTED_ERROR_NAME ? "INTERRUPTED" : "FAILED",
+  errorName,
+]
+
 const _toolStateOutput = (state: any): { output: string; isError: boolean } => {
   if (!state || typeof state !== "object") {
     return { output: "", isError: false }
@@ -175,6 +215,7 @@ export const MngrLifecyclePlugin: Plugin = async () => {
   const permissionsWaitingPath = join(stateDir, PERMISSIONS_WAITING_FILENAME)
   const rawTranscriptPath = join(stateDir, RAW_TRANSCRIPT_RELATIVE_PATH)
   const commonTranscriptPath = join(stateDir, COMMON_TRANSCRIPT_RELATIVE_PATH)
+  const turnEndPath = join(stateDir, TURN_END_FILENAME)
   const emitCommon = process.env[EMIT_COMMON_ENV_VAR] === "1"
 
   // parentID per session id, learned from session.created/updated (which carry
@@ -435,11 +476,84 @@ export const MngrLifecyclePlugin: Plugin = async () => {
     }
   }
 
+  // Whether a root turn has opened since the last root idle.
+  let isRootTurnOpen = false
+  // The name of the last root `session.error` since the root last went busy.
+  let rootErrorName: string | undefined = undefined
+  // The error of the last root tool declined since the root last went busy.
+  let rootRejectionName: string | undefined = undefined
+
+  const openRootTurn = (): void => {
+    isRootTurnOpen = true
+    rootErrorName = undefined
+    rootRejectionName = undefined
+    try {
+      rmSync(turnEndPath, { force: true })
+    } catch {
+      // best-effort
+    }
+  }
+
+  // The kind and native type of the root turn's end, or undefined without evidence of how it ended.
+  const rootTurnEnd = (sessionId: string): [TurnEndKind, string] | undefined => {
+    if (rootErrorName !== undefined) {
+      return _errorTurnEnd(rootErrorName)
+    }
+    let prompt: any = undefined
+    let reply: any = undefined
+    for (const info of messageById.values()) {
+      if (info?.sessionID !== sessionId) {
+        continue
+      }
+      if (info.role === "user" && _isLaterMessage(info, prompt)) {
+        prompt = info
+      } else if (info.role === "assistant" && _isLaterMessage(info, reply)) {
+        reply = info
+      }
+    }
+    if (prompt !== undefined && reply?.parentID === prompt.id) {
+      if (reply.error) {
+        return _errorTurnEnd(reply.error.name ?? "")
+      }
+      // opencode's own loop-exit test.
+      const finish = reply.finish
+      const parts = [...(partsByMessage.get(reply.id)?.values() ?? [])]
+      if (typeof finish === "string" && finish && !NON_FINAL_FINISHES.has(finish) && !parts.some(_isToolCallToAnswer)) {
+        return [finish === ERROR_FINISH ? "FAILED" : "COMPLETED", finish]
+      }
+    }
+    return rootRejectionName === undefined ? undefined : ["INTERRUPTED", rootRejectionName]
+  }
+
+  const writeTurnEnd = (sessionId: string): void => {
+    const turnEnd = rootTurnEnd(sessionId)
+    if (turnEnd === undefined) {
+      return
+    }
+    const [kind, nativeType] = turnEnd
+    const nativeTypeToken = nativeType ? ` native_type:${_encodeRecordValue(nativeType)}` : ""
+    const stagingPath = join(stateDir, `.${TURN_END_FILENAME}.${process.pid}.tmp`)
+    try {
+      writeFileSync(stagingPath, `ended:${Math.floor(Date.now() / 1000)} kind:${kind}${nativeTypeToken}\n`)
+      renameSync(stagingPath, turnEndPath)
+    } catch {
+      try {
+        rmSync(stagingPath, { force: true })
+      } catch {
+        // best-effort
+      }
+    }
+  }
+
   // A session finished its turn. Newer opencode reports this as a `session.status`
   // carrying an idle status; older builds emit the now-deprecated standalone
   // `session.idle`. opencode self-upgrades, so both arms route here.
   const handleTurnIdle = (sessionId: string): void => {
     if (isRootSession(sessionId)) {
+      if (isRootTurnOpen) {
+        isRootTurnOpen = false
+        writeTurnEnd(sessionId)
+      }
       clearMarkersForRootIdle()
     }
     rebuildCommon()
@@ -459,6 +573,9 @@ export const MngrLifecyclePlugin: Plugin = async () => {
         const status = event.properties.status.type
         if (status === "busy" || status === "retry") {
           touchMarker()
+          if (isRootSession(event.properties.sessionID)) {
+            openRootTurn()
+          }
         } else if (status === "idle") {
           handleTurnIdle(event.properties.sessionID)
         }
@@ -466,6 +583,13 @@ export const MngrLifecyclePlugin: Plugin = async () => {
       }
       if (type === "session.idle") {
         handleTurnIdle(event.properties.sessionID)
+        return
+      }
+      if (type === "session.error") {
+        const sessionId = event.properties.sessionID
+        if (sessionId && isRootSession(sessionId)) {
+          rootErrorName = event.properties.error?.name ?? ""
+        }
         return
       }
 
@@ -485,6 +609,17 @@ export const MngrLifecyclePlugin: Plugin = async () => {
       if (type === "permission.replied") {
         pendingPermissions.delete(event.properties.requestID ?? event.properties.permissionID)
         refreshPermissionsMarker()
+        const sessionId = event.properties.sessionID
+        if (event.properties.reply === "reject" && sessionId && isRootSession(sessionId)) {
+          rootRejectionName = PERMISSION_REJECTED_ERROR_NAME
+        }
+        return
+      }
+      if (type === "question.rejected") {
+        const sessionId = event.properties.sessionID
+        if (sessionId && isRootSession(sessionId)) {
+          rootRejectionName = QUESTION_REJECTED_ERROR_NAME
+        }
         return
       }
 
