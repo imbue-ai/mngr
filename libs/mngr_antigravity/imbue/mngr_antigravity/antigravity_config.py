@@ -32,10 +32,11 @@ This module holds the pure, host-agnostic pieces of that scheme:
   lifecycle -- it maintains the ``active`` marker (RUNNING vs WAITING), records
   the root conversation, and fires the tmux message-submission signal. This is
   mngr-owned and applied last (winning over ``settings_overrides``).
-* The transcript-scoping ``PreInvocation`` hook (``build_antigravity_hooks_config``),
-  written to the per-agent ``$HOME/.gemini/config/hooks.json`` (agy executes
-  hooks from there with no trust prompt and no ``--add-dir``). It only captures
-  conversation ids (including subagents', which ``statusLine`` does not surface).
+* The hooks (``build_antigravity_hooks_config``), written to the per-agent
+  ``$HOME/.gemini/config/hooks.json`` (agy executes hooks from there with no
+  trust prompt and no ``--add-dir``). They capture conversation ids (including
+  subagents', which ``statusLine`` does not surface) and record how the root
+  conversation's turn ended.
 
 Trust: agy suppresses its first-launch "Do you trust this folder?" dialog for
 any path present in its ``settings.json`` ``trustedWorkspaces`` array. The
@@ -309,10 +310,6 @@ def build_onboarding_seed() -> dict[str, Any]:
     }
 
 
-# =============================================================================
-# Hook config builder
-# =============================================================================
-
 # Top-level key for mngr's named hook group in the per-agent ``hooks.json``.
 # agy keys hooks.json by hook *name* (each name maps to per-event handler
 # lists); a single mngr-owned name keeps the file self-contained and easy to
@@ -344,9 +341,8 @@ CAPTURE_CONVERSATION_ID_SCRIPT_NAME: str = "capture_conversation_id.sh"
 # Per-agent file (in ``$MNGR_AGENT_STATE_DIR``) recording the conversation ID of
 # the *root* agent. agy's ``statusLine`` payload always carries the root
 # ``conversation_id`` (never a subagent's, even while a subagent runs), so
-# ``statusline.sh`` writes it here on every state change. The only consumer is
-# the resume prelude in ``assemble_command``. The shell script hardcodes this
-# same literal, so keep them in sync.
+# ``statusline.sh`` writes it here on every state change. The shell scripts
+# hardcode this same literal, so keep them in sync.
 ROOT_CONVERSATION_FILENAME: str = "root_conversation"
 
 # Script (provisioned into ``$MNGR_AGENT_STATE_DIR/commands/``) that agy runs as
@@ -373,13 +369,18 @@ USER_STATUSLINE_COMMAND_FILENAME: str = "user_statusline_command"
 # its own (agy shows working/idle itself) and emits only a composed user statusLine.
 _STATUSLINE_COMMAND: str = f'bash "$MNGR_AGENT_STATE_DIR/commands/{STATUSLINE_SCRIPT_NAME}"'
 
-# The lone ``PreInvocation`` handler: records the conversation ID from agy's hook
+# The ``PreInvocation`` handler that records the conversation ID from agy's hook
 # payload (delivered on stdin) into ``CONVERSATION_IDS_FILENAME`` for transcript
 # scoping. ``statusLine`` (not a hook) drives lifecycle; this hook only needs to
 # capture subagent ids, which the statusLine payload does not surface (it always
 # reports the root). ``$MNGR_AGENT_STATE_DIR`` expands in agy's shell at
 # hook-execution time.
 _CAPTURE_CONVERSATION_ID_COMMAND: str = f'bash "$MNGR_AGENT_STATE_DIR/commands/{CAPTURE_CONVERSATION_ID_SCRIPT_NAME}"'
+
+# Script (provisioned into ``$MNGR_AGENT_STATE_DIR/commands/``) that records the root turn's end in ``turn_end``.
+TURN_END_HOOK_SCRIPT_NAME: str = "turn_end_hook.sh"
+
+_TURN_END_HOOK_COMMAND: str = f'bash "$MNGR_AGENT_STATE_DIR/commands/{TURN_END_HOOK_SCRIPT_NAME}"'
 
 
 @pure
@@ -428,7 +429,7 @@ def extract_statusline_command(statusline: Any) -> str | None:
 def build_antigravity_hooks_config() -> dict[str, Any]:
     """Build the per-agent ``hooks.json`` body for the antigravity agent.
 
-    Emits a single ``PreInvocation`` handler running
+    Emits a ``PreInvocation`` handler running
     ``capture_conversation_id.sh``, which reads agy's hook payload from stdin and
     records every distinct conversation ID this agent touches -- the root agent's
     and its subagents' -- into ``CONVERSATION_IDS_FILENAME``. That file is the
@@ -436,6 +437,9 @@ def build_antigravity_hooks_config() -> dict[str, Any]:
     Subagent ids are needed here precisely because the ``statusLine`` payload
     only ever reports the root conversation (so the hook is the only place
     subagent ids surface).
+
+    ``turn_end_hook.sh`` runs at ``PreInvocation`` and ``Stop`` to record how the
+    root conversation's turn ended (see ``TURN_END_HOOK_SCRIPT_NAME``).
 
     The agent's RUNNING/WAITING lifecycle and message-submission signal are NOT
     hooks: they are driven by the mngr-owned ``statusLine`` command
@@ -454,13 +458,17 @@ def build_antigravity_hooks_config() -> dict[str, Any]:
     through the per-agent ``settings.json`` ``permissions`` block or the
     ``--dangerously-skip-permissions`` CLI flag instead.
 
-    ``PreInvocation`` takes a flat list of handlers (its matcher is ignored). The
+    ``PreInvocation`` and ``Stop`` take a flat list of handlers (their matcher is ignored). The
     file is mngr-owned and rewritten from scratch each provision, so no
     merge-with-existing-content logic is needed.
     """
     mngr_hook: dict[str, Any] = {
         "PreInvocation": [
             {"type": "command", "command": _CAPTURE_CONVERSATION_ID_COMMAND},
+            {"type": "command", "command": f"{_TURN_END_HOOK_COMMAND} PreInvocation"},
+        ],
+        "Stop": [
+            {"type": "command", "command": f"{_TURN_END_HOOK_COMMAND} Stop"},
         ],
     }
     return {_MNGR_HOOK_NAME: mngr_hook}

@@ -16,8 +16,27 @@ from __future__ import annotations
 import os
 import sqlite3
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from typing import Final
+
+from imbue.mngr.primitives import TurnEndKind
+
+# The turn end kind turn_end_hook.sh records for each Stop terminationReason it maps.
+TURN_END_KIND_BY_TERMINATION_REASON: Final[Mapping[str, TurnEndKind]] = {
+    "NO_TOOL_CALL": TurnEndKind.COMPLETED,
+    "ERROR": TurnEndKind.FAILED,
+    "USER_CANCELED": TurnEndKind.INTERRUPTED,
+    "MAX_INVOCATIONS": TurnEndKind.INTERRUPTED,
+    "MAX_FORCED_INVOCATIONS": TurnEndKind.INTERRUPTED,
+    "MAX_TOKEN_BUDGET_EXCEEDED": TurnEndKind.INTERRUPTED,
+    "TERMINAL_STEP_TYPE": TurnEndKind.INTERRUPTED,
+    "TERMINAL_CUSTOM_HOOK": TurnEndKind.INTERRUPTED,
+    "INJECTED_RESPONSE": TurnEndKind.INTERRUPTED,
+    "EARLY_CONTINUE": TurnEndKind.INTERRUPTED,
+    "CHAINED": TurnEndKind.INTERRUPTED,
+}
 
 # CortexStepStatus / CortexStepSource values used by the builders.
 STATUS_DONE = 3

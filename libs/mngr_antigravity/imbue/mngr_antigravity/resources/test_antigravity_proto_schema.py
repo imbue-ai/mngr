@@ -1,4 +1,4 @@
-"""Release-marked verification that the transcript decoder's field map still matches agy.
+"""Release-marked checks that the transcript decoder's field map and turn_end_hook.sh's Stop fields still match agy.
 
 ``decode_agy_transcript.py`` walks agy's ``gemini_coder.Step`` protobuf by hard-coded field
 numbers and enum values recovered from the binary's embedded descriptors (see
@@ -28,6 +28,7 @@ import pytest
 from google.protobuf import descriptor_pb2
 
 from imbue.mngr_antigravity.resources import decode_agy_transcript as dat
+from imbue.mngr_antigravity.resources.testing import TURN_END_KIND_BY_TERMINATION_REASON
 
 # ty cannot see protobuf's dynamically generated descriptor classes (no stubs ship), though they
 # exist at runtime. Bind them once here so the walk below needs no per-line suppressions.
@@ -141,3 +142,17 @@ def test_decoder_field_map_matches_installed_antigravity_binary(tmp_path: Path) 
     step_status = enums["exa.cortex_pb.CortexStepStatus"]
     for number, name in dat._STEP_STATUS_NAMES.items():
         assert step_status[f"CORTEX_STEP_STATUS_{name}"] == number
+
+
+@pytest.mark.release
+@pytest.mark.harness_internals(harness="antigravity")
+def test_turn_end_hook_fields_and_termination_reasons_match_installed_antigravity_binary(tmp_path: Path) -> None:
+    """Every Stop field turn_end_hook.sh reads must exist in live agy, and it must map every termination reason agy defines."""
+    messages, enums = _index(_load_descriptors(tmp_path))
+
+    assert {"conversation_id", "last_user_input"} <= set(messages["exa.hooks_pb.HookArgsCommon"])
+    assert "termination_reason" in messages["exa.hooks_pb.StopHookArgs"]
+    reasons = {
+        name.removeprefix("EXECUTOR_TERMINATION_REASON_") for name in enums["exa.cortex_pb.ExecutorTerminationReason"]
+    }
+    assert set(TURN_END_KIND_BY_TERMINATION_REASON) == reasons - {"UNSPECIFIED"}

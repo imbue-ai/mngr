@@ -16,8 +16,7 @@
 # On each invocation this script:
 #   1. Parses `agent_state` and `conversation_id` (POSIX grep/sed only -- no jq;
 #      jq may be absent on remote hosts).
-#   2. Records the (root) `conversation_id` in `root_conversation` when present
-#      -- the only consumer is the resume prelude in assemble_command.
+#   2. Records the (root) `conversation_id` in `root_conversation` when present.
 #   3. Maintains the `active` marker BaseAgent reads for RUNNING/WAITING: active
 #      iff `agent_state` is NOT in {idle, initializing, authenticating, ""}
 #      (a denylist, so any present/future busy state counts as RUNNING; `idle`
@@ -71,7 +70,7 @@ conv_id=$(
 # reports the root id here (never a subagent's), so recording it unconditionally
 # keeps `root_conversation` pointed at the true root for resume.
 if [ -n "$conv_id" ]; then
-    printf '%s' "$conv_id" > "$root_file"
+    printf '%s' "$conv_id" > "$root_file.$$.tmp" && mv -f "$root_file.$$.tmp" "$root_file"
 fi
 
 # Parse the model agy reports and mirror it to the uniform model_state.json the workspace's

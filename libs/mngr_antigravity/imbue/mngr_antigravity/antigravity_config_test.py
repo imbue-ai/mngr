@@ -13,6 +13,7 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import STATUSLINE_SCRIPT_NAME
+from imbue.mngr_antigravity.antigravity_config import TURN_END_HOOK_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import build_antigravity_hooks_config
 from imbue.mngr_antigravity.antigravity_config import build_antigravity_statusline_settings
 from imbue.mngr_antigravity.antigravity_config import build_isolated_settings
@@ -84,11 +85,6 @@ def test_merge_trusted_workspace_promotes_non_list_value_to_fresh_array() -> Non
 
     assert merged is not None
     assert merged["trustedWorkspaces"] == ["/work/agent-1"]
-
-
-# =============================================================================
-# Per-agent settings + onboarding builders
-# =============================================================================
 
 
 def test_build_isolated_settings_layers_base_trust_and_overrides() -> None:
@@ -253,11 +249,6 @@ def test_read_antigravity_settings_returns_parsed_dict(
     assert parsed["enableTelemetry"] is False
 
 
-# =============================================================================
-# statusLine settings builder
-# =============================================================================
-
-
 def test_statusline_settings_emits_command_block() -> None:
     """The statusLine block runs statusline.sh, agy's source of truth for lifecycle.
 
@@ -300,38 +291,26 @@ def test_extract_statusline_command_returns_none_for_non_runnable(statusline: An
     assert extract_statusline_command(statusline) is None
 
 
-# =============================================================================
-# Hook config builder
-# =============================================================================
-
-
-def test_hooks_config_emits_only_conversation_id_capture_preinvocation() -> None:
-    """The lone hook is a single PreInvocation handler running capture_conversation_id.sh.
+def test_hooks_config_captures_conversation_ids_and_records_the_turn_end() -> None:
+    """PreInvocation captures conversation ids and removes the turn end; Stop records it.
 
     Lifecycle (RUNNING/WAITING) and message submission are driven by the
-    statusLine command, NOT hooks -- so the hooks config carries no marker
-    handler and no Stop block. The capture hook exists because the statusLine
-    payload only ever reports the root conversation, so subagent ids (needed for
-    transcript scoping) are surfaced only here.
+    statusLine command, NOT hooks -- so no hook touches the active marker.
     """
+    capture_command = f'bash "$MNGR_AGENT_STATE_DIR/commands/{CAPTURE_CONVERSATION_ID_SCRIPT_NAME}"'
+    turn_end_command = f'bash "$MNGR_AGENT_STATE_DIR/commands/{TURN_END_HOOK_SCRIPT_NAME}"'
+
     config = build_antigravity_hooks_config()
 
-    mngr = config["mngr"]
-    # Only PreInvocation remains -- no Stop block.
-    assert set(mngr) == {"PreInvocation"}
-    pre = mngr["PreInvocation"]
-    assert pre == [
-        {
-            "type": "command",
-            "command": f'bash "$MNGR_AGENT_STATE_DIR/commands/{CAPTURE_CONVERSATION_ID_SCRIPT_NAME}"',
+    assert config == {
+        "mngr": {
+            "PreInvocation": [
+                {"type": "command", "command": capture_command},
+                {"type": "command", "command": f"{turn_end_command} PreInvocation"},
+            ],
+            "Stop": [{"type": "command", "command": f"{turn_end_command} Stop"}],
         }
-    ]
-
-
-def test_hooks_config_emits_no_stop_handler() -> None:
-    """No Stop handler: clearing the active marker is the statusLine command's job."""
-    config = build_antigravity_hooks_config()
-    assert "Stop" not in config["mngr"]
+    }
 
 
 def test_hooks_config_never_emits_pretooluse() -> None:
@@ -340,11 +319,10 @@ def test_hooks_config_never_emits_pretooluse() -> None:
     agy's documented PreToolUse {"decision": "allow"} output does not actually
     gate the run_command confirmation dialog (verified live against agy 1.0.3),
     so permission auto-approval is wired through --dangerously-skip-permissions
-    in assemble_command instead. The hooks file only carries the capture handler.
+    in assemble_command instead.
     """
     config = build_antigravity_hooks_config()
     assert "PreToolUse" not in config["mngr"]
-    assert set(config["mngr"]) == {"PreInvocation"}
 
 
 def test_serialize_antigravity_hooks_round_trips() -> None:

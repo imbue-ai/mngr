@@ -43,6 +43,7 @@ from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SC
 from imbue.mngr_antigravity.antigravity_config import CONVERSATION_IDS_FILENAME
 from imbue.mngr_antigravity.antigravity_config import ROOT_CONVERSATION_FILENAME
 from imbue.mngr_antigravity.antigravity_config import STATUSLINE_SCRIPT_NAME
+from imbue.mngr_antigravity.antigravity_config import TURN_END_HOOK_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import build_onboarding_seed
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_conversations_dir
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_global_rules_path
@@ -1197,24 +1198,28 @@ def test_provision_writes_hooks_json_under_per_agent_home_config(
     assert hooks_path.exists()
 
 
-def test_provision_hooks_json_emits_only_conversation_id_capture(
+def test_provision_hooks_json_captures_conversation_ids_and_records_the_turn_end(
     antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path
 ) -> None:
-    """The lone hook is the PreInvocation conversation-id capture; no Stop block.
-
-    Lifecycle (RUNNING/WAITING) is driven by the statusLine command, so the
-    provisioned hooks config carries no marker handler and no Stop block. The
-    capture hook is present because the statusLine payload only reports the root
-    conversation.
-    """
+    """hooks.json runs the conversation-id capture and the turn-end hook, each from the commands dir."""
     agent = antigravity_agent_auto_dismiss
     _provision(agent)
     mngr = _read_hooks_json(agent)["mngr"]
-    assert set(mngr) == {"PreInvocation"}
-    assert (
-        mngr["PreInvocation"][0]["command"]
-        == f'bash "$MNGR_AGENT_STATE_DIR/commands/{CAPTURE_CONVERSATION_ID_SCRIPT_NAME}"'
-    )
+    turn_end_command = f'bash "$MNGR_AGENT_STATE_DIR/commands/{TURN_END_HOOK_SCRIPT_NAME}"'
+    assert [handler["command"] for handler in mngr["PreInvocation"]] == [
+        f'bash "$MNGR_AGENT_STATE_DIR/commands/{CAPTURE_CONVERSATION_ID_SCRIPT_NAME}"',
+        f"{turn_end_command} PreInvocation",
+    ]
+    assert [handler["command"] for handler in mngr["Stop"]] == [f"{turn_end_command} Stop"]
+
+
+def test_provision_installs_the_turn_end_hook_script(
+    antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path
+) -> None:
+    agent = antigravity_agent_auto_dismiss
+    _provision(agent)
+    script_path = agent._get_agent_dir() / "commands" / TURN_END_HOOK_SCRIPT_NAME
+    assert script_path.read_text() == (Path(__file__).parent / "resources" / TURN_END_HOOK_SCRIPT_NAME).read_text()
 
 
 def test_provision_settings_json_has_mngr_owned_statusline(

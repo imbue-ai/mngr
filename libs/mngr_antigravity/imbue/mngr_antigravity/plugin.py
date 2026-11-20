@@ -42,8 +42,8 @@ flow; ``antigravity-oauth-token`` is a symlink to the user's shared file token
 (auth) -- created even when that token doesn't exist yet, so the first agent's
 login writes *through* it to the shared path and authenticates every agent (agy
 writes the token in place; copy mode is available for full isolation); and
-``config/hooks.json`` holds the conversation-id capture hook (agy executes it
-from there directly -- no ``--add-dir``).
+``config/hooks.json`` holds mngr's hooks (agy executes them from there
+directly -- no ``--add-dir``).
 
 Lifecycle: agy invokes a configured ``statusLine`` command on every agent-state
 change (JSON payload on stdin), and ``statusline.sh`` is the single source of
@@ -55,11 +55,13 @@ message-submission signal. agy's top-level ``agent_state`` already aggregates
 subagent activity (stays ``working`` while a subagent runs), so this single
 state check captures the whole-turn busy/idle invariant on its own.
 
-Hooks: a single ``PreInvocation`` handler captures every conversation id (incl.
-subagents', which ``statusLine`` does not surface) for transcript scoping (see
-``build_antigravity_hooks_config``). Because the per-agent ``$HOME`` is
-unconditional, agy executes it from ``$HOME/.gemini/config/hooks.json`` directly
--- no ``--add-dir`` symlink workaround.
+Hooks: a ``PreInvocation`` handler captures every conversation id (incl.
+subagents', which ``statusLine`` does not surface) for transcript scoping, and
+``turn_end_hook.sh`` records how the root turn ended at ``PreInvocation`` and
+``Stop`` (see ``build_antigravity_hooks_config``). Because the per-agent
+``$HOME`` is unconditional, agy executes them from
+``$HOME/.gemini/config/hooks.json`` directly -- no ``--add-dir`` symlink
+workaround.
 
 Permissions: routed through the per-agent ``settings.json`` (a ``permissions``
 block in ``settings_overrides``) and/or ``--dangerously-skip-permissions``
@@ -165,6 +167,7 @@ from imbue.mngr_antigravity.antigravity_config import CONVERSATION_IDS_FILENAME
 from imbue.mngr_antigravity.antigravity_config import ROOT_CONVERSATION_FILENAME
 from imbue.mngr_antigravity.antigravity_config import STATUSLINE_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import TRUSTED_WORKSPACES_KEY
+from imbue.mngr_antigravity.antigravity_config import TURN_END_HOOK_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import USER_STATUSLINE_COMMAND_FILENAME
 from imbue.mngr_antigravity.antigravity_config import build_antigravity_hooks_config
 from imbue.mngr_antigravity.antigravity_config import build_antigravity_statusline_settings
@@ -961,7 +964,7 @@ class AntigravityAgent(
         3. Build the per-agent ``$HOME`` tree (``_provision_agy_home``):
            settings.json (copy of the user's settings + project trust +
            overrides + the mngr-owned lifecycle statusLine), the onboarding NUX
-           seed, the conversation-id capture hook, the oauth token symlink/copy,
+           seed, the ``hooks.json`` hooks, the oauth token symlink/copy,
            the shared playwright-cache symlink, and -- on macOS -- the
            ``Library/Keychains`` symlink (restores keychain discovery under the
            relocated ``$HOME`` so agy's os_crypt never raises a blocking dialog).
@@ -1002,6 +1005,7 @@ class AntigravityAgent(
                     CAPTURE_CONVERSATION_ID_SCRIPT_NAME: _load_antigravity_resource_script(
                         CAPTURE_CONVERSATION_ID_SCRIPT_NAME
                     ),
+                    TURN_END_HOOK_SCRIPT_NAME: _load_antigravity_resource_script(TURN_END_HOOK_SCRIPT_NAME),
                 },
                 concurrency_group,
             )
@@ -1012,8 +1016,8 @@ class AntigravityAgent(
         """Write the mngr-owned per-agent ``$HOME`` tree (idempotent each provision).
 
         Provisions the oauth token, settings.json (including the mngr-owned
-        lifecycle ``statusLine``), the onboarding NUX seed, the conversation-id
-        capture hook, the shared playwright-cache symlink, and -- on macOS -- the
+        lifecycle ``statusLine``), the onboarding NUX seed, the ``hooks.json``
+        hooks, the shared playwright-cache symlink, and -- on macOS -- the
         ``Library/Keychains`` symlink that restores keychain discovery under the
         relocated ``$HOME`` (see ``_provision_macos_keychain``).
         ``host.write_text_file`` creates intermediate directories. agy-owned
@@ -1467,9 +1471,8 @@ class AntigravityAgent(
            "$@"; }`` -- foreground process under the per-agent ``$HOME``.
            ``HOME`` is injected only on the agy process (the unambiguous ``env``
            prefix), so the backgrounded supervisor subshell and tmux keep the
-           real HOME. agy loads and executes the per-agent ``hooks.json`` (the
-           conversation-ID capture hook; see ``build_antigravity_hooks_config``)
-           directly from ``$HOME/.gemini/config/hooks.json`` under the relocated
+           real HOME. agy loads and executes the per-agent ``hooks.json`` (see
+           ``build_antigravity_hooks_config``) directly from ``$HOME/.gemini/config/hooks.json`` under the relocated
            home -- no ``--add-dir`` needed, and the lifecycle ``statusLine`` runs
            from the per-agent ``settings.json``. The ``--dangerously-skip-permissions`` flag is
            appended only when ``auto_allow_permissions`` is set; the model and
