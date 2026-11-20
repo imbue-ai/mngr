@@ -30,6 +30,10 @@
 # restart re-emits at most the duplicate lines. A defensive reset handles a
 # rollout that got shorter than the stored offset.
 #
+# Each pass also records how the last turn among the lines it streamed ended in
+# $MNGR_AGENT_STATE_DIR/turn_end, or removes that file when a turn opened; a
+# compaction does neither.
+#
 # Usage: stream_transcript.sh [--single-pass]
 #
 # Environment:
@@ -60,6 +64,13 @@ source "$MNGR_AGENT_STATE_DIR/commands/mngr_log.sh"
 # `--single-pass` flush (and against the converter's read-modify-write).
 # shellcheck source=mngr_common_transcript_lib.sh
 source "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh"
+# shellcheck source=mngr_background_task_lib.sh
+if [ -r "$MNGR_AGENT_STATE_DIR/commands/mngr_background_task_lib.sh" ]; then
+    source "$MNGR_AGENT_STATE_DIR/commands/mngr_background_task_lib.sh"
+fi
+
+# A rollout line's turn record, e.g. `{..."type":"event_msg","payload":{"type":"task_complete",...}}`.
+_TURN_RECORD_PATTERN='"type":"event_msg","payload":[{]"type":"(task_started|task_complete|turn_aborted)"'
 
 _line_count() {
     if [ -f "$1" ]; then
@@ -102,6 +113,43 @@ _offset_key_for_path() {
     # bash equivalents of those tools here, and this runs on every poll cycle.
     local name="${1##*/}"
     printf '%s' "${name//[^A-Za-z0-9._-]/_}"
+}
+
+# Print the string `"$1":"<value>"` holds in the JSON line $2, or the first key of an object `"$1":{"<value>":..}`.
+_rollout_field() {
+    printf '%s' "$2" | { grep -oE "\"$1\":[{]?\"[^\"]*\"" || :; } | sed -n -E "1s/^\"$1\":[{]?\"(.*)\"\$/\1/p"
+}
+
+# Print `"turn_id":"<id>"` for each compaction in rollout $1: a task_started without the turn_attribution its other task_started records carry.
+_compaction_turn_ids() {
+    local turn_starts
+    turn_starts=$({ grep -F '"payload":{"type":"task_started"' "$1" || :; })
+    case "$turn_starts" in
+        *'"turn_attribution":'*) printf '%s\n' "$turn_starts" | { grep -vF '"turn_attribution":' || :; } | { grep -oE '"turn_id":"[^"]*"' || :; } ;;
+    esac
+}
+
+# Record how the last turn among lines $2..$3 of rollout $1 ended, or remove the record when a turn opened after it; a compaction's records are skipped.
+_record_turn_end() {
+    command -v mngr_turn_end_write >/dev/null 2>&1 || return 0
+    local turn_records compactions turn_record native_type
+    turn_records=$(sed -n "${2},${3}p" "$1" | { grep -E "$_TURN_RECORD_PATTERN" || :; })
+    [ -n "$turn_records" ] || return 0
+    compactions=$(_compaction_turn_ids "$1")
+    if [ -n "$compactions" ]; then
+        turn_records=$(printf '%s\n' "$turn_records" | { grep -vF "$compactions" || :; })
+    fi
+    turn_record=$(printf '%s\n' "$turn_records" | tail -n 1)
+    [ -n "$turn_record" ] || return 0
+    case "$turn_record" in
+        *'"payload":{"type":"task_started"'*) rm -f "$MNGR_AGENT_STATE_DIR/turn_end" ;;
+        *'"payload":{"type":"turn_aborted"'*)
+            native_type=$(_rollout_field codex_error_info "$turn_record")
+            mngr_turn_end_write INTERRUPTED "${native_type:-$(_rollout_field reason "$turn_record")}"
+            ;;
+        *'"error":{'*) mngr_turn_end_write FAILED "$(_rollout_field codex_error_info "$turn_record")" ;;
+        *) mngr_turn_end_write COMPLETED ;;
+    esac
 }
 
 # Append new lines from the current rollout to the output verbatim.
@@ -153,6 +201,8 @@ _emit_new_lines() {
     # Append the new lines verbatim. The downstream converter parses them; this
     # streamer never rewrites content.
     sed -n "${start},${end}p" "$rollout_path" >> "$OUTPUT_FILE"
+
+    _record_turn_end "$rollout_path" "$start" "$end" || true
 
     _save_offset "$key" "$file_lines"
 

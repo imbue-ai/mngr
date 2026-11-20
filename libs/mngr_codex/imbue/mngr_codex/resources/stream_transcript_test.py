@@ -21,6 +21,8 @@ The streamer's contract:
   - Re-read the persisted offset on every pass and advance it under the shared
     per-agent transcript lock, so the 1s daemon and the turn-end --single-pass
     flush never re-emit lines the other already streamed.
+  - Record how the last turn among the streamed lines ended in turn_end, and
+    remove it when that turn record opens a turn; a compaction does neither.
 """
 
 from __future__ import annotations
@@ -30,19 +32,35 @@ import json
 import os
 import signal
 import subprocess
+from collections.abc import Sequence
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 from pathlib import Path
 from typing import Any
+from typing import Final
 
 import pytest
 
 from imbue.mngr import resources as mngr_resources
+from imbue.mngr.hosts.background_tasks import TURN_END_FILE_NAME
 from imbue.mngr.utils.polling import poll_until
+from imbue.mngr.utils.testing import read_turn_end_in
 
 _SCRIPT_PATH = Path(__file__).parent / "stream_transcript.sh"
 # A real rollout captured from the patched codex-cli 0.146.0 build (one full
 # exec turn); the streamer copies lines verbatim, so the exactly-once tests
 # drive it with the real wire shapes rather than hand-written ones.
 _REAL_0146_ROLLOUT = Path(__file__).parent / "test_fixtures" / "codex_0146_rollout_exec_turn.jsonl"
+# Real codex-cli 0.163.0 turn records: a completed turn, one interrupted by Esc, one failed on an unoffered model.
+_REAL_0163_TURN_ENDS: Final[tuple[str, ...]] = tuple(
+    (Path(__file__).parent / "test_fixtures" / "codex_0163_rollout_turn_ends.jsonl").read_text().splitlines()
+)
+# A real codex-cli 0.163.0 compaction (thread/compact/start): its task_started and task_complete.
+_REAL_0163_COMPACTION: Final[tuple[str, ...]] = tuple(
+    (Path(__file__).parent / "test_fixtures" / "codex_0163_rollout_compaction.jsonl").read_text().splitlines()
+)
+_CLOCK_SLACK: Final[timedelta] = timedelta(seconds=5)
 
 
 def _make_line(type_: str, payload: dict[str, Any], timestamp: str = "2026-06-09T07:00:00.000Z") -> str:
@@ -72,6 +90,9 @@ def _state_dir(tmp_path: Path, stub_mngr_log_sh: str) -> Path:
     (commands / "mngr_common_transcript_lib.sh").write_text(
         importlib.resources.files(mngr_resources).joinpath("mngr_common_transcript_lib.sh").read_text()
     )
+    (commands / "mngr_background_task_lib.sh").write_text(
+        importlib.resources.files(mngr_resources).joinpath("mngr_background_task_lib.sh").read_text()
+    )
     return state_dir
 
 
@@ -100,7 +121,7 @@ def _offset_dir(state_dir: Path) -> Path:
     return state_dir / "plugin" / "codex" / ".transcript_offsets"
 
 
-def _run_streamer(state_dir: Path) -> None:
+def _run_streamer(state_dir: Path) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         ["bash", str(_SCRIPT_PATH), "--single-pass"],
         env={**os.environ, "MNGR_AGENT_STATE_DIR": str(state_dir)},
@@ -109,6 +130,7 @@ def _run_streamer(state_dir: Path) -> None:
         check=True,
     )
     assert "Traceback" not in result.stderr, result.stderr
+    return result
 
 
 def _read_raw_events(state_dir: Path) -> list[dict[str, Any]]:
@@ -122,9 +144,6 @@ def _read_raw_events(state_dir: Path) -> list[dict[str, Any]]:
             continue
         events.append(json.loads(line))
     return events
-
-
-# -- Tests --
 
 
 def test_streamer_with_no_transcript_path_produces_empty_output(tmp_path: Path, stub_mngr_log_sh: str) -> None:
@@ -339,3 +358,187 @@ def test_single_pass_defers_emit_while_transcript_lock_is_held(tmp_path: Path, s
     _lock_dir(state_dir).rmdir()
     _run_streamer(state_dir)
     assert len(_read_raw_events(state_dir)) == 1
+
+
+def _turn_end_word(state_dir: Path) -> str:
+    turn_end = read_turn_end_in(state_dir)
+    return "-" if turn_end is None else f"{turn_end.kind.value}/{turn_end.native_type}"
+
+
+def _turn_end_word_after_one_pass(tmp_path: Path, stub_mngr_log_sh: str, lines: Sequence[str]) -> str:
+    """The turn end one pass records after streaming ``lines`` as a fresh rollout."""
+    state_dir = _state_dir(tmp_path, stub_mngr_log_sh)
+    _set_transcript_path(state_dir, _write_rollout(tmp_path, "rollout-a.jsonl", list(lines)))
+    _run_streamer(state_dir)
+    return _turn_end_word(state_dir)
+
+
+def _codex_line(record: dict[str, Any]) -> str:
+    """A rollout line as codex writes it, as compact JSON."""
+    return json.dumps(record, separators=(",", ":"))
+
+
+def _real_record(index: int, **payload_changes: Any) -> dict[str, Any]:
+    record = json.loads(_REAL_0163_TURN_ENDS[index])
+    payload = {**record["payload"], **payload_changes}
+    return {**record, "payload": {key: value for key, value in payload.items() if value is not None}}
+
+
+def test_each_streamed_turn_record_sets_or_removes_the_turn_end(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    state_dir = _state_dir(tmp_path, stub_mngr_log_sh)
+    rollout = _write_rollout(tmp_path, "rollout-a.jsonl", [])
+    _set_transcript_path(state_dir, rollout)
+    started_at = datetime.now(timezone.utc)
+
+    observed: list[str] = []
+    for line in _REAL_0163_TURN_ENDS:
+        with rollout.open("a") as f:
+            f.write(line + "\n")
+        _run_streamer(state_dir)
+        observed.append(_turn_end_word(state_dir))
+
+    assert observed == ["-", "COMPLETED/", "-", "INTERRUPTED/interrupted", "-", "FAILED/other"]
+    turn_end = read_turn_end_in(state_dir)
+    assert turn_end is not None and abs(turn_end.ended_at - started_at) <= _CLOCK_SLACK
+    assert _output_file(state_dir).read_text() == rollout.read_text()
+
+
+@pytest.mark.parametrize(
+    ("streamed_line_count", "expected"),
+    [
+        pytest.param(2, "COMPLETED/", id="completed"),
+        pytest.param(3, "-", id="a_later_turn_opened"),
+        pytest.param(6, "FAILED/other", id="failed_last"),
+    ],
+)
+def test_one_pass_records_how_the_last_turn_it_streams_ended(
+    streamed_line_count: int, expected: str, tmp_path: Path, stub_mngr_log_sh: str
+) -> None:
+    lines = _REAL_0163_TURN_ENDS[:streamed_line_count]
+    assert _turn_end_word_after_one_pass(tmp_path, stub_mngr_log_sh, lines) == expected
+
+
+@pytest.mark.parametrize(
+    ("record", "expected"),
+    [
+        pytest.param(
+            _real_record(
+                5, error={"message": "502", "codex_error_info": {"http_connection_failed": {"http_status_code": 502}}}
+            ),
+            "FAILED/http_connection_failed",
+            id="failed_with_an_error_that_carries_fields",
+        ),
+        pytest.param(
+            _real_record(5, error={"message": "no info", "codex_error_info": None}),
+            "FAILED/",
+            id="failed_without_an_error_name",
+        ),
+        pytest.param(
+            _real_record(3, error={"message": "denied", "codex_error_info": "too_many_denials"}),
+            "INTERRUPTED/too_many_denials",
+            id="interrupted_with_an_error",
+        ),
+        pytest.param(
+            _real_record(3, reason="budget_limited"), "INTERRUPTED/budget_limited", id="interrupted_by_a_limit"
+        ),
+        pytest.param(
+            _real_record(1, last_agent_message=_REAL_0163_TURN_ENDS[5]),
+            "COMPLETED/",
+            id="completed_reply_quoting_a_failed_record",
+        ),
+        pytest.param(json.loads(_user_line(_REAL_0163_TURN_ENDS[5])), "-", id="user_message_quoting_a_failed_record"),
+    ],
+)
+def test_a_turn_record_is_read_by_its_own_fields_only(
+    record: dict[str, Any], expected: str, tmp_path: Path, stub_mngr_log_sh: str
+) -> None:
+    assert _turn_end_word_after_one_pass(tmp_path, stub_mngr_log_sh, [_codex_line(record)]) == expected
+
+
+def test_lines_without_a_turn_record_leave_the_turn_end_alone(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    state_dir = _state_dir(tmp_path, stub_mngr_log_sh)
+    rollout = _write_rollout(tmp_path, "rollout-a.jsonl", list(_REAL_0163_TURN_ENDS[2:4]))
+    _set_transcript_path(state_dir, rollout)
+    _run_streamer(state_dir)
+    recorded = (state_dir / TURN_END_FILE_NAME).read_text()
+    assert " kind:INTERRUPTED " in recorded
+
+    with rollout.open("a") as f:
+        f.write(_user_line("next") + "\n" + _assistant_line("still idle") + "\n")
+    _run_streamer(state_dir)
+
+    assert (state_dir / TURN_END_FILE_NAME).read_text() == recorded
+
+
+@pytest.mark.parametrize(
+    "compaction_passes",
+    [
+        pytest.param([_REAL_0163_COMPACTION[:1], _REAL_0163_COMPACTION[1:]], id="start_and_end_in_separate_passes"),
+        pytest.param([_REAL_0163_COMPACTION], id="start_and_end_in_one_pass"),
+    ],
+)
+def test_a_compaction_leaves_the_last_turns_end(
+    compaction_passes: list[tuple[str, ...]], tmp_path: Path, stub_mngr_log_sh: str
+) -> None:
+    state_dir = _state_dir(tmp_path, stub_mngr_log_sh)
+    rollout = _write_rollout(tmp_path, "rollout-a.jsonl", list(_REAL_0163_TURN_ENDS[4:6]))
+    _set_transcript_path(state_dir, rollout)
+    _run_streamer(state_dir)
+    recorded = (state_dir / TURN_END_FILE_NAME).read_text()
+    assert " kind:FAILED " in recorded
+
+    for lines in compaction_passes:
+        with rollout.open("a") as f:
+            f.write("".join(line + "\n" for line in lines))
+        _run_streamer(state_dir)
+        assert (state_dir / TURN_END_FILE_NAME).read_text() == recorded
+
+    with rollout.open("a") as f:
+        f.write(_REAL_0163_TURN_ENDS[0] + "\n" + _REAL_0163_TURN_ENDS[1] + "\n")
+    _run_streamer(state_dir)
+    assert _turn_end_word(state_dir) == "COMPLETED/"
+
+
+@pytest.mark.parametrize(
+    "compaction_lines",
+    [
+        pytest.param(_REAL_0163_COMPACTION[:1], id="compaction_started"),
+        pytest.param(_REAL_0163_COMPACTION, id="compaction_ended"),
+    ],
+)
+def test_a_compaction_streamed_with_a_turns_end_keeps_that_end(
+    compaction_lines: tuple[str, ...], tmp_path: Path, stub_mngr_log_sh: str
+) -> None:
+    lines = [*_REAL_0163_TURN_ENDS[:2], *compaction_lines]
+    assert _turn_end_word_after_one_pass(tmp_path, stub_mngr_log_sh, lines) == "COMPLETED/"
+
+
+@pytest.mark.parametrize(
+    "rollout_lines",
+    [
+        pytest.param(tuple(_REAL_0146_ROLLOUT.read_text().splitlines()), id="codex_0146"),
+        # codex 0.156 to 0.161 write a root_turn_id on every task_started and no turn_attribution.
+        pytest.param(
+            (_codex_line(_real_record(0, turn_attribution=None)), _REAL_0163_TURN_ENDS[1]), id="codex_0156_to_0161"
+        ),
+    ],
+)
+def test_a_turn_from_a_codex_without_turn_attribution_still_records_its_end(
+    rollout_lines: tuple[str, ...], tmp_path: Path, stub_mngr_log_sh: str
+) -> None:
+    assert _turn_end_word_after_one_pass(tmp_path, stub_mngr_log_sh, rollout_lines) == "COMPLETED/"
+
+
+def test_the_streamer_records_no_turn_end_without_the_background_task_library(
+    tmp_path: Path, stub_mngr_log_sh: str
+) -> None:
+    state_dir = _state_dir(tmp_path, stub_mngr_log_sh)
+    (state_dir / "commands" / "mngr_background_task_lib.sh").unlink()
+    rollout = _write_rollout(tmp_path, "rollout-a.jsonl", list(_REAL_0163_TURN_ENDS[:2]))
+    _set_transcript_path(state_dir, rollout)
+
+    result = _run_streamer(state_dir)
+
+    assert result.stderr == ""
+    assert _output_file(state_dir).read_text() == rollout.read_text()
+    assert read_turn_end_in(state_dir) is None

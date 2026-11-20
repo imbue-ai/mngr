@@ -57,6 +57,8 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LifecycleProbeResult
 from imbue.mngr.primitives import OutputStyleName
 from imbue.mngr.primitives import SystemPromptText
+from imbue.mngr.primitives import TurnEnd
+from imbue.mngr.primitives import TurnEndKind
 from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
@@ -727,6 +729,7 @@ def _live_codex_agent(
     base_state: AgentLifecycleState,
     *,
     base_pid: int | None = None,
+    base_turn_end: TurnEnd | None = None,
 ) -> CodexAgent:
     """A codex agent whose daemon status is scripted AND whose process-presence probe is fixed.
 
@@ -741,7 +744,7 @@ def _live_codex_agent(
             return transport
 
         def _base_probe_lifecycle(self, lifecycle_snapshot: HostLifecycleSnapshot | None) -> LifecycleProbeResult:
-            return LifecycleProbeResult(state=base_state, pid=base_pid)
+            return LifecycleProbeResult(state=base_state, pid=base_pid, turn_end=base_turn_end)
 
     agent = _make_codex_agent(
         _LiveCodexAgent,
@@ -834,6 +837,46 @@ def test_probe_lifecycle_resources_split_and_preserves_pid(
     probe = agent.probe_lifecycle()
     assert probe.state == AgentLifecycleState.WAITING
     assert probe.pid == 4242
+
+
+_FAILED_TURN_END = TurnEnd(
+    kind=TurnEndKind.FAILED, native_type="other", ended_at=datetime(2026, 1, 2, 12, 0, 0, tzinfo=timezone.utc)
+)
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_state", "expected_turn_end"),
+    [
+        pytest.param({"type": "idle"}, AgentLifecycleState.WAITING, _FAILED_TURN_END, id="idle"),
+        pytest.param({"type": "active", "activeFlags": []}, AgentLifecycleState.RUNNING, None, id="turn_in_flight"),
+        pytest.param(
+            {"type": "active", "activeFlags": ["waitingOnApproval"]},
+            AgentLifecycleState.RUNNING,
+            None,
+            id="turn_waiting_on_approval",
+        ),
+        pytest.param(None, AgentLifecycleState.WAITING, _FAILED_TURN_END, id="daemon_unreachable"),
+    ],
+)
+def test_probe_lifecycle_publishes_the_turn_end_unless_the_daemon_reports_a_turn_in_flight(
+    status: Mapping[str, Any] | None,
+    expected_state: AgentLifecycleState,
+    expected_turn_end: TurnEnd | None,
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    if status is None:
+        transport = _ScriptedTransport()
+        transport.respond_error("initialize", -32600, "handshake refused")
+    else:
+        transport = _status_transport(status, [{"id": "turn-1", "status": "inProgress"}])
+    agent = _live_codex_agent(
+        local_provider, tmp_path, transport, AgentLifecycleState.WAITING, base_turn_end=_FAILED_TURN_END
+    )
+
+    probe = agent.probe_lifecycle()
+
+    assert (probe.state, probe.turn_end) == (expected_state, expected_turn_end)
 
 
 @pytest.mark.parametrize(

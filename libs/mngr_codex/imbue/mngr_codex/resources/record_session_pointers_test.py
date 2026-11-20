@@ -2,8 +2,8 @@
 
 The UserPromptSubmit hook records two non-lifecycle pointers from codex's stdin payload:
 the rollout ``session_id`` into ``codex_root_session`` and the ``transcript_path`` into
-``codex_transcript_path`` (which ``stream_transcript.sh`` tails). It is self-contained (no
-sourced helper) and does no lifecycle-marker work.
+``codex_transcript_path`` (which ``stream_transcript.sh`` tails), and removes ``turn_end``
+since a turn is opening. It is self-contained (no sourced helper).
 """
 
 from __future__ import annotations
@@ -53,6 +53,18 @@ def test_records_transcript_path_with_spaces(tmp_path: Path) -> None:
     rollout = "/home/a user/sessions/rollout-abc.jsonl"
     _run(state_dir, _compact({"session_id": "abc", "transcript_path": rollout}))
     assert (state_dir / "codex_transcript_path").read_text() == rollout
+
+
+def test_removes_the_last_turns_end(tmp_path: Path) -> None:
+    state_dir = tmp_path / "agent"
+    state_dir.mkdir()
+    (state_dir / "turn_end").write_text("ended:1795083423 kind:COMPLETED\n")
+
+    result = _run(state_dir, _compact({"session_id": "abc", "transcript_path": "/r/rollout-abc.jsonl"}))
+
+    assert result.stdout == ""
+    assert not (state_dir / "turn_end").exists()
+    assert (state_dir / "codex_transcript_path").read_text() == "/r/rollout-abc.jsonl"
 
 
 def test_missing_fields_leave_files_unwritten(tmp_path: Path) -> None:

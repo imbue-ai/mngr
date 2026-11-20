@@ -38,7 +38,7 @@ lifecycle marker and no marker fallback -- the daemon is authoritative, and its
 death takes the ``--remote`` window down so a dead daemon reads STOPPED. The one
 mngr hook, ``UserPromptSubmit`` -> ``record_session_pointers.sh``, records only
 the rollout session id + transcript path (non-lifecycle pointers the
-adopt/preserve and raw-transcript machinery need); see
+adopt/preserve and raw-transcript machinery need) and removes ``turn_end``; see
 :func:`codex_config.build_codex_hooks_config`.
 
 Readiness: a successful ``initialize`` handshake with the ``codex app-server``
@@ -627,16 +627,18 @@ class CodexAgent(
         pid is preserved from the base probe. There is no marker fallback: when the daemon
         cannot be read the split degrades to WAITING (pid preserved). The permission promotion
         is applied only by ``get_lifecycle_state`` (matching the base contract, where
-        ``probe_lifecycle`` reports the raw split and the promotion layers on top).
+        ``probe_lifecycle`` reports the raw split and the promotion layers on top). The base
+        probe's ``turn_end`` is kept unless the daemon reports a turn in flight.
         """
         base_probe = self._base_probe_lifecycle(lifecycle_snapshot)
         if base_probe.state not in _PROCESS_PRESENT_STATES:
             return base_probe
         activity = self._resolve_live_activity()
-        if activity is None:
-            return LifecycleProbeResult(state=AgentLifecycleState.WAITING, pid=base_probe.pid)
-        live_state = AgentLifecycleState.RUNNING if activity.is_active else AgentLifecycleState.WAITING
-        return LifecycleProbeResult(state=live_state, pid=base_probe.pid)
+        if activity is not None and activity.is_active:
+            return LifecycleProbeResult(state=AgentLifecycleState.RUNNING, pid=base_probe.pid)
+        return LifecycleProbeResult(
+            state=AgentLifecycleState.WAITING, pid=base_probe.pid, turn_end=base_probe.turn_end
+        )
 
     def is_blocked_on_dialog(self) -> bool:
         """Whether codex is parked on an approval/input it cannot self-clear.
@@ -856,7 +858,7 @@ class CodexAgent(
         ``assemble_command``'s ``codex resume <id> --remote`` attaches the visible TUI to it, and
         every send binds it. This is the app-server analogue of pi opening its session / claude
         writing ``claude_session_id``; the id is written from HERE (where mngr learns it), not from
-        the ``UserPromptSubmit`` hook (which never fires on a programmatic turn).
+        the ``UserPromptSubmit`` hook (which fires only when a turn opens, once hooks are trusted).
 
         Skipped when a root is already persisted (an ``--adopt`` / ``--from`` clone wrote
         ``codex_root_session`` in ``on_after_provisioning`` -- that adopted session IS the root,
@@ -875,9 +877,8 @@ class CodexAgent(
             # start a second conversation over it -- but DO finish the pointers establishment would
             # otherwise write, which adopt does not: bind the send/status path to the adopted thread
             # (``codex_app_server_thread``) and record its rollout for the transcript streamer
-            # (``codex_transcript_path``). Without these the adopted agent's sends open a stray thread
-            # and its transcript stays empty (the ``UserPromptSubmit`` hook won't write them on a
-            # programmatic turn), so it never recalls its resumed history.
+            # (``codex_transcript_path``). Without these the adopted agent's sends open a stray thread,
+            # so it never recalls its resumed history.
             self._write_persisted_thread_id(adopted_root)
             self._persist_transcript_path(adopted_root)
             return
@@ -901,11 +902,10 @@ class CodexAgent(
         """Record the root rollout's absolute path in ``codex_transcript_path`` for the streamer.
 
         ``stream_transcript.sh`` tails the file named here to build the raw + common transcripts (what
-        ``mngr transcript`` and the Imbue Studio web chat read). On a turn TYPED into the TUI, codex's
-        ``UserPromptSubmit`` hook (``record_session_pointers.sh``) records it -- but that hook never
-        fires on mngr's programmatic ``turn/start`` turns, so without this the transcript stays empty
-        for every web/CLI-driven send. mngr records it itself from the rollout ``inject_items`` just
-        materialized; codex appends to that same rollout across restarts, so the one write stays valid.
+        ``mngr transcript`` and the Imbue Studio web chat read). codex's ``UserPromptSubmit`` hook
+        (``record_session_pointers.sh``) also records it, but only when a turn opens and only once hooks
+        are trusted. mngr records it itself from the rollout ``inject_items`` just materialized; codex
+        appends to that same rollout across restarts, so the one write stays valid.
         """
         sessions_dir = self._get_codex_home() / "sessions"
         try:
@@ -1377,8 +1377,7 @@ class CodexAgent(
                 self._get_agent_dir(),
                 {
                     BACKGROUND_TASKS_SCRIPT_NAME: _load_codex_resource_script(BACKGROUND_TASKS_SCRIPT_NAME),
-                    # UserPromptSubmit hook: record the rollout session id + transcript
-                    # path (non-lifecycle pointers; see build_codex_hooks_config).
+                    # The UserPromptSubmit hook; see build_codex_hooks_config.
                     RECORD_SESSION_POINTERS_SCRIPT_NAME: _load_codex_resource_script(
                         RECORD_SESSION_POINTERS_SCRIPT_NAME
                     ),

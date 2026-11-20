@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# UserPromptSubmit hook: record the codex session id + rollout transcript path.
+# UserPromptSubmit hook: remove turn_end and record the codex session id + rollout transcript path.
 #
 # codex runs this before each user turn (see build_codex_hooks_config), passing a
 # JSON payload on stdin that carries the session id and the rollout transcript
-# path. This hook does NO lifecycle-state work -- RUNNING vs WAITING comes from the
-# app-server thread/status, not from any marker. It only records two pointers other
-# machinery needs:
+# path. The hook removes $MNGR_AGENT_STATE_DIR/turn_end, since a turn is opening,
+# and records two pointers other machinery needs:
 #
 #   - session_id      -> $MNGR_AGENT_STATE_DIR/codex_root_session
 #     The rollout session id the adopt/preserve machinery resumes by (kept in sync
@@ -23,6 +22,8 @@ if [ -z "${MNGR_AGENT_STATE_DIR:-}" ]; then
     echo "record_session_pointers.sh: MNGR_AGENT_STATE_DIR is not set" >&2
     exit 1
 fi
+
+rm -f "$MNGR_AGENT_STATE_DIR/turn_end"
 
 payload=$(cat)
 

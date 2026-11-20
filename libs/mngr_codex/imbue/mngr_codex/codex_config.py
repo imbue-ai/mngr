@@ -26,7 +26,7 @@ This module holds the pure, host-agnostic pieces of that scheme:
 * ``build_codex_hooks_config`` -- the single non-lifecycle hook written to
   ``<CODEX_HOME>/hooks.json``: ``UserPromptSubmit`` -> ``record_session_pointers.sh``,
   which records the rollout session id + transcript path (the non-lifecycle pointers
-  the adopt/preserve and raw-transcript machinery need). Lifecycle/activity are NOT
+  the adopt/preserve and raw-transcript machinery need) and removes ``turn_end``. Lifecycle/activity are NOT
   tracked by hooks: RUNNING vs WAITING is read live from the daemon's
   ``thread/status``. Guards a repo wants on its own agents are not mngr's: they go in
   that repo's ``.codex/hooks.json``, which codex loads as its own config layer and
@@ -200,10 +200,10 @@ TRANSCRIPT_PATH_FILENAME: str = "codex_transcript_path"
 # Scripts provisioned into ``$MNGR_AGENT_STATE_DIR/commands/``; names kept in
 # sync with the resource files under ``resources/``.
 #
-# UserPromptSubmit hook that records the rollout session id + transcript path (the
-# non-lifecycle pointers the adopt/preserve and raw-transcript machinery need). It
-# does NO lifecycle-marker work: RUNNING vs WAITING is read from the daemon's live
-# ``thread/status``, not from any on-disk marker.
+# UserPromptSubmit hook that removes ``turn_end`` and records the rollout session id +
+# transcript path (the non-lifecycle pointers the adopt/preserve and raw-transcript
+# machinery need). It does NO lifecycle-marker work: RUNNING vs WAITING is read from
+# the daemon's live ``thread/status``, not from any on-disk marker.
 RECORD_SESSION_POINTERS_SCRIPT_NAME: str = "record_session_pointers.sh"
 BACKGROUND_TASKS_SCRIPT_NAME: str = "codex_background_tasks.sh"
 RAW_TRANSCRIPT_SCRIPT_NAME: str = "stream_transcript.sh"
@@ -566,7 +566,7 @@ def build_codex_hooks_config() -> dict[str, Any]:
 
     One hook, and it is bookkeeping: ``UserPromptSubmit`` -> ``record_session_pointers.sh``
     records the rollout session id + transcript path, which the adopt/preserve and
-    raw-transcript machinery need. It does NO lifecycle-state work -- RUNNING vs WAITING is
+    raw-transcript machinery need, and removes ``turn_end``. It does NO lifecycle-state work -- RUNNING vs WAITING is
     read live from the daemon's ``thread/status``, so there is no ``active`` /
     ``permissions_waiting`` marker and no subagent-tracking recompute.
 

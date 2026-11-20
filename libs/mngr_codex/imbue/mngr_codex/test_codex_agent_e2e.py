@@ -20,6 +20,7 @@ ChatGPT-account logins (see the lib README).
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -27,6 +28,8 @@ from collections.abc import Generator
 from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
+from typing import Final
 
 import pytest
 
@@ -38,6 +41,8 @@ from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
 from imbue.mngr.agents.agent_release_testing import run_message_delivery_journey
 from imbue.mngr.agents.agent_release_testing import send_expecting_success
 from imbue.mngr.agents.agent_release_testing import wait_for_records
+from imbue.mngr.hosts.background_tasks import TURN_END_FILE_NAME
+from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import init_git_repo
@@ -340,3 +345,210 @@ def test_codex_agent_steps_carry_the_session_and_turn_ids_codex_reports(tmp_path
             f"agent steps carry {extras}, some without a harness_turn_id; the rollout's turn_context drifted "
             "(consumer: common_transcript_convert._stamp_inference_context)"
         )
+
+
+_TURN_END_CONSUMER: Final[str] = (
+    "stream_transcript.sh's _record_turn_end, which reads the rollout's task_complete (its error's codex_error_info) "
+    "and turn_aborted (its reason) records"
+)
+
+
+def _published_turn_end(profile: _CodexReleaseProfile, ctx: AgentReleaseContext, agent_name: str) -> dict[str, Any]:
+    listing = profile.run_mngr(ctx, "list", "--provider", "local", "--format", "json", timeout=120)
+    assert listing.returncode == 0, f"mngr list failed:\n{listing.stdout}\n{listing.stderr}"
+    (agent,) = [agent for agent in json.loads(listing.stdout)["agents"] if agent["name"] == agent_name]
+    return agent.get("turn_end") or {}
+
+
+def _wait_for_turn_end(
+    profile: _CodexReleaseProfile, ctx: AgentReleaseContext, agent_name: str, kind: str
+) -> dict[str, Any]:
+    poll_until(lambda: _published_turn_end(profile, ctx, agent_name).get("kind") == kind, timeout=180, poll_interval=2)
+    turn_end = _published_turn_end(profile, ctx, agent_name)
+    assert turn_end.get("kind") == kind, f"mngr list published turn_end {turn_end!r}, not {kind}; {_TURN_END_CONSUMER}"
+    return turn_end
+
+
+@contextmanager
+def _root_thread_client(
+    profile: _CodexReleaseProfile, ctx: AgentReleaseContext
+) -> Generator[CodexAppServerClient, None, None]:
+    """A connection to the agent's daemon, bound to its root thread."""
+    state_dir = agent_state_dir(ctx.host_dir)
+    client = CodexAppServerClient(
+        transport=connect_app_server_transport(get_codex_app_server_socket_path(get_codex_home(state_dir)))
+    )
+    try:
+        client.initialize("mngr-codex-release-test", "0")
+        assert profile._bind_root_thread(client, state_dir)
+        yield client
+    finally:
+        client.close()
+
+
+def _interrupt_running_turn(profile: _CodexReleaseProfile, ctx: AgentReleaseContext) -> None:
+    """Send ``turn/interrupt`` to the daemon for the root thread's turn in progress."""
+    with _root_thread_client(profile, ctx) as client:
+        turns = client.thread_read(include_turns=True)["thread"]["turns"]
+        (turn_id,) = [turn["id"] for turn in turns if turn.get("status") == "inProgress"]
+        client.interrupt(turn_id)
+
+
+@pytest.mark.release
+@pytest.mark.harness_internals(harness="codex")
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(900)
+def test_codex_agent_publishes_a_completed_and_an_interrupted_turn_end(tmp_path: Path) -> None:
+    """mngr list publishes turn_end COMPLETED after a reply and INTERRUPTED after the daemon interrupts a turn."""
+    profile = _CodexReleaseProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+    ctx = profile.setup(tmp_path)
+    agent_name = f"codex-turn-end-{get_short_random_string()}"
+    with _created_codex_agent(profile, ctx, agent_name, *profile.create_extra_args(ctx)):
+        send_expecting_success(profile, ctx, agent_name, "Reply with just OK.")
+        completed = _wait_for_turn_end(profile, ctx, agent_name, "COMPLETED")
+
+        send_expecting_success(profile, ctx, agent_name, "Run `sleep 120` in the shell, wait for it, then reply DONE.")
+        assert poll_until(lambda: profile.is_reporting_running(ctx.host_dir), timeout=120, poll_interval=1)
+        assert _published_turn_end(profile, ctx, agent_name) == {}
+        _interrupt_running_turn(profile, ctx)
+        interrupted = _wait_for_turn_end(profile, ctx, agent_name, "INTERRUPTED")
+
+    assert completed["native_type"] == ""
+    assert interrupted["native_type"] == "interrupted", f"{interrupted!r}; {_TURN_END_CONSUMER}"
+
+
+@pytest.mark.release
+@pytest.mark.harness_internals(harness="codex")
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(900)
+def test_codex_agent_publishes_a_failed_turn_end_named_by_codex(tmp_path: Path) -> None:
+    """A turn on a model the account does not offer publishes turn_end FAILED with codex's error name."""
+    profile = _CodexReleaseProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+    ctx = profile.setup(tmp_path)
+    agent_name = f"codex-turn-failed-{get_short_random_string()}"
+    unoffered_model = f"gpt-unoffered-{get_short_random_string()}"
+    with _created_codex_agent(
+        profile,
+        ctx,
+        agent_name,
+        "--no-ensure-clean",
+        "--source",
+        str(ctx.project_dir),
+        "-S",
+        f"agent_types.codex.model={unoffered_model}",
+    ):
+        send_expecting_success(profile, ctx, agent_name, "Reply with just OK.")
+        failed = _wait_for_turn_end(profile, ctx, agent_name, "FAILED")
+
+    assert failed["native_type"], f"{failed!r} names no codex_error_info; {_TURN_END_CONSUMER}"
+
+
+@pytest.mark.release
+@pytest.mark.harness_internals(harness="codex")
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(900)
+def test_codex_agent_turn_end_never_outlives_its_turn_and_survives_a_compaction(tmp_path: Path) -> None:
+    """A fast-failing turn never shows the previous turn's end once idle, and a compaction keeps the last turn's end.
+
+    The last compaction starts the moment a turn ends, so its records reach the streamer in the same pass as that end.
+    """
+    profile = _CodexReleaseProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+    ctx = profile.setup(tmp_path)
+    agent_name = f"codex-turn-end-{get_short_random_string()}"
+    daemon_states_seen: set[str] = set()
+    stale_samples: list[str] = []
+    with _created_codex_agent(profile, ctx, agent_name, *profile.create_extra_args(ctx)):
+        send_expecting_success(profile, ctx, agent_name, "Reply with just OK.")
+        _wait_for_turn_end(profile, ctx, agent_name, "COMPLETED")
+        state_dir = agent_state_dir(ctx.host_dir)
+        turn_end_path = state_dir / TURN_END_FILE_NAME
+        completed_line = turn_end_path.read_text()
+
+        with _root_thread_client(profile, ctx) as client:
+            client.settings_update(model=f"gpt-unoffered-{get_short_random_string()}")
+            client.read_thread_status()
+            client.submit("Reply with just OK.", get_short_random_string())
+
+            def is_failure_recorded() -> bool:
+                daemon_state = client.read_thread_status().status_type
+                line = turn_end_path.read_text() if turn_end_path.exists() else ""
+                if "active" in daemon_states_seen and daemon_state != "active" and line == completed_line:
+                    stale_samples.append(f"{daemon_state}: {line.strip()}")
+                daemon_states_seen.add(daemon_state)
+                return " kind:FAILED" in line
+
+            poll_until(is_failure_recorded, timeout=60, poll_interval=0.02)
+        failed = _wait_for_turn_end(profile, ctx, agent_name, "FAILED")
+
+        with _root_thread_client(profile, ctx) as client:
+            client.settings_update(model=_CODEX_MODEL)
+            compaction = _run_compaction(client)
+        _wait_for_streamed_task_complete(state_dir, compaction["id"])
+        after_compaction = _published_turn_end(profile, ctx, agent_name)
+
+        with _root_thread_client(profile, ctx) as client:
+            client.submit("Reply with just OK.", get_short_random_string())
+            assert poll_until(
+                lambda: client.read_thread_status().status_type == "active", timeout=60, poll_interval=0.01
+            )
+            assert poll_until(
+                lambda: client.read_thread_status().status_type != "active", timeout=180, poll_interval=0.01
+            )
+            turn_then_compaction = _run_compaction(client)
+        _wait_for_streamed_task_complete(state_dir, turn_then_compaction["id"])
+        after_turn_then_compaction = _published_turn_end(profile, ctx, agent_name)
+
+    assert "active" in daemon_states_seen, f"never saw the failing turn run: {daemon_states_seen}"
+    assert stale_samples == [], (
+        f"the previous turn's end outlived the next turn: {stale_samples} "
+        "(consumer: record_session_pointers.sh, which removes turn_end at codex's UserPromptSubmit)"
+    )
+    compaction_consumer = (
+        "(consumer: stream_transcript.sh's _record_turn_end, which skips a task whose task_started lacks the "
+        "turn_attribution the rollout's other task_started records carry)"
+    )
+    assert compaction.get("status") == "completed", compaction
+    assert after_compaction == failed, (
+        f"a compaction replaced {failed!r} with {after_compaction!r} {compaction_consumer}"
+    )
+    assert turn_then_compaction.get("status") == "completed", turn_then_compaction
+    assert after_turn_then_compaction.get("kind") == "COMPLETED", (
+        f"a compaction started as a turn ended left {after_turn_then_compaction!r}, not that turn's COMPLETED "
+        f"{compaction_consumer}"
+    )
+
+
+def _run_compaction(client: CodexAppServerClient) -> dict[str, Any]:
+    """Start a compaction of the root thread and return its turn once it has ended."""
+    turn_count = len(client.thread_read(include_turns=True)["thread"]["turns"])
+    client.thread_compact_start()
+
+    def is_compaction_over() -> bool:
+        turns = client.thread_read(include_turns=True)["thread"]["turns"]
+        return len(turns) > turn_count and turns[-1].get("status") != "inProgress"
+
+    assert poll_until(is_compaction_over, timeout=180, poll_interval=1)
+    return client.thread_read(include_turns=True)["thread"]["turns"][-1]
+
+
+def _wait_for_streamed_task_complete(state_dir: Path, turn_id: str) -> None:
+    events_path = state_dir / "logs" / "codex_transcript" / "events.jsonl"
+    assert poll_until(
+        lambda: any(
+            '"type":"task_complete"' in line and turn_id in line for line in events_path.read_text().splitlines()
+        ),
+        timeout=60,
+        poll_interval=1,
+    )
