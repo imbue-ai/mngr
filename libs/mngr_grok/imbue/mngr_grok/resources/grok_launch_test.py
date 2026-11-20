@@ -30,6 +30,7 @@ from imbue.mngr_grok.grok_config import build_launch_env
 from imbue.mngr_grok.grok_config import build_pinned_grok_environment
 from imbue.mngr_grok.grok_config import compute_session_bucket_name
 from imbue.mngr_grok.grok_config import get_grok_home
+from imbue.mngr_grok.resources.grok_hook import SUBMISSIONS_LOG_FILENAME
 from imbue.mngr_grok.resources.grok_transcript_streamer import convert_lock_path
 from imbue.mngr_grok.resources.testing import CONFIG_FIXTURES_DIR
 from imbue.mngr_grok.resources.testing import read_complete_jsonl_records
@@ -501,6 +502,17 @@ def test_launch_resets_stale_state_before_grok_starts(tmp_path: Path) -> None:
     assert not state_entries_at_launch & {*_STALE_STATE_DIR_MARKERS, convert_lock_path(launch.state_dir).name}
     assert not plugin_entries_at_launch & {"background_tasks.json", "turns", "subagents", "pending_wake"}
     assert "grok_process_started" in state_entries_at_launch
+
+
+def test_launch_keeps_the_submissions_log(tmp_path: Path) -> None:
+    launch = _prepare_default_launch(tmp_path)
+    submissions_log_path = launch.plugin_dir / SUBMISSIONS_LOG_FILENAME
+    submissions_log_path.write_text("p1 hello\n")
+
+    result = _run_default_launch(launch)
+
+    assert SUBMISSIONS_LOG_FILENAME in result.invocations[0]["plugin_entries_at_launch"]
+    assert submissions_log_path.read_text() == "p1 hello\n"
 
 
 def test_launch_starts_the_supervisor_with_the_pane_session_name_and_without_grok_agent(tmp_path: Path) -> None:

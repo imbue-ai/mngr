@@ -53,6 +53,7 @@ from imbue.mngr.primitives import BackgroundTaskKind
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import SystemPromptText
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.primitives import TurnEndKind
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import capture_loguru
@@ -1183,7 +1184,7 @@ def test_a_background_subagent_holds_the_agent_running_background_until_it_ends_
     assert _hook_outcomes_of_turn(hook_log, root_session_id, spawn_prompt_id) == [
         "turn:start active:on",
         "stop subagents-pruned=0 subagents-marked-background=1 background_tasks=1",
-        "turn:end active:off",
+        "turn:end active:off turn_end:COMPLETED",
     ], failure_context
     assert (
         probe_while_subagent_runs.state,
@@ -1243,11 +1244,91 @@ def test_ctrl_c_during_a_foreground_tool_cancels_the_turn_and_leaves_grok_runnin
         with pytest.raises(GrokKeyRefusedError, match="grok is idle"):
             agent.press_key_chord("C-c")
         pane_after_refused_press = capture_tmux_pane_contents(agent.tmux_target)
+        poll_until(lambda: agent.probe_lifecycle().turn_end is not None, timeout=_TURN_TIMEOUT_SECONDS)
+        published_turn_end = agent.probe_lifecycle().turn_end
         hook_log = (_state_dir(agent) / _HOOK_LOG_RELATIVE_PATH).read_text()
 
     assert [turn_end["stop_reason"] for turn_end in turn_ends] == ["cancelled"]
     assert f"event={TURN_DROPPED_FLAG} " not in hook_log
+    assert published_turn_end is not None and (published_turn_end.kind, published_turn_end.native_type) == (
+        TurnEndKind.INTERRUPTED,
+        "user_interrupt",
+    ), (
+        f"pinned grok {read_pinned_grok_version()}; grok_hook.py's _handle_stop_cancelled records a Ctrl+C as "
+        f"turn_end INTERRUPTED with the StopCancelled payload's `reason`; published {published_turn_end!r}. "
+        f"Hook log:\n{hook_log}"
+    )
     assert is_idle_and_empty(pane_after_refused_press) and not has_press_again_hint(pane_after_refused_press)
+
+
+def _write_held_stop_hook(tmp_path: Path) -> tuple[Path, Path]:
+    """A Stop hook that logs each fire's promptId, then holds an `end_turn` stop's gate open on a FIFO nothing writes to."""
+    log_path = tmp_path / "held_stop_fires.jsonl"
+    hold_fifo_path = tmp_path / "held_stop_hold"
+    os.mkfifo(hold_fifo_path)
+    script_path = tmp_path / "held_stop_hook.py"
+    write_executable_script(
+        script_path,
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        'payload = json.loads(sys.stdin.read() or "{}")\n'
+        f"with open({str(log_path)!r}, 'a') as log_file:\n"
+        '    log_file.write(json.dumps({"prompt_id": payload.get("promptId")}) + "\\n")\n'
+        'if payload.get("reason") == "end_turn":\n'
+        f"    open({str(hold_fifo_path)!r}, 'rb').close()\n",
+    )
+    return script_path, log_path
+
+
+@pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
+@pytest.mark.tmux
+def test_ctrl_c_during_a_stop_hook_ends_the_turn_cancelled_and_records_it_interrupted(
+    pinned_grok_binary: Path,
+    hermetic_stub_grok_config: GrokAgentConfig,
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    agent_id = AgentId.generate()
+    hold_script_path, hold_log_path = _write_held_stop_hook(tmp_path)
+    # Sorts after mngr.json, so grok runs mngr's Stop hook to completion before this one holds the gate.
+    hold_hooks = _upload_extra_hooks_file(
+        tmp_path, temp_mngr_ctx, agent_id, "user_hold", _build_hooks_file(str(hold_script_path), ("Stop",))
+    )
+    message = f"hello held stop {get_short_random_string()}"
+
+    with _running_grok_agent(
+        temp_mngr_ctx,
+        hermetic_stub_grok_config,
+        tmp_path / "project",
+        agent_id=agent_id,
+        upload_files=(hold_hooks,),
+    ) as agent:
+        agent.send_message(message)
+        prompt_id = _find_submitted_prompt_id(agent, message)
+        wait_for(
+            lambda: hold_log_path.is_file() and prompt_id in hold_log_path.read_text(),
+            timeout=_TURN_TIMEOUT_SECONDS,
+            error_message="the held Stop hook never started",
+        )
+        agent.press_key_chord("C-c")
+        session_id = _agent_session_id(agent)
+        _wait_for_hook_log_containing(agent, f"event=stop_cancelled session={session_id} prompt={prompt_id} ")
+        hook_log = _wait_for_hook_log_containing(
+            agent, f"event=--turn-completed session={session_id} prompt={prompt_id} "
+        )
+        turn_ends = _select_turn_completions(_read_all_session_updates(agent), prompt_id)
+        published_turn_end = agent.probe_lifecycle().turn_end
+
+    assert f"event=stop session={session_id} prompt={prompt_id} " in hook_log
+    assert [turn_end["stop_reason"] for turn_end in turn_ends] == ["cancelled"], (
+        f"pinned grok {read_pinned_grok_version()}; grok_hook.py's --turn-completed writes COMPLETED for an "
+        f"`end_turn`, which would relabel this cancelled turn. Hook log:\n{hook_log}"
+    )
+    assert published_turn_end is not None and (published_turn_end.kind, published_turn_end.native_type) == (
+        TurnEndKind.INTERRUPTED,
+        "user_interrupt",
+    ), f"published {published_turn_end!r}. Hook log:\n{hook_log}"
 
 
 @pytest.mark.release

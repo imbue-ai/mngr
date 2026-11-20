@@ -2,6 +2,7 @@ import io
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -26,10 +27,12 @@ from imbue.mngr.agents.tui_utils import NORMALIZED_PROBE_MAX_LENGTH
 from imbue.mngr.agents.tui_utils import build_normalized_message_probe
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.background_tasks import BACKGROUND_TASK_DIR_NAME
+from imbue.mngr.hosts.background_tasks import TURN_END_FILE_NAME
 from imbue.mngr.primitives import BackgroundTaskKind
 from imbue.mngr.utils.testing import HOSTILE_NATIVE_TYPES
 from imbue.mngr.utils.testing import file_lock_held_by_another_process
 from imbue.mngr.utils.testing import read_background_task_records_in
+from imbue.mngr.utils.testing import read_turn_end_in
 from imbue.mngr_grok.resources import grok_hook
 from imbue.mngr_grok.resources.testing import HOOK_FIXTURES_DIR
 from imbue.mngr_grok.resources.testing import read_complete_jsonl_records
@@ -125,12 +128,18 @@ def _hook_step(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _turn_completed_step(session_id: str, prompt_id: str) -> dict[str, Any]:
-    return {"kind": "turn_completed", "sessionId": session_id, "promptId": prompt_id}
+    return {"kind": "turn_completed", "sessionId": session_id, "promptId": prompt_id, "stopReason": "end_turn"}
+
+
+def _turn_dropped_step(session_id: str, prompt_id: str) -> dict[str, Any]:
+    return {"kind": "turn_dropped", "sessionId": session_id, "promptId": prompt_id}
 
 
 def _run_step(target: _HookTarget, step: Mapping[str, Any]) -> None:
     if step["kind"] == "turn_completed":
-        _run_handler(target, ["--turn-completed", step["sessionId"], step["promptId"]], "", {})
+        _run_handler(target, ["--turn-completed", step["sessionId"], step["promptId"], step["stopReason"]], "", {})
+    elif step["kind"] == "turn_dropped":
+        _run_handler(target, [grok_hook.TURN_DROPPED_FLAG, step["sessionId"], step["promptId"]], "", {})
     else:
         _run_handler(target, [], json.dumps(step["payload"]), {})
 
@@ -144,8 +153,9 @@ def _label(value: str, fixture: _HookFixture) -> str:
 
 
 def _describe_step(step: Mapping[str, Any], fixture: _HookFixture) -> str:
-    if step["kind"] == "turn_completed":
-        return f"{_label(step['sessionId'], fixture)} --turn-completed {_label(step['promptId'], fixture)}"
+    if step["kind"] in ("turn_completed", "turn_dropped"):
+        flag = "--turn-completed" if step["kind"] == "turn_completed" else grok_hook.TURN_DROPPED_FLAG
+        return f"{_label(step['sessionId'], fixture)} {flag} {_label(step['promptId'], fixture)}"
     payload = step["payload"]
     event = payload["hookEventName"]
     words = [_label(payload["sessionId"], fixture), event]
@@ -482,6 +492,17 @@ _NEW_SESSION_EXPECTED: Final = (
     ("R stop shutdown", "idle"),
 )
 
+_STOP_GATE_CANCEL_EXPECTED: Final = (
+    ("R session_start new", "idle"),
+    ("R user_prompt_submit p1", "active turns=R:p1"),
+    ("R stop end_turn p1", "active turns=R:p1"),
+    ("R --turn-completed p1", "idle"),
+    ("R stop_cancelled p1", "idle"),
+    ("R user_prompt_submit p2", "active turns=R:p2"),
+    ("R stop end_turn p2", "active turns=R:p2"),
+    ("R --turn-completed p2", "idle"),
+)
+
 _UNKNOWN_SESSION_EXPECTED: Final = (
     ("R session_end shutdown", "idle"),
     ("R stop shutdown", "idle"),
@@ -503,6 +524,7 @@ _UNKNOWN_SESSION_EXPECTED: Final = (
         pytest.param("idle_prompt", _IDLE_PROMPT_EXPECTED, id="idle_prompt"),
         pytest.param("silent_wake_exhaust", _SILENT_WAKE_EXHAUST_EXPECTED, id="failed_wake_turn"),
         pytest.param("new_session", _NEW_SESSION_EXPECTED, id="new_session"),
+        pytest.param("stop_gate_cancel", _STOP_GATE_CANCEL_EXPECTED, id="ctrl_c_during_a_stop_hook"),
         pytest.param("unknown_session", _UNKNOWN_SESSION_EXPECTED, id="unknown_session"),
     ],
 )
@@ -1420,7 +1442,10 @@ def test_nested_grok_hooks_are_ignored_but_streamer_calls_are_not(temp_host_dir:
     _run_handler_process(target, [], json.dumps(user_prompt), {})
     assert _describe_marker_state(target, fixture) == "active turns=R:p1"
     _run_handler_process(
-        target, ["--turn-completed", user_prompt["sessionId"], user_prompt["promptId"]], "", {"GROK_AGENT": "1"}
+        target,
+        ["--turn-completed", user_prompt["sessionId"], user_prompt["promptId"], "end_turn"],
+        "",
+        {"GROK_AGENT": "1"},
     )
     assert _describe_marker_state(target, fixture) == "idle"
 
@@ -1521,6 +1546,13 @@ def test_a_stop_that_is_not_end_turn_leaves_the_running_subagents_alone(reason: 
         pytest.param(
             "R stop end_turn p1",
             _PROMPT_ID_KEYS,
+            {"hookEventName": "stop_failure"},
+            "ignored:no-prompt-id",
+            id="stop_failure_no_prompt_id",
+        ),
+        pytest.param(
+            "R stop end_turn p1",
+            _PROMPT_ID_KEYS,
             {"hookEventName": "stop_cancelled"},
             "ignored:no-prompt-id",
             id="stop_cancelled_no_prompt_id",
@@ -1551,6 +1583,7 @@ def test_payloads_without_a_usable_root_session_or_prompt_leave_the_markers_unch
 
     assert read_files_under(_plugin_dir(target)) == plugin_files_before
     assert _describe_marker_state(target, fixture) == "active turns=R:p1"
+    assert read_turn_end_in(target.state_dir) is None
     assert _hook_log_lines(target)[-1].endswith(" " + expected_outcome)
 
 
@@ -1605,7 +1638,10 @@ def test_missing_state_dir_exits_zero_without_touching_anything(tmp_path: Path) 
     [
         pytest.param(["--turn-completed", "only-a-session-id"], "ignored:unknown-arguments", id="missing_prompt_id"),
         pytest.param(["--unknown-flag", "x"], "ignored:unknown-arguments", id="unknown_flag"),
-        pytest.param(["--turn-completed", "../escape", "p1"], "ignored:invalid-arguments", id="unsafe_session_id"),
+        pytest.param(["--turn-completed", "s1", "p1"], "ignored:unknown-arguments", id="missing_stop_reason"),
+        pytest.param(
+            ["--turn-completed", "../escape", "p1", "end_turn"], "ignored:invalid-arguments", id="unsafe_session_id"
+        ),
     ],
 )
 def test_unknown_or_invalid_arguments_are_logged_no_ops(
@@ -1624,7 +1660,8 @@ def test_unknown_or_invalid_arguments_are_logged_no_ops(
 
 
 @pytest.mark.parametrize(
-    "arguments", [pytest.param([], id="hook"), pytest.param(["--turn-completed", "s1", "p1"], id="turn_completed")]
+    "arguments",
+    [pytest.param([], id="hook"), pytest.param(["--turn-completed", "s1", "p1", "end_turn"], id="turn_completed")],
 )
 def test_invocation_without_a_state_dir_writes_nothing(
     arguments: list[str], temp_host_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1660,7 +1697,10 @@ def test_silenced_descriptors_are_pointed_at_dev_null(temp_host_dir: Path) -> No
     read_end, write_end = os.pipe()
 
     grok_hook.main(
-        ["grok_hook.py", "--turn-completed", "s1", "p1"], io.BytesIO(b""), _handler_environ(target, {}), [write_end]
+        ["grok_hook.py", "--turn-completed", "s1", "p1", "end_turn"],
+        io.BytesIO(b""),
+        _handler_environ(target, {}),
+        [write_end],
     )
     os.write(write_end, b"written after silencing")
     os.close(write_end)
@@ -1724,7 +1764,7 @@ def test_a_streamer_call_waits_past_the_hook_lock_timeout_for_the_state_lock(tem
         release_timer.start()
         started_at = time.monotonic()
         try:
-            _run_handler(target, ["--turn-completed", _id_of(fixture, "R"), _id_of(fixture, "p1")], "", {})
+            _run_step(target, _turn_completed_step(_id_of(fixture, "R"), _id_of(fixture, "p1")))
             waited_seconds = time.monotonic() - started_at
         finally:
             release_timer.join()
@@ -1732,7 +1772,7 @@ def test_a_streamer_call_waits_past_the_hook_lock_timeout_for_the_state_lock(tem
 
     assert waited_seconds >= grok_hook.STATE_LOCK_TIMEOUT_SECONDS
     assert _describe_marker_state(target, fixture) == "idle"
-    assert _hook_log_lines(target)[-1].endswith("turn:end active:off")
+    assert _hook_log_lines(target)[-1].endswith("turn:end active:off turn_end:COMPLETED")
 
 
 def _write_leftovers_of_a_killed_turn(target: _HookTarget, fixture: _HookFixture) -> None:
@@ -1807,3 +1847,496 @@ def test_one_invocation_runs_well_under_200_ms(temp_host_dir: Path) -> None:
     fastest_seconds = min(_run_handler_process(_make_target(temp_host_dir), [], user_prompt, {}) for _ in range(3))
 
     assert fastest_seconds < 0.2
+
+
+# The turn_end file, which the handler writes in the format mngr reads.
+
+
+def test_the_handler_writes_the_turn_end_file_mngr_reads() -> None:
+    assert grok_hook.TURN_END_FILENAME == TURN_END_FILE_NAME
+
+
+def _turn_end_word(target: _HookTarget) -> str:
+    turn_end = read_turn_end_in(target.state_dir)
+    return "-" if turn_end is None else f"{turn_end.kind.value}/{turn_end.native_type}"
+
+
+def _replay_turn_ends(
+    target: _HookTarget, fixture: _HookFixture, steps: Sequence[Mapping[str, Any]]
+) -> list[tuple[str, str]]:
+    observed: list[tuple[str, str]] = []
+    for step in steps:
+        _run_step(target, step)
+        observed.append((_describe_step(step, fixture), _turn_end_word(target)))
+    return observed
+
+
+_PLAIN_TURN_ENDS: Final = (
+    ("R session_start new", "-"),
+    ("R user_prompt_submit p1", "-"),
+    ("R stop end_turn p1", "-"),
+    ("R --turn-completed p1", "COMPLETED/end_turn"),
+    ("R notification idle_prompt", "COMPLETED/end_turn"),
+    ("R session_end shutdown", "COMPLETED/end_turn"),
+    ("R stop shutdown", "COMPLETED/end_turn"),
+)
+
+_INTERRUPT_TURN_ENDS: Final = (
+    ("R session_start new", "-"),
+    ("R user_prompt_submit p1", "-"),
+    ("R --turn-completed p1", "-"),
+    ("R stop_cancelled p1", "INTERRUPTED/user_interrupt"),
+    ("R user_prompt_submit p2", "-"),
+    ("R pre_tool_use run_terminal_command", "-"),
+    ("R --turn-completed p2", "-"),
+    ("R stop_cancelled p2", "INTERRUPTED/user_interrupt"),
+    ("R user_prompt_submit p3", "-"),
+    ("R stop end_turn p3", "-"),
+    ("R --turn-completed p3", "COMPLETED/end_turn"),
+    ("R session_end shutdown", "COMPLETED/end_turn"),
+    ("R stop shutdown", "COMPLETED/end_turn"),
+)
+
+_SILENT_WAKE_EXHAUST_TURN_ENDS: Final = (
+    ("R session_start new", "-"),
+    ("R user_prompt_submit p1", "-"),
+    ("R pre_tool_use run_terminal_command", "-"),
+    ("R post_tool_use run_terminal_command", "-"),
+    ("R stop end_turn p1", "-"),
+    ("R --turn-completed p1", "COMPLETED/end_turn"),
+    ("R notification task_complete", "COMPLETED/end_turn"),
+    ("R user_prompt_submit wake-T1", "-"),
+    ("R notification agent_error", "-"),
+    ("R stop_failure wake-T1", "FAILED/server_error"),
+    ("R --turn-completed wake-T1", "FAILED/server_error"),
+    ("R session_end shutdown", "FAILED/server_error"),
+    ("R stop shutdown", "FAILED/server_error"),
+)
+
+
+_STOP_GATE_CANCEL_TURN_ENDS: Final = (
+    ("R session_start new", "-"),
+    ("R user_prompt_submit p1", "-"),
+    ("R stop end_turn p1", "-"),
+    ("R --turn-completed p1", "-"),
+    ("R stop_cancelled p1", "INTERRUPTED/user_interrupt"),
+    ("R user_prompt_submit p2", "-"),
+    ("R stop end_turn p2", "-"),
+    ("R --turn-completed p2", "COMPLETED/end_turn"),
+)
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "expected"),
+    [
+        pytest.param("plain", _PLAIN_TURN_ENDS, id="completed"),
+        pytest.param("interrupt", _INTERRUPT_TURN_ENDS, id="interrupted"),
+        pytest.param("stop_gate_cancel", _STOP_GATE_CANCEL_TURN_ENDS, id="interrupted_during_its_stop_hook"),
+        pytest.param("silent_wake_exhaust", _SILENT_WAKE_EXHAUST_TURN_ENDS, id="failed"),
+    ],
+)
+def test_each_root_turn_end_records_how_it_ended_until_the_next_prompt(
+    fixture_name: str, expected: Sequence[tuple[str, str]], temp_host_dir: Path
+) -> None:
+    fixture = _load_fixture(fixture_name)
+    target = _make_target(temp_host_dir)
+
+    observed = _replay_turn_ends(target, fixture, fixture.steps)
+
+    assert observed == list(expected)
+
+
+@pytest.mark.parametrize(
+    "step_indices",
+    [
+        pytest.param([0, 1, 2, 3, 4], id="turn_completed_first"),
+        pytest.param([0, 1, 2, 4, 3], id="stop_cancelled_first"),
+    ],
+)
+def test_a_turn_cancelled_during_its_stop_hook_reads_interrupted_whichever_report_lands_last(
+    step_indices: Sequence[int], temp_host_dir: Path
+) -> None:
+    fixture = _load_fixture("stop_gate_cancel")
+    target = _make_target(temp_host_dir)
+
+    observed = _replay_turn_ends(target, fixture, _steps_in_order(fixture, step_indices))
+
+    assert observed[-1][1] == "INTERRUPTED/user_interrupt"
+    assert _describe_marker_state(target, fixture) == "idle"
+
+
+def test_a_recorded_turn_end_is_read_as_ended_when_the_hook_ran(temp_host_dir: Path) -> None:
+    fixture = _load_fixture("silent_wake_exhaust")
+    target = _make_target(temp_host_dir)
+    started_at = datetime.now(timezone.utc)
+
+    _replay(target, fixture, fixture.steps)
+
+    turn_end = read_turn_end_in(target.state_dir)
+    assert turn_end is not None
+    assert abs(turn_end.ended_at - started_at) <= _CLOCK_SLACK
+
+
+_STOP_REPORT_KEYS: Final = (
+    "reason",
+    "cancelledBy",
+    "cancelTrigger",
+    "stopHookActive",
+    "stop_hook_active",
+    "backgroundTasks",
+    "sessionCrons",
+)
+
+
+def _stop_failure_of(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """grok's ``StopFailure{unknown}`` for the turn of the root or subagent session that sent ``payload``."""
+    return {
+        **_without_keys(payload, _STOP_REPORT_KEYS),
+        "hookEventName": "stop_failure",
+        "hook_event_name": "StopFailure",
+        "error": "unknown",
+    }
+
+
+def _stop_cancelled_of(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """grok's ``StopCancelled`` for a Ctrl+C of the turn of the session that sent ``payload``."""
+    return {
+        **_without_keys(payload, _STOP_REPORT_KEYS),
+        "hookEventName": "stop_cancelled",
+        "hook_event_name": "StopCancelled",
+        "reason": "user_interrupt",
+        "cancelledBy": "user",
+        "cancelTrigger": "ctrl_c",
+    }
+
+
+def test_a_subagent_turn_end_leaves_the_root_turn_end_alone(temp_host_dir: Path) -> None:
+    fixture = _load_fixture("plain")
+    target = _make_target(temp_host_dir)
+    root_steps = _steps_in_order(fixture, [0, 1, 2, 3])
+    stop = _payload_of(fixture, "R stop end_turn p1")
+    subagent_steps = [
+        _hook_step(_as_subagent_payload(report, f"child-{uuid4().hex}"))
+        for report in (_stop_failure_of(stop), _stop_cancelled_of(stop), stop)
+    ]
+
+    observed = _replay_turn_ends(target, fixture, [*root_steps, *subagent_steps])
+
+    assert [turn_end for _, turn_end in observed[-4:]] == ["COMPLETED/end_turn"] * 4
+
+
+def _idle_prompt_of(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """grok's ``idle_prompt`` notification for the session that sent ``payload``."""
+    return {
+        **_without_keys(payload, (*_PROMPT_ID_KEYS, "reason", "cancelTrigger", "cancelledBy")),
+        "hookEventName": "notification",
+        "hook_event_name": "Notification",
+        "notificationType": "idle_prompt",
+        "notification_type": "idle_prompt",
+    }
+
+
+@pytest.mark.parametrize(
+    "unreported_end",
+    [
+        pytest.param("R --turn-dropped p2", id="turn_dropped"),
+        pytest.param("R notification idle_prompt", id="idle_prompt_backstop"),
+    ],
+)
+def test_a_stop_cancelled_for_an_older_prompt_records_nothing_through_the_newest_turn(
+    unreported_end: str, temp_host_dir: Path
+) -> None:
+    fixture = _load_fixture("interrupt")
+    target = _make_target(temp_host_dir)
+    step_by_unreported_end = {
+        "R --turn-dropped p2": _turn_dropped_step(_id_of(fixture, "R"), _id_of(fixture, "p2")),
+        "R notification idle_prompt": _hook_step(_idle_prompt_of(_payload_of(fixture, "R stop_cancelled p2"))),
+    }
+    late_cancel_steps = [*_steps_in_order(fixture, [0, 1, 2, 4, 3]), step_by_unreported_end[unreported_end]]
+
+    observed = _replay_turn_ends(target, fixture, late_cancel_steps)
+
+    assert observed == [
+        ("R session_start new", "-"),
+        ("R user_prompt_submit p1", "-"),
+        ("R --turn-completed p1", "-"),
+        ("R user_prompt_submit p2", "-"),
+        ("R stop_cancelled p1", "-"),
+        (unreported_end, "-"),
+    ]
+    assert _hook_log_lines(target)[-2].endswith(" ignored:not-the-current-turn turn_end:skipped-not-latest-prompt")
+    assert _describe_marker_state(target, fixture) == "idle"
+
+
+_LATE_TURN_COMPLETED_AFTER_AN_INTERRUPTED_TURN: Final = (
+    ("R session_start new", "-"),
+    ("R user_prompt_submit p3", "-"),
+    ("R stop end_turn p3", "-"),
+    ("R user_prompt_submit p4", "-"),
+    ("R --turn-completed p4", "-"),
+    ("R stop_cancelled p4", "INTERRUPTED/user_interrupt"),
+    ("R --turn-completed p3", "INTERRUPTED/user_interrupt"),
+)
+
+_LATE_STOP_CANCELLED_AFTER_A_COMPLETED_TURN: Final = (
+    ("R session_start new", "-"),
+    ("R user_prompt_submit p1", "-"),
+    ("R --turn-completed p1", "-"),
+    ("R user_prompt_submit p3", "-"),
+    ("R stop end_turn p3", "-"),
+    ("R --turn-completed p3", "COMPLETED/end_turn"),
+    ("R stop_cancelled p1", "COMPLETED/end_turn"),
+)
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "step_indices", "expected"),
+    [
+        pytest.param(
+            "idle_prompt",
+            [0, 8, 9, 12, 13, 14, 10],
+            _LATE_TURN_COMPLETED_AFTER_AN_INTERRUPTED_TURN,
+            id="turn_completed_after_an_interrupted_turn",
+        ),
+        pytest.param(
+            "interrupt",
+            [0, 1, 2, 8, 9, 10, 3],
+            _LATE_STOP_CANCELLED_AFTER_A_COMPLETED_TURN,
+            id="stop_cancelled_after_a_completed_turn",
+        ),
+    ],
+)
+def test_a_late_report_for_an_older_prompt_leaves_the_newest_turn_s_end_alone(
+    fixture_name: str, step_indices: Sequence[int], expected: Sequence[tuple[str, str]], temp_host_dir: Path
+) -> None:
+    fixture = _load_fixture(fixture_name)
+    target = _make_target(temp_host_dir)
+
+    observed = _replay_turn_ends(target, fixture, _steps_in_order(fixture, step_indices))
+
+    assert observed == list(expected)
+    assert _hook_log_lines(target)[-1].endswith(" ignored:not-the-current-turn turn_end:skipped-not-latest-prompt")
+
+
+@pytest.mark.parametrize(
+    ("step_indices_before", "expected_turn_end"),
+    [
+        pytest.param([0, 1, 2, 3], "COMPLETED/end_turn", id="after_a_completed_turn"),
+        pytest.param([0], "-", id="before_any_prompt"),
+    ],
+)
+def test_a_report_for_a_prompt_never_submitted_leaves_the_turn_end_and_the_markers_alone(
+    step_indices_before: Sequence[int], expected_turn_end: str, temp_host_dir: Path
+) -> None:
+    fixture = _load_fixture("plain")
+    target = _make_target(temp_host_dir)
+    _replay_turn_ends(target, fixture, _steps_in_order(fixture, step_indices_before))
+    prompt_id = "never-submitted"
+    stop = {**_payload_of(fixture, "R stop end_turn p1"), **dict.fromkeys(_PROMPT_ID_KEYS, prompt_id)}
+    reports = [
+        _hook_step(_stop_cancelled_of(stop)),
+        _hook_step(_stop_failure_of(stop)),
+        _turn_completed_step(_id_of(fixture, "R"), prompt_id),
+    ]
+    plugin_files_before = read_files_under(_plugin_dir(target))
+
+    observed = _replay_turn_ends(target, fixture, reports)
+
+    assert [turn_end for _, turn_end in observed] == [expected_turn_end] * 3
+    assert _describe_marker_state(target, fixture) == "idle"
+    assert read_files_under(_plugin_dir(target)) == plugin_files_before
+    assert all(line.endswith(" turn_end:skipped-not-latest-prompt") for line in _hook_log_lines(target)[-3:])
+
+
+def test_a_turn_completed_after_its_session_ended_records_how_the_turn_ended(temp_host_dir: Path) -> None:
+    fixture = _load_fixture("plain")
+    target = _make_target(temp_host_dir)
+
+    observed = _replay_turn_ends(target, fixture, _steps_in_order(fixture, [0, 1, 2, 5, 3]))
+
+    assert observed[-2:] == [("R session_end shutdown", "-"), ("R --turn-completed p1", "COMPLETED/end_turn")]
+    assert _hook_log_lines(target)[-1].endswith(" ignored:not-the-current-turn turn_end:COMPLETED")
+
+
+def _reset_as_the_launch_does(target: _HookTarget) -> None:
+    """Remove what ``grok_launch.sh`` removes before grok starts, which leaves ``submissions.log``."""
+    for marker_name in ("active", "permissions_waiting", "grok_session_started"):
+        (target.state_dir / marker_name).unlink(missing_ok=True)
+    (_plugin_dir(target) / "background_tasks.json").unlink(missing_ok=True)
+    for dirname in ("turns", "subagents", "pending_wake"):
+        shutil.rmtree(_plugin_dir(target) / dirname, ignore_errors=True)
+
+
+def test_a_report_after_a_relaunch_reads_the_prompts_submitted_before_it(temp_host_dir: Path) -> None:
+    fixture = _load_fixture("interrupt")
+    target = _make_target(temp_host_dir)
+    _replay_turn_ends(target, fixture, _steps_in_order(fixture, [0, 8, 9]))
+    _reset_as_the_launch_does(target)
+
+    observed = _replay_turn_ends(target, fixture, _steps_in_order(fixture, [0, 10]))
+
+    assert observed[-1][1] == "COMPLETED/end_turn"
+    assert _hook_log_lines(target)[-1].endswith(" ignored:not-the-current-turn turn_end:COMPLETED")
+    assert _describe_marker_state(target, fixture) == "idle"
+
+
+_LATE_TURN_COMPLETED_AFTER_ANOTHER_ROOT_S_INTERRUPTED_TURN: Final = (
+    ("R session_start new", "-"),
+    ("R user_prompt_submit p1", "-"),
+    ("R stop end_turn p1", "-"),
+    ("R2 session_start new", "-"),
+    ("R2 user_prompt_submit p2", "-"),
+    ("R2 stop_cancelled p2", "INTERRUPTED/user_interrupt"),
+    ("R --turn-completed p1", "INTERRUPTED/user_interrupt"),
+)
+
+_LATE_STOP_CANCELLED_AFTER_ANOTHER_ROOT_S_COMPLETED_TURN: Final = (
+    ("R session_start new", "-"),
+    ("R user_prompt_submit p1", "-"),
+    ("R --turn-completed p1", "-"),
+    ("R2 session_start new", "-"),
+    ("R2 user_prompt_submit p2", "-"),
+    ("R2 stop end_turn p2", "-"),
+    ("R2 --turn-completed p2", "COMPLETED/end_turn"),
+    ("R stop_cancelled p1", "COMPLETED/end_turn"),
+)
+
+
+def _late_report_steps_across_root_sessions(fixture: _HookFixture, case: str) -> list[dict[str, Any]]:
+    """``new_session``'s steps with a report from the first root arriving after the second root's turn."""
+    first_root_cancel = _stop_cancelled_of(_payload_of(fixture, "R stop end_turn p1"))
+    first_turn_cancelled = {**fixture.steps[3], "stopReason": "cancelled"}
+    steps_by_case = {
+        "late_turn_completed": [
+            *_steps_in_order(fixture, [0, 1, 2, 4, 5]),
+            _hook_step(_stop_cancelled_of(_payload_of(fixture, "R2 stop end_turn p2"))),
+            fixture.steps[3],
+        ],
+        "late_stop_cancelled": [
+            *_steps_in_order(fixture, [0, 1]),
+            first_turn_cancelled,
+            *_steps_in_order(fixture, [4, 5, 6, 7]),
+            _hook_step(first_root_cancel),
+        ],
+    }
+    return steps_by_case[case]
+
+
+@pytest.mark.parametrize(
+    ("case", "expected", "expected_last_outcomes"),
+    [
+        pytest.param(
+            "late_turn_completed",
+            _LATE_TURN_COMPLETED_AFTER_ANOTHER_ROOT_S_INTERRUPTED_TURN,
+            ("turn:end turn_end:INTERRUPTED", "turn:end active:off turn_end:skipped-not-latest-prompt"),
+            id="turn_completed_after_an_interrupted_turn",
+        ),
+        pytest.param(
+            "late_stop_cancelled",
+            _LATE_STOP_CANCELLED_AFTER_ANOTHER_ROOT_S_COMPLETED_TURN,
+            (
+                "turn:end active:off turn_end:COMPLETED",
+                "ignored:not-the-current-turn turn_end:skipped-not-latest-prompt",
+            ),
+            id="stop_cancelled_after_a_completed_turn",
+        ),
+    ],
+)
+def test_a_late_report_from_an_earlier_root_session_leaves_the_later_session_s_turn_end_alone(
+    case: str, expected: Sequence[tuple[str, str]], expected_last_outcomes: tuple[str, str], temp_host_dir: Path
+) -> None:
+    fixture = _load_fixture("new_session")
+    target = _make_target(temp_host_dir)
+
+    observed = _replay_turn_ends(target, fixture, _late_report_steps_across_root_sessions(fixture, case))
+
+    assert observed == list(expected)
+    last_two_log_lines = _hook_log_lines(target)[-2:]
+    assert all(
+        line.endswith(" " + outcome) for line, outcome in zip(last_two_log_lines, expected_last_outcomes, strict=True)
+    ), last_two_log_lines
+    assert _describe_marker_state(target, fixture) == "idle"
+
+
+def test_a_turn_dropped_after_a_stop_hook_blocked_its_stop_records_nothing(temp_host_dir: Path) -> None:
+    fixture = _load_fixture("stop_block")
+    target = _make_target(temp_host_dir)
+    blocked_steps = _steps_in_order(fixture, [0, 1, 2])
+
+    observed = _replay_turn_ends(target, fixture, blocked_steps)
+    _run_handler(target, [grok_hook.TURN_DROPPED_FLAG, _id_of(fixture, "R"), _id_of(fixture, "p1")], "", {})
+
+    assert observed[-1] == ("R stop end_turn p1", "-")
+    assert _describe_marker_state(target, fixture) == "idle"
+    assert read_turn_end_in(target.state_dir) is None
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "root_turn_completed_count"),
+    [
+        pytest.param("fg_subagent", 5, id="foreground_subagent"),
+        pytest.param("bgsubagent", 2, id="background_subagent"),
+        pytest.param("bgsubagent_busy_root", 3, id="background_subagent_of_a_busy_root"),
+    ],
+)
+def test_a_subagent_s_prompt_leaves_each_root_turn_to_record_how_it_ended(
+    fixture_name: str, root_turn_completed_count: int, temp_host_dir: Path
+) -> None:
+    fixture = _load_fixture(fixture_name)
+    target = _make_target(temp_host_dir)
+
+    for step in fixture.steps:
+        _run_step(target, step)
+
+    root_turn_completed_log_entry = f" event=--turn-completed session={_id_of(fixture, 'R')} "
+    root_turn_end_outcomes = [
+        line.rsplit(" ", 1)[1] for line in _hook_log_lines(target) if root_turn_completed_log_entry in line
+    ]
+    assert root_turn_end_outcomes == ["turn_end:COMPLETED"] * root_turn_completed_count
+
+
+@pytest.mark.parametrize(
+    ("last_line_case", "expected_turn_end"),
+    [
+        pytest.param("cut_after_its_prompt_id", "COMPLETED/end_turn"),
+        pytest.param("cut_inside_its_prompt_id", "-"),
+        pytest.param("of_a_longer_prompt_id", "-"),
+        pytest.param("longer_than_one_read", "COMPLETED/end_turn"),
+    ],
+)
+def test_the_newest_turn_is_the_prompt_id_on_the_submissions_log_s_last_line(
+    last_line_case: str, expected_turn_end: str, temp_host_dir: Path
+) -> None:
+    fixture = _load_fixture("interrupt")
+    target = _make_target(temp_host_dir)
+    _replay_turn_ends(target, fixture, _steps_in_order(fixture, [0, 1, 2, 3, 8, 9]))
+    prompt_id = _id_of(fixture, "p3")
+    last_line_by_case = {
+        "cut_after_its_prompt_id": prompt_id,
+        "cut_inside_its_prompt_id": prompt_id[:-1],
+        "of_a_longer_prompt_id": f"{prompt_id}x tail\n",
+        "longer_than_one_read": f"{prompt_id} {'x' * 10_000}\n",
+    }
+    submissions_log_path = _plugin_dir(target) / grok_hook.SUBMISSIONS_LOG_FILENAME
+    earlier_lines = _file_lines(submissions_log_path)[:-1]
+    submissions_log_path.write_text("".join(f"{line}\n" for line in earlier_lines) + last_line_by_case[last_line_case])
+
+    observed = _replay_turn_ends(target, fixture, _steps_in_order(fixture, [10]))
+
+    assert observed == [("R --turn-completed p3", expected_turn_end)]
+
+
+def test_a_prompt_submitted_after_a_cut_last_line_is_logged_on_a_line_of_its_own(temp_host_dir: Path) -> None:
+    fixture = _load_fixture("interrupt")
+    target = _make_target(temp_host_dir)
+    _replay_turn_ends(target, fixture, _steps_in_order(fixture, [0, 1, 2, 3]))
+    submissions_log_path = _plugin_dir(target) / grok_hook.SUBMISSIONS_LOG_FILENAME
+    submissions_log_path.write_text(f"{_id_of(fixture, 'p1')} slowtest")
+
+    observed = _replay_turn_ends(target, fixture, _steps_in_order(fixture, [8, 9, 10]))
+
+    assert observed[-1] == ("R --turn-completed p3", "COMPLETED/end_turn")
+    assert [line.partition(" ")[0] for line in _file_lines(submissions_log_path)] == [
+        _id_of(fixture, "p1"),
+        _id_of(fixture, "p3"),
+    ]

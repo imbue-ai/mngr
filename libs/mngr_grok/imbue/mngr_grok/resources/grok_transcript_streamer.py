@@ -17,7 +17,7 @@ per-file offsets and the discovered child sessions persist in
 
 After a pass that appended a root session's ``turn_completed``, the streamer releases
 the lock, runs ``commands/common_transcript.sh --single-pass --hold-open-steps``, then
-calls ``grok_hook.py --turn-completed <session id> <prompt id>``.
+calls ``grok_hook.py --turn-completed <session id> <prompt id> <stop reason>``.
 Each failed, unblocked ``global/mngr:`` hook run is recorded in
 ``events/grok/hook_failures/events.jsonl``. Records copied from another session (a fork
 replays its source's history) trigger none of these.
@@ -383,7 +383,7 @@ def scan_native_record(
     if kind == "turn_completed":
         prompt_id = update.get("prompt_id")
         if parent_session_id is None and isinstance(prompt_id, str) and prompt_id:
-            follow_ups["turn_completions"].append([session_id, prompt_id])
+            follow_ups["turn_completions"].append([session_id, prompt_id, str(update.get("stop_reason") or "")])
     elif kind == "hook_execution":
         _collect_hook_failures(record, session_id, parent_session_id, offset, follow_ups)
     elif kind == "subagent_spawned":
@@ -571,8 +571,8 @@ def _run_follow_ups(state_dir: Path, follow_ups: Mapping[str, Any], environ: Map
     common_transcript_script = state_dir / "commands" / "common_transcript.sh"
     if common_transcript_script.is_file():
         run_follow_up_command(["bash", str(common_transcript_script), "--single-pass", "--hold-open-steps"], environ)
-    for session_id, prompt_id in follow_ups["turn_completions"]:
-        run_follow_up_command([hook_path, "--turn-completed", session_id, prompt_id], environ)
+    for session_id, prompt_id, stop_reason in follow_ups["turn_completions"]:
+        run_follow_up_command([hook_path, "--turn-completed", session_id, prompt_id, stop_reason], environ)
 
 
 def run_stream_pass(state_dir: Path, environ: Mapping[str, str]) -> None:

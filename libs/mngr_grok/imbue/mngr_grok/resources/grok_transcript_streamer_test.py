@@ -141,8 +141,8 @@ def test_turn_completed_is_reported_after_the_common_transcript_holds_the_closin
 
     calls = _hook_calls(state_dir)
     assert [call["argv"] for call in calls] == [
-        ["--turn-completed", _SEND_NOW_ROOT, cut_prompt],
-        ["--turn-completed", _SEND_NOW_ROOT, follow_up_prompt],
+        ["--turn-completed", _SEND_NOW_ROOT, cut_prompt, "cancelled"],
+        ["--turn-completed", _SEND_NOW_ROOT, follow_up_prompt, "end_turn"],
     ]
     for call in calls:
         assert call["argv"][2] in call["flushed_prompt_ids"]
@@ -288,7 +288,9 @@ def test_a_second_pass_appends_only_what_was_written_after_the_first(tmp_path: P
     _run_pass(state_dir)
 
     assert _raw_lines(state_dir) == _expected_raw_lines(session_path, _TOOL_ROOT, None)
-    assert _hook_argvs(state_dir) == [["--turn-completed", _TOOL_ROOT, _prompt_ids_of_turn_completed(session_path)[0]]]
+    assert _hook_argvs(state_dir) == [
+        ["--turn-completed", _TOOL_ROOT, _prompt_ids_of_turn_completed(session_path)[0], "end_turn"]
+    ]
 
 
 def test_a_torn_last_line_waits_for_its_newline(tmp_path: Path, stub_mngr_log_sh: str) -> None:
@@ -368,8 +370,11 @@ def test_new_session_and_resumed_root_are_both_streamed(tmp_path: Path, stub_mng
         new_path, _NEW_ROOT, None
     )
     assert _hook_argvs(state_dir) == [
-        ["--turn-completed", _FIRST_ROOT, prompt_id] for prompt_id in _prompt_ids_of_turn_completed(first_path)
-    ] + [["--turn-completed", _NEW_ROOT, prompt_id] for prompt_id in _prompt_ids_of_turn_completed(new_path)]
+        ["--turn-completed", _FIRST_ROOT, prompt_id, "end_turn"]
+        for prompt_id in _prompt_ids_of_turn_completed(first_path)
+    ] + [
+        ["--turn-completed", _NEW_ROOT, prompt_id, "end_turn"] for prompt_id in _prompt_ids_of_turn_completed(new_path)
+    ]
 
 
 def test_records_a_fork_copied_from_its_source_trigger_no_hook_calls(tmp_path: Path, stub_mngr_log_sh: str) -> None:

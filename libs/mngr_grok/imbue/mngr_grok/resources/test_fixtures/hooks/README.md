@@ -1,7 +1,7 @@
 # Hook payload sequences
 
 Hook payloads captured from the real `grok 1.0.62` binary (pinned build, stub model server), merged with the `turn_completed` records of the same sessions' `updates.jsonl`.
-`grok_hook_test.py` replays them through `grok_hook.py`, feeding each `turn_completed` as the transcript streamer's `--turn-completed <sessionId> <promptId>` call.
+`grok_hook_test.py` replays them through `grok_hook.py`, feeding each `turn_completed` as the transcript streamer's `--turn-completed <sessionId> <promptId> <stopReason>` call.
 
 ## Format
 
@@ -30,5 +30,6 @@ Session ids, prompt ids, prompts and all other fields are verbatim.
 | `stop_block.jsonl` | A `Stop` hook that blocks once per prompt: two `Stop{end_turn}` per prompt id (`stopHookActive` false, then true), one `turn_completed` after the second; also on a background-shell turn and its wake. |
 | `idle_prompt.jsonl` | `GROK_IDLE_NOTIFICATION_DELAY_MS=3000`: `idle_prompt` after turns, suppressed by a turn sent 2 s after the previous one, and after a cancelled turn. |
 | `silent_wake_exhaust.jsonl` | A background-shell wake whose model reply is empty: no `Stop` for 327 s of retries, then `Notification{agent_error}`, `StopFailure` 12 ms before `turn_completed{error}`. |
+| `stop_gate_cancel.jsonl` | Ctrl+C 1 s into a user `Stop` hook that sleeps: grok kills the hook, writes `turn_completed{cancelled}`, then reports `StopCancelled` for the prompt id its `Stop` already reported; then a normal turn. |
 | `new_session.jsonl` | A turn, `/new` (`SessionStart{new}` for a second root) and a turn there, quit (both roots end), `--resume` of the first root and a turn. |
 | `unknown_session.jsonl` | `SessionEnd` and `Stop{shutdown}` for a session that never had `SessionStart` (seen while a consent notice re-armed at launch). |

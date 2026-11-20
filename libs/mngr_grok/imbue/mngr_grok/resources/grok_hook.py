@@ -4,7 +4,8 @@
 Invocations (each exits 0 with nothing on stdout or stderr, and logs one line to ``logs/grok_hooks.log``):
 
 - ``grok_hook.py``: hook mode, the payload JSON on stdin; does nothing when ``GROK_AGENT=1`` (a nested grok).
-- ``grok_hook.py --turn-completed <sessionId> <promptId>``: the transcript streamer saw that turn's ``turn_completed``.
+- ``grok_hook.py --turn-completed <sessionId> <promptId> <stopReason>``: the transcript streamer saw that turn's
+  ``turn_completed``.
 - ``grok_hook.py --turn-dropped <sessionId> <promptId>``: mngr ends that turn, which grok dropped at mngr's Ctrl+C
   without reporting its end.
 
@@ -14,7 +15,9 @@ Both end the turn only while it is the session's recorded turn.
 ``background``; a task a ``Stop`` lists in flight is recorded at ``background_tasks/task-<id>`` instead. Every state
 change runs under ``fcntl.flock`` on ``plugin/grok/state.lock``; a recompute that flips ``active`` appends a
 ``mngr/activity`` event to ``$MNGR_HOST_DIR/events/mngr/activity/events.jsonl``, and one that removes it writes
-``idle_since``.
+``idle_since``. A root ``StopFailure``, ``StopCancelled`` or ``turn_completed{end_turn}`` writes how its turn ended to
+``turn_end`` only when its promptId is the one on ``submissions.log``'s last line; a root ``UserPromptSubmit`` removes
+it.
 
 ``permissions_waiting`` holds the session ids grok asked the user about, one per line (empty when a notification named
 none); a tool of one of those sessions resolving, its top-level turn starting or ending, or the session ending removes
@@ -90,6 +93,7 @@ _STATE_LOCK_FILENAME: Final[str] = "state.lock"
 ACTIVE_MARKER_FILENAME: Final[str] = "active"
 PERMISSIONS_WAITING_FILENAME: Final[str] = "permissions_waiting"
 _IDLE_SINCE_FILENAME: Final[str] = "idle_since"
+TURN_END_FILENAME: Final[str] = "turn_end"
 SESSION_STARTED_FILENAME: Final[str] = "grok_session_started"
 _HOOK_LOG_PATH_PARTS: Final[tuple[str, ...]] = ("logs", "grok_hooks.log")
 _ACTIVITY_EVENTS_PATH_PARTS: Final[tuple[str, ...]] = ("events", "mngr", "activity", "events.jsonl")
@@ -121,6 +125,7 @@ _NON_ALPHANUMERIC_PATTERN: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9]")
 _CAMEL_CASE_BOUNDARY_PATTERN: Final[re.Pattern[str]] = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _WHITESPACE_PATTERN: Final[re.Pattern[str]] = re.compile(r"\s+")
 _LOG_FIELD_MAX_LENGTH: Final[int] = 160
+_LAST_LINE_READ_BYTES: Final[int] = 4096
 
 
 class GrokHookError(Exception):
@@ -179,6 +184,22 @@ def _read_first_line(path: Path) -> Optional[str]:
     return text.split("\n", 1)[0].strip()
 
 
+def _read_last_line(path: Path) -> str:
+    """The last line of ``path``, with or without its newline, read from the file's end; empty when there is none."""
+    try:
+        with open(path, "rb") as handle:
+            position = handle.seek(0, os.SEEK_END)
+            window = b""
+            while position > 0 and b"\n" not in window.rstrip(b"\n"):
+                read_size = min(_LAST_LINE_READ_BYTES, position)
+                position -= read_size
+                handle.seek(position)
+                window = handle.read(read_size) + window
+    except FileNotFoundError:
+        return ""
+    return window.rstrip(b"\n").rpartition(b"\n")[2].decode("utf-8", errors="replace").strip()
+
+
 def _write_text_atomically(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -190,6 +211,16 @@ def _append_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "ab", buffering=0) as handle:
         handle.write(text.encode("utf-8"))
+
+
+def _append_line(path: Path, line: str) -> None:
+    """Append ``line`` and a newline, first ending a last line that an interrupted write left without one."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a+b", buffering=0) as handle:
+        size = handle.seek(0, os.SEEK_END)
+        handle.seek(max(size - 1, 0))
+        line_start = b"\n" if size > 0 and handle.read(1) != b"\n" else b""
+        handle.write(line_start + line.encode("utf-8") + b"\n")
 
 
 def _touch(path: Path) -> None:
@@ -301,6 +332,22 @@ def _append_activity_event(host_dir: str, now: datetime) -> str:
     }
     _append_text(Path(host_dir).joinpath(*_ACTIVITY_EVENTS_PATH_PARTS), json.dumps(event) + "\n")
     return ""
+
+
+def _with_native_type(line: str, native_type: str) -> str:
+    """``line`` with ``native_type`` appended as a ``native_type:<percent-encoded>`` token, unless it is empty."""
+    encoded_native_type = quote(native_type, safe="", errors="replace")
+    return f"{line} native_type:{encoded_native_type}" if encoded_native_type else line
+
+
+def _write_turn_end(state_dir: Path, prompt_id: str, kind: str, native_type: str, now: datetime) -> str:
+    """Record how ``prompt_id``'s turn ended, e.g. ``ended:1792575895 kind:FAILED``, if it is the newest root prompt."""
+    last_submission = _read_last_line(_plugin_dir(state_dir) / SUBMISSIONS_LOG_FILENAME)
+    if last_submission.partition(" ")[0] != prompt_id:
+        return " turn_end:skipped-not-latest-prompt"
+    line = _with_native_type(f"ended:{int(now.timestamp())} kind:{kind}", native_type)
+    _write_text_atomically(state_dir / TURN_END_FILENAME, line + "\n")
+    return f" turn_end:{kind}"
 
 
 def _recompute_active_marker(state_dir: Path, host_dir: str, now: datetime) -> str:
@@ -454,8 +501,7 @@ def _record_line_of(task: Mapping[str, Any], seen_at: int) -> str:
     """A record's first line, e.g. ``seen:1792575895 kind:SHELL native_type:shell``."""
     task_type = str(task.get("type") or "")
     line = f"seen:{seen_at} kind:{BACKGROUND_TASK_KIND_BY_TASK_TYPE.get(task_type, OTHER_BACKGROUND_TASK_KIND)}"
-    native_type = quote(task_type, safe="", errors="replace")
-    return f"{line} native_type:{native_type}" if native_type else line
+    return _with_native_type(line, task_type)
 
 
 def _clear_background_task_records(state_dir: Path) -> str:
@@ -528,12 +574,13 @@ def _handle_user_prompt_submit(state_dir: Path, host_dir: str, payload: Mapping[
     is_auto_wake = _is_auto_wake_prompt_id(prompt_id)
     tail = AUTO_WAKE_TAIL_MARKER if is_auto_wake else normalized_prompt_tail(_payload_field_text(payload, "prompt"))
     _write_text_atomically(_turn_path(state_dir, session_id), f"{prompt_id}\n{tail}\n")
+    _remove_file(state_dir / TURN_END_FILENAME)
     if prompt_id.startswith(SUBAGENT_WAKE_PROMPT_ID_PREFIX):
         _remove_file(_pending_wake_path(state_dir, session_id))
     _clear_session_permission_waiting(state_dir, session_id)
     recompute_outcome = _recompute_active_marker(state_dir, host_dir, now)
     # Appended last, so a probe that sees this line also sees the turn's marker.
-    _append_text(_plugin_dir(state_dir) / SUBMISSIONS_LOG_FILENAME, f"{prompt_id} {tail}\n")
+    _append_line(_plugin_dir(state_dir) / SUBMISSIONS_LOG_FILENAME, f"{prompt_id} {tail}")
     return ("turn:start-auto-wake" if is_auto_wake else "turn:start") + recompute_outcome
 
 
@@ -564,13 +611,17 @@ def _end_stopped_subagent(state_dir: Path, host_dir: str, subagent_id: str, now:
 
 
 def _handle_stop_failure(state_dir: Path, host_dir: str, payload: Mapping[str, Any], now: datetime) -> str:
-    """End a failed subagent; a failed root turn ends at its later ``turn_completed{error}``."""
+    """End a failed subagent, or record a failed root turn, which ends at its later ``turn_completed{error}``."""
     session_id = _payload_session_id(payload)
+    prompt_id = _payload_prompt_id(payload)
     if session_id is None:
         return "ignored:no-session-id"
-    if not _is_subagent_payload(payload):
-        return "ignored:root-session"
-    return _end_stopped_subagent(state_dir, host_dir, session_id, now)
+    if _is_subagent_payload(payload):
+        return _end_stopped_subagent(state_dir, host_dir, session_id, now)
+    if prompt_id is None:
+        return "ignored:no-prompt-id"
+    error = _payload_field_text(payload, "error")
+    return "root-session" + _write_turn_end(state_dir, prompt_id, "FAILED", error, now)
 
 
 def _handle_stop_cancelled(state_dir: Path, host_dir: str, payload: Mapping[str, Any], now: datetime) -> str:
@@ -582,7 +633,9 @@ def _handle_stop_cancelled(state_dir: Path, host_dir: str, payload: Mapping[str,
         return _end_stopped_subagent(state_dir, host_dir, session_id, now)
     if prompt_id is None:
         return "ignored:no-prompt-id"
-    return _complete_turn(state_dir, host_dir, session_id, prompt_id, now)
+    reason = _payload_field_text(payload, "reason")
+    turn_end_outcome = _write_turn_end(state_dir, prompt_id, "INTERRUPTED", reason, now)
+    return _complete_turn(state_dir, host_dir, session_id, prompt_id, now) + turn_end_outcome
 
 
 def _handle_subagent_start(state_dir: Path, host_dir: str, payload: Mapping[str, Any], now: datetime) -> str:
@@ -661,7 +714,10 @@ def _handle_turn_end_command(state_dir: Path, host_dir: str, payload: Mapping[st
     prompt_id = _payload_prompt_id(payload)
     if session_id is None or prompt_id is None:
         return "ignored:invalid-arguments"
-    return _complete_turn(state_dir, host_dir, session_id, prompt_id, now)
+    turn_end_outcome = ""
+    if _payload_field_text(payload, "stopReason") == _END_TURN_REASON:
+        turn_end_outcome = _write_turn_end(state_dir, prompt_id, "COMPLETED", _END_TURN_REASON, now)
+    return _complete_turn(state_dir, host_dir, session_id, prompt_id, now) + turn_end_outcome
 
 
 _EventHandler = Callable[[Path, str, Mapping[str, Any], datetime], str]
@@ -743,8 +799,9 @@ def _run_invocation(
         )
     elif state_dir_value == "":
         return None
-    elif len(arguments) == 3 and arguments[0] in (_TURN_COMPLETED_FLAG, TURN_DROPPED_FLAG):
-        payload = {"sessionId": arguments[1], "promptId": arguments[2]}
+    elif (arguments[0], len(arguments)) in ((_TURN_COMPLETED_FLAG, 4), (TURN_DROPPED_FLAG, 3)):
+        stop_reason = arguments[3] if arguments[0] == _TURN_COMPLETED_FLAG else ""
+        payload = {"sessionId": arguments[1], "promptId": arguments[2], "stopReason": stop_reason}
         return _dispatch(
             Path(state_dir_value),
             host_dir,
