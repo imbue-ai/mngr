@@ -195,8 +195,9 @@ PREVENT_ASYNC_AWAIT = RegexRatchetRule(
     # (``minds-admin server await-delivery``), so every comment, docstring, and help
     # string naming it counts as an async usage. NB: this file is scanned by this rule, so write
     # any prose here with the keyword never followed by a space or an open paren, or the rule
-    # counts its own explanation.
-    pattern_string=r"\basync\s+def\b|\bawait\s|\bawait\(",
+    # counts its own explanation. A line-leading ``await`` is skipped: formatted Python has the keyword
+    # only in an indented function body, so one at column 0 is another language held in a string.
+    pattern_string=r"\basync\s+def\b|(?<=.)\bawait\s|(?<=.)\bawait\(",
 )
 
 PREVENT_PANDAS_IMPORT = RegexRatchetRule(

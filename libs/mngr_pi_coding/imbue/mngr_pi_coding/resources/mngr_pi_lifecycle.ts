@@ -4,7 +4,7 @@
 // lifecycle-event surface is the TypeScript extension API. mngr provisions this
 // single extension and loads it with `pi -e <path>` (see plugin.py's
 // assemble_command). It is the pi analogue of mngr_antigravity's hook scripts,
-// collapsed into one in-process module, and it does three jobs:
+// collapsed into one in-process module, and it does these jobs:
 //
 //   1. Readiness sentinel. On `session_start` (which fires at TUI startup,
 //      before any prompt and even with no model configured) it writes
@@ -15,12 +15,13 @@
 //   2. The RUNNING/WAITING marker. mngr's BaseAgent reports RUNNING iff
 //      `$MNGR_AGENT_STATE_DIR/active` exists while the pi process is alive (see
 //      determine_lifecycle_state). pi maintains no such file, so this extension
-//      touches it on `agent_start` and removes it on `agent_end`. No child/root
-//      gating is needed: pi has no in-process subagent/Task tool, so only one
-//      agent loop ever runs per process, and only the mngr-launched pi runs this
-//      extension (loaded via the explicit `-e` flag, not auto-discovery) -- a
-//      nested pi the agent spawns with the bash tool (bare `pi`, no `-e`) never
-//      executes these handlers and never touches the marker.
+//      touches it on `agent_start` and removes it on `agent_end`, or on
+//      `agent_settled` on pi 1.1.0+. No child/root gating is needed: pi has no
+//      in-process subagent/Task tool, so only one agent loop ever runs per
+//      process, and only the mngr-launched pi runs this extension (loaded via
+//      the explicit `-e` flag, not auto-discovery) -- a nested pi the agent
+//      spawns with the bash tool (bare `pi`, no `-e`) never executes these
+//      handlers and never touches the marker.
 //
 //   3. Transcript emission. On `message_end` it appends the raw pi message to
 //      `$MNGR_AGENT_STATE_DIR/logs/<type>_transcript/events.jsonl` and, when
@@ -53,17 +54,22 @@
 //      until the finished message reaches the session file. pi turns every
 //      provider's stream into the same `message_update` events, so this works for
 //      any model pi runs. The finished text stays there until the next message
-//      replaces it or the turn ends (`agent_end` removes it).
+//      replaces it or `agent_end` removes it.
+//
+//   6. Turn end. On `agent_settled` (pi 1.1.0+) it writes
+//      `$MNGR_AGENT_STATE_DIR/turn_end` before removing `active`, and
+//      `agent_start` removes it.
 //
 // Design rules:
 //   * Every handler body is wrapped so a bug here can never disrupt pi's loop.
 //   * All filesystem work is synchronous (node's *Sync calls), so ordering is
 //     deterministic within pi's single-threaded event loop -- no interleaved
 //     appends, no async races on the marker.
-//   * No imports from the pi package or any other dependency: the file is
+//   * No static imports from the pi package or any other dependency: the file is
 //     provisioned standalone and must load under jiti regardless of where pi
-//     itself is installed (npm, brew, bundled binary). Event/message shapes are
-//     declared locally as the minimal structural types we read.
+//     itself is installed (npm, brew, bundled binary). pi's VERSION is read with
+//     a dynamic import that falls back to "". Event/message shapes are declared
+//     locally as the minimal structural types we read.
 
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -215,6 +221,8 @@ const MODEL_STATE_NAME = "model_state.json";
 // message_end records it. Kept in sync with the pi watcher in the workspace
 // template (harnesses/pi_coding/watcher.py).
 const REPLY_DRAFT_NAME = "pi_reply_draft";
+// How the last turn ended; kept in sync with TURN_END_FILE_NAME in imbue/mngr/hosts/background_tasks.py.
+const TURN_END_NAME = "turn_end";
 // message_update fires per token; the draft is rewritten at most this often
 // while a message streams (message_end always writes the finished text).
 const REPLY_DRAFT_MIN_WRITE_INTERVAL_MS = 100;
@@ -285,6 +293,31 @@ function safe(label: string, fn: () => void): void {
     // Never let a lifecycle/transcript failure disrupt pi.
     logDiagnostic(label, error);
   }
+}
+
+// The running pi's version, e.g. `1.5.2`, or "" when it cannot be read.
+async function readPiVersion(): Promise<string> {
+  try {
+    const piPackage = await import("@earendil-works/pi-coding-agent");
+    return typeof piPackage.VERSION === "string" ? piPackage.VERSION : "";
+  } catch {
+    return "";
+  }
+}
+
+// Whether a version such as `1.5.2` is at least `major.minor`.
+function isVersionAtLeast(version: string, major: number, minor: number): boolean {
+  const match = /^(\d+)\.(\d+)\./.exec(version);
+  if (match === null) {
+    return false;
+  }
+  const [versionMajor, versionMinor] = [Number(match[1]), Number(match[2])];
+  return versionMajor > major || (versionMajor === major && versionMinor >= minor);
+}
+
+// Encode text as a record value, e.g. `cloud session` as `cloud%20session`.
+function encodeRecordValue(text: string): string {
+  return encodeURIComponent(text).replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
 function appendLine(filePath: string, line: string): void {
@@ -431,7 +464,7 @@ function metricsFromUsage(usage: PiUsage | undefined): Record<string, unknown> |
   return metrics;
 }
 
-export default function mngrPiLifecycle(pi: PiApi): void {
+export default async function mngrPiLifecycle(pi: PiApi): Promise<void> {
   const stateDir = process.env.MNGR_AGENT_STATE_DIR;
   if (!stateDir) {
     // Not running under mngr; do nothing rather than scatter files.
@@ -447,6 +480,7 @@ export default function mngrPiLifecycle(pi: PiApi): void {
   const sessionFilePath = join(stateDir, SESSION_FILE_NAME);
   const modelStatePath = join(stateDir, MODEL_STATE_NAME);
   const replyDraftPath = join(stateDir, REPLY_DRAFT_NAME);
+  const turnEndPath = join(stateDir, TURN_END_NAME);
   const rawPath = join(stateDir, "logs", `${agentType}_transcript`, "events.jsonl");
   const commonPath = join(stateDir, "events", agentType, "common_transcript", "events.jsonl");
   const commonEmitter = `${agentType}/common_transcript`;
@@ -555,6 +589,27 @@ export default function mngrPiLifecycle(pi: PiApi): void {
     writeFileSync(tmpPath, text);
     renameSync(tmpPath, replyDraftPath);
     replyDraftWrittenAt = now;
+  };
+
+  // The stop reason of the turn's last assistant reply, e.g. `stop`, `error` or `aborted`.
+  let lastStopReason: string | undefined;
+  // Whether pi is 1.1.0+, whose agent_settled reports `aborted`; there agent_settled, not agent_end, ends a turn.
+  let isTurnClosedAtSettled = false;
+
+  // Record how the turn ended as pi's own outcome counts it: aborted, error, else completed.
+  const recordTurnEnd = (stopReason: string | undefined): void => {
+    if (!stopReason) {
+      return;
+    }
+    const kind = stopReason === "aborted" ? "INTERRUPTED" : stopReason === "error" ? "FAILED" : "COMPLETED";
+    const ended = Math.floor(Date.now() / 1000);
+    const stagingPath = join(stateDir, `.${TURN_END_NAME}.${process.pid}.tmp`);
+    try {
+      writeFileSync(stagingPath, `ended:${ended} kind:${kind} native_type:${encodeRecordValue(stopReason)}\n`);
+      renameSync(stagingPath, turnEndPath);
+    } finally {
+      rmSync(stagingPath, { force: true });
+    }
   };
 
   // Input injection. mngr delivers messages by appending one JSON-encoded string
@@ -906,15 +961,33 @@ export default function mngrPiLifecycle(pi: PiApi): void {
   });
 
   pi.on("agent_start", (_event, _ctx) => {
+    lastStopReason = undefined;
     safe("agent_start", () => {
       writeFileSync(markerPath, "1");
+      rmSync(turnEndPath, { force: true });
     });
   });
 
   pi.on("agent_end", (_event, _ctx) => {
     safe("agent_end", () => {
-      rmSync(markerPath, { force: true });
+      if (!isTurnClosedAtSettled) {
+        rmSync(markerPath, { force: true });
+      }
       rmSync(replyDraftPath, { force: true });
+    });
+  });
+
+  pi.on("agent_settled", (event: { aborted?: boolean }, _ctx) => {
+    if (!isTurnClosedAtSettled) {
+      return;
+    }
+    const stopReason = event?.aborted ? "aborted" : lastStopReason;
+    lastStopReason = undefined;
+    safe("turn_end", () => {
+      recordTurnEnd(stopReason);
+    });
+    safe("agent_settled", () => {
+      rmSync(markerPath, { force: true });
     });
   });
 
@@ -941,6 +1014,9 @@ export default function mngrPiLifecycle(pi: PiApi): void {
       const message = event?.message;
       if (message == null || typeof message.role !== "string") {
         return;
+      }
+      if (message.role === "assistant") {
+        lastStopReason = (message as AssistantMessage).stopReason;
       }
       if (emitRaw) {
         appendLine(rawPath, JSON.stringify({ type: "message", timestamp: isoTimestamp(message), message }));
@@ -1043,6 +1119,8 @@ export default function mngrPiLifecycle(pi: PiApi): void {
       commonLineCount += 1;
     });
   });
+
+  isTurnClosedAtSettled = isVersionAtLeast(await readPiVersion(), 1, 1);
 }
 
 // Convert a pi AgentMessage into an mngr usage cost_snapshot record, or null when

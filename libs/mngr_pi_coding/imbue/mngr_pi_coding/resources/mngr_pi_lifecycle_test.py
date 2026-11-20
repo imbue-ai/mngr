@@ -17,26 +17,36 @@ import json
 import os
 import shutil
 import subprocess
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
+from imbue.mngr.hosts.background_tasks import TURN_END_FILE_NAME
+from imbue.mngr.primitives import TurnEndKind
+from imbue.mngr.utils.testing import read_turn_end_in
 from imbue.mngr_pi_coding.plugin import _LIFECYCLE_EXTENSION_NAME
 from imbue.mngr_pi_coding.plugin import _load_resource
 
 # Node driver: load the extension, register its handlers via a fake `pi`, then
 # replay a JSON list of events. Each event is `{event, payload?, sessionId?,
-# sessionFile?}`; the fake ctx returns the given session id/file. Assertions
-# live in Python (below) against the files the extension writes.
+# sessionFile?, now?}`; the fake ctx returns the given session id/file, and `now`
+# fixes `Date.now()` in ms from that event on. Assertions live in Python (below)
+# against the files the extension writes.
 _DRIVER_MJS = """
 import { readFileSync } from "node:fs";
 const events = JSON.parse(readFileSync(process.argv[2], "utf8"));
 const handlers = {};
 const mod = await import("./mngr_pi_lifecycle.ts");
-mod.default({ on: (name, handler) => { (handlers[name] ||= []).push(handler); } });
+await mod.default({ on: (name, handler) => { (handlers[name] ||= []).push(handler); } });
 for (const ev of events) {
+  if (ev.now !== undefined) {
+    Date.now = () => ev.now;
+  }
   const ctx = {
     sessionManager: { getSessionId: () => ev.sessionId, getSessionFile: () => ev.sessionFile },
     model: ev.model,
@@ -59,10 +69,26 @@ def _node_supports_typescript(node: str, work_dir: Path) -> bool:
     return result.returncode == 0
 
 
+def _install_pi_package(work_dir: Path, version: str) -> None:
+    """Install a stand-in for pi's own package, which pi resolves for its extensions, reporting ``version``."""
+    package_dir = work_dir / "node_modules" / "@earendil-works" / "pi-coding-agent"
+    package_dir.mkdir(parents=True, exist_ok=True)
+    (package_dir / "package.json").write_text(json.dumps({"type": "module", "main": "index.js"}))
+    (package_dir / "index.js").write_text(f"export const VERSION = {json.dumps(version)};\n")
+
+
 def _run_extension(
-    tmp_path: Path, events: list[dict[str, Any]], *, emit_common: bool = True, emit_usage: bool = False
+    tmp_path: Path,
+    events: list[dict[str, Any]],
+    *,
+    emit_common: bool = True,
+    emit_usage: bool = False,
+    pi_version: str | None = None,
 ) -> Path:
-    """Run the extension over ``events`` under a fresh state dir; return the state dir."""
+    """Run the extension over ``events`` under a fresh state dir; return the state dir.
+
+    ``pi_version=None`` is a pi whose version the extension cannot read.
+    """
     node = shutil.which("node")
     if node is None:
         pytest.skip("node is not available")
@@ -72,6 +98,8 @@ def _run_extension(
         pytest.skip("node does not support importing TypeScript modules")
 
     (work_dir / _LIFECYCLE_EXTENSION_NAME).write_text(_load_resource(_LIFECYCLE_EXTENSION_NAME))
+    if pi_version is not None:
+        _install_pi_package(work_dir, pi_version)
     driver_path = work_dir / "driver.mjs"
     driver_path.write_text(_DRIVER_MJS)
     events_path = work_dir / "events.json"
@@ -1418,3 +1446,198 @@ def test_inbox_watcher_triggers_compaction(tmp_path: Path) -> None:
     outcome = json.loads((state / "outcome.json").read_text())
     assert "compact:focus on recent changes" in outcome["log"]
     assert "inject:follow-up message" in outcome["log"]
+
+
+_AGENT_START: dict[str, Any] = {"event": "agent_start"}
+_AGENT_END: dict[str, Any] = {"event": "agent_end"}
+_TURN_END_CLOCK_SLACK = timedelta(seconds=30)
+# The first pi whose agent_settled reports ``aborted``.
+_PI_WITH_SETTLED_ABORTED = "1.1.0"
+
+
+def _reply(stop_reason: str) -> dict[str, Any]:
+    """The ``message_end`` of an assistant reply that stopped for ``stop_reason``."""
+    return _message_end(
+        role="assistant", content=[{"type": "text", "text": "ok"}], stopReason=stop_reason, timestamp=9
+    )
+
+
+def _settled(aborted: bool | None) -> dict[str, Any]:
+    """An ``agent_settled`` event; ``aborted=None`` is pi before 1.1.0, which sends none."""
+    return {"event": "agent_settled", "payload": {} if aborted is None else {"aborted": aborted}}
+
+
+_SETTLED_TURN: list[dict[str, Any]] = [_AGENT_START, _reply("stop"), _AGENT_END, _settled(False)]
+
+
+@pytest.mark.parametrize(
+    ("run_events", "aborted", "expected_kind", "expected_native_type"),
+    [
+        pytest.param([_reply("stop")], False, TurnEndKind.COMPLETED, "stop", id="completed"),
+        pytest.param([_reply("length")], False, TurnEndKind.COMPLETED, "length", id="completed_at_the_length_limit"),
+        pytest.param([_reply("error")], False, TurnEndKind.FAILED, "error", id="failed"),
+        pytest.param([_reply("aborted")], False, TurnEndKind.INTERRUPTED, "aborted", id="reply_aborted"),
+        pytest.param([_reply("toolUse")], True, TurnEndKind.INTERRUPTED, "aborted", id="aborted_during_a_tool"),
+        pytest.param([], True, TurnEndKind.INTERRUPTED, "aborted", id="aborted_before_any_reply"),
+        pytest.param(
+            [
+                _reply("toolUse"),
+                _message_end(
+                    role="toolResult", toolCallId="c1", content=[{"type": "text", "text": "out"}], timestamp=10
+                ),
+            ],
+            False,
+            TurnEndKind.COMPLETED,
+            "toolUse",
+            id="ended_by_a_tool_batch",
+        ),
+        pytest.param(
+            [_reply("error"), _AGENT_END, _AGENT_START, _reply("stop")],
+            False,
+            TurnEndKind.COMPLETED,
+            "stop",
+            id="completed_after_a_retry",
+        ),
+        pytest.param(
+            [_reply("new reason\n")], False, TurnEndKind.COMPLETED, "new reason�", id="an_unknown_stop_reason"
+        ),
+    ],
+)
+def test_a_settled_turn_records_pi_s_own_outcome_as_its_turn_end(
+    run_events: list[dict[str, Any]],
+    aborted: bool,
+    expected_kind: TurnEndKind,
+    expected_native_type: str,
+    tmp_path: Path,
+) -> None:
+    written_at = datetime.now(timezone.utc)
+
+    state = _run_extension(
+        tmp_path, [_AGENT_START, *run_events, _AGENT_END, _settled(aborted)], pi_version=_PI_WITH_SETTLED_ABORTED
+    )
+
+    turn_end = read_turn_end_in(state)
+    assert turn_end is not None
+    assert (turn_end.kind, turn_end.native_type) == (expected_kind, expected_native_type)
+    assert abs(turn_end.ended_at - written_at) <= _TURN_END_CLOCK_SLACK
+
+
+def test_a_turn_end_native_type_is_percent_encoded_outside_the_unreserved_set(tmp_path: Path) -> None:
+    events = [_AGENT_START, _reply("it's (new)*! ~_.-"), _AGENT_END, _settled(False)]
+
+    state = _run_extension(tmp_path, events, pi_version=_PI_WITH_SETTLED_ABORTED)
+
+    tokens = (state / TURN_END_FILE_NAME).read_text().removesuffix("\n").split(" ")
+    assert tokens[2] == "native_type:it%27s%20%28new%29%2A%21%20~_.-"
+
+
+@pytest.mark.parametrize(
+    ("pi_version", "events"),
+    [
+        pytest.param("0.80.3", [_AGENT_START, _reply("stop"), _AGENT_END], id="pi_without_agent_settled"),
+        pytest.param("1.0.9", [_AGENT_START, _reply("error"), _AGENT_END, _settled(None)], id="pi_without_aborted"),
+        pytest.param(None, [_AGENT_START, _reply("error"), _AGENT_END, _settled(False)], id="pi_version_unread"),
+        pytest.param(
+            _PI_WITH_SETTLED_ABORTED, [_AGENT_START, _AGENT_END, _settled(False)], id="no_reply_and_no_abort"
+        ),
+        pytest.param(
+            _PI_WITH_SETTLED_ABORTED,
+            [_AGENT_START, _reply("error"), _AGENT_END, _settled(False), _AGENT_START, _AGENT_END, _settled(False)],
+            id="no_reply_in_the_turn_after_a_failed_one",
+        ),
+    ],
+)
+def test_a_turn_end_is_recorded_only_when_pi_says_how_the_turn_ended(
+    pi_version: str | None, events: list[dict[str, Any]], tmp_path: Path
+) -> None:
+    state = _run_extension(tmp_path, events, pi_version=pi_version)
+
+    assert not (state / TURN_END_FILE_NAME).exists()
+
+
+def test_a_turn_end_is_kept_across_a_restart_and_removed_when_the_next_turn_opens(tmp_path: Path) -> None:
+    state = _run_extension(
+        tmp_path, [*_SETTLED_TURN, {"event": "session_shutdown"}], pi_version=_PI_WITH_SETTLED_ABORTED
+    )
+    _rerun_extension_against_state(tmp_path, state, [{"event": "session_start", "sessionFile": "/s/s1.jsonl"}])
+    assert (state / TURN_END_FILE_NAME).exists()
+
+    _rerun_extension_against_state(tmp_path, state, [_AGENT_START])
+
+    assert not (state / TURN_END_FILE_NAME).exists()
+    assert (state / "active").exists()
+
+
+_LAST_TURN_ENDED_AT = datetime(2026, 11, 19, 12, 0, tzinfo=timezone.utc)
+_LATER_RUN_SETTLED_AT = _LAST_TURN_ENDED_AT + timedelta(minutes=5)
+
+
+@pytest.mark.parametrize(
+    ("run_events", "expected_turn_end"),
+    [
+        pytest.param([], (TurnEndKind.COMPLETED, "stop", _LAST_TURN_ENDED_AT), id="no_reply_keeps_the_last_line"),
+        pytest.param(
+            [_reply("error"), _AGENT_END],
+            (TurnEndKind.FAILED, "error", _LATER_RUN_SETTLED_AT),
+            id="its_own_failure_reply",
+        ),
+    ],
+)
+def test_a_run_that_settles_without_starting_records_only_its_own_reply(
+    run_events: list[dict[str, Any]], expected_turn_end: tuple[TurnEndKind, str, datetime], tmp_path: Path
+) -> None:
+    events = [
+        *({**event, "now": _LAST_TURN_ENDED_AT.timestamp() * 1000} for event in _SETTLED_TURN),
+        *({**event, "now": _LATER_RUN_SETTLED_AT.timestamp() * 1000} for event in [*run_events, _settled(False)]),
+    ]
+
+    state = _run_extension(tmp_path, events, pi_version=_PI_WITH_SETTLED_ABORTED)
+
+    turn_end = read_turn_end_in(state)
+    assert turn_end is not None
+    assert (turn_end.kind, turn_end.native_type, turn_end.ended_at) == expected_turn_end
+
+
+@pytest.mark.parametrize("earlier_turns", [[], _SETTLED_TURN], ids=["first_turn", "later_turn"])
+@pytest.mark.parametrize(
+    ("closing_events", "is_turn_open"),
+    [
+        pytest.param([_AGENT_END], True, id="after_agent_end"),
+        pytest.param([_AGENT_END, _settled(False)], False, id="after_agent_settled"),
+    ],
+)
+def test_on_pi_1_1_0_a_turn_stays_open_until_agent_settled_records_its_end(
+    earlier_turns: list[dict[str, Any]], closing_events: list[dict[str, Any]], is_turn_open: bool, tmp_path: Path
+) -> None:
+    events = [*earlier_turns, _AGENT_START, _reply("error"), *closing_events]
+
+    state = _run_extension(tmp_path, events, pi_version=_PI_WITH_SETTLED_ABORTED)
+
+    assert ((state / "active").exists(), read_turn_end_in(state) is None) == (is_turn_open, is_turn_open)
+
+
+@pytest.mark.parametrize(
+    ("pi_version", "is_turn_open_after_agent_end"),
+    [
+        pytest.param(None, False, id="unread"),
+        pytest.param("0.87.1", False, id="0.87.1"),
+        pytest.param("1.0.9", False, id="1.0.9"),
+        pytest.param(_PI_WITH_SETTLED_ABORTED, True, id=_PI_WITH_SETTLED_ABORTED),
+        pytest.param("2.0.0", True, id="2.0.0"),
+    ],
+)
+def test_a_turn_stays_open_past_agent_end_only_on_pi_1_1_0_or_later(
+    pi_version: str | None, is_turn_open_after_agent_end: bool, tmp_path: Path
+) -> None:
+    state = _run_extension(tmp_path, [_AGENT_START, _reply("stop"), _AGENT_END], pi_version=pi_version)
+
+    assert (state / "active").exists() == is_turn_open_after_agent_end
+
+
+def test_a_turn_end_that_cannot_be_written_still_ends_the_turn(tmp_path: Path) -> None:
+    (tmp_path / "state" / TURN_END_FILE_NAME).mkdir(parents=True)
+
+    state = _run_extension(tmp_path, [*_SETTLED_TURN, *_SETTLED_TURN], pi_version=_PI_WITH_SETTLED_ABORTED)
+
+    assert not (state / "active").exists()
+    assert [path.name for path in state.iterdir() if TURN_END_FILE_NAME in path.name] == [TURN_END_FILE_NAME]

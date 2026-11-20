@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_ASYNC_AWAIT
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_TMUX_TARGETS
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_INLINE_IMPORTS
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_TRAILING_COMMENTS
@@ -91,6 +92,25 @@ def test_trailing_comment_rule_finds_a_bare_bandit_suppression(git_repo: Path) -
 
     assert len(chunks) == 1
     assert chunks[0].start_line == 2
+
+
+def test_async_await_rule_finds_python_async_but_skips_a_line_leading_await_held_in_a_string(git_repo: Path) -> None:
+    _commit_module(
+        git_repo,
+        '''
+        async def f() -> None:
+            await g()
+            await(h())
+
+        DRIVER = """
+        await mod.default(pi);
+        """
+        ''',
+    )
+
+    chunks = check_ratchet_rule(PREVENT_ASYNC_AWAIT, git_repo)
+
+    assert [chunk.start_line for chunk in chunks] == [1, 2, 3]
 
 
 @pytest.mark.parametrize(
