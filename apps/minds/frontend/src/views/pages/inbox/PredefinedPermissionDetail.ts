@@ -21,7 +21,7 @@ import {
   isPermissionRowDisabled,
   submittedPermissions,
 } from "../../../models/inbox";
-import { renderExperimentalConnectorRisk } from "../../components/ExperimentalConnectorRisk";
+import { renderExperimentalConnectorRisk } from "../../components/ConnectorRisk";
 import { Select } from "../../components/FormControls";
 import { Icon16 } from "../../components/Icon";
 import { renderImplicitPermissionsHint } from "../../components/ImplicitPermissionsHint";
@@ -319,9 +319,15 @@ function credentialEntrySwitch(model: InboxModel): m.Children {
 }
 
 export function PredefinedPermissionDetailView(): m.Component<PredefinedPermissionDetailAttrs> {
+  // The request the experimental connector warning was opened on.
+  // RequestDetail mounts this view unkeyed, so one instance serves every
+  // predefined request the user moves between; a warning opened on one must
+  // not render open on the next.
+  let openRiskRequestId: string | null = null;
   return {
     view(vnode) {
       const { model, detail } = vnode.attrs;
+      const isRiskOpen = openRiskRequestId === detail.request_id;
       return m(PermissionsShell, {
         model,
         headerLabel: detail.display_name,
@@ -332,7 +338,14 @@ export function PredefinedPermissionDetailView(): m.Component<PredefinedPermissi
           m(Icon16, { name: "key", extra: "text-primary" }),
         ),
         headerNotice: detail.is_experimental
-          ? renderExperimentalConnectorRisk("This is an experimental connector. Use at your own risk.")
+          ? renderExperimentalConnectorRisk({
+              id: "permissions-experimental-risk",
+              sentence: "This is an experimental connector. Use at your own risk.",
+              isOpen: isRiskOpen,
+              onToggle: () => {
+                openRiskRequestId = isRiskOpen ? null : detail.request_id;
+              },
+            })
           : null,
         rationale: detail.rationale,
         account: accountPicker(model, detail),

@@ -450,6 +450,21 @@ punycode label that could look like another site. The classification lives in
 line is worded as "make sure you know what this is", since a private network
 calls its services what it likes.
 
+A connection whose sign-in is one of the capture flows gets one more line,
+under the dialog's header: "This connection may rely on an unofficial API.",
+with a "See more" that opens what that can mean underneath: many such
+connections work fine, but one could stop working without notice and, in rare
+cases, the service might restrict the account. The line is there because a
+cookie or token captured from a signed-in browser is what the service's own
+website uses for itself, so what it reaches may be an API the service does not
+document or support. It is the same concern as an [experimental
+connector](#experimental-connectors)'s, only uncertain rather than known, so it
+is drawn a tone quieter: an information glyph and muted text where the
+experimental warning has a warning sign and its colour. An `mcp`
+sign-in and a pasted token get no such line, and for a service the machine
+already has it is the registration's flow that decides, as it is for the
+sign-in itself.
+
 An agent is not supposed to ask for a domain some *other* service already
 covers, and does not need Imbue Studio to stop it: Latchkey answers that question
 first. A request to a domain no service covers fails with `No service matches
@@ -1363,17 +1378,18 @@ and Strava) everywhere its gateways run -- into this computer's latchkey
 directory as the app starts, and onto every remote workspace's machine as it is
 provisioned -- so every workspace sees the same set, and offers their services
 as **experimental connectors**: at the foot of Add connection, under their own
-heading and a brief "Use at your own risk" warning whose tooltip says why, each
-with a Connect button like any other service and the service's logo where one
-ships (Spotify and Strava; Garmin Connect falls back to the plain glyph). One is
-connected and granted the same way as a built-in service; its only permission
+heading and a brief "Use at your own risk" warning whose "See more" says why,
+each with a Connect button like any other service and the service's logo where
+one ships (Spotify and Strava; Garmin Connect falls back to the plain glyph). One
+is connected and granted the same way as a built-in service; its only permission
 is full access to the host its API lives on, as for a [custom
 service](#additional-custom-services). A connected one is listed in the left
 nav like any connection, and its panel heading carries an "Experimental"
 label. A permission request for one says "This is an experimental connector.
-Use at your own risk." under the dialog's header, with the same tooltip: the
-service can stop working without notice and, in the extreme case, might suspend
-the account.
+Use at your own risk." under the dialog's header, with the same "See more".
+Pressing it opens the reason under the warning, and pressing it again puts it
+away: the service can stop working without notice and, in the extreme case,
+might suspend the account.
 
 There is nothing to install or remove: which connectors exist is a property of
 the build. A plugin Imbue Studio does not pin is not offered.

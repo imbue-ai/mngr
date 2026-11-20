@@ -2,8 +2,28 @@ import m from "mithril";
 import { describe, expect, it } from "vitest";
 import { InboxModel } from "../../../models/inbox";
 import type { CustomServicePermissionDetail } from "../../../models/inbox";
+import { panelIdFor } from "../../components/Collapsible";
+import {
+  CAPTURE_LOGIN_RISK_ATTR,
+  CAPTURE_LOGIN_RISK_DETAIL,
+  EXPERIMENTAL_CONNECTOR_RISK_ATTR,
+} from "../../components/ConnectorRisk";
+import { ICONS_16 } from "../../components/icons";
 import { CustomServicePermissionDetailView } from "./CustomServicePermissionDetail";
-import { collectText, collectVnodes } from "../../../testing";
+import type { AnyVnode } from "../../../testing";
+import {
+  allText,
+  attrsOf,
+  byId,
+  classesOf,
+  collapsibleTrigger,
+  collectText,
+  collectVnodes,
+  pressCollapsible,
+  renderDeep,
+  required,
+  withAttr,
+} from "../../../testing";
 
 const DETAIL: CustomServicePermissionDetail = {
   kind: "custom_service",
@@ -17,29 +37,27 @@ const DETAIL: CustomServicePermissionDetail = {
   base_api_url: "https://api.example.com/",
   login_url: null,
   is_system_browser_login_supported: false,
+  is_capture_login: false,
   credential_header: "X-Api-Key: {token}",
   proxy: null,
 };
 
 interface ShellAttrs {
   headerLabel: string;
+  headerNotice?: m.Children;
   body: m.Children;
 }
 
 // Render without a DOM: instantiate the closure component and call view() directly,
-// as the sibling detail tests do. The root is a PermissionsShell vnode.
-function renderBody(
-  detail: CustomServicePermissionDetail,
+// as the sibling detail tests do. The root is a PermissionsShell vnode. One
+// instance draws whichever request it is handed, as Mithril does when the
+// request changes.
+function mountShell(
   model: InboxModel = new InboxModel(),
-): {
-  body: m.Children;
-  toggle: () => void;
-  /** Re-render the same instance, as Mithril does when the request changes. */
-  rerender: (next?: CustomServicePermissionDetail) => m.Children;
-} {
+): (shown: CustomServicePermissionDetail) => ShellAttrs {
   const instance =
     CustomServicePermissionDetailView() as unknown as m.Component;
-  const render = (shown: CustomServicePermissionDetail): ShellAttrs => {
+  return (shown) => {
     const vnode = m(instance, {
       model,
       detail: shown,
@@ -50,6 +68,18 @@ function renderBody(
     );
     return root.attrs as unknown as ShellAttrs;
   };
+}
+
+function renderBody(
+  detail: CustomServicePermissionDetail,
+  model: InboxModel = new InboxModel(),
+): {
+  body: m.Children;
+  toggle: () => void;
+  /** Re-render the same instance, as Mithril does when the request changes. */
+  rerender: (next?: CustomServicePermissionDetail) => m.Children;
+} {
+  const render = mountShell(model);
   const first = render(detail);
   const disclosure = collectVnodes(first.body).find(
     (vnode) => typeof vnode.attrs?.onToggle === "function",
@@ -166,5 +196,67 @@ describe("CustomServicePermissionDetailView", () => {
       "X-Auth: <the token you paste>; sig=<the token you paste>",
     );
     expect(text).not.toContain("{token}");
+  });
+});
+
+describe("CustomServicePermissionDetailView capture sign-in", () => {
+  const CAPTURED: CustomServicePermissionDetail = {
+    ...DETAIL,
+    login_url: "https://api.example.com/login",
+    is_capture_login: true,
+    credential_header: null,
+  };
+  const RISK_ID = "custom-service-capture-login-risk";
+
+  /** One mounted view, drawn for whichever request is shown: what sits under
+   * the header as a reader would see it. */
+  function mountHeaderNotice(): (shown: CustomServicePermissionDetail) => unknown {
+    const shellFor = mountShell();
+    return (shown) => renderDeep(shellFor(shown).headerNotice);
+  }
+
+  function riskOf(notice: unknown): AnyVnode {
+    return withAttr(notice, CAPTURE_LOGIN_RISK_ATTR)[0];
+  }
+
+  it("notes under the header that the connection may ride an unofficial API, with why behind See more", () => {
+    const noticeFor = mountHeaderNotice();
+
+    const shut = riskOf(noticeFor(CAPTURED));
+    expect(collectText(shut)).toEqual(["This connection may rely on an unofficial API.", " ", "See more"]);
+    expect(attrsOf(collapsibleTrigger(shut, RISK_ID))["aria-expanded"]).toBe("false");
+
+    pressCollapsible(shut, RISK_ID);
+    const opened = riskOf(noticeFor(CAPTURED));
+    expect(collectText(required(byId(opened, panelIdFor(RISK_ID))))).toEqual([CAPTURE_LOGIN_RISK_DETAIL]);
+    expect(CAPTURE_LOGIN_RISK_DETAIL).toContain("Many connections like this work fine");
+
+    pressCollapsible(opened, RISK_ID);
+    expect(allText(riskOf(noticeFor(CAPTURED)))).not.toContain(CAPTURE_LOGIN_RISK_DETAIL);
+  });
+
+  it("draws it a tone quieter than an experimental connector's warning", () => {
+    const notice = mountHeaderNotice()(CAPTURED);
+
+    expect(withAttr(notice, EXPERIMENTAL_CONNECTOR_RISK_ATTR)).toEqual([]);
+    expect(collectVnodes(notice).filter((vnode) => classesOf(vnode).includes("text-warning"))).toEqual([]);
+    const glyphs = collectVnodes(notice).filter((vnode) => vnode.tag === "<");
+    expect(glyphs.map((glyph) => glyph.children)).toEqual([ICONS_16["info"]]);
+    expect(allText(notice)).not.toContain("risk");
+  });
+
+  it("starts the next request's note shut after one was opened", () => {
+    const noticeFor = mountHeaderNotice();
+    pressCollapsible(noticeFor(CAPTURED), RISK_ID);
+    expect(allText(noticeFor(CAPTURED))).toContain(CAPTURE_LOGIN_RISK_DETAIL);
+
+    expect(allText(noticeFor({ ...CAPTURED, request_id: "evt-b" }))).not.toContain(CAPTURE_LOGIN_RISK_DETAIL);
+  });
+
+  it("says nothing of the kind for a pasted token or a sign-in that captures nothing", () => {
+    const noticeFor = mountHeaderNotice();
+
+    expect(noticeFor(DETAIL)).toBeNull();
+    expect(noticeFor({ ...CAPTURED, is_capture_login: false })).toBeNull();
   });
 });

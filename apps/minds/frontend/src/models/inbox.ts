@@ -218,6 +218,9 @@ export interface CustomServicePermissionDetail {
   login_url: string | null;
   /** Whether the sign-in opens the user's own browser rather than latchkey's. */
   is_system_browser_login_supported: boolean;
+  /** Whether the sign-in captures the cookie or token the service's own website
+   * ends up holding, so the connection may ride an API the service does not document. */
+  is_capture_login: boolean;
   /** The header line a pasted token is sent as, `{token}` standing for the value;
    * null when a browser sign-in applies and no token is pasted. */
   credential_header: string | null;

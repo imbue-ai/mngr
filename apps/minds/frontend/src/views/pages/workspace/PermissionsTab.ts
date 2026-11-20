@@ -23,7 +23,7 @@ import { ErrorNotice } from "../../components/ErrorDisplay";
 import {
   EXPERIMENTAL_CONNECTOR_RISK_DETAIL,
   renderExperimentalConnectorRisk,
-} from "../../components/ExperimentalConnectorRisk";
+} from "../../components/ConnectorRisk";
 import { InlineError } from "../../components/errorDesign";
 import { TextInput } from "../../components/FormControls";
 import { Icon16 } from "../../components/Icon";
@@ -175,6 +175,8 @@ interface PermissionsTabLocalState {
    * navigation to another workspace's pane, where the same service must not
    * pick the draft up. */
   desktopEgressDraft: { model: PermissionsModel; serviceName: string; route: string[] } | null;
+  /** Whether Add connection's experimental connectors warning shows what the risk is. */
+  isExperimentalRiskOpen: boolean;
   /** The chat a refused change's "Ask the agent to request it again" starts. */
   askAgent: AskAgentModel;
 }
@@ -196,6 +198,7 @@ export function PermissionsTab(): m.Component<PermissionsTabAttrs> {
     disconnectSectionId: null,
     folderSyncPollTimer: null,
     desktopEgressDraft: null,
+    isExperimentalRiskOpen: false,
     askAgent: new AskAgentModel({
       onStarted: (workspaceAgentId) => getAppContext().shell.enterWorkspace(workspaceAgentId),
     }),
@@ -544,7 +547,7 @@ function renderSelectedPanel(
   if (selected === LOCAL_FILES_SECTION) return renderLocalFilesPanel(model);
   if (selected === OTHER_MACHINES_SECTION) return renderOtherMachinesPanel(model);
   if (selected === THIS_COMPUTER_SECTION) return renderThisComputerPanel(model);
-  if (selected === ADD_CONNECTION_SECTION) return renderAddConnectionPanel(model, selectSection);
+  if (selected === ADD_CONNECTION_SECTION) return renderAddConnectionPanel(model, local, selectSection);
   const connection = connections.find((entry) => connectionSectionId(entry) === selected);
   if (connection === undefined) return null;
   return renderConnectionPanel(model, local, connection, machineName, data.is_credential_store_shared, selectSection);
@@ -821,6 +824,7 @@ function disarmRevoke(local: PermissionsTabLocalState): void {
 
 function renderAddConnectionPanel(
   model: PermissionsModel,
+  local: PermissionsTabLocalState,
   selectSection: (section: string) => void,
 ): m.Children {
   const connected = connectedServices(model.data?.connections ?? []);
@@ -847,7 +851,7 @@ function renderAddConnectionPanel(
     available.length === 0
       ? m(Notice, { variant: "info" }, "Every available service already has an account connected.")
       : renderCatalogList(model, available, "Connect", selectSection, "muted"),
-    experimental.length === 0 ? null : renderExperimentalConnectors(model, experimental, selectSection),
+    experimental.length === 0 ? null : renderExperimentalConnectors(model, local, experimental, selectSection),
   ]);
 }
 
@@ -857,12 +861,21 @@ function renderAddConnectionPanel(
  * row here is a catalog row like any other. */
 function renderExperimentalConnectors(
   model: PermissionsModel,
+  local: PermissionsTabLocalState,
   services: UiAvailableConnection[],
   selectSection: (section: string) => void,
 ): m.Children {
   return m("div", { "data-perm-experimental-connectors": "" }, [
     m("h3", { class: CATALOG_HEADING_CLASS }, "Experimental connectors"),
-    renderExperimentalConnectorRisk("Use at your own risk.", "mb-1"),
+    renderExperimentalConnectorRisk({
+      id: "ws-perm-experimental-risk",
+      sentence: "Use at your own risk.",
+      isOpen: local.isExperimentalRiskOpen,
+      onToggle: () => {
+        local.isExperimentalRiskOpen = !local.isExperimentalRiskOpen;
+      },
+      extra: "mb-1",
+    }),
     renderCatalogList(model, services, "Connect", selectSection, "muted"),
   ]);
 }

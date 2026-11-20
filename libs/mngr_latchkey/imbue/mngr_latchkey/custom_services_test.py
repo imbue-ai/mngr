@@ -35,6 +35,8 @@ from imbue.mngr_latchkey.custom_services import custom_service_catalog_payload
 from imbue.mngr_latchkey.custom_services import custom_service_name
 from imbue.mngr_latchkey.custom_services import domain_from_base_api_url
 from imbue.mngr_latchkey.custom_services import domain_warning
+from imbue.mngr_latchkey.custom_services import is_capture_login_flow
+from imbue.mngr_latchkey.custom_services import is_capture_login_registration
 from imbue.mngr_latchkey.custom_services import is_custom_service_name
 from imbue.mngr_latchkey.custom_services import is_system_browser_login_flow
 from imbue.mngr_latchkey.custom_services import registration_credential_header
@@ -1099,3 +1101,25 @@ def test_registering_then_deregistering_through_latchkey_refreshes_the_gateway_c
 )
 def test_only_the_mcp_flow_signs_in_through_the_system_browser(flow: LoginFlow, is_supported: bool) -> None:
     assert is_system_browser_login_flow(flow) is is_supported
+
+
+@pytest.mark.parametrize(
+    ("flow", "is_capture"),
+    [(LoginFlow.COOKIE_CAPTURE, True), (LoginFlow.TOKEN_CAPTURE, True), (LoginFlow.MCP, False)],
+)
+def test_a_registration_is_a_capture_login_exactly_when_its_flow_captures(flow: LoginFlow, is_capture: bool) -> None:
+    registration = build_custom_service_registration(
+        "api.example.com",
+        scheme="https",
+        login_url="https://api.example.com/login",
+        login_flow=flow,
+        login_flow_params={},
+    )
+
+    assert is_capture_login_flow(flow) is is_capture
+    assert is_capture_login_registration(registration) is is_capture
+
+
+def test_a_registration_with_no_sign_in_or_an_unknown_flow_is_not_a_capture_login() -> None:
+    assert is_capture_login_registration({"baseApiUrl": "https://api.example.com/"}) is False
+    assert is_capture_login_registration({"loginFlow": {"name": "a-flow-of-a-later-latchkey"}}) is False

@@ -1474,6 +1474,7 @@ describe("InboxModel custom-service requests", () => {
     base_api_url: "https://api.example.com/",
     login_url: "https://api.example.com/login",
     is_system_browser_login_supported: false,
+    is_capture_login: false,
     rationale: "needs the widget API",
     proxy: null,
   };

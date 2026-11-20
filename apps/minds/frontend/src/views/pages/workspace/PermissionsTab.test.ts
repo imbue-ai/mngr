@@ -24,10 +24,11 @@ import { PermissionsTab } from "./PermissionsTab";
 import { OptionsPanel } from "./OptionsPanel";
 import { TITLEBAR_POPUP_ICONS } from "../../shell/RaisedTitlebarIcons";
 import { forgetFailedServiceMarks } from "../../components/ServiceMark";
+import { panelIdFor } from "../../components/Collapsible";
 import {
   EXPERIMENTAL_CONNECTOR_RISK_ATTR,
   EXPERIMENTAL_CONNECTOR_RISK_DETAIL,
-} from "../../components/ExperimentalConnectorRisk";
+} from "../../components/ConnectorRisk";
 import { IMPLICIT_PERMISSIONS_HINT_ATTR } from "../../components/ImplicitPermissionsHint";
 import { Spinner } from "../../components/Spinner";
 import { ErrorNotice } from "../../components/ErrorDisplay";
@@ -38,10 +39,13 @@ import {
   attrsOf,
   byId,
   classesOf,
+  collapsibleTrigger,
   collectText,
   collectVnodes,
   errorMarks,
+  pressCollapsible,
   renderDeep,
+  required,
   withAttr,
 } from "../../../testing";
 
@@ -1489,13 +1493,35 @@ describe("PermissionsTab experimental connectors", () => {
     const text = allText(panel);
     expect(text.indexOf("Notion")).toBeLessThan(text.indexOf("Experimental connectors"));
     expect(text.indexOf("Experimental connectors")).toBeLessThan(text.indexOf("Strava"));
-    const risk = withAttr(section(root), EXPERIMENTAL_CONNECTOR_RISK_ATTR)[0];
-    expect(allText(risk)).toBe("Use at your own risk.");
-    expect(attrsOf(risk)["data-tooltip"]).toBe(EXPERIMENTAL_CONNECTOR_RISK_DETAIL);
+    const risk = withAttr(renderDeep(section(root)), EXPERIMENTAL_CONNECTOR_RISK_ATTR)[0];
+    expect(collectText(risk)).toEqual(["Use at your own risk.", " ", "See more"]);
     // Connected like any other service, with the service's own mark on the row.
     expect(connectNames(section(root))).toEqual(["strava"]);
     expect(markSources(marks(section(root))[0])).toEqual(["/_static/service_icons/strava.svg"]);
     expect(connectNames(root)).toEqual(["slack", "notion", "strava"]);
+  });
+
+  it("says what the risk is once See more is pressed, and puts it away when pressed again", async () => {
+    const { root, rerender } = await render(permissionsView({ available_connections: [stravaAvailable()] }), {
+      requestedSection: "add-connection",
+    });
+    const RISK_ID = "ws-perm-experimental-risk";
+    const riskOf = (node: unknown): AnyVnode => withAttr(renderDeep(node), EXPERIMENTAL_CONNECTOR_RISK_ATTR)[0];
+
+    const shut = riskOf(root);
+    expect(attrsOf(collapsibleTrigger(shut, RISK_ID))["aria-expanded"]).toBe("false");
+    expect(allText(shut)).not.toContain(EXPERIMENTAL_CONNECTOR_RISK_DETAIL);
+    // The detail is reached by the press alone: no tooltip repeats it.
+    expect(withAttr(shut, "data-tooltip")).toEqual([]);
+
+    pressCollapsible(shut, RISK_ID);
+    const opened = riskOf(rerender());
+    expect(attrsOf(collapsibleTrigger(opened, RISK_ID))["aria-expanded"]).toBe("true");
+    const detail = required(byId(opened, panelIdFor(RISK_ID)));
+    expect(collectText(detail)).toEqual([EXPERIMENTAL_CONNECTOR_RISK_DETAIL]);
+
+    pressCollapsible(opened, RISK_ID);
+    expect(allText(riskOf(rerender()))).not.toContain(EXPERIMENTAL_CONNECTOR_RISK_DETAIL);
   });
 
   it("is left out when nothing experimental is on offer, and out of every other section", async () => {

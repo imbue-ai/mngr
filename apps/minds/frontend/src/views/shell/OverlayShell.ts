@@ -60,6 +60,9 @@ const ANCHORED_MIN_GUTTER_PX = 8;
 export const ANCHORED_CARD_CLASS = "w-[400px] min-h-0";
 const ANCHORED_ALIGN_ICON: TitlebarPopupId = "help";
 
+/** Marks the card's body, which is its scroll container when it has one. */
+const OVERLAY_BODY_ATTR = "data-overlay-body";
+
 const CARD_BASE =
   "pointer-events-auto relative flex flex-col bg-surface-primary text-primary " +
   "rounded-xl shadow-overlay overflow-hidden";
@@ -160,7 +163,12 @@ export function OverlayShell(): m.Component<OverlayShellAttrs> {
     const previous = boxes.wasResizing ? boxes.drawn : from;
     lastBox = boxes.content;
     if (previous === null) return;
-    resize = animateCardResize(card, previous, boxes.content);
+    resize = animateCardResize(
+      card,
+      previous,
+      boxes.content,
+      card.querySelector<HTMLElement>(`:scope > [${OVERLAY_BODY_ATTR}]`),
+    );
     if (resize !== null)
       resize.addEventListener("finish", () => (resize = null));
   }
@@ -245,7 +253,7 @@ export function OverlayShell(): m.Component<OverlayShellAttrs> {
                   "data-tooltip": attrs.closeLabel,
                 }),
           }),
-          m("div", { class: attrs.bodyClass }, children),
+          m("div", { class: attrs.bodyClass, [OVERLAY_BODY_ATTR]: "" }, children),
         ],
       ),
       selected === null

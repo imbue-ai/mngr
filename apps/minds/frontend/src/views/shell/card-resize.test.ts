@@ -5,6 +5,22 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/** A running animation that can be cancelled, telling whoever listens for it. */
+function fakeAnimation(): { animation: Animation; isCancelled: () => boolean } {
+  const cancelListeners: (() => void)[] = [];
+  let isCancelled = false;
+  const animation = {
+    addEventListener: (type: string, listener: () => void) => {
+      if (type === "cancel") cancelListeners.push(listener);
+    },
+    cancel: () => {
+      isCancelled = true;
+      for (const listener of cancelListeners) listener();
+    },
+  } as unknown as Animation;
+  return { animation, isCancelled: () => isCancelled };
+}
+
 /** An element that reports `box` and records what it was asked to animate. */
 function fakeCard(
   box: { width: number; height: number },
@@ -18,11 +34,24 @@ function fakeCard(
       : {
           animate: (frames: Keyframe[]) => {
             keyframes = frames;
-            return {} as Animation;
+            return fakeAnimation().animation;
           },
         }),
   } as unknown as HTMLElement;
   return { element, keyframes: () => keyframes };
+}
+
+/** A card's scroll container, recording what it was asked to animate and whether that was cancelled. */
+function fakeScroller(): { element: HTMLElement; keyframes: () => Keyframe[] | null; isCancelled: () => boolean } {
+  let keyframes: Keyframe[] | null = null;
+  const running = fakeAnimation();
+  const element = {
+    animate: (frames: Keyframe[]) => {
+      keyframes = frames;
+      return running.animation;
+    },
+  } as unknown as HTMLElement;
+  return { element, keyframes: () => keyframes, isCancelled: running.isCancelled };
 }
 
 /** The media query the helper asks about, answering `matches` to every query. */
@@ -70,7 +99,7 @@ describe("animateCardResize", () => {
     stubReducedMotion(false);
     const { element, keyframes } = fakeCard({ width: 600, height: 420 });
 
-    const animation = animateCardResize(element, { width: 880, height: 660 }, { width: 600, height: 420 });
+    const animation = animateCardResize(element, { width: 880, height: 660 }, { width: 600, height: 420 }, null);
 
     expect(animation).not.toBeNull();
     expect(keyframes()).toEqual([
@@ -83,7 +112,7 @@ describe("animateCardResize", () => {
     stubReducedMotion(true);
     const { element, keyframes } = fakeCard({ width: 600, height: 420 });
 
-    expect(animateCardResize(element, { width: 880, height: 660 }, { width: 600, height: 420 })).toBeNull();
+    expect(animateCardResize(element, { width: 880, height: 660 }, { width: 600, height: 420 }, null)).toBeNull();
     expect(keyframes()).toBeNull();
   });
 
@@ -93,14 +122,54 @@ describe("animateCardResize", () => {
     stubReducedMotion(false);
     const { element } = fakeCard({ width: 600, height: 420 }, { canAnimate: false });
 
-    expect(animateCardResize(element, { width: 880, height: 660 }, { width: 600, height: 420 })).toBeNull();
+    expect(animateCardResize(element, { width: 880, height: 660 }, { width: 600, height: 420 }, null)).toBeNull();
   });
 
   it("skips a change too small to see", () => {
     stubReducedMotion(false);
     const { element, keyframes } = fakeCard({ width: 600, height: 420 });
 
-    expect(animateCardResize(element, { width: 600, height: 420 }, { width: 600, height: 420 })).toBeNull();
+    expect(animateCardResize(element, { width: 600, height: 420 }, { width: 600, height: 420 }, null)).toBeNull();
     expect(keyframes()).toBeNull();
+  });
+
+  it("keeps the card's scroller from scrolling while the card grows, so no scrollbar flashes on the way", () => {
+    stubReducedMotion(false);
+    const { element } = fakeCard({ width: 600, height: 420 });
+    const scroller = fakeScroller();
+
+    animateCardResize(element, { width: 600, height: 360 }, { width: 600, height: 420 }, scroller.element);
+
+    expect(scroller.keyframes()).toEqual([{ overflowY: "hidden" }, { overflowY: "hidden" }]);
+  });
+
+  it("hands the scroller back when the resize is cancelled mid-flight", () => {
+    stubReducedMotion(false);
+    const { element } = fakeCard({ width: 600, height: 420 });
+    const scroller = fakeScroller();
+
+    const animation = animateCardResize(
+      element,
+      { width: 600, height: 360 },
+      { width: 600, height: 420 },
+      scroller.element,
+    );
+    expect(scroller.isCancelled()).toBe(false);
+    animation?.cancel();
+
+    expect(scroller.isCancelled()).toBe(true);
+  });
+
+  it("leaves the scroller alone while the card shrinks or only changes width", () => {
+    // A card that is not growing taller is never shorter than its content, and
+    // a scrollbar it already has is one the content needs.
+    stubReducedMotion(false);
+    const { element } = fakeCard({ width: 600, height: 420 });
+    const scroller = fakeScroller();
+
+    animateCardResize(element, { width: 880, height: 660 }, { width: 600, height: 420 }, scroller.element);
+    animateCardResize(element, { width: 880, height: 420 }, { width: 600, height: 420 }, scroller.element);
+
+    expect(scroller.keyframes()).toBeNull();
   });
 });

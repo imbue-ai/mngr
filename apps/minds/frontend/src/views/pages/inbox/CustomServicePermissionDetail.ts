@@ -15,6 +15,7 @@ import type {
   CustomServicePermissionDetail as Detail,
   InboxModel,
 } from "../../../models/inbox";
+import { renderCaptureLoginRisk } from "../../components/ConnectorRisk";
 import { Disclosure } from "../../components/Disclosure";
 import { Icon16 } from "../../components/Icon";
 import { Notice } from "../../components/Notice";
@@ -149,14 +150,16 @@ function summary(
 }
 
 export function CustomServicePermissionDetailView(): m.Component<CustomServicePermissionDetailAttrs> {
-  // The request the disclosure was opened on. RequestDetail mounts this view
+  // The request each disclosure was opened on. RequestDetail mounts this view
   // unkeyed, so one instance serves every custom-service request the user moves
   // between; a disclosure opened on one must not render open on the next.
   let openHeaderRequestId: string | null = null;
+  let openRiskRequestId: string | null = null;
   return {
     view(vnode) {
       const { model, detail } = vnode.attrs;
       const isHeaderOpen = openHeaderRequestId === detail.request_id;
+      const isRiskOpen = openRiskRequestId === detail.request_id;
       return m(PermissionsShell, {
         model,
         // The origin is the label here: the domain everywhere else, and the
@@ -165,6 +168,15 @@ export function CustomServicePermissionDetailView(): m.Component<CustomServicePe
         // misdescribe what the connection reaches.
         headerLabel: `Storing credentials for ${detail.base_api_url}`,
         mark: m(Icon16, { name: "globe", extra: "text-primary" }),
+        headerNotice: detail.is_capture_login
+          ? renderCaptureLoginRisk({
+              id: "custom-service-capture-login-risk",
+              isOpen: isRiskOpen,
+              onToggle: () => {
+                openRiskRequestId = isRiskOpen ? null : detail.request_id;
+              },
+            })
+          : null,
         rationale: detail.rationale,
         approveLabel: model.isBrowserSignInPending()
           ? "Sign in & approve"

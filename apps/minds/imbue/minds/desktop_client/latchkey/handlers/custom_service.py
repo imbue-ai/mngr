@@ -153,6 +153,8 @@ from imbue.mngr_latchkey.custom_services import build_custom_service_scope_schem
 from imbue.mngr_latchkey.custom_services import custom_service_label
 from imbue.mngr_latchkey.custom_services import custom_service_name
 from imbue.mngr_latchkey.custom_services import domain_warning
+from imbue.mngr_latchkey.custom_services import is_capture_login_flow
+from imbue.mngr_latchkey.custom_services import is_capture_login_registration
 from imbue.mngr_latchkey.custom_services import is_system_browser_login_flow
 from imbue.mngr_latchkey.custom_services import registration_credential_header
 from imbue.mngr_latchkey.custom_services import registration_login_url
@@ -256,6 +258,13 @@ def _is_system_browser_sign_in(
             machine_latchkey, service_name
         )
     return payload.login is not None and is_system_browser_login_flow(payload.login.flow)
+
+
+def _is_capture_sign_in(existing: Mapping[str, JsonValue] | None, payload: CustomServiceRequestPayload) -> bool:
+    """Whether the sign-in :func:`_sign_in_url` names captures what the service's own website ends up holding."""
+    if existing is not None:
+        return registration_login_url(existing) is not None and is_capture_login_registration(existing)
+    return payload.login is not None and is_capture_login_flow(payload.login.flow)
 
 
 def _credential_header(existing: Mapping[str, JsonValue] | None, payload: CustomServiceRequestPayload) -> str | None:
@@ -434,6 +443,7 @@ class CustomServiceGrantHandler(RequestEventHandler):
             is_system_browser_login_supported=_is_system_browser_sign_in(
                 machine_latchkey, service_name, existing, payload
             ),
+            is_capture_login=_is_capture_sign_in(existing, payload),
             credential_header=_credential_header(existing, payload),
             rationale=permission_request.rationale,
             proxy=build_requested_proxy(

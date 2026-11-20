@@ -787,6 +787,44 @@ def test_detail_payload_reports_the_system_browser_for_an_mcp_sign_in_before_reg
     assert _detail(harness, _make_event(AgentId(), has_login=True)).is_system_browser_login_supported is False
 
 
+def test_detail_payload_reports_a_capture_sign_in_for_the_capture_flows_alone(tmp_path: Path) -> None:
+    harness = _Harness(tmp_path, published_metadata=_MCP_PUBLISHED)
+
+    assert _detail(harness, _make_event(AgentId(), has_login=True)).is_capture_login is True
+    assert _detail(harness, _make_mcp_event(AgentId())).is_capture_login is False
+    assert _detail(harness, _make_event(AgentId(), has_login=False)).is_capture_login is False
+
+
+def test_detail_payload_reads_the_capture_sign_in_off_a_registered_services_registration(tmp_path: Path) -> None:
+    """The registration's sign-in is what runs, so the request's own login says nothing here."""
+    harness = _Harness(tmp_path)
+    harness.register()
+    assert _detail(harness, _make_event(AgentId(), has_login=True)).is_capture_login is False
+
+    harness.register(login_url="https://api.example.com/sso")
+    assert _detail(harness, _make_event(AgentId(), has_login=False)).is_capture_login is True
+
+
+def test_detail_payload_reports_no_capture_sign_in_for_a_registration_whose_flow_has_no_sign_in_url(
+    tmp_path: Path,
+) -> None:
+    harness = _Harness(tmp_path)
+    harness.latchkey.register_custom_service(
+        harness.latchkey.latchkey_directory,
+        _SERVICE_NAME,
+        {
+            "baseApiUrl": "https://api.example.com/",
+            "loginFlow": {"name": LoginFlow.COOKIE_CAPTURE.value, "params": {"cookieKeys": ["session"]}},
+        },
+    )
+
+    detail = _detail(harness, _make_event(AgentId(), has_login=True))
+
+    assert detail.is_already_registered is True
+    assert detail.login_url is None
+    assert detail.is_capture_login is False
+
+
 def test_detail_payload_asks_latchkey_about_a_registered_services_browser(tmp_path: Path) -> None:
     harness = _Harness(tmp_path)
     harness.register(login_url="https://api.example.com/sso")

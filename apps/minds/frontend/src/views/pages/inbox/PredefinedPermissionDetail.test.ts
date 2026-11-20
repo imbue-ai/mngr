@@ -3,15 +3,28 @@ import { describe, expect, it } from "vitest";
 import { InboxModel } from "../../../models/inbox";
 import type { PredefinedPermissionDetail } from "../../../models/inbox";
 import { DESKTOPS } from "../../../models/workspacePermissions.testing";
+import { panelIdFor } from "../../components/Collapsible";
 import {
   EXPERIMENTAL_CONNECTOR_RISK_ATTR,
   EXPERIMENTAL_CONNECTOR_RISK_DETAIL,
-} from "../../components/ExperimentalConnectorRisk";
+} from "../../components/ConnectorRisk";
 import { Select } from "../../components/FormControls";
 import { IMPLICIT_PERMISSIONS_HINT_ATTR } from "../../components/ImplicitPermissionsHint";
 import { PredefinedPermissionDetailView } from "./PredefinedPermissionDetail";
 import type { AnyVnode } from "../../../testing";
-import { attrsOf, classesOf, collectText, collectVnodes, withAttr } from "../../../testing";
+import {
+  allText,
+  attrsOf,
+  byId,
+  classesOf,
+  collapsibleTrigger,
+  collectText,
+  collectVnodes,
+  pressCollapsible,
+  renderDeep,
+  required,
+  withAttr,
+} from "../../../testing";
 
 const DETAIL: PredefinedPermissionDetail = {
   kind: "predefined",
@@ -111,20 +124,31 @@ interface ShellAttrs {
   body: m.Children;
 }
 
+/** One mounted view, drawing whichever request it is handed, as Mithril does
+ * with the same instance when the request changes. */
+function mountShell(): (
+  model: InboxModel,
+  detail: PredefinedPermissionDetail,
+) => ShellAttrs {
+  const instance = PredefinedPermissionDetailView() as unknown as m.Component;
+  return (model, detail) => {
+    const vnode = m(instance, {
+      model,
+      detail,
+    } as unknown as m.Attributes) as m.Vnode;
+    const root = (instance.view as unknown as (v: m.Vnode) => m.Vnode).call(
+      instance,
+      vnode,
+    );
+    return root.attrs as unknown as ShellAttrs;
+  };
+}
+
 function renderShell(
   model: InboxModel,
   detail: PredefinedPermissionDetail,
 ): ShellAttrs {
-  const instance = PredefinedPermissionDetailView() as unknown as m.Component;
-  const vnode = m(instance, {
-    model,
-    detail,
-  } as unknown as m.Attributes) as m.Vnode;
-  const root = (instance.view as unknown as (v: m.Vnode) => m.Vnode).call(
-    instance,
-    vnode,
-  );
-  return root.attrs as unknown as ShellAttrs;
+  return mountShell()(model, detail);
 }
 
 function renderBody(
@@ -250,14 +274,52 @@ describe("PredefinedPermissionDetailView summary", () => {
 });
 
 describe("PredefinedPermissionDetailView experimental connector", () => {
-  it("warns under the header that the service is used at one's own risk, with why behind the tooltip", () => {
-    const detail = { ...DETAIL, service_name: "strava", display_name: "Strava", is_experimental: true };
-    const notice = renderShell(makeModel(detail), detail).headerNotice;
+  const STRAVA: PredefinedPermissionDetail = {
+    ...DETAIL,
+    service_name: "strava",
+    display_name: "Strava",
+    is_experimental: true,
+  };
+  const RISK_ID = "permissions-experimental-risk";
 
-    const [risk] = withAttr(notice, EXPERIMENTAL_CONNECTOR_RISK_ATTR);
-    expect(collectText(risk)).toEqual(["This is an experimental connector. Use at your own risk."]);
-    expect(attrsOf(risk)["data-tooltip"]).toBe(EXPERIMENTAL_CONNECTOR_RISK_DETAIL);
+  /** One mounted view, drawn for whichever request is shown: the warning under
+   * the header as a reader would see it. */
+  function mountRisk(): (shown: PredefinedPermissionDetail) => AnyVnode {
+    const shellFor = mountShell();
+    return (shown) => {
+      const notice = renderDeep(shellFor(makeModel(shown), shown).headerNotice);
+      return withAttr(notice, EXPERIMENTAL_CONNECTOR_RISK_ATTR)[0];
+    };
+  }
+
+  it("warns under the header that the service is used at one's own risk, with why behind See more", () => {
+    const riskFor = mountRisk();
+
+    const shut = riskFor(STRAVA);
+    expect(collectText(shut)).toEqual(["This is an experimental connector. Use at your own risk.", " ", "See more"]);
+    expect(attrsOf(collapsibleTrigger(shut, RISK_ID))["aria-expanded"]).toBe("false");
+    // The detail is reached by the press alone: no tooltip repeats it.
+    expect(withAttr(shut, "data-tooltip")).toEqual([]);
+
+    pressCollapsible(shut, RISK_ID);
+    const opened = riskFor(STRAVA);
+    expect(attrsOf(collapsibleTrigger(opened, RISK_ID))["aria-expanded"]).toBe("true");
+    expect(collectText(required(byId(opened, panelIdFor(RISK_ID))))).toEqual([EXPERIMENTAL_CONNECTOR_RISK_DETAIL]);
     expect(EXPERIMENTAL_CONNECTOR_RISK_DETAIL).toContain("suspend your account");
+
+    pressCollapsible(opened, RISK_ID);
+    expect(allText(riskFor(STRAVA))).not.toContain(EXPERIMENTAL_CONNECTOR_RISK_DETAIL);
+  });
+
+  it("starts the next request's warning shut after one was opened", () => {
+    const riskFor = mountRisk();
+    pressCollapsible(riskFor(STRAVA), RISK_ID);
+    expect(allText(riskFor(STRAVA))).toContain(EXPERIMENTAL_CONNECTOR_RISK_DETAIL);
+
+    const next = riskFor({ ...STRAVA, request_id: "evt-b" });
+    expect(allText(next)).not.toContain(EXPERIMENTAL_CONNECTOR_RISK_DETAIL);
+    // Going back finds the first one as it was left.
+    expect(allText(riskFor(STRAVA))).toContain(EXPERIMENTAL_CONNECTOR_RISK_DETAIL);
   });
 
   it("says nothing of the kind for a built-in service", () => {

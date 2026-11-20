@@ -34,6 +34,7 @@ import type {
 } from "./profiling";
 import type { SharePanelModelOptions } from "./models/sharePanel";
 import type { SharedWorkspaceRow } from "./models/sharedWorkspaces";
+import { triggerIdFor } from "./views/components/Collapsible";
 import { BTN_VARIANTS } from "./views/components/constants";
 import { ICONS_16 } from "./views/components/icons";
 import { ShellState } from "./views/shell/shell-state";
@@ -984,6 +985,17 @@ export function byId(node: unknown, id: string): AnyVnode | undefined {
 export function required<T>(value: T | undefined): T {
   if (value === undefined) throw new Error("expected a rendered vnode");
   return value;
+}
+
+/** The trigger of the `Collapsible` with this id, in a tree rendered through
+ * (`renderDeep`): its `aria-expanded` is what says whether the panel is open. */
+export function collapsibleTrigger(node: unknown, id: string): AnyVnode {
+  return required(byId(node, triggerIdFor(id)));
+}
+
+/** Press that trigger, as a click on it would. */
+export function pressCollapsible(node: unknown, id: string): void {
+  (attrsOf(collapsibleTrigger(node, id)).onclick as () => void)();
 }
 
 /** A sessionStorage for the suite (the vitest environment has none): a map behind the Storage methods the

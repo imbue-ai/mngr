@@ -309,6 +309,12 @@ class UiCustomServicePermissionDetail(FrozenModel):
             "sign-in does), in which case the Chrome import, which fills only latchkey's browser, is not offered"
         ),
     )
+    is_capture_login: bool = Field(
+        description=(
+            "Whether the sign-in captures the cookie or token the service's own website ends up holding, in "
+            "which case the connection may ride an API the service does not document, and the dialog says so"
+        ),
+    )
     credential_header: str | None = Field(
         default=None,
         description=(

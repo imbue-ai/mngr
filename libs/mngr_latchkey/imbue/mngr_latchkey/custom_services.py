@@ -116,6 +116,23 @@ def is_system_browser_login_flow(flow: LoginFlow) -> bool:
             assert_never(flow)
 
 
+def is_capture_login_flow(flow: LoginFlow) -> bool:
+    """Whether ``flow`` signs in by capturing the credential the service's own website ends up holding.
+
+    A captured cookie or token is what the website uses for itself, so what it
+    reaches may be an API the service neither documents nor supports for
+    anyone else. The MCP flow is an OAuth authorization the service publishes
+    for exactly this use.
+    """
+    match flow:
+        case LoginFlow.COOKIE_CAPTURE | LoginFlow.TOKEN_CAPTURE:
+            return True
+        case LoginFlow.MCP:
+            return False
+        case _:
+            assert_never(flow)
+
+
 class CookieCaptureParams(FrozenModel):
     """The ``--login-flow-params`` of ``cookie-capture``, keyed as latchkey keys them.
 
@@ -641,6 +658,15 @@ def is_mcp_login_registration(registration: Mapping[str, JsonValue]) -> bool:
     """Whether a registration signs in through latchkey's ``mcp`` login flow."""
     login_flow = registration.get("loginFlow")
     return isinstance(login_flow, dict) and login_flow.get("name") == LoginFlow.MCP
+
+
+def is_capture_login_registration(registration: Mapping[str, JsonValue]) -> bool:
+    """Whether a registration signs in through one of latchkey's capture login flows."""
+    login_flow = registration.get("loginFlow")
+    if not isinstance(login_flow, dict):
+        return False
+    flow_name = login_flow.get("name")
+    return any(flow_name == flow and is_capture_login_flow(flow) for flow in LoginFlow)
 
 
 def registration_credential_header(registration: Mapping[str, JsonValue]) -> str | None:

@@ -80,16 +80,34 @@ function isMotionUnwanted(): boolean {
  * Cancel the returned animation to hand the element straight back to its own
  * sizing: nothing is written to `style`, so a cancel mid-flight reverts to the
  * content size rather than freezing at the interpolated one.
+ *
+ * `scroller` is the card's own scroll container, if it has one. A card growing
+ * taller is shorter than its content until it lands, so the scroller would
+ * draw a scrollbar for the length of the trip and re-wrap everything into the
+ * narrower column beside it. It is kept from scrolling until the card arrives,
+ * which is when a scrollbar the content really needs appears.
  */
-export function animateCardResize(element: HTMLElement, from: CardBox, to: CardBox): Animation | null {
+export function animateCardResize(
+  element: HTMLElement,
+  from: CardBox,
+  to: CardBox,
+  scroller: HTMLElement | null,
+): Animation | null {
   if (!isResizeWorthAnimating(from, to)) return null;
   if (typeof element.animate !== "function") return null;
   if (isMotionUnwanted()) return null;
-  return element.animate(
+  const resize = element.animate(
     [
       { width: `${from.width}px`, height: `${from.height}px` },
       { width: `${to.width}px`, height: `${to.height}px` },
     ],
     { duration: CARD_RESIZE_MS, easing: CARD_RESIZE_EASING },
   );
+  if (scroller !== null && to.height > from.height) {
+    const scrollHold = scroller.animate([{ overflowY: "hidden" }, { overflowY: "hidden" }], {
+      duration: CARD_RESIZE_MS,
+    });
+    resize.addEventListener("cancel", () => scrollHold.cancel());
+  }
+  return resize;
 }
