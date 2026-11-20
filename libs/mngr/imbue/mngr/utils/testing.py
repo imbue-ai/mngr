@@ -1879,16 +1879,24 @@ def in_process_paramiko_sshd(
 
 
 # Relays stdin to 127.0.0.1:argv[1] and that connection back to stdout, like ``nc 127.0.0.1 <port>``.
+# Single-threaded: Linux reports a killed process as a zombie once its main thread exits, while its
+# other threads may still hold its descriptors open.
 _LOCAL_TCP_RELAY_SCRIPT: Final[str] = (
-    "import os, socket, sys, threading\n"
+    "import os, select, socket, sys\n"
     "connection = socket.create_connection(('127.0.0.1', int(sys.argv[1])))\n"
-    "def forward_stdin():\n"
-    "    while data := os.read(0, 65536):\n"
-    "        connection.sendall(data)\n"
-    "    connection.shutdown(socket.SHUT_WR)\n"
-    "threading.Thread(target=forward_stdin, daemon=True).start()\n"
-    "while data := connection.recv(65536):\n"
-    "    os.write(1, data)\n"
+    "sources = [0, connection]\n"
+    "while connection in sources:\n"
+    "    for source in select.select(sources, [], [])[0]:\n"
+    "        if source is connection:\n"
+    "            if data := connection.recv(65536):\n"
+    "                os.write(1, data)\n"
+    "            else:\n"
+    "                sources.remove(connection)\n"
+    "        elif data := os.read(0, 65536):\n"
+    "            connection.sendall(data)\n"
+    "        else:\n"
+    "            connection.shutdown(socket.SHUT_WR)\n"
+    "            sources.remove(0)\n"
 )
 
 
