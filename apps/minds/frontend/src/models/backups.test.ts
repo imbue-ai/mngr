@@ -729,7 +729,11 @@ describe("backup operation failures", () => {
     expect(safety.controller.isSkipSafetyRetryOffered).toBe(true);
     expect(safety.controller.isForceRetryOffered).toBe(false);
 
-    for (const reason of ["CHAT_GATE_UNDETERMINED", "WORKSPACE_PROBE_FAILED"]) {
+    for (const reason of [
+      "CHAT_GATE_UNDETERMINED",
+      "CHAT_STATE_UNREADABLE",
+      "WORKSPACE_PROBE_FAILED",
+    ]) {
       const { controller } = await restoreEndingWith({
         status: "FAILED",
         kind: "backup_restore",
@@ -764,6 +768,68 @@ describe("backup operation failures", () => {
     );
     expect(controller.isStopChatsRetryOffered).toBe(true);
     expect(controller.isRetryOffered).toBe(false);
+  });
+
+  it("words a chat whose state could not be read as a busy workspace, and offers trying again", async () => {
+    const deps = new FakeDeps();
+    const controller = new BackupOperationController("agent-11", deps);
+    deps.postResponses.push({ status: 202, body: null });
+    controller.startUpdate();
+    await settle();
+    deps.getResponses.push({
+      status: "FAILED",
+      kind: "backup_update",
+      error:
+        "could not read the state of chat agent(s) review; the workspace may be busy, try again",
+      failure_reason: "CHAT_STATE_UNREADABLE",
+    });
+    await controller.pollOnce();
+
+    expect(controller.error?.message).toBe(
+      "Imbue Studio couldn't tell whether any chats are still running in this workspace, " +
+        "which may be busy. *Try again in a moment.*",
+    );
+    expect(controller.error?.details).toContain("review");
+    expect(controller.isRetryOffered).toBe(true);
+    expect(controller.isStopChatsRetryOffered).toBe(false);
+    expect(controller.isForceRetryOffered).toBe(false);
+
+    // A restore can be tried again too, and forced past a state that never reads.
+    const restore = await restoreEndingWith({
+      status: "FAILED",
+      kind: "backup_restore",
+      error:
+        "could not read the state of chat agent(s) review; the workspace may be busy, try again",
+      failure_reason: "CHAT_STATE_UNREADABLE",
+    });
+    expect(restore.controller.isRetryOffered).toBe(true);
+    expect(restore.controller.isForceRetryOffered).toBe(true);
+  });
+
+  it("words a reason this page does not know by the sentence for the kind of operation", async () => {
+    // A server newer than this page can name a reason it has no sentence for;
+    // the fallback for the kind words it, and no reason-specific retry is offered.
+    const deps = new FakeDeps();
+    const controller = new BackupOperationController("agent-11", deps);
+    deps.postResponses.push({ status: 202, body: null });
+    controller.startUpdate();
+    await settle();
+    deps.getResponses.push({
+      status: "FAILED",
+      kind: "backup_update",
+      error: "the update stalled in a step this page predates",
+      failure_reason: "A_REASON_FROM_A_NEWER_SERVER",
+    });
+    await controller.pollOnce();
+
+    expect(controller.error?.message).toBe(
+      "Couldn't update this workspace's backup software. Try again. If this persists, report a bug.",
+    );
+    expect(controller.error?.details).toContain("predates");
+    expect(controller.isRetryOffered).toBe(true);
+    expect(controller.isStopChatsRetryOffered).toBe(false);
+    expect(controller.isForceRetryOffered).toBe(false);
+    expect(controller.isSkipSafetyRetryOffered).toBe(false);
   });
 
   it("keeps a backup that cannot be restored from offering a retry", async () => {

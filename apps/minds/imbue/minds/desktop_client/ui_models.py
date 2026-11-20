@@ -15,10 +15,10 @@ holdover from the deleted ``/_chrome/events`` SSE wire format, which encoded
 flags as ``"true"`` strings); its ``_ui_*_from_legacy_dict`` converters
 translate those rows into these models, where booleans are real booleans.
 
-The trailing section holds ``/ui/api`` request/response payloads rather than
-channel frames. They live here because the generated TypeScript comes from
-``UiWireSchema``, and because this module depends on nothing but pydantic --
-the payload builders import it, never the other way round.
+The trailing section holds request/response payloads rather than channel
+frames: those of ``/ui/api``, and the ``/api/v1`` answers the SPA polls. They
+live here because the generated TypeScript comes from ``UiWireSchema``, and
+because the payload builders import this module, never the other way round.
 """
 
 from datetime import datetime
@@ -59,6 +59,7 @@ from imbue.minds.desktop_client.update_status import UpdateAvailability
 from imbue.minds.desktop_client.update_status import UpdateStartedBy
 from imbue.minds.desktop_client.update_status import UpdateUnknownReason
 from imbue.minds.desktop_client.update_status import UpdateVerdict
+from imbue.minds.desktop_client.workspace_operations import OperationOrProgramFailureReason
 from imbue.minds.errors import ProfileEventFlowError
 from imbue.mngr_latchkey.desktop_egress import DesktopEgressMode
 from imbue.mngr_latchkey.file_sharing import FileSharingAccess
@@ -1594,6 +1595,66 @@ class UiPermissionGrantGroup(FrozenModel):
     rows: tuple[UiPermissionGrantRow, ...] = Field(description="Rows in catalog order")
 
 
+class BackupOperationStatusResponse(FrozenModel):
+    """Status of a backup update/configure/restore operation (polled at /operations/backup/<id>)."""
+
+    operation_id: str = Field(description="The workspace agent id the operation acts on")
+    kind: str = Field(description="'backup_update', 'backup_configure', or 'backup_restore'")
+    status: str = Field(description="Raw operation status (RUNNING/DONE/FAILED/CANCELLED)")
+    is_done: bool = Field(description="Whether the operation has finished successfully")
+    error: str | None = Field(default=None, description="Failure message, when the operation failed")
+    warning: str | None = Field(
+        default=None,
+        description=(
+            "Non-fatal caveat on a DONE operation (e.g. the restore succeeded but its chained backup-service "
+            "update failed), when there is one"
+        ),
+    )
+    is_update_suggested: bool = Field(
+        default=False,
+        description=(
+            'Whether running "Update backup software" finishes what the warning says a DONE restore left undone'
+        ),
+    )
+    failure_reason: OperationOrProgramFailureReason | None = Field(
+        default=None,
+        description="Why a FAILED operation failed, when the code knows; else None",
+    )
+    services_down: tuple[str, ...] = Field(
+        default=(),
+        description="Programs a DONE restore left not yet running again",
+    )
+    service_config_error: str | None = Field(
+        default=None,
+        description=(
+            "supervisorctl's output when a restore (DONE or FAILED) found the restored service configuration "
+            "unreadable: the services run from the configuration in use before it and will not start on the "
+            "workspace's next restart until it is fixed. None otherwise"
+        ),
+    )
+    blocked_chats: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Chat agents that blocked the update because they were RUNNING, or idle but busy with a pending "
+            "background task (offer 'Stop all chats and retry')"
+        ),
+    )
+    is_cancellable: bool = Field(
+        default=False,
+        description=(
+            "Whether a cancel request can still take effect: only while an update/restore is waiting, "
+            "before it starts mutating the workspace (the UI hides Cancel once this goes false)"
+        ),
+    )
+    snapshot_id: str | None = Field(
+        default=None,
+        description=(
+            "The snapshot a restore is restoring to, so a page loaded mid-restore can mark the right "
+            "table row. None for operations that act on the whole workspace"
+        ),
+    )
+
+
 class UiWireSchema(FrozenModel):
     """Container whose JSON Schema is the single generated artifact for the frontend.
 
@@ -1634,6 +1695,9 @@ class UiWireSchema(FrozenModel):
     shared_path_remove: UiSharedPathRemoveRequest = Field(description="shared-path-remove request body")
     folder_sync_discard_copy: UiFolderSyncDiscardCopyRequest = Field(
         description="folder-syncs/discard-copy request body"
+    )
+    backup_operation: BackupOperationStatusResponse = Field(
+        description="/api/v1 operations/backup/<id> response, polled while a backup operation runs"
     )
     folder_syncs: UiFolderSyncs = Field(description="folder-syncs poll payload")
     client_permissions: UiClientPermissions = Field(description="client-permissions payload")

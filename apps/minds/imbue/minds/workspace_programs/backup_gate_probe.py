@@ -1,13 +1,13 @@
 """Report what would hold a mutating backup program back: busy chats and an in-flight backup tick.
 
-The chats are the agents actively RUNNING, RUNNING_BACKGROUND (their turn ended with
-work they declared still outstanding), UNKNOWN (state unreadable, so possibly
-mid-turn), or WAITING with their chat busy per the template's
-background-task CLI when it has one (agents sharing the
-repo-root work_dir, excluding the ``main``-type services agent --
-worktree/worker agents live elsewhere and never count). Reads ``--agent-id``
-(the services agent, whose state dir holds the backup events log); answers on
-one ``GATE_RESULT_MARKER`` line.
+The ``running_chats`` are the agents actively RUNNING, RUNNING_BACKGROUND (their turn
+ended with work they declared still outstanding), or WAITING with their chat busy per
+the template's background-task CLI when it has one (agents sharing the repo-root
+work_dir, excluding the ``main``-type services agent -- worktree/worker agents live
+elsewhere and never count). The ``unreadable_chats`` are those whose state mngr could
+not read in time; the mutating program reads them again before deciding. Reads
+``--agent-id`` (the services agent, whose state dir holds the backup events log);
+answers on one ``GATE_RESULT_MARKER`` line.
 """
 
 import sys
@@ -27,8 +27,10 @@ def main(argv: Sequence[str]) -> None:
     if gate is None:
         result["gate_error"] = gate_error
         result["running_chats"] = []
+        result["unreadable_chats"] = []
     else:
-        result["running_chats"] = gate["chats"]
+        result["running_chats"] = gate["running_chats"]
+        result["unreadable_chats"] = gate["unreadable_chats"]
     result["backup_tick_in_flight"] = is_backup_tick_in_flight(agent_id)
     emit_marker_json(GATE_RESULT_MARKER, result)
 

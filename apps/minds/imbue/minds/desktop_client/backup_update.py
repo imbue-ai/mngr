@@ -10,11 +10,13 @@ Runs as a tracked workspace operation (the ``workspace_operations`` registry,
 like restart) so the settings view can poll step-level progress:
 
 1. Gate + wait: poll the workspace's gate probe until no backup tick is in
-   flight. RUNNING chat agents, UNKNOWN ones (state unreadable), and idle ones
-   busy with a pending background task, block the *code* path -- the caller
-   passes ``is_stop_chats`` (the "Stop all chats and retry" flow) to have the
-   apply script stop them first. Waiting is unbounded and cancellable (the
-   cancel just stops polling; nothing has been mutated yet).
+   flight. RUNNING chat agents, and idle ones busy with a pending background
+   task, block the *code* path -- the caller passes ``is_stop_chats`` (the
+   "Stop all chats and retry" flow) to have the apply script stop them first.
+   A chat whose state the probe could not read is only logged here: the apply
+   script reads it again and fails closed if it stays unreadable. Waiting is
+   unbounded and cancellable (the cancel just stops polling; nothing has been
+   mutated yet).
 2. Apply: one exec runs the mutating script (stash / checkout tag / commit /
    ``uv sync --all-packages`` / restart / verify), which auto-rolls-back via
    ``git revert``
@@ -35,6 +37,7 @@ from typing import Final
 from typing import assert_never
 
 from loguru import logger
+from pydantic import ConfigDict
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -78,11 +81,11 @@ from imbue.minds.errors import WorkspaceFileWriteError
 from imbue.minds.workspace_programs import backup_apply_update
 from imbue.minds.workspace_programs import backup_gate_probe
 from imbue.minds.workspace_programs import backup_restore
+from imbue.minds.workspace_programs.backup_protocol import BackupProgramFailureReason
 from imbue.minds.workspace_programs.backup_protocol import BackupProgramStatus
 from imbue.minds.workspace_programs.backup_protocol import GATE_RESULT_MARKER
 from imbue.minds.workspace_programs.backup_protocol import RESTORE_RESULT_MARKER
 from imbue.minds.workspace_programs.backup_protocol import UPDATE_RESULT_MARKER
-from imbue.minds.workspace_programs.backup_protocol import parse_backup_program_failure_reason
 from imbue.minds.workspace_programs.backup_protocol import parse_backup_program_status
 from imbue.minds.workspace_programs.backup_restore import RESUME_SERVICES_COMMAND
 from imbue.mngr.primitives import AgentId
@@ -150,6 +153,71 @@ _PROBLEMS_THAT_FAIL_UPDATE: Final[tuple[BackupServiceProblem, ...]] = (
     BackupServiceProblem.SERVICE_NOT_RUNNING,
     BackupServiceProblem.UNVERIFIABLE,
 )
+
+
+_UNKNOWN_FAILURE_DETAIL: Final[str] = "unknown failure"
+
+
+class BackupGateProbeAnswer(FrozenModel):
+    """The gate probe's answer, as the desktop acts on it; the fields it does not act on are left unread."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    running_chats: tuple[str, ...] = Field(default=(), description="The chats the probe read as running")
+    unreadable_chats: tuple[str, ...] = Field(
+        default=(), description="The chats whose state the probe could not read in time"
+    )
+    gate_error: str = Field(default="", description="Why the probe could not list chats at all; '' when it could")
+    backup_tick_in_flight: bool = Field(default=False, description="Whether a backup tick is running right now")
+
+
+class BackupUpdateAnswer(FrozenModel):
+    """The apply-update program's answer, as the desktop acts on it; the fields it does not act on are left unread."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    status: str = Field(default="", description="The outcome, read through parse_backup_program_status")
+    detail: str = Field(default="", description="A failure's reason as the program worded it; '' when it gave none")
+    failure_reason: BackupProgramFailureReason | None = Field(
+        default=None, description="The failed step the program named, when it named one"
+    )
+    running_chats: tuple[str, ...] = Field(default=(), description="The chats that blocked the update")
+    committed: bool = Field(default=False, description="Whether the update committed new backup-service code")
+    rolled_back: bool = Field(default=False, description="Whether a failed update's commit was reverted")
+    stash_conflict: bool = Field(
+        default=False, description="Whether the stashed uncommitted changes did not pop cleanly"
+    )
+    tag: str = Field(default="", description="The release tag the code was converged to; '' when none was resolved")
+
+
+class BackupRestoreAnswer(FrozenModel):
+    """The restore program's answer, as the desktop acts on it; the fields it does not act on are left unread."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    status: str = Field(default="", description="The outcome, read through parse_backup_program_status")
+    detail: str = Field(default="", description="A failure's reason as the program worded it; '' when it gave none")
+    failure_reason: BackupProgramFailureReason | None = Field(
+        default=None, description="The failed step the program named, when it named one"
+    )
+    running_chats: tuple[str, ...] = Field(default=(), description="The chats that blocked the restore")
+    safety_snapshot_taken: bool = Field(
+        default=False, description="Whether the pre-restore safety snapshot was taken before the failure"
+    )
+    services_down: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Services outside the restore-critical set (behaviors/backup-restore/restore-verdict.feature) that did "
+            "not come back; they ride on the record as data for the UI to word, never as a failure"
+        ),
+    )
+    supervisord_config_error: str | None = Field(
+        default=None,
+        description=(
+            "supervisorctl's output when the restored service config did not parse, so the services were brought "
+            "back from the configuration loaded before the restore; rides on the record for the UI to word"
+        ),
+    )
 
 
 class RestoreCaveat(FrozenModel):
@@ -355,32 +423,32 @@ def _apply_update_and_verify(
         return BackupOperationFailure(
             detail=f"The update script produced no result: {detail}", reason=OperationFailureReason.NO_RESULT
         )
-    match parse_backup_program_status(payload.get("status")):
+    answer = BackupUpdateAnswer.model_validate(payload)
+    match parse_backup_program_status(answer.status):
         case BackupProgramStatus.BLOCKED:
-            running_chats = payload.get("running_chats")
-            chat_names = ",".join(str(name) for name in running_chats) if isinstance(running_chats, list) else ""
-            return BackupOperationFailure(detail=f"{BLOCKED_BY_RUNNING_CHATS_PREFIX}{chat_names}", reason=None)
-        case BackupProgramStatus.FAILED:
-            detail = str(payload.get("detail", "unknown failure"))
-            rolled_back_note = " (changes were rolled back)" if payload.get("rolled_back") else ""
-            is_stash_kept = bool(payload.get("stash_conflict"))
-            stash_note = f" {_STASH_CONFLICT_GUIDANCE}" if is_stash_kept else ""
-            script_reason = parse_backup_program_failure_reason(payload.get("failure_reason"))
-            reason = (
-                script_reason
-                if script_reason is not None
-                else (OperationFailureReason.UPDATE_STASH_KEPT if is_stash_kept else None)
+            return BackupOperationFailure(
+                detail=f"{BLOCKED_BY_RUNNING_CHATS_PREFIX}{','.join(answer.running_chats)}", reason=None
             )
-            return BackupOperationFailure(detail=f"{detail}{rolled_back_note}{stash_note}", reason=reason)
+        case BackupProgramStatus.FAILED:
+            rolled_back_note = " (changes were rolled back)" if answer.rolled_back else ""
+            stash_note = f" {_STASH_CONFLICT_GUIDANCE}" if answer.stash_conflict else ""
+            reason = (
+                answer.failure_reason
+                if answer.failure_reason is not None
+                else (OperationFailureReason.UPDATE_STASH_KEPT if answer.stash_conflict else None)
+            )
+            return BackupOperationFailure(
+                detail=f"{answer.detail or _UNKNOWN_FAILURE_DETAIL}{rolled_back_note}{stash_note}", reason=reason
+            )
         case BackupProgramStatus.OK:
             pass
         case _ as unreachable:
             assert_never(unreachable)
-    if payload.get("committed"):
-        registry.append_log(agent_id, f"Updated backup service code to {payload.get('tag', 'the target tag')}.")
+    if answer.committed:
+        registry.append_log(agent_id, f"Updated backup service code to {answer.tag or 'the target tag'}.")
     else:
         registry.append_log(agent_id, "Backup service code already matched the target version.")
-    if payload.get("stash_conflict"):
+    if answer.stash_conflict:
         registry.append_log(agent_id, f"Warning: {_STASH_CONFLICT_GUIDANCE}")
 
     # Re-inject the canonical env (rotates a drifted workspace copy).
@@ -424,6 +492,7 @@ def _wait_for_quiet_workspace(
     probe_command = build_workspace_program_command(backup_gate_probe, ("--agent-id", str(agent_id)))
     is_waiting_logged = False
     is_gate_error_logged = False
+    is_unreadable_logged = False
     while not registry.is_cancel_requested(agent_id):
         probe_result = run_mngr_exec_on_agent(
             agent_address, probe_command, parent_cg=parent_cg, timeout_seconds=_GATE_PROBE_TIMEOUT_SECONDS
@@ -435,23 +504,33 @@ def _wait_for_quiet_workspace(
                 agent_id, f"Could not probe the workspace: {detail}", OperationFailureReason.WORKSPACE_PROBE_FAILED
             )
             return False
+        answer = BackupGateProbeAnswer.model_validate(payload)
         # A gate_error means the probe could not list chats (its mngr list
         # failed) and running_chats is empty by construction. Keep going --
         # the apply script re-runs the gate authoritatively before mutating
         # anything -- but leave a trace so a later failure is explicable.
-        gate_error = str(payload.get("gate_error") or "")
-        if gate_error and not is_gate_error_logged:
-            logger.warning("Backup update gate probe for {} could not list chats: {}", agent_id, gate_error)
+        if answer.gate_error and not is_gate_error_logged:
+            logger.warning("Backup update gate probe for {} could not list chats: {}", agent_id, answer.gate_error)
             registry.append_log(
                 agent_id, "Warning: could not check for running chats; they are re-checked before applying."
             )
             is_gate_error_logged = True
-        running_chats = payload.get("running_chats")
-        chat_names = [str(name) for name in running_chats] if isinstance(running_chats, list) else []
-        if chat_names and not is_stop_chats:
-            registry.fail(agent_id, f"{BLOCKED_BY_RUNNING_CHATS_PREFIX}{','.join(chat_names)}")
+        # A chat whose state the probe could not read is a trace too, not a verdict: the
+        # mutating program's own gate decides.
+        if answer.unreadable_chats and not is_unreadable_logged:
+            unreadable_names = ", ".join(answer.unreadable_chats)
+            logger.warning(
+                "Backup update gate probe for {} could not read the state of chats {}", agent_id, unreadable_names
+            )
+            registry.append_log(
+                agent_id,
+                f"Warning: could not read the state of chats {unreadable_names}; they are re-checked before applying.",
+            )
+            is_unreadable_logged = True
+        if answer.running_chats and not is_stop_chats:
+            registry.fail(agent_id, f"{BLOCKED_BY_RUNNING_CHATS_PREFIX}{','.join(answer.running_chats)}")
             return False
-        if not payload.get("backup_tick_in_flight"):
+        if not answer.backup_tick_in_flight:
             return True
         if not is_waiting_logged:
             registry.append_log(agent_id, "Waiting for the in-progress backup to finish...")
@@ -599,61 +678,33 @@ def _resolve_restore_subpath(
     )
 
 
-def _restore_services_down(payload: dict[str, object]) -> tuple[str, ...]:
-    """The restore script's ``services_down`` list: programs not yet running again.
-
-    These services are outside the restore-critical set (the contract is
-    ``behaviors/backup-restore/restore-verdict.feature``), so their state
-    never fails the operation -- the workspace came back able to serve its
-    user. They ride on the record as data, and the UI words the caveat.
-    """
-    services_down = payload.get("services_down")
-    if not isinstance(services_down, list):
-        return ()
-    return tuple(str(name) for name in services_down)
-
-
-def _restore_service_config_error(payload: dict[str, object]) -> str | None:
-    """The restore program's ``supervisord_config_error``: supervisorctl's output when the restored config did not parse.
-
-    The program then brought the services back from the configuration
-    supervisord loaded before the restore, and a supervisord that starts from
-    the restored one will refuse to. It rides on the record as data, and the
-    UI words the consequence.
-    """
-    config_error = payload.get("supervisord_config_error")
-    if not isinstance(config_error, str) or not config_error:
-        return None
-    return config_error
-
-
 def _end_unfinished_restore(
-    registry: WorkspaceOperationRegistryInterface, agent_id: AgentId, payload: dict[str, object]
+    registry: WorkspaceOperationRegistryInterface, agent_id: AgentId, answer: BackupRestoreAnswer
 ) -> bool:
     """End the operation when the restore program reports it blocked or failed; return whether it did."""
-    match parse_backup_program_status(payload.get("status")):
+    match parse_backup_program_status(answer.status):
         case BackupProgramStatus.BLOCKED:
-            running_chats = payload.get("running_chats")
-            chat_names = ",".join(str(name) for name in running_chats) if isinstance(running_chats, list) else ""
-            registry.fail(agent_id, f"{BLOCKED_BY_RUNNING_CHATS_PREFIX}{chat_names}")
+            registry.fail(agent_id, f"{BLOCKED_BY_RUNNING_CHATS_PREFIX}{','.join(answer.running_chats)}")
             return True
         case BackupProgramStatus.FAILED:
-            detail = str(payload.get("detail", "unknown failure"))
-            is_safety_backup_taken = bool(payload.get("safety_snapshot_taken"))
             safety_note = (
-                " A safety backup of the pre-restore state was taken first." if is_safety_backup_taken else ""
+                " A safety backup of the pre-restore state was taken first." if answer.safety_snapshot_taken else ""
             )
-            script_reason = parse_backup_program_failure_reason(payload.get("failure_reason"))
             reason = (
-                script_reason
-                if script_reason is not None
+                answer.failure_reason
+                if answer.failure_reason is not None
                 else (
                     OperationFailureReason.RESTORE_INCOMPLETE_AFTER_SAFETY_BACKUP
-                    if is_safety_backup_taken
+                    if answer.safety_snapshot_taken
                     else OperationFailureReason.RESTORE_INCOMPLETE
                 )
             )
-            registry.fail_restore(agent_id, f"{detail}{safety_note}", reason, _restore_service_config_error(payload))
+            registry.fail_restore(
+                agent_id,
+                f"{answer.detail or _UNKNOWN_FAILURE_DETAIL}{safety_note}",
+                reason,
+                answer.supervisord_config_error,
+            )
             return True
         case BackupProgramStatus.OK:
             return False
@@ -665,14 +716,14 @@ def _complete_restore(
     registry: WorkspaceOperationRegistryInterface,
     agent_id: AgentId,
     caveat: RestoreCaveat | None,
-    payload: dict[str, object],
+    answer: BackupRestoreAnswer,
 ) -> None:
     registry.complete_restore(
         agent_id,
         caveat.warning if caveat is not None else None,
         caveat is not None and caveat.is_update_suggested,
-        _restore_services_down(payload),
-        _restore_service_config_error(payload),
+        answer.services_down,
+        answer.supervisord_config_error,
     )
 
 
@@ -917,7 +968,8 @@ def _run_restore_from_workspace_env(
             agent_id, f"The restore script produced no result: {detail}", OperationFailureReason.NO_RESULT
         )
         return
-    if _end_unfinished_restore(registry, agent_id, payload):
+    answer = BackupRestoreAnswer.model_validate(payload)
+    if _end_unfinished_restore(registry, agent_id, answer):
         return
     registry.append_log(
         agent_id, "Restored the backup, reinstalled dependencies, and restarted the workspace services."
@@ -934,7 +986,7 @@ def _run_restore_from_workspace_env(
         is_update_after=is_update_after,
         workspace_version_ref=workspace_version_ref,
     )
-    _complete_restore(registry, agent_id, caveat, payload)
+    _complete_restore(registry, agent_id, caveat, answer)
 
 
 def _converge_after_restore(

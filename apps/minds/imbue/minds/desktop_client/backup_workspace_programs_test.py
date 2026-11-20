@@ -32,12 +32,14 @@ from imbue.minds.workspace_programs import backup_apply_update
 from imbue.minds.workspace_programs import backup_check
 from imbue.minds.workspace_programs import backup_gate_probe
 from imbue.minds.workspace_programs import backup_restore
+from imbue.minds.workspace_programs.backup_protocol import BackupProgramFailureReason
 from imbue.minds.workspace_programs.backup_protocol import BackupProgramStatus
 from imbue.minds.workspace_programs.backup_protocol import CHECK_RESULT_MARKER
 from imbue.minds.workspace_programs.backup_protocol import GATE_RESULT_MARKER
 from imbue.minds.workspace_programs.backup_protocol import RESTORE_RESULT_MARKER
 from imbue.minds.workspace_programs.backup_protocol import UPDATE_RESULT_MARKER
 from imbue.minds.workspace_programs.backup_protocol import parse_backup_program_status
+from imbue.minds.workspace_programs.backup_support import resolve_chat_gate
 
 
 def _make_workspace_repo(tmp_path: Path, *, code_path: str = "libs/host_backup") -> Path:
@@ -446,12 +448,13 @@ def test_gate_probe_reports_running_chats_excluding_main_and_worktrees(tmp_path:
     assert payload["backup_tick_in_flight"] is False
 
 
-def test_gate_probe_counts_a_chat_whose_state_is_unreadable_as_running(tmp_path: Path) -> None:
-    """A loaded workspace can fail to read a live chat's state; that chat may be mid-turn, so it holds the gate."""
+def test_gate_probe_reports_a_chat_whose_state_is_unreadable_apart_from_the_running_ones(tmp_path: Path) -> None:
+    """A loaded workspace can fail to read a chat's state; the probe says so without calling the chat running."""
     repo = _make_workspace_repo(tmp_path)
     agents = [
         {"name": "chat-1", "id": "agent-1", "type": "claude", "state": "UNKNOWN", "work_dir": str(repo)},
         {"name": "chat-2", "id": "agent-2", "type": "claude", "state": "STOPPED", "work_dir": str(repo)},
+        {"name": "chat-3", "id": "agent-3", "type": "claude", "state": "RUNNING", "work_dir": str(repo)},
     ]
     stub_bin = _make_stub_bin(tmp_path, agents_json=json.dumps({"agents": agents, "errors": []}))
 
@@ -459,7 +462,8 @@ def test_gate_probe_counts_a_chat_whose_state_is_unreadable_as_running(tmp_path:
 
     payload = extract_marker_json(run["stdout"], GATE_RESULT_MARKER)
     assert payload is not None, run
-    assert payload["running_chats"] == ["chat-1"]
+    assert payload["running_chats"] == ["chat-3"]
+    assert payload["unreadable_chats"] == ["chat-1"]
 
 
 def test_gate_probe_answers_in_a_machine_whose_own_mngr_config_it_cannot_parse(tmp_path: Path) -> None:
@@ -585,14 +589,24 @@ def test_gate_probe_counts_a_chat_handed_off_to_another_agent_as_busy_from_the_f
     assert payload["running_chats"] == ["chat-successor"]
 
 
-def _write_stateful_mngr_uv_stub(stub_bin: Path, agents: list[dict[str, str]], stop_log: Path) -> None:
-    """A `uv` whose `mngr stop <name>` logs the name and leaves that agent listed STOPPED afterwards."""
+def _write_stateful_mngr_uv_stub(
+    stub_bin: Path,
+    agents: list[dict[str, str]],
+    stop_log: Path,
+    # What a stopped agent's state reads on each `mngr list` after its stop, in order; the last
+    # entry holds. ("UNKNOWN", "STOPPED") is a loaded workspace whose first re-read times out.
+    states_after_stop: tuple[str, ...],
+) -> None:
+    """A `uv` whose `mngr stop <name>` logs the name and lists that agent as ``states_after_stop`` says afterwards."""
     uv_stub = stub_bin / "uv"
+    list_counter = stub_bin / "lists-after-stop.txt"
     uv_stub.write_text(
         f"#!{sys.executable}\n"
         "import json, sys\n"
         f"agents = {agents!r}\n"
         f"stop_log = {str(stop_log)!r}\n"
+        f"list_counter = {str(list_counter)!r}\n"
+        f"states_after_stop = {list(states_after_stop)!r}\n"
         "args = sys.argv[1:]\n"
         "if args[:4] == ['run', '--no-sync', 'mngr', 'stop']:\n"
         "    with open(stop_log, 'a') as handle:\n"
@@ -603,9 +617,17 @@ def _write_stateful_mngr_uv_stub(stub_bin: Path, agents: list[dict[str, str]], s
         "        stopped = open(stop_log).read().split()\n"
         "    except OSError:\n"
         "        stopped = []\n"
-        "    for agent in agents:\n"
-        "        if agent['name'] in stopped:\n"
-        "            agent['state'] = 'STOPPED'\n"
+        "    if stopped:\n"
+        "        try:\n"
+        "            lists_after_stop = int(open(list_counter).read())\n"
+        "        except OSError:\n"
+        "            lists_after_stop = 0\n"
+        "        with open(list_counter, 'w') as handle:\n"
+        "            handle.write(str(lists_after_stop + 1))\n"
+        "        state_after_stop = states_after_stop[min(lists_after_stop, len(states_after_stop) - 1)]\n"
+        "        for agent in agents:\n"
+        "            if agent['name'] in stopped:\n"
+        "                agent['state'] = state_after_stop\n"
         "    print(json.dumps({'agents': agents, 'errors': []}))\n"
         "sys.exit(0)\n"
     )
@@ -634,7 +656,7 @@ def test_apply_update_with_stop_chats_stops_busy_chats_and_ends_their_runners(tm
         run_git_for_backup_test(repo, "tag", "minds-v1.0.0")
         stub_bin = _make_stub_bin(tmp_path)
         stop_log = tmp_path / "stopped.txt"
-        _write_stateful_mngr_uv_stub(stub_bin, _busy_and_idle_chat_agents(repo), stop_log)
+        _write_stateful_mngr_uv_stub(stub_bin, _busy_and_idle_chat_agents(repo), stop_log, ("STOPPED",))
 
         run = _run_program(
             repo,
@@ -654,6 +676,128 @@ def test_apply_update_with_stop_chats_stops_busy_chats_and_ends_their_runners(tm
         for process in (runner, claude_task, other_runner):
             process.kill()
             process.wait()
+
+
+def test_apply_update_with_stop_chats_is_not_blocked_by_a_stopped_chat_whose_state_reads_unreadable_once(
+    tmp_path: Path,
+) -> None:
+    """A workspace loaded enough to time out a state read lists the chat the gate just stopped as UNKNOWN.
+
+    The stop succeeded, so that read says nothing about the chat running; the gate reads
+    again rather than answering blocked with the name of a chat it stopped itself.
+    """
+    repo = _make_workspace_repo(tmp_path)
+    run_git_for_backup_test(repo, "tag", "minds-v1.0.0")
+    stub_bin = _make_stub_bin(tmp_path)
+    stop_log = tmp_path / "stopped.txt"
+    agents = [
+        {"name": "chat-1", "id": "agent-1", "type": "claude", "state": "RUNNING", "work_dir": str(repo)},
+        {"name": "services", "id": "agent-2", "type": "main", "state": "WAITING", "work_dir": str(repo)},
+    ]
+    _write_stateful_mngr_uv_stub(stub_bin, agents, stop_log, ("UNKNOWN", "STOPPED"))
+
+    run = _run_program(
+        repo,
+        backup_apply_update,
+        ("--minds-version", "1.0.0", "--agent-id", "agent-x", "--stop-chats"),
+        extra_path=stub_bin,
+    )
+
+    payload = extract_marker_json(run["stdout"], UPDATE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["status"] == "ok", payload
+    assert stop_log.read_text().split() == ["chat-1"]
+
+
+def _write_mngr_uv_stub_listing_in_turn(stub_bin: Path, listings: list[list[dict[str, str]]]) -> None:
+    """A `uv` whose successive `mngr list` calls answer ``listings`` in order; the last one holds."""
+    uv_stub = stub_bin / "uv"
+    list_counter = stub_bin / "lists.txt"
+    uv_stub.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        f"listings = {listings!r}\n"
+        f"list_counter = {str(list_counter)!r}\n"
+        "args = sys.argv[1:]\n"
+        "if args[:4] == ['run', '--no-sync', 'mngr', 'list']:\n"
+        "    try:\n"
+        "        lists = int(open(list_counter).read())\n"
+        "    except OSError:\n"
+        "        lists = 0\n"
+        "    with open(list_counter, 'w') as handle:\n"
+        "        handle.write(str(lists + 1))\n"
+        "    agents = listings[min(lists, len(listings) - 1)]\n"
+        "    print(json.dumps({'agents': agents, 'errors': []}))\n"
+        "sys.exit(0)\n"
+    )
+    uv_stub.chmod(0o755)
+
+
+def _chat_agent(repo: Path, state: str, name: str = "chat-1") -> dict[str, str]:
+    agent_id = "agent-" + name.removeprefix("chat-")
+    return {"name": name, "id": agent_id, "type": "claude", "state": state, "work_dir": str(repo)}
+
+
+def _resolve_chat_gate_in_process(
+    repo: Path, stub_bin: Path, monkeypatch: pytest.MonkeyPatch, *, is_stop_chats: bool
+) -> tuple[BackupProgramStatus, dict[str, object], str]:
+    """Run the gate's chat half from ``repo`` with ``stub_bin``'s `uv`, re-reading at the pace of a unit test."""
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("PATH", f"{stub_bin}:{os.environ['PATH']}")
+    return resolve_chat_gate(is_stop_chats, reread_timeout_seconds=2.0, reread_interval_seconds=0.05)
+
+
+def test_the_gate_is_blocked_by_an_unreadable_chat_once_a_later_read_finds_it_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _make_workspace_repo(tmp_path)
+    stub_bin = _make_stub_bin(tmp_path)
+    _write_mngr_uv_stub_listing_in_turn(stub_bin, [[_chat_agent(repo, "UNKNOWN")], [_chat_agent(repo, "RUNNING")]])
+
+    verdict = _resolve_chat_gate_in_process(repo, stub_bin, monkeypatch, is_stop_chats=False)
+
+    assert verdict == (BackupProgramStatus.BLOCKED, {"running_chats": ["chat-1"]}, "chat agents are running")
+
+
+def test_the_gate_opens_once_an_unreadable_chat_reads_stopped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = _make_workspace_repo(tmp_path)
+    stub_bin = _make_stub_bin(tmp_path)
+    _write_mngr_uv_stub_listing_in_turn(stub_bin, [[_chat_agent(repo, "UNKNOWN")], [_chat_agent(repo, "STOPPED")]])
+
+    verdict = _resolve_chat_gate_in_process(repo, stub_bin, monkeypatch, is_stop_chats=False)
+
+    assert verdict == (BackupProgramStatus.OK, {}, "")
+
+
+def test_the_gate_fails_closed_naming_a_chat_whose_state_stays_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A state that never reads holds the gate shut, but as a read that failed, not as a chat to stop."""
+    repo = _make_workspace_repo(tmp_path)
+    stub_bin = _make_stub_bin(
+        tmp_path, agents_json=json.dumps({"agents": [_chat_agent(repo, "UNKNOWN")], "errors": []})
+    )
+
+    status, extra, detail = _resolve_chat_gate_in_process(repo, stub_bin, monkeypatch, is_stop_chats=False)
+
+    assert status == BackupProgramStatus.FAILED
+    assert extra == {
+        "failure_reason": BackupProgramFailureReason.CHAT_STATE_UNREADABLE,
+        "unreadable_chats": ["chat-1"],
+    }
+    assert "chat-1" in detail
+
+
+def test_the_gate_names_only_the_running_chats_when_another_state_is_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _make_workspace_repo(tmp_path)
+    agents = [_chat_agent(repo, "RUNNING"), _chat_agent(repo, "UNKNOWN", name="chat-2")]
+    stub_bin = _make_stub_bin(tmp_path, agents_json=json.dumps({"agents": agents, "errors": []}))
+
+    verdict = _resolve_chat_gate_in_process(repo, stub_bin, monkeypatch, is_stop_chats=False)
+
+    assert verdict == (BackupProgramStatus.BLOCKED, {"running_chats": ["chat-1"]}, "chat agents are running")
 
 
 def test_gate_probe_detects_in_flight_backup_tick(tmp_path: Path) -> None:

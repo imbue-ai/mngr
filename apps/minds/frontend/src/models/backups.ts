@@ -29,6 +29,7 @@ import type {
   ResponseBody,
   UserFacingError,
 } from "./errors";
+import type { BackupOperationStatusResponse } from "../generated/ui";
 import type { EnvironmentCondition, RecoveryFailureCause, RecoveryKind } from "./health";
 import { isReconnectNeeded, reconnectError } from "./reconnect";
 import { destroyDispatchFailureFor } from "./workspaceOptions";
@@ -114,20 +115,14 @@ export interface PreviousBackupRepository {
   snapshots_error?: string | null;
 }
 
-interface OperationStatusPayload {
-  status?: string;
-  kind?: string;
-  is_done?: boolean;
-  is_cancellable?: boolean;
-  error?: string | null;
-  failure_reason?: string | null;
-  warning?: string | null;
-  is_update_suggested?: boolean;
-  services_down?: string[];
-  service_config_error?: string | null;
-  blocked_chats?: string[];
-  snapshot_id?: string | null;
-}
+/** The operation status route's answer as this page reads it: parsed JSON, so no field is promised. */
+type OperationStatusPayload = Partial<BackupOperationStatusResponse>;
+
+/** Why a backup operation failed, as the status response names it: the app's own reasons and
+ * the in-workspace programs'. */
+export type OperationOrProgramFailureReason = NonNullable<
+  BackupOperationStatusResponse["failure_reason"]
+>;
 
 /** How a failed backup operation is told to the user, and what it offers. */
 export interface OperationFailure {
@@ -138,6 +133,10 @@ export interface OperationFailure {
   isRetryOffered: boolean;
   /** Whether stopping the chats and running it again is offered. */
   isStopChatsRetryOffered: boolean;
+  /** Whether restoring without the safety backup first is offered. */
+  isSkipSafetyRetryOffered: boolean;
+  /** Whether forcing the restore past its chat check is offered. */
+  isForceRetryOffered: boolean;
   /** Whether restarting Imbue Studio is the remedy. */
   isRestartAppOffered: boolean;
   /** Whether reloading the page, to read what is true now, is the remedy. */
@@ -173,6 +172,8 @@ function failure(
     isBugReportOffered: boolean;
     isRetryOffered: boolean;
     isStopChatsRetryOffered?: boolean;
+    isSkipSafetyRetryOffered?: boolean;
+    isForceRetryOffered?: boolean;
     isReloadOffered?: boolean;
   },
 ): OperationFailure {
@@ -181,6 +182,8 @@ function failure(
     isBugReportOffered: options.isBugReportOffered,
     isRetryOffered: options.isRetryOffered,
     isStopChatsRetryOffered: options.isStopChatsRetryOffered === true,
+    isSkipSafetyRetryOffered: options.isSkipSafetyRetryOffered === true,
+    isForceRetryOffered: options.isForceRetryOffered === true,
     isRestartAppOffered: false,
     isReloadOffered: options.isReloadOffered === true,
   };
@@ -193,6 +196,8 @@ function reconnectFailure(outcome: RequestOutcome): OperationFailure {
     isBugReportOffered: false,
     isRetryOffered: false,
     isStopChatsRetryOffered: false,
+    isSkipSafetyRetryOffered: false,
+    isForceRetryOffered: false,
     isRestartAppOffered: true,
     isReloadOffered: false,
   };
@@ -247,130 +252,179 @@ function operationFallbackFailure(
   );
 }
 
+/** What a reason's wording is given: the operation's kind and the worker's own text. */
+interface FailureWordingInput {
+  kind: string;
+  rawError: string;
+  isRestore: boolean;
+}
+
 /**
- * Word a failed backup operation from the reason the worker gave for it (see
- * OperationOrProgramFailureReason in workspace_operations.py); the worker's own text
- * goes behind See details. A reason this build does not know falls back to the
- * sentence for the kind of operation.
+ * The sentence, and the retries, for every reason a failed backup operation can
+ * carry; the worker's own text goes behind See details. Keyed by the reasons the
+ * server generates into ui.ts, so a reason added or renamed there does not
+ * compile here until it is worded.
  */
+const FAILURE_BY_REASON: Record<
+  OperationOrProgramFailureReason,
+  (input: FailureWordingInput) => OperationFailure
+> = {
+  CHAT_GATE_UNDETERMINED: ({ rawError, isRestore }) =>
+    // A restore offers "Force restore" for this instead.
+    failure(CHAT_CHECK_FAILED_SENTENCE, rawError, {
+      isBugReportOffered: false,
+      isRetryOffered: !isRestore,
+      isForceRetryOffered: isRestore,
+    }),
+  CHAT_RECHECK_FAILED: ({ rawError }) =>
+    failure(CHAT_CHECK_FAILED_SENTENCE, rawError, {
+      isBugReportOffered: false,
+      isRetryOffered: true,
+    }),
+  CHAT_STATE_UNREADABLE: ({ rawError, isRestore }) =>
+    // A restore offers "Force restore" besides, for a state that never reads.
+    failure(
+      "Imbue Studio couldn't tell whether any chats are still running in this workspace, " +
+        "which may be busy. *Try again in a moment.*",
+      rawError,
+      {
+        isBugReportOffered: false,
+        isRetryOffered: true,
+        isForceRetryOffered: isRestore,
+      },
+    ),
+  CHAT_STOP_FAILED: ({ rawError }) =>
+    failure(
+      "Imbue Studio couldn't stop the chats in this workspace.",
+      rawError,
+      {
+        isBugReportOffered: false,
+        isRetryOffered: false,
+        isStopChatsRetryOffered: true,
+      },
+    ),
+  BACKUP_TICK_TIMEOUT: ({ rawError }) =>
+    failure(
+      "A backup of this workspace is still running. Try again in a few minutes.",
+      rawError,
+      { isBugReportOffered: false, isRetryOffered: true },
+    ),
+  WORKSPACE_PROBE_FAILED: ({ rawError, isRestore }) =>
+    failure(
+      isRestore
+        ? RESTORE_UNREACHABLE_SENTENCE
+        : "Imbue Studio couldn't reach this workspace to update its backup software. " +
+            "*Make sure the workspace is running, then try again.*",
+      rawError,
+      {
+        isBugReportOffered: false,
+        isRetryOffered: true,
+        isForceRetryOffered: isRestore,
+      },
+    ),
+  SAFETY_SNAPSHOT_FAILED: ({ rawError }) =>
+    failure(
+      "Imbue Studio couldn't save a copy of this workspace's current state before restoring.",
+      rawError,
+      {
+        isBugReportOffered: true,
+        isRetryOffered: false,
+        isSkipSafetyRetryOffered: true,
+      },
+    ),
+  RESTORE_INCOMPLETE: ({ rawError }) =>
+    failure(RESTORE_INCOMPLETE_SENTENCE, rawError, {
+      isBugReportOffered: true,
+      isRetryOffered: true,
+    }),
+  RESTORE_INCOMPLETE_AFTER_SAFETY_BACKUP: ({ rawError }) =>
+    failure(
+      `${RESTORE_INCOMPLETE_SENTENCE} A safety backup of the pre-restore state was taken first.`,
+      rawError,
+      { isBugReportOffered: true, isRetryOffered: true },
+    ),
+  NO_RESULT: ({ kind, rawError, isRestore }) =>
+    isRestore
+      ? failure(
+          fallbackErrorSentence("The restore stopped before it finished"),
+          rawError,
+          { isBugReportOffered: true, isRetryOffered: true },
+        )
+      : operationFallbackFailure(kind, rawError),
+  SNAPSHOT_UNRESTORABLE: ({ rawError }) =>
+    failure(
+      "This backup doesn't contain a copy of your workspace, so it can't be restored. " +
+        "*Pick a different one* -- nothing in your workspace was changed.",
+      rawError,
+      { isBugReportOffered: false, isRetryOffered: false },
+    ),
+  SNAPSHOT_READ_FAILED: ({ rawError }) =>
+    failure(
+      "Imbue Studio couldn't read this backup just now. Nothing in your workspace was changed. " +
+        "Try again. If this persists, report a bug.",
+      rawError,
+      { isBugReportOffered: true, isRetryOffered: true },
+    ),
+  CREDENTIALS_WRITE_FAILED: ({ rawError }) =>
+    failure(RESTORE_UNREACHABLE_SENTENCE, rawError, {
+      isBugReportOffered: false,
+      isRetryOffered: true,
+    }),
+  UPDATE_STASH_KEPT: ({ rawError }) =>
+    failure(
+      `${UPDATE_FAILED_SENTENCE} Some unsaved changes in this workspace couldn't be put back ` +
+        "automatically. They are kept safe.",
+      rawError,
+      { isBugReportOffered: true, isRetryOffered: true },
+    ),
+  BELOW_UPDATE_FLOOR: ({ rawError }) =>
+    // The server's own sentence already says what to do.
+    failure(rawError, "", {
+      isBugReportOffered: false,
+      isRetryOffered: false,
+    }),
+  RESTIC_PASSWORD_SET: ({ rawError }) =>
+    failure(RESTIC_PASSWORD_SET_SENTENCE, rawError, {
+      isBugReportOffered: false,
+      isRetryOffered: false,
+    }),
+  STORAGE_QUOTA_EXCEEDED: ({ rawError }) =>
+    failure(STORAGE_QUOTA_SENTENCE, rawError, {
+      isBugReportOffered: false,
+      isRetryOffered: false,
+    }),
+  DISABLE_FAILED: ({ rawError }) =>
+    failure(DISABLE_FAILED_SENTENCE, rawError, {
+      isBugReportOffered: true,
+      isRetryOffered: false,
+    }),
+};
+
+/** The reason a status payload names, when this build knows it. A reason it does
+ * not know (a server newer than this page) reads as none, and the sentence for
+ * the kind of operation words the failure. */
+export function knownFailureReason(
+  value: string | null | undefined,
+): OperationOrProgramFailureReason | null {
+  if (value === null || value === undefined) return null;
+  return Object.hasOwn(FAILURE_BY_REASON, value)
+    ? (value as OperationOrProgramFailureReason)
+    : null;
+}
+
+/** Word a failed backup operation from the reason the worker gave for it, else
+ * from the kind of operation. */
 export function operationFailureFor(
   kind: string,
-  reason: string | null,
+  reason: OperationOrProgramFailureReason | null,
   rawError: string,
 ): OperationFailure {
-  const isRestore = kind === "backup_restore";
-  switch (reason) {
-    case "CHAT_GATE_UNDETERMINED":
-      // A restore offers "Force restore" for this instead.
-      return failure(CHAT_CHECK_FAILED_SENTENCE, rawError, {
-        isBugReportOffered: false,
-        isRetryOffered: !isRestore,
-      });
-    case "CHAT_RECHECK_FAILED":
-      return failure(CHAT_CHECK_FAILED_SENTENCE, rawError, {
-        isBugReportOffered: false,
-        isRetryOffered: true,
-      });
-    case "CHAT_STOP_FAILED":
-      return failure(
-        "Imbue Studio couldn't stop the chats in this workspace.",
-        rawError,
-        {
-          isBugReportOffered: false,
-          isRetryOffered: false,
-          isStopChatsRetryOffered: true,
-        },
-      );
-    case "BACKUP_TICK_TIMEOUT":
-      return failure(
-        "A backup of this workspace is still running. Try again in a few minutes.",
-        rawError,
-        { isBugReportOffered: false, isRetryOffered: true },
-      );
-    case "WORKSPACE_PROBE_FAILED":
-      return failure(
-        isRestore
-          ? RESTORE_UNREACHABLE_SENTENCE
-          : "Imbue Studio couldn't reach this workspace to update its backup software. " +
-              "*Make sure the workspace is running, then try again.*",
-        rawError,
-        { isBugReportOffered: false, isRetryOffered: true },
-      );
-    case "SAFETY_SNAPSHOT_FAILED":
-      return failure(
-        "Imbue Studio couldn't save a copy of this workspace's current state before restoring.",
-        rawError,
-        { isBugReportOffered: true, isRetryOffered: false },
-      );
-    case "RESTORE_INCOMPLETE":
-      return failure(RESTORE_INCOMPLETE_SENTENCE, rawError, {
-        isBugReportOffered: true,
-        isRetryOffered: true,
-      });
-    case "RESTORE_INCOMPLETE_AFTER_SAFETY_BACKUP":
-      return failure(
-        `${RESTORE_INCOMPLETE_SENTENCE} A safety backup of the pre-restore state was taken first.`,
-        rawError,
-        { isBugReportOffered: true, isRetryOffered: true },
-      );
-    case "NO_RESULT":
-      return isRestore
-        ? failure(
-            fallbackErrorSentence("The restore stopped before it finished"),
-            rawError,
-            { isBugReportOffered: true, isRetryOffered: true },
-          )
-        : operationFallbackFailure(kind, rawError);
-    case "SNAPSHOT_UNRESTORABLE":
-      return failure(
-        "This backup doesn't contain a copy of your workspace, so it can't be restored. " +
-          "*Pick a different one* -- nothing in your workspace was changed.",
-        rawError,
-        { isBugReportOffered: false, isRetryOffered: false },
-      );
-    case "SNAPSHOT_READ_FAILED":
-      return failure(
-        "Imbue Studio couldn't read this backup just now. Nothing in your workspace was changed. " +
-          "Try again. If this persists, report a bug.",
-        rawError,
-        { isBugReportOffered: true, isRetryOffered: true },
-      );
-    case "CREDENTIALS_WRITE_FAILED":
-      return failure(RESTORE_UNREACHABLE_SENTENCE, rawError, {
-        isBugReportOffered: false,
-        isRetryOffered: true,
-      });
-    case "UPDATE_STASH_KEPT":
-      return failure(
-        `${UPDATE_FAILED_SENTENCE} Some unsaved changes in this workspace couldn't be put back ` +
-          "automatically. They are kept safe.",
-        rawError,
-        { isBugReportOffered: true, isRetryOffered: true },
-      );
-    case "BELOW_UPDATE_FLOOR":
-      // The server's own sentence already says what to do.
-      return failure(rawError, "", {
-        isBugReportOffered: false,
-        isRetryOffered: false,
-      });
-    case "RESTIC_PASSWORD_SET":
-      return failure(RESTIC_PASSWORD_SET_SENTENCE, rawError, {
-        isBugReportOffered: false,
-        isRetryOffered: false,
-      });
-    case "STORAGE_QUOTA_EXCEEDED":
-      return failure(STORAGE_QUOTA_SENTENCE, rawError, {
-        isBugReportOffered: false,
-        isRetryOffered: false,
-      });
-    case "DISABLE_FAILED":
-      return failure(DISABLE_FAILED_SENTENCE, rawError, {
-        isBugReportOffered: true,
-        isRetryOffered: false,
-      });
-    default:
-      return operationFallbackFailure(kind, rawError);
-  }
+  if (reason === null) return operationFallbackFailure(kind, rawError);
+  return FAILURE_BY_REASON[reason]({
+    kind,
+    rawError,
+    isRestore: kind === "backup_restore",
+  });
 }
 
 /** A dispatch the route refused (or never answered): our sentence for the
@@ -876,20 +930,13 @@ export class BackupOperationController {
       this.deps.redraw();
       return;
     }
-    const reason = payload.failure_reason ?? null;
     this.showFailure(
       operationFailureFor(
         this.dispatchedKind || (payload.kind ?? ""),
-        reason,
+        knownFailureReason(payload.failure_reason),
         payload.error ?? "",
       ),
     );
-    this.isSkipSafetyRetryOffered =
-      this.retrySkipSafety !== null && reason === "SAFETY_SNAPSHOT_FAILED";
-    this.isForceRetryOffered =
-      this.retryForce !== null &&
-      (reason === "CHAT_GATE_UNDETERMINED" ||
-        reason === "WORKSPACE_PROBE_FAILED");
     this.serviceConfigError = payload.service_config_error ?? null;
     this.deps.redraw();
   }
@@ -976,6 +1023,10 @@ export class BackupOperationController {
     this.isRetryOffered = failure.isRetryOffered && this.retrySame !== null;
     this.isStopChatsRetryOffered =
       failure.isStopChatsRetryOffered && this.retryWithStopChats !== null;
+    this.isSkipSafetyRetryOffered =
+      failure.isSkipSafetyRetryOffered && this.retrySkipSafety !== null;
+    this.isForceRetryOffered =
+      failure.isForceRetryOffered && this.retryForce !== null;
   }
 }
 

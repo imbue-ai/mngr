@@ -101,7 +101,6 @@ from imbue.minds.desktop_client.api_models import AgentFolderSyncsResponse
 from imbue.minds.desktop_client.api_models import AgentNotificationReadRequest
 from imbue.minds.desktop_client.api_models import AgentNotificationRequest
 from imbue.minds.desktop_client.api_models import AppVersionResponse
-from imbue.minds.desktop_client.api_models import BackupOperationStatusResponse
 from imbue.minds.desktop_client.api_models import BackupRestoreRequest
 from imbue.minds.desktop_client.api_models import BackupServiceConfigureRequest
 from imbue.minds.desktop_client.api_models import BackupServiceUpdateRequest
@@ -292,6 +291,7 @@ from imbue.minds.desktop_client.ui_api_inbox import build_agent_message_card
 from imbue.minds.desktop_client.ui_api_inbox import primary_agent_ids_by_workspace_name
 from imbue.minds.desktop_client.ui_api_inbox import resolve_chat_agent_id
 from imbue.minds.desktop_client.ui_api_inbox import workspace_agent_id_for_agent
+from imbue.minds.desktop_client.ui_models import BackupOperationStatusResponse
 from imbue.minds.desktop_client.ui_models import UiFolderSyncRow
 from imbue.minds.desktop_client.ui_models import UiOpenHelpMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspaceRefreshMessage

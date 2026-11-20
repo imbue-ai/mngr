@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 from pydantic import AnyUrl
+from pydantic import ValidationError
 
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client import backup_status
@@ -20,14 +21,16 @@ from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import RESTIC_PREVIOUS_ENV_REMOTE_PATH
 from imbue.minds.desktop_client.backup_update import BELOW_UPDATE_FLOOR_MESSAGE
+from imbue.minds.desktop_client.backup_update import BackupGateProbeAnswer
 from imbue.minds.desktop_client.backup_update import BackupOperationFailure
+from imbue.minds.desktop_client.backup_update import BackupRestoreAnswer
+from imbue.minds.desktop_client.backup_update import BackupUpdateAnswer
 from imbue.minds.desktop_client.backup_update import _apply_update_and_verify
 from imbue.minds.desktop_client.backup_update import _chained_update_warning
 from imbue.minds.desktop_client.backup_update import _complete_restore
 from imbue.minds.desktop_client.backup_update import _end_unfinished_restore
 from imbue.minds.desktop_client.backup_update import _resolve_restore_snapshot
 from imbue.minds.desktop_client.backup_update import _resolve_restore_subpath
-from imbue.minds.desktop_client.backup_update import _restore_services_down
 from imbue.minds.desktop_client.backup_update import build_restore_program_arguments
 from imbue.minds.desktop_client.backup_update import run_backup_configure_sequence
 from imbue.minds.desktop_client.backup_update import run_backup_restore_sequence
@@ -232,14 +235,36 @@ def _only_snapshot_id(paths: InstallationPaths, agent_id: AgentId) -> str:
     return snapshots[0].snapshot_id
 
 
-def test_restore_services_down_carries_the_names_as_data() -> None:
-    # The restore script's services_down list (services outside the
-    # restore-critical set that did not come back) rides on the record for the
-    # UI to word; a payload without the list yields none, keeping clean
-    # restores caveat-free.
-    assert _restore_services_down({"services_down": ["browser", "xvfb"]}) == ("browser", "xvfb")
-    assert _restore_services_down({}) == ()
-    assert _restore_services_down({"services_down": []}) == ()
+def test_program_answers_read_the_fields_the_desktop_acts_on_and_leave_the_rest_unread() -> None:
+    # The programs answer with more than the desktop acts on (the schema version, the
+    # stash detail, ...), and a field a program did not set reads as its default.
+    probe = BackupGateProbeAnswer.model_validate(
+        {"schema": 1, "running_chats": ["chat-1"], "backup_tick_in_flight": True}
+    )
+    assert probe == BackupGateProbeAnswer(running_chats=("chat-1",), backup_tick_in_flight=True)
+
+    update = BackupUpdateAnswer.model_validate(
+        {
+            "schema": 1,
+            "committed": True,
+            "stashed": True,
+            "stash_detail": "conflict",
+            "tag": "minds-v1.0.0",
+            "status": "ok",
+        }
+    )
+    assert update == BackupUpdateAnswer(status="ok", committed=True, tag="minds-v1.0.0")
+
+    # A clean restore names no services down and no config error, so it completes caveat-free.
+    restore = BackupRestoreAnswer.model_validate({"schema": 1, "status": "ok", "restored": True})
+    assert restore == BackupRestoreAnswer(status="ok")
+
+
+def test_a_program_answer_naming_a_reason_the_desktop_does_not_know_is_refused() -> None:
+    # The programs are shipped from this very package, so a reason the desktop's enum lacks is a
+    # bug to surface, not a failure to word by a fallback.
+    with pytest.raises(ValidationError):
+        BackupRestoreAnswer.model_validate({"status": "failed", "failure_reason": "NOT_A_REASON"})
 
 
 _UNREADABLE_CONFIG_OUTPUT = "ERROR: CANT_REREAD: File contains no section headers."
@@ -265,7 +290,9 @@ def test_a_restore_whose_restored_service_config_is_unreadable_completes_with_it
         registry,
         agent_id,
         None,
-        {"status": "ok", "services_down": ["browser"], "supervisord_config_error": _UNREADABLE_CONFIG_OUTPUT},
+        BackupRestoreAnswer(
+            status="ok", services_down=("browser",), supervisord_config_error=_UNREADABLE_CONFIG_OUTPUT
+        ),
     )
 
     record = registry.get(agent_id)
@@ -285,12 +312,12 @@ def test_a_failed_restore_keeps_its_reason_and_carries_an_unreadable_service_con
     is_ended = _end_unfinished_restore(
         registry,
         agent_id,
-        {
-            "status": "failed",
-            "detail": "restored, but uv sync failed: resolver error",
-            "safety_snapshot_taken": True,
-            "supervisord_config_error": _UNREADABLE_CONFIG_OUTPUT,
-        },
+        BackupRestoreAnswer(
+            status="failed",
+            detail="restored, but uv sync failed: resolver error",
+            safety_snapshot_taken=True,
+            supervisord_config_error=_UNREADABLE_CONFIG_OUTPUT,
+        ),
     )
 
     assert is_ended
@@ -310,11 +337,11 @@ def test_a_failed_restore_takes_the_reason_its_program_named() -> None:
     is_ended = _end_unfinished_restore(
         registry,
         agent_id,
-        {
-            "status": "failed",
-            "detail": "pre-restore safety snapshot failed: disk full",
-            "failure_reason": "SAFETY_SNAPSHOT_FAILED",
-        },
+        BackupRestoreAnswer(
+            status="failed",
+            detail="pre-restore safety snapshot failed: disk full",
+            failure_reason=BackupProgramFailureReason.SAFETY_SNAPSHOT_FAILED,
+        ),
     )
 
     assert is_ended
@@ -327,7 +354,7 @@ def test_a_failed_restore_takes_the_reason_its_program_named() -> None:
 def test_a_restore_its_program_reported_ok_is_left_running_for_the_later_phases() -> None:
     registry, agent_id = _started_restore()
 
-    assert not _end_unfinished_restore(registry, agent_id, {"status": "ok"})
+    assert not _end_unfinished_restore(registry, agent_id, BackupRestoreAnswer(status="ok"))
 
     record = registry.get(agent_id)
     assert record is not None

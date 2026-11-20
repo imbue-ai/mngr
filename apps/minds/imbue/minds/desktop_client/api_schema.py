@@ -60,7 +60,6 @@ from imbue.minds.desktop_client.api_models import AgentNotificationReadRequest
 from imbue.minds.desktop_client.api_models import AgentNotificationRequest
 from imbue.minds.desktop_client.api_models import ApiErrorResponse
 from imbue.minds.desktop_client.api_models import AppVersionResponse
-from imbue.minds.desktop_client.api_models import BackupOperationStatusResponse
 from imbue.minds.desktop_client.api_models import BackupRestoreRequest
 from imbue.minds.desktop_client.api_models import BackupServiceConfigureRequest
 from imbue.minds.desktop_client.api_models import BackupServiceUpdateRequest
@@ -107,6 +106,7 @@ from imbue.minds.desktop_client.api_transport import ApiTransport
 from imbue.minds.desktop_client.api_transport import transport_for_environ
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.responses import make_response
+from imbue.minds.desktop_client.ui_models import BackupOperationStatusResponse
 from imbue.mngr_latchkey.remote_execution import REMOTE_EXECUTION_PROGRAM_QUERY_PARAMETER
 
 # The path the schema document is served at (version-agnostic: it describes every

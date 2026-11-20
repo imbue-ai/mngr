@@ -27,6 +27,8 @@ class BackupProgramFailureReason(StrEnum):
     CHAT_RECHECK_FAILED = "CHAT_RECHECK_FAILED"
     # A running chat could not be stopped.
     CHAT_STOP_FAILED = "CHAT_STOP_FAILED"
+    # A chat's state could not be read for as long as the gate kept reading it, so whether it runs is unknown.
+    CHAT_STATE_UNREADABLE = "CHAT_STATE_UNREADABLE"
     # A backup in progress did not finish in time.
     BACKUP_TICK_TIMEOUT = "BACKUP_TICK_TIMEOUT"
     # The safety backup a restore takes first failed.
@@ -56,14 +58,6 @@ def parse_backup_program_status(raw: object) -> BackupProgramStatus:
         return BackupProgramStatus(raw)
     except ValueError:
         return BackupProgramStatus.FAILED
-
-
-def parse_backup_program_failure_reason(raw: object) -> BackupProgramFailureReason | None:
-    """The failure reason an answer names; a missing or unknown one reads as None (no known reason)."""
-    try:
-        return BackupProgramFailureReason(raw)
-    except ValueError:
-        return None
 
 
 def parse_backup_code_state(raw: object) -> BackupCodeState:

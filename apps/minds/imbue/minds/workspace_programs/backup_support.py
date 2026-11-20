@@ -63,12 +63,20 @@ SERVICE_VERIFY_TIMEOUT_SECONDS: Final[float] = 60.0
 SHORT_COMMAND_TIMEOUT_SECONDS: Final[float] = 60.0
 MNGR_COMMAND_TIMEOUT_SECONDS: Final[float] = 180.0
 _TAG_FETCH_TIMEOUT_SECONDS: Final[float] = 300.0
+# How long a mutating program keeps re-reading the chats whose state `mngr list` could not
+# read, and the pause between its listings. An unreadable state is a read that timed out on a
+# loaded host: the next listing needs the host to have caught up, and is itself one more
+# process on it. The window is a few listings' worth of mngr's own per-host read budget.
+UNREADABLE_CHAT_REREAD_TIMEOUT_SECONDS: Final[float] = 60.0
+UNREADABLE_CHAT_REREAD_INTERVAL_SECONDS: Final[float] = 5.0
 
 
 class RunningChatsGate(TypedDict):
-    """The chats that hold a mutating program back, and the background runners that would wake each one again."""
+    """What holds a mutating program back: the chats that run, the chats whose state could not be read,
+    and the background runners that would wake each running chat again once stopped."""
 
-    chats: list[str]
+    running_chats: list[str]
+    unreadable_chats: list[str]
     runner_pids_by_chat: dict[str, list[int]]
 
 
@@ -275,12 +283,13 @@ def _agents_payload_from_mngr_list(stdout: str) -> dict[str, object] | None:
 def list_running_chats() -> tuple[RunningChatsGate | None, str]:
     """``(gate, error)``; the gate is None when the chats could not be listed.
 
-    The gate's ``chats`` are the agents in this work_dir, excluding type=main, that are RUNNING,
-    RUNNING_BACKGROUND (their turn ended with work they declared still outstanding),
-    RUNNING_UNKNOWN_AGENT_TYPE (their process runs under a type mngr's config does not name), UNKNOWN
-    (their state could not be read, so they may be mid-turn), or WAITING with their chat busy (they
-    will resume on their own). ``runner_pids_by_chat`` holds each chat's runners, the
-    background commands that would wake it again after a stop.
+    The chats are the agents in this work_dir, excluding type=main. The ``running_chats`` are
+    those RUNNING, RUNNING_BACKGROUND (their turn ended with work they declared still
+    outstanding), RUNNING_UNKNOWN_AGENT_TYPE (their process runs under a type mngr's config
+    does not name), or WAITING with their chat busy (they will resume on their own); the
+    ``unreadable_chats`` are those whose state mngr could not read in time (UNKNOWN), which
+    says nothing about whether they run. ``runner_pids_by_chat`` holds each running chat's
+    runners, the background commands that would wake it again after a stop.
     """
     listed = run_mngr(["list", "--format", "json", "--provider", "local"], MNGR_COMMAND_TIMEOUT_SECONDS)
     if listed.returncode != 0:
@@ -290,7 +299,8 @@ def list_running_chats() -> tuple[RunningChatsGate | None, str]:
         return None, "mngr list produced no JSON payload"
     background_chats = _read_background_chats()
     cwd = os.path.realpath(os.getcwd())
-    chats: list[str] = []
+    running_chats: list[str] = []
+    unreadable_chats: list[str] = []
     runner_pids_by_chat: dict[str, list[int]] = {}
     for agent in as_json_object_list(payload.get("agents")):
         work_dir = os.path.realpath(str(agent.get("work_dir", "")))
@@ -298,17 +308,24 @@ def list_running_chats() -> tuple[RunningChatsGate | None, str]:
             continue
         if agent.get("type") == "main":
             continue
+        chat_name = str(agent.get("name") or agent.get("id") or "unknown")
+        state = agent.get("state")
+        if state == "UNKNOWN":
+            unreadable_chats.append(chat_name)
+            continue
         own_background_chats = _background_chats_of(agent, background_chats)
         is_busy = any(chat.get("is_busy") is True for chat in own_background_chats)
-        state = agent.get("state")
-        if state not in ("RUNNING", "RUNNING_BACKGROUND", "RUNNING_UNKNOWN_AGENT_TYPE", "UNKNOWN") and not (
+        if state not in ("RUNNING", "RUNNING_BACKGROUND", "RUNNING_UNKNOWN_AGENT_TYPE") and not (
             state == "WAITING" and is_busy
         ):
             continue
-        chat_name = str(agent.get("name") or agent.get("id") or "unknown")
-        chats.append(chat_name)
+        running_chats.append(chat_name)
         runner_pids_by_chat[chat_name] = _runner_pids(own_background_chats)
-    return {"chats": chats, "runner_pids_by_chat": runner_pids_by_chat}, ""
+    return {
+        "running_chats": running_chats,
+        "unreadable_chats": unreadable_chats,
+        "runner_pids_by_chat": runner_pids_by_chat,
+    }, ""
 
 
 def _end_runners(runner_pids: Sequence[int]) -> None:
@@ -390,14 +407,81 @@ def is_backup_tick_in_flight(agent_id: str) -> bool:
 
 
 def _stop_running_chats(gate: RunningChatsGate) -> str:
-    """Stop every chat the gate names, ending its runners first; "" or an error detail."""
-    for chat_name in gate["chats"]:
+    """Stop every running chat the gate names, ending its runners first; "" or an error detail."""
+    for chat_name in gate["running_chats"]:
         # First, so no runner reports its killed command and wakes the chat again.
         _end_runners(gate["runner_pids_by_chat"].get(chat_name, []))
         stopped = run_mngr(["stop", chat_name], MNGR_COMMAND_TIMEOUT_SECONDS)
         if stopped.returncode != 0:
             return "could not stop chat %s: %s" % (chat_name, output_tail(stopped, 300))
     return ""
+
+
+def _is_chat_listing_settled(sample: tuple[RunningChatsGate | None, str]) -> bool:
+    """Whether a listing answers the gate: it failed, a chat runs, or every chat's state was read."""
+    gate, _ = sample
+    return gate is None or bool(gate["running_chats"]) or not gate["unreadable_chats"]
+
+
+def _failed_gate(
+    failure_reason: BackupProgramFailureReason, detail: str
+) -> tuple[BackupProgramStatus, dict[str, object], str]:
+    return BackupProgramStatus.FAILED, {"failure_reason": failure_reason}, detail
+
+
+def _chat_gate_answer_for(gate: RunningChatsGate) -> tuple[BackupProgramStatus, dict[str, object], str]:
+    """The answer for the chats as read: blocked by the running ones, failed on the unreadable ones, else ok.
+
+    A chat whose state could not be read may be mid-turn, so it holds the gate shut -- as a read
+    that failed, not as a running chat: ``blocked`` names chats the user can stop, and stopping
+    a chat cannot make its state readable.
+    """
+    if gate["running_chats"]:
+        return BackupProgramStatus.BLOCKED, {"running_chats": gate["running_chats"]}, "chat agents are running"
+    if gate["unreadable_chats"]:
+        return (
+            BackupProgramStatus.FAILED,
+            {
+                "failure_reason": BackupProgramFailureReason.CHAT_STATE_UNREADABLE,
+                "unreadable_chats": gate["unreadable_chats"],
+            },
+            "could not read the state of chat agent(s) %s; the workspace may be busy, try again"
+            % ", ".join(gate["unreadable_chats"]),
+        )
+    return BackupProgramStatus.OK, {}, ""
+
+
+def resolve_chat_gate(
+    is_stop_chats: bool, reread_timeout_seconds: float, reread_interval_seconds: float
+) -> tuple[BackupProgramStatus, dict[str, object], str]:
+    """The chat half of a mutating program's gate: (status, extra, detail) as ``gate_chats_and_wait_for_tick`` answers.
+
+    With ``is_stop_chats`` the chats found running are stopped first, and a listing after the
+    stop is what the answer reads. A chat whose state could not be read is listed again,
+    ``reread_interval_seconds`` apart, until its state reads, a chat reads as running, or
+    ``reread_timeout_seconds`` passes.
+    """
+    gate, list_error = list_running_chats()
+    if gate is None:
+        return _failed_gate(
+            BackupProgramFailureReason.CHAT_GATE_UNDETERMINED, "cannot determine running chats: %s" % list_error
+        )
+    is_blocked_as_read = bool(gate["running_chats"]) and not is_stop_chats
+    if gate["running_chats"] and is_stop_chats:
+        stop_error = _stop_running_chats(gate)
+        if stop_error:
+            return _failed_gate(BackupProgramFailureReason.CHAT_STOP_FAILED, stop_error)
+    is_reread_needed = not is_blocked_as_read and bool(gate["running_chats"] or gate["unreadable_chats"])
+    settled_gate, settle_error = (
+        poll_until(list_running_chats, _is_chat_listing_settled, reread_timeout_seconds, reread_interval_seconds)
+        if is_reread_needed
+        else (gate, "")
+    )
+    if settled_gate is None:
+        return _failed_gate(
+            BackupProgramFailureReason.CHAT_RECHECK_FAILED, "cannot re-check running chats: %s" % settle_error
+        )
+    return _chat_gate_answer_for(settled_gate)
 
 
 def gate_chats_and_wait_for_tick(
@@ -413,30 +497,11 @@ def gate_chats_and_wait_for_tick(
     the tick wait still applies -- it needs no workspace code to answer.
     """
     if not is_chat_gate_skipped:
-        gate, gate_error = list_running_chats()
-        if gate is None:
-            return (
-                BackupProgramStatus.FAILED,
-                {"failure_reason": BackupProgramFailureReason.CHAT_GATE_UNDETERMINED},
-                "cannot determine running chats: %s" % gate_error,
-            )
-        if gate["chats"] and is_stop_chats:
-            stop_error = _stop_running_chats(gate)
-            if stop_error:
-                return (
-                    BackupProgramStatus.FAILED,
-                    {"failure_reason": BackupProgramFailureReason.CHAT_STOP_FAILED},
-                    stop_error,
-                )
-            gate, gate_error = list_running_chats()
-            if gate is None:
-                return (
-                    BackupProgramStatus.FAILED,
-                    {"failure_reason": BackupProgramFailureReason.CHAT_RECHECK_FAILED},
-                    "cannot re-check running chats: %s" % gate_error,
-                )
-        if gate["chats"]:
-            return BackupProgramStatus.BLOCKED, {"running_chats": gate["chats"]}, "chat agents are running"
+        status, extra, detail = resolve_chat_gate(
+            is_stop_chats, UNREADABLE_CHAT_REREAD_TIMEOUT_SECONDS, UNREADABLE_CHAT_REREAD_INTERVAL_SECONDS
+        )
+        if status is not BackupProgramStatus.OK:
+            return status, extra, detail
     is_tick_still_in_flight = poll_until(
         lambda: is_backup_tick_in_flight(agent_id),
         lambda is_in_flight: not is_in_flight,
