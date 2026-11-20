@@ -22,6 +22,26 @@ import imbue.imbue_common.sentry.s3_uploader as s3_uploader
 # A test DSN: well-formed enough for the SDK to consider the client active, pointing nowhere.
 _TEST_DSN = "https://public@example.com/1"
 
+# The plain substrings Sentry's default password scrubbing rule looks for, case-insensitively, anywhere in a
+# string value: one match replaces the whole value -- a breadcrumb's entire log line -- with "[Filtered]".
+# A replica of a server-side rule, so it can drift; kept a superset of it on purpose.
+_SENTRY_SCRUBBED_SUBSTRINGS = (
+    "password",
+    "passwd",
+    "secret",
+    "api_key",
+    "apikey",
+    "auth",
+    "credential",
+    "mysql_pwd",
+    "privatekey",
+    "private_key",
+    "token",
+    "session_id",
+    "sessionid",
+    "bearer",
+)
+
 # The bucket ``recording_s3_bucket`` pretends is configured. Exposed so a test can spell out the
 # ``s3://`` URI it expects rather than deriving it the same way the code under test does.
 TEST_S3_BUCKET = "test-bug-reports-bucket"
@@ -123,3 +143,9 @@ def recording_s3_bucket() -> Generator[list[tuple[str, bytes]], None, None]:
         yield uploader._uploads
     finally:
         s3_uploader._S3_UPLOADER = previous
+
+
+def find_sentry_scrubbed_substrings(text: str) -> tuple[str, ...]:
+    """The substrings in ``text`` that would make Sentry's default scrubber blank it whole; empty when it survives."""
+    lowered = text.lower()
+    return tuple(substring for substring in _SENTRY_SCRUBBED_SUBSTRINGS if substring in lowered)

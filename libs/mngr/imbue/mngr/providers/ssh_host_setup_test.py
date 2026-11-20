@@ -14,6 +14,7 @@ from typing import Final
 import pytest
 
 import imbue.mngr.resources as mngr_resources
+from imbue.imbue_common.sentry.testing import find_sentry_scrubbed_substrings
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import UserId
@@ -726,6 +727,7 @@ def test_log_client_key_configuration_names_the_host_and_the_key_fingerprint() -
     assert get_ssh_public_key_fingerprint(public_key) in message
     assert "provider docker, profile profile-user" in message
     assert public_key.split()[1] not in message
+    assert find_sentry_scrubbed_substrings(message.replace(get_ssh_public_key_fingerprint(public_key), "")) == ()
 
 
 def test_log_client_key_configuration_lists_appended_keys_and_tolerates_unparseable_ones() -> None:

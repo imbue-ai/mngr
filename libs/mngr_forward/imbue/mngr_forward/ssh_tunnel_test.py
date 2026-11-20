@@ -40,6 +40,7 @@ from pydantic import PrivateAttr
 
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.imbue_common.primitives import PositiveInt
+from imbue.imbue_common.sentry.testing import find_sentry_scrubbed_substrings
 from imbue.imbue_common.suspension import ClockReading
 from imbue.imbue_common.suspension import read_clocks
 from imbue.imbue_common.testing import assert_model_is_frozen
@@ -2055,7 +2056,9 @@ def test_a_real_sshd_rejecting_the_key_logs_the_offered_key_and_reraises(tmp_pat
     """A rejected key is logged with what was offered, then propagates unchanged to the caller.
 
     Driven against a real handshake so the warning is pinned to the exception
-    paramiko actually raises for a refusal, not one built by hand.
+    paramiko actually raises for a refusal, not one built by hand -- and so the
+    line is checked to survive Sentry's scrubber as actually emitted, quoting
+    nothing of paramiko's own wording.
     """
     with _loopback_sshd(tmp_path, _KeyRejectingServer.create()) as (ssh_info, _served):
         offered_fingerprint = paramiko.Ed25519Key.from_private_key_file(str(ssh_info.key_path)).fingerprint
@@ -2065,10 +2068,12 @@ def test_a_real_sshd_rejecting_the_key_logs_the_offered_key_and_reraises(tmp_pat
 
     warnings = log_output.getvalue().splitlines()
     assert len(warnings) == 1, warnings
-    assert f"as root on port {ssh_info.port} failed" in warnings[0]
-    assert "AuthenticationException: Authentication failed." in warnings[0]
-    assert f"key {offered_fingerprint} (file modified " in warnings[0]
+    assert f"SSH login as root on port {ssh_info.port} failed: the server rejected the last key offered" in warnings[0]
+    assert f"offered provider-wide key {offered_fingerprint} (file modified " in warnings[0]
+    assert "agent key(s)" not in warnings[0]
     assert str(ssh_info.key_path) not in warnings[0]
+    # The fingerprint is random base64 that can spell a scrubbed word by chance; the wording is what is pinned.
+    assert find_sentry_scrubbed_substrings(warnings[0].replace(offered_fingerprint, "")) == ()
 
 
 def _write_rsa_pem_key(key_path: Path) -> paramiko.PKey:
@@ -2103,7 +2108,8 @@ def test_a_real_sshd_rejecting_an_rsa_or_ecdsa_key_reports_the_rejection(
 
     warnings = log_output.getvalue().splitlines()
     assert len(warnings) == 1, warnings
-    assert f"key {offered_key.fingerprint} (file modified " in warnings[0]
+    assert f"offered provider-wide key {offered_key.fingerprint} (file modified " in warnings[0]
+    assert find_sentry_scrubbed_substrings(warnings[0].replace(offered_key.fingerprint, "")) == ()
 
 
 @pytest.mark.timeout(60)
@@ -2198,7 +2204,7 @@ def test_a_credential_deferring_host_authenticates_with_the_users_own_keys(
             client.close()
 
 
-def test_authentication_failure_log_reports_the_auth_types_the_server_allows() -> None:
+def test_authentication_failure_log_reports_the_login_methods_the_server_allows() -> None:
     ssh_info = RemoteSSHInfo(user="root", host="agent-host.example", port=22, key_path=Path(""))
     with capture_loguru("WARNING") as log_output:
         _log_authentication_failure(
@@ -2206,8 +2212,9 @@ def test_authentication_failure_log_reports_the_auth_types_the_server_allows() -
         )
 
     warning = log_output.getvalue()
-    assert "offered credentials: the user's own SSH setup (credential-deferring host)" in warning
-    assert "auth types the server allows: password" in warning
+    assert "failed: the server does not accept public-key logins" in warning
+    assert "offered the user's own SSH setup (a host with no key of its own)" in warning
+    assert "login methods the server allows: password" in warning
 
 
 def test_authentication_failure_log_names_the_fallback_for_a_key_that_needs_a_passphrase(tmp_path: Path) -> None:
@@ -2215,9 +2222,7 @@ def test_authentication_failure_log_names_the_fallback_for_a_key_that_needs_a_pa
     with capture_loguru("WARNING") as log_output:
         _log_authentication_failure(ssh_info, None, paramiko.AuthenticationException("Authentication failed."))
 
-    assert "offered credentials: the user's own SSH setup (the configured key needs a passphrase)" in (
-        log_output.getvalue()
-    )
+    assert "offered the user's own SSH setup (the configured key needs a passphrase): " in log_output.getvalue()
 
 
 def test_authentication_failure_log_survives_a_key_file_that_has_since_gone(tmp_path: Path) -> None:
@@ -2228,10 +2233,69 @@ def test_authentication_failure_log_survives_a_key_file_that_has_since_gone(tmp_
 
     warning = log_output.getvalue()
     assert (
-        f"offered credentials: key {offered_key.fingerprint} (file no longer readable: FileNotFoundError)" in warning
+        f"offered provider-wide key {offered_key.fingerprint} (file no longer readable: FileNotFoundError)" in warning
     )
-    assert "AuthenticationException: Authentication timeout." in warning
-    assert "auth types the server allows: not reported" in warning
+    assert "failed: the server did not answer the login in time" in warning
+    assert "login methods the server allows: not reported" in warning
+    assert find_sentry_scrubbed_substrings(warning.replace(offered_key.fingerprint, "")) == ()
+
+
+def test_authentication_failure_log_reports_an_encrypted_key_without_tripping_the_scrubber(tmp_path: Path) -> None:
+    ssh_info = RemoteSSHInfo(user="root", host="agent-host.example", port=22, key_path=tmp_path / "id_rsa")
+    with capture_loguru("WARNING") as log_output:
+        _log_authentication_failure(
+            ssh_info, None, paramiko.PasswordRequiredException("Private key file is encrypted")
+        )
+
+    warning = log_output.getvalue()
+    assert "failed: the last key offered is encrypted and no passphrase was given" in warning
+    assert find_sentry_scrubbed_substrings(warning) == ()
+
+
+@pytest.mark.parametrize(
+    "relative_key_path",
+    ["keys/host_keys/0123abcd/modal_ssh_key", "hosts/host-0123abcd/ssh_key"],
+)
+def test_authentication_failure_log_names_a_per_host_key_as_such(tmp_path: Path, relative_key_path: str) -> None:
+    key_path = tmp_path / relative_key_path
+    save_ssh_keypair(key_path.parent, key_path.name)
+    offered_key = paramiko.PKey.from_path(key_path)
+    ssh_info = RemoteSSHInfo(user="root", host="agent-host.example", port=22, key_path=key_path)
+    with capture_loguru("WARNING") as log_output:
+        _log_authentication_failure(ssh_info, offered_key, paramiko.AuthenticationException("Authentication failed."))
+
+    assert f"offered per-host key {offered_key.fingerprint} (file modified " in log_output.getvalue()
+
+
+def test_authentication_failure_log_lists_the_users_own_keys_paramiko_offers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The keys behind the user's own SSH setup are listed, so a final error from one of them is not misread."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    (tmp_path / ".ssh").mkdir()
+    (tmp_path / ".ssh" / "id_ed25519").write_text("synthetic\n")
+    (tmp_path / ".ssh" / "id_rsa").write_text("synthetic\n")
+    ssh_info = RemoteSSHInfo(user="root", host="agent-host.example", port=22, key_path=Path(""))
+    with capture_loguru("WARNING") as log_output:
+        _log_authentication_failure(ssh_info, None, paramiko.AuthenticationException("Authentication failed."))
+
+    assert (
+        "offered the user's own SSH setup (a host with no key of its own): "
+        "0 agent key(s), default key files [~/.ssh/id_rsa, ~/.ssh/id_ed25519];"
+    ) in log_output.getvalue()
+
+
+def test_authentication_failure_log_says_when_the_user_has_no_keys_to_offer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    ssh_info = RemoteSSHInfo(user="root", host="agent-host.example", port=22, key_path=Path(""))
+    with capture_loguru("WARNING") as log_output:
+        _log_authentication_failure(ssh_info, None, paramiko.AuthenticationException("Authentication failed."))
+
+    assert "0 agent key(s), default key files [none];" in log_output.getvalue()
 
 
 @contextmanager

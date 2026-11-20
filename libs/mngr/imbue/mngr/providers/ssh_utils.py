@@ -281,12 +281,12 @@ def load_or_create_host_keypair(key_dir: Path, key_name: str = "host_key") -> tu
 # impersonate any sibling host. Per-host *client* keys keep any export of a
 # host's credentials free of provider-wide material: an exported key opens
 # its one host, never all of the user's hosts.
-_PER_HOST_KEY_SUBDIR: Final[str] = "host_keys"
+PER_HOST_KEY_SUBDIR: Final[str] = "host_keys"
 
 
 def per_host_key_dir(base_key_dir: Path, host_id: HostId) -> Path:
     """Directory holding ``host_id``'s unique keypairs under a provider key dir."""
-    return base_key_dir / _PER_HOST_KEY_SUBDIR / host_id.get_uuid().hex
+    return base_key_dir / PER_HOST_KEY_SUBDIR / host_id.get_uuid().hex
 
 
 def load_or_create_per_host_host_keypair(base_key_dir: Path, host_id: HostId, key_name: str) -> tuple[Path, str]:

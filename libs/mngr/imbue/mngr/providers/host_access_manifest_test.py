@@ -9,6 +9,7 @@ from imbue.mngr.providers.host_access_manifest import PerHostDirScheme
 from imbue.mngr.providers.host_access_manifest import host_access_key_dir
 from imbue.mngr.providers.host_access_manifest import host_access_per_host_dir
 from imbue.mngr.providers.host_access_manifest import host_access_pin_store_paths
+from imbue.mngr.providers.host_access_manifest import is_per_host_key_path
 from imbue.mngr.providers.host_access_manifest import keypair_file_names
 from imbue.mngr.providers.ssh_utils import per_host_key_dir
 
@@ -53,6 +54,16 @@ def test_per_host_layout_resolves_under_the_hosts_own_dir(tmp_path: Path) -> Non
     assert host_access_key_dir(tmp_path, _PER_HOST) == tmp_path
     assert host_access_per_host_dir(tmp_path, _PER_HOST, host_id) == host_dir
     assert host_access_pin_store_paths(tmp_path, _PER_HOST, host_id) == {"known_hosts": host_dir / "known_hosts"}
+
+
+@pytest.mark.parametrize("manifest", [_PROVIDER_WIDE, _PER_HOST])
+def test_is_per_host_key_path_tells_a_per_host_key_from_a_provider_wide_one(
+    tmp_path: Path, manifest: HostAccessManifest
+) -> None:
+    per_host_dir = host_access_per_host_dir(tmp_path, manifest, HostId.generate())
+
+    assert is_per_host_key_path(per_host_dir / manifest.agent_key_file_name)
+    assert not is_per_host_key_path(host_access_key_dir(tmp_path, manifest) / manifest.agent_key_file_name)
 
 
 def test_manifest_refuses_an_agent_key_it_does_not_carry() -> None:

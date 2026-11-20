@@ -312,11 +312,13 @@ def log_client_key_configuration(
     rejected logs the fingerprint it offered; matching it against this line
     shows whether a configure from elsewhere replaced it. Appended entries are
     listed too because some providers authorize the key their consumers use
-    there rather than as the client key.
+    there rather than as the client key. Worded without ``auth`` so Sentry's
+    default scrubber, which blanks any whole string containing it, leaves the
+    line readable in a breadcrumb.
     """
     logger.info(
-        "Configuring host {} to authorize client key {} and {} appended key(s) [{}] (provider {}, profile {}), "
-        "replacing its authorized_keys",
+        "Configuring host {} to admit client key {} and {} appended key(s) [{}] (provider {}, profile {}), "
+        "replacing the client keys its sshd admits",
         host_id,
         _describe_public_key(client_public_key),
         len(appended_public_keys),

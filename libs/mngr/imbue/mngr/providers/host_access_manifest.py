@@ -12,6 +12,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import HostId
+from imbue.mngr.providers.ssh_utils import PER_HOST_KEY_SUBDIR
 from imbue.mngr.providers.ssh_utils import per_host_key_dir
 
 # The per-host subdir of the providers that key a host's dir by its full id
@@ -105,6 +106,15 @@ def host_access_per_host_dir(instance_dir: Path, manifest: HostAccessManifest, h
             return key_dir / PER_HOST_HOSTS_SUBDIR / str(host_id)
         case _ as unreachable:
             assert_never(unreachable)
+
+
+@pure
+def is_per_host_key_path(key_path: Path) -> bool:
+    """Whether ``key_path`` names a key inside some host's own dir, under either ``PerHostDirScheme``.
+
+    False means a provider-wide key, shared by every host of the provider instance.
+    """
+    return key_path.parent.parent.name in (PER_HOST_KEY_SUBDIR, PER_HOST_HOSTS_SUBDIR)
 
 
 @pure

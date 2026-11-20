@@ -29,6 +29,8 @@ from imbue.imbue_common.suspension import read_clocks
 from imbue.imbue_common.suspension import was_suspended_since
 from imbue.mngr.errors import SSHPrivateKeyEncryptedError
 from imbue.mngr.errors import SSHPrivateKeyError
+from imbue.mngr.hosts.outer_host import is_ssh_auth_timeout
+from imbue.mngr.providers.host_access_manifest import is_per_host_key_path
 from imbue.mngr.providers.ssh_utils import load_ssh_private_key_file
 from imbue.mngr_forward.relay import relay_data
 
@@ -1206,41 +1208,97 @@ def _log_authentication_failure(
 
     A rejection persists across cycles for very different reasons: the host no
     longer authorizes the key we hold (compare the fingerprint with the one the
-    host was last configured with), the connection info is stale (the user or
-    port), or the host defers to the user's own SSH setup, which may not exist
-    for this process. The message also distinguishes a refusal ("Authentication
-    failed.") from a server that never answered ("Authentication timeout.").
+    host was last configured with), this device holds only the provider-wide
+    key for a host that admits its own per-host key, the connection info is
+    stale (the user or port), or the host defers to the user's own SSH setup,
+    which may not exist for this process. The outcome also distinguishes a
+    refusal from a server that never answered.
     Only identifiers are logged, never the key path, which can embed a username.
+
+    Worded so Sentry's default scrubber leaves it alone: it blanks any whole
+    string containing ``auth``, ``credentials`` and similar plain substrings
+    (see ``submit_manual_bug_report``), which is why paramiko's own exception
+    message and class name are not quoted.
     """
     allowed_types = error.allowed_types if isinstance(error, paramiko.BadAuthenticationType) else None
     logger.warning(
-        "SSH authentication as {} on port {} failed ({}: {}); offered credentials: {}; auth types the server allows: {}",
+        "SSH login as {} on port {} failed: {}; offered {}; login methods the server allows: {}",
         ssh_info.user,
         ssh_info.port,
-        type(error).__name__,
-        error,
+        _describe_login_failure(error),
         _describe_offered_key(ssh_info, offered_key),
         "not reported" if allowed_types is None else ", ".join(allowed_types),
     )
 
 
-def _describe_offered_key(ssh_info: RemoteSSHInfo, offered_key: paramiko.PKey | None) -> str:
-    """The fingerprint and file modification time of the key this device offered, or what it offered instead.
+def _describe_login_failure(error: paramiko.SSHException) -> str:
+    """What paramiko's final exception says happened, in words that survive Sentry's scrubber."""
+    if isinstance(error, paramiko.BadAuthenticationType):
+        return "the server does not accept public-key logins"
+    if is_ssh_auth_timeout(error):
+        return "the server did not answer the login in time"
+    # Raised for an encrypted key file before anything is sent to the server.
+    if isinstance(error, paramiko.PasswordRequiredException):
+        return "the last key offered is encrypted and no passphrase was given"
+    if isinstance(error, paramiko.AuthenticationException):
+        return "the server rejected the last key offered"
+    # One of the user's own keys that paramiko could not load, after an earlier
+    # key was rejected (see ``_was_rejected_during_authentication``).
+    return f"the last key attempt raised {type(error).__name__}"
 
+
+def _describe_offered_key(ssh_info: RemoteSSHInfo, offered_key: paramiko.PKey | None) -> str:
+    """Which key this device offered: its source, fingerprint and file modification time, or what it offered instead.
+
+    The source says whether the producer handed over a host's own per-host key
+    or the provider-wide fallback key, which a host created with a per-host key
+    elsewhere does not admit. It is inferred from where the key file sits
+    (``is_per_host_key_path``), so a key outside any provider's key dir reads as
+    provider-wide.
     The fingerprint is in the same form ``log_client_key_configuration`` logs
     for the public key a host is configured with: a host configured from a
     ``.pub`` that no longer matches the private key shows up as two different
     fingerprints.
     """
     if offered_key is None:
-        if _is_user_config_host(ssh_info):
-            return "the user's own SSH setup (credential-deferring host)"
-        return "the user's own SSH setup (the configured key needs a passphrase)"
+        reason = (
+            "a host with no key of its own"
+            if _is_user_config_host(ssh_info)
+            else "the configured key needs a passphrase"
+        )
+        return f"the user's own SSH setup ({reason}): {_describe_default_lookup_keys()}"
+    source = "per-host key" if is_per_host_key_path(ssh_info.key_path) else "provider-wide key"
     try:
         modified_at = datetime.fromtimestamp(ssh_info.key_path.stat().st_mtime, tz=timezone.utc)
     except OSError as e:
-        return f"key {offered_key.fingerprint} (file no longer readable: {type(e).__name__})"
-    return f"key {offered_key.fingerprint} (file modified {modified_at.isoformat()})"
+        return f"{source} {offered_key.fingerprint} (file no longer readable: {type(e).__name__})"
+    return f"{source} {offered_key.fingerprint} (file modified {modified_at.isoformat()})"
+
+
+def _describe_default_lookup_keys() -> str:
+    """The keys paramiko's default lookup offers as the user's own SSH setup, any of which can raise the final error.
+
+    Mirrors ``paramiko.SSHClient._auth`` with ``allow_agent`` and
+    ``look_for_keys`` on: every key the SSH agent holds, then each
+    ``id_<type>`` file under ``~/.ssh`` and ``~/ssh``.
+    """
+    # ``Agent()`` lists the keys on construction; no agent running is no keys.
+    try:
+        agent = paramiko.Agent()
+    # An agent that answered with something paramiko could not parse, or whose
+    # socket failed mid-exchange.
+    except (paramiko.SSHException, OSError) as e:
+        agent_keys = f"agent keys that could not be listed ({type(e).__name__})"
+    else:
+        agent_keys = f"{len(agent.get_keys())} agent key(s)"
+        agent.close()
+    default_key_files = [
+        f"~/{directory}/id_{key_type}"
+        for key_type in ("rsa", "dsa", "ecdsa", "ed25519")
+        for directory in (".ssh", "ssh")
+        if (Path.home() / directory / f"id_{key_type}").is_file()
+    ]
+    return f"{agent_keys}, default key files [{', '.join(default_key_files) or 'none'}]"
 
 
 def _create_short_path_tmpdir(prefix: str) -> tempfile.TemporaryDirectory[str]:
