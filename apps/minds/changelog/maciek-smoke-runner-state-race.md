@@ -1,0 +1,1 @@
+A smoke-suite runner in the workspace (the template's CI suites, the OOM drill) that finishes while its state is being read is reported as finished, not as a runner that died, so a complete template run no longer carries a spurious `('runner', '[run]')` failure.

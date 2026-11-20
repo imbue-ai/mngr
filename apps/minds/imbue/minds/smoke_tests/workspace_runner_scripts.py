@@ -25,11 +25,14 @@ DETACH_PROGRAM: Final[str] = (
     "subprocess.Popen(['bash', sys.argv[1]], start_new_session=True, stdin=subprocess.DEVNULL, "
     "stdout=open(sys.argv[2], 'wb'), stderr=subprocess.STDOUT)"
 )
-# Prints the runner's state, then the last line it logged.
+# Prints the runner's state, then the last line it logged. The runner writes ``done`` before it exits, so
+# ``done`` is looked for again once the runner is found gone: a runner that finished after the first look
+# would otherwise read as one that vanished.
 RUNNER_STATE_COMMAND_TEMPLATE: Final[str] = (
     "if [ -e {done} ]; then echo FINISHED; "
     "elif [ ! -s {pid} ]; then echo STARTING; "
     'elif kill -0 "$(cat {pid})" 2>/dev/null; then echo RUNNING; '
+    "elif [ -e {done} ]; then echo FINISHED; "
     "else echo VANISHED; fi; "
     "tail -n 1 {log} 2>/dev/null || true"
 )
