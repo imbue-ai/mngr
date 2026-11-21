@@ -471,6 +471,36 @@ test('embedder endpoint takes a provider-chooser-on-screen report from its own f
   assert.strictEqual(reportCount, 2);
 });
 
+test('embedder endpoint takes a first-run provider step report only with a boolean isPending', () => {
+  const frameWin = makeWindowDouble();
+  const seen = [];
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    isExpectedOrigin: () => true,
+    handlers: { [contract.FIRST_RUN_PROVIDER_STEP]: (msg) => seen.push(msg.isPending) },
+  });
+  const report = (payload) =>
+    win.deliver({ source: frameWin, origin: 'https://agent-1.localhost', data: { type: contract.FIRST_RUN_PROVIDER_STEP, ...payload } });
+  report({ isPending: true });
+  report({ isPending: false });
+  report({ isPending: 'yes' });
+  report({});
+  assert.strictEqual(contract.FIRST_RUN_PROVIDER_STEP, 'minds:first-run-provider-step');
+  assert.deepStrictEqual(seen, [true, false]);
+});
+
+test('workspace endpoint takes washesFirstRunExit only as a boolean', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({
+    handlers: { [contract.EMBEDDER_CAPABILITIES]: (msg) => seen.push(msg.washesFirstRunExit) },
+  });
+  const deliver = (data) => win.deliver({ source: parentWin, origin: 'http://chrome', data });
+  deliver({ type: contract.EMBEDDER_CAPABILITIES, canPopOut: true, washesFirstRunExit: true });
+  deliver({ type: contract.EMBEDDER_CAPABILITIES, canPopOut: true, washesFirstRunExit: 'yes' });
+  deliver({ type: contract.EMBEDDER_CAPABILITIES, canPopOut: true });
+  assert.deepStrictEqual(seen, [true, undefined]);
+});
+
 test('embedder endpoint takes a chat-on-screen report only with a chat id of the agent shape', () => {
   const frameWin = makeWindowDouble();
   const seen = [];
@@ -592,7 +622,7 @@ test('embedder endpoint never honours an open-link, which only travels to the wo
 });
 
 test('the contract is at version 16', () => {
-  assert.strictEqual(contract.CONTRACT_VERSION, '16');
+  assert.strictEqual(contract.CONTRACT_VERSION, '17');
 });
 
 test('embedder endpoint takes an immersive request only with a window id and a boolean on', () => {

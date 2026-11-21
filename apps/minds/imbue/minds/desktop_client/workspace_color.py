@@ -41,11 +41,12 @@ from imbue.imbue_common.pure import pure
 #
 # Order matters: the picker renders swatches in this order and
 # ``pick_unused_create_color`` walks it to find the first free color.
-# ``confusion`` (the default) leads. The achromatic neutrals (pure black
-# and pure white) were removed deliberately -- see the module docstring.
+# ``courage`` (the first run's brown, a new workspace's first suggestion)
+# leads. The achromatic neutrals (pure black and pure white) were removed
+# deliberately -- see the module docstring.
 WORKSPACE_PALETTE: Final[Mapping[str, str]] = {
-    "confusion": "#0b292b",
     "courage": "#492222",
+    "confusion": "#0b292b",
     "envy": "#3c3d06",
     "peace": "#9fbbd3",
     "belonging": "#e8a7a8",
@@ -56,13 +57,16 @@ WORKSPACE_PALETTE: Final[Mapping[str, str]] = {
     "clarity": "#fcefd4",
 }
 
-# Default workspace color: preselected on the create form when no other
-# palette entry is suggested, and used as the renderer-side fallback for
-# primary agents that have no ``color`` label on disk (pre-picker
-# workspaces keep rendering as this until the user picks; nothing
-# proactively writes the label).
+# The renderer-side fallback for primary agents that have no ``color``
+# label on disk: pre-picker workspaces keep rendering as this until the
+# user picks (nothing proactively writes the label), so it stays the color
+# they always had.
 DEFAULT_WORKSPACE_COLOR_NAME: Final[str] = "confusion"
 DEFAULT_WORKSPACE_COLOR: Final[str] = WORKSPACE_PALETTE[DEFAULT_WORKSPACE_COLOR_NAME]
+
+# The create form's suggestion when there is no free palette entry to walk
+# to: the palette's lead, which is also what an empty walk lands on.
+FIRST_CREATE_COLOR: Final[str] = next(iter(WORKSPACE_PALETTE.values()))
 
 _HEX_PATTERN: Final[re.Pattern[str]] = re.compile(r"^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 
@@ -71,10 +75,10 @@ _HEX_PATTERN: Final[re.Pattern[str]] = re.compile(r"^#?([0-9a-fA-F]{3}|[0-9a-fA-
 def pick_unused_create_color(used_colors: Collection[str]) -> str:
     """Pick the color to preselect in the create form.
 
-    Returns ``DEFAULT_WORKSPACE_COLOR`` (confusion) when nothing is in
-    use yet (no workspaces) or when every palette entry is already
-    taken; otherwise returns the first palette entry (in palette order)
-    not present in ``used_colors``. Custom (non-palette) colors in
+    Returns the first palette entry (in palette order) not present in
+    ``used_colors``, so ``FIRST_CREATE_COLOR`` (courage) for the first
+    workspace, and ``FIRST_CREATE_COLOR`` again when every palette entry
+    is already taken. Custom (non-palette) colors in
     ``used_colors`` simply don't match any palette entry, so they never
     block a palette pick.
 
@@ -83,12 +87,10 @@ def pick_unused_create_color(used_colors: Collection[str]) -> str:
     comparison is case-insensitive regardless.
     """
     normalized_used = {c.lower() for c in used_colors}
-    if not normalized_used:
-        return DEFAULT_WORKSPACE_COLOR
     for hex_value in WORKSPACE_PALETTE.values():
         if hex_value not in normalized_used:
             return hex_value
-    return DEFAULT_WORKSPACE_COLOR
+    return FIRST_CREATE_COLOR
 
 
 @pure

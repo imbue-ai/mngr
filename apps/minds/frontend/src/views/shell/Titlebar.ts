@@ -38,8 +38,8 @@ export interface TitlebarAttrs {
 
 /** The bar across the top of every chrome (the titlebar and the popout's bar):
  * painted with the workspace accent while one is active (--titlebar-bg), else
- * the neutral surface. The workspace surface starts 38px below it. */
-export const CHROME_BAR_STYLE = "background-color: var(--titlebar-bg, var(--c-surface-primary));";
+ * the app's ground (--c-surface-app). The workspace surface starts 38px below it. */
+export const CHROME_BAR_STYLE = "background-color: var(--titlebar-bg, var(--c-surface-app));";
 export const CHROME_BAR_CLASS = "fixed top-0 left-0 right-0 h-[38px] flex items-center select-none z-[100] px-1";
 
 /** The ring a workspace's tour asks for around one chrome control (minds:highlight-chrome), as extra classes. */

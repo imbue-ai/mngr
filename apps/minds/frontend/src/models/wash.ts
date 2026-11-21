@@ -140,3 +140,8 @@ export class WashModel {
 
 /** The one wash a window can run at a time. */
 export const wash = new WashModel(() => m.redraw());
+
+/** Whether the user asked for less motion: every wash then covers and lifts at once. */
+export function isReducedMotion(): boolean {
+  return typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}

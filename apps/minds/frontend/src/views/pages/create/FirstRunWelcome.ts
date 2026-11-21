@@ -176,17 +176,17 @@ export function firstRunWelcome(attrs: FirstRunWelcomeAttrs): m.Children {
     [
       m(
         "h1",
-        { id: "creating-welcome", class: "first-run-headline text-center text-[clamp(40px,4.6vw,64px)]" },
+        { id: "creating-welcome", class: "first-run-headline text-center text-[40px]" },
         welcomeHeading(firstNameOf(firstRun.account)),
       ),
-      m("p", { id: "studio-type-question", class: "mt-5 text-center text-[19px]" }, STUDIO_TYPE_QUESTION),
+      m("p", { id: "studio-type-question", class: "mt-5 text-center type-heading" }, STUDIO_TYPE_QUESTION),
       m(
         "div",
         {
           id: "studio-types",
           role: "group",
           "aria-label": STUDIO_TYPE_QUESTION,
-          class: "mt-10 flex max-w-[960px] flex-wrap items-center justify-center gap-x-3 gap-y-5",
+          class: "mt-[52px] flex max-w-[960px] flex-wrap items-center justify-center gap-x-3 gap-y-5",
         },
         [...STUDIO_TYPES.map((type, index) => studioTypePill(attrs, type, index)), somethingElse(attrs)],
       ),
@@ -197,33 +197,36 @@ export function firstRunWelcome(attrs: FirstRunWelcomeAttrs): m.Children {
   );
 }
 
-/** The thin bar and its line while something is still being readied, with anything more under them. */
+/** The thin bar under its line, as wide as the line, while something is still being readied, with anything more
+ * under them. */
 export function settingUpStatus(line: string, percent: number, extra: m.Children[] = []): m.Children {
-  return m("div", { class: "mt-14 flex w-full max-w-[420px] flex-col items-center" }, [
-    m("p", { id: "creating-setting-up", class: "text-[17px]" }, line),
-    m(
-      "div",
-      { class: "first-run-bar mt-4 h-1 w-full overflow-hidden rounded-full" },
-      m("div", {
-        id: "creating-welcome-bar",
-        class: "h-full rounded-full transition-[width] duration-300 ease-out",
-        style: `width: ${percent.toFixed(1)}%`,
-      }),
-    ),
+  return m("div", { class: "mt-[68px] flex flex-col items-center" }, [
+    m("div", { class: "flex w-fit flex-col" }, [
+      m("p", { id: "creating-setting-up", class: "text-[17px]" }, line),
+      m(
+        "div",
+        { class: "first-run-bar mt-4 h-1 w-full overflow-hidden rounded-full" },
+        m("div", {
+          id: "creating-welcome-bar",
+          class: "h-full rounded-full transition-[width] duration-300 ease-out",
+          style: `width: ${percent.toFixed(1)}%`,
+        }),
+      ),
+    ]),
     ...extra,
   ]);
 }
 
 /** "Your workspace is ready!" and Continue. */
 export function readyStatus(onContinue: () => void): m.Children {
-  return m("div", { class: "mt-14 flex flex-col items-center gap-4" }, [
+  return m("div", { class: "mt-[68px] flex flex-col items-center gap-4" }, [
     m("p", { id: "creating-ready", class: "text-[18px]" }, WORKSPACE_READY_LINE),
     m(
       "button",
       {
         id: "creating-continue",
         type: "button",
-        class: "first-run-button rounded-full px-7 py-3 text-[17px] font-semibold",
+        class: "first-run-button type-heading",
         onclick: onContinue,
       },
       CONTINUE_LABEL,

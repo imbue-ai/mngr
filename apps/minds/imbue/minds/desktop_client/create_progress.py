@@ -90,6 +90,10 @@ class OperationProgressSnapshot(FrozenModel):
         description="How fast the percent is expected to grow right now, for extrapolation between polls"
     )
     remaining_text: str = Field(description="The remaining time, said coarsely; empty while nothing is known")
+    is_over_a_minute_left: bool = Field(
+        default=False,
+        description="Whether the remaining time, as remaining_text says it, is a matter of minutes rather than seconds",
+    )
     current_label: str = Field(description="The caption of the innermost running step; empty before the first")
     steps: tuple[ProgressStepSnapshot, ...] = Field(description="The top-level steps, in order")
 
@@ -137,10 +141,14 @@ def _text_for_bucket(bucket: int) -> str:
     if bucket == 0:
         return "Almost there..."
     if bucket == 1:
-        return "Less than a minute remaining"
+        return "Less than a minute left"
     if bucket == 2:
-        return "About a minute remaining"
-    return f"About {bucket - 1} minutes remaining"
+        return "1 minute left"
+    return f"{bucket - 1} minutes left"
+
+
+# The first bucket whose wording names whole minutes ("2 minutes left").
+_FIRST_MINUTES_BUCKET: Final[int] = 3
 
 
 @pure
@@ -331,11 +339,13 @@ class OperationProgressTracker(MutableModel):
         leaf, leaf_share = self._running_leaf_and_share()
         rate, cap = self._rate_and_cap(leaf, leaf_share, now)
         remaining = sum(self._remaining(root, now) for root in self._roots)
+        remaining_text = "" if is_done else self._remaining_text_with_hysteresis(remaining, now)
         return OperationProgressSnapshot(
             percent=self._highest_percent,
             percent_cap=max(self._highest_percent, cap),
             percent_per_second=rate,
-            remaining_text="" if is_done else self._remaining_text_with_hysteresis(remaining, now),
+            remaining_text=remaining_text,
+            is_over_a_minute_left=remaining_text != "" and (self._shown_eta_bucket or 0) >= _FIRST_MINUTES_BUCKET,
             current_label=leaf.label if leaf is not None else "",
             steps=tuple(
                 ProgressStepSnapshot(step_id=root.step_id, label=root.label, status=root.status)

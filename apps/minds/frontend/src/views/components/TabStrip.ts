@@ -30,7 +30,7 @@ export function TabStrip(): m.Component<TabStripAttrs> {
         { class: "flex justify-center" },
         m(
           "div",
-          { role: "tablist", "aria-label": label, class: "flex items-center gap-1" },
+          { role: "tablist", "aria-label": label, class: "flex items-center gap-2" },
           tabs.map((tab) => {
             const isSelected = tab.id === selected;
             const count = tab.count ?? 0;

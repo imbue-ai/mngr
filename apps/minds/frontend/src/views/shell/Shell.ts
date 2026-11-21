@@ -1,8 +1,8 @@
 // The persistent app shell: titlebar + switcher popover + the routed page
 // body. Body modes, matching ChromeShell.jinja:
 //
-// - Local page: content scrolls inside #local-page-scroll, the inset white
-//   card below the fixed titlebar (accent bleeds around it).
+// - Local page: content scrolls inside #local-page-scroll, the inset card
+//   on the app's ground below the fixed titlebar (accent bleeds around it).
 // - Agent content surface (/workspace/<id>): the page IS the fixed iframe
 //   surface; no scroll container. The options route (/workspace/<id>/options)
 //   keeps the frame mounted and renders the routed content as its own overlay
@@ -245,7 +245,7 @@ export function Shell(): m.Component<ShellAttrs> {
           : "/"
         : routePath;
       const localScrollClass =
-        "bg-surface-primary overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable]";
+        "bg-surface-app overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable]";
 
       const base =
         surfaceWorkspaceId !== null
@@ -543,7 +543,7 @@ export function Shell(): m.Component<ShellAttrs> {
         // The browser sign-in modal, raised through the shared webLogin model.
         // After the overlay slot, which shares its z-[110], so it paints over
         // an app modal (Manage Accounts) that opened it.
-        m(WebLoginModal),
+        m(WebLoginModal, { backdrop: routePath === "/start" ? "wash" : "dim" }),
         // Main's question about the workspace underneath (may its pages use
         // the microphone?), whose request waits on the answer. Last of the
         // z-[110] surfaces, so it paints over every other one, the sign-in

@@ -95,7 +95,8 @@ describe("ConnectionOperationWatcher", () => {
       percent: 40,
       percent_cap: 60,
       percent_per_second: 2,
-      remaining_text: "Less than a minute remaining",
+      remaining_text: "Less than a minute left",
+      is_over_a_minute_left: false,
       current_label: "Creating the state bucket",
       steps: [],
     };

@@ -85,6 +85,8 @@ function makeContract() {
     WORKSPACE_READY: "minds:workspace-ready",
     CHAT_ON_SCREEN: "minds:chat-on-screen",
     PROVIDER_CHOOSER_ON_SCREEN: "minds:provider-chooser-on-screen",
+    FIRST_RUN_PROVIDER_STEP: "minds:first-run-provider-step",
+    FIRST_RUN_EXIT_COVER_MS: 560,
     FOCUS_CHAT: "minds:focus-chat",
     POP_OUT_WINDOW: "minds:pop-out-window",
     WINDOW_DRAG_STARTED: "minds:window-drag-started",
@@ -138,6 +140,7 @@ function makeHandlers(
   const reportingAnswers: WorkspaceReporting[] = [];
   const chatsOnScreen: string[] = [];
   let chooserOnScreenCount = 0;
+  const providerSteps: boolean[] = [];
   const externalLinks: string[] = [];
   const immersiveRequests: boolean[] = [];
   const highlights: (string | null)[] = [];
@@ -175,6 +178,7 @@ function makeHandlers(
     onProviderChooserOnScreen: () => {
       chooserOnScreenCount += 1;
     },
+    onFirstRunProviderStep: (isPending) => providerSteps.push(isPending),
     openExternalLink:
       options.opensExternalLinks === true
         ? (url) => externalLinks.push(url)
@@ -219,6 +223,7 @@ function makeHandlers(
     reportingAnswers,
     chatsOnScreen,
     chooserOnScreenCount: () => chooserOnScreenCount,
+    providerSteps,
     externalLinks,
     immersiveRequests,
     highlights,
@@ -247,6 +252,13 @@ describe("buildEmbedHandlers", () => {
     const { contract, handlers, chooserOnScreenCount } = makeHandlers();
     handlers[contract.PROVIDER_CHOOSER_ON_SCREEN]({});
     expect(chooserOnScreenCount()).toBe(1);
+  });
+
+  it("passes on the first run's provider page going up and coming down", () => {
+    const { contract, handlers, providerSteps } = makeHandlers();
+    handlers[contract.FIRST_RUN_PROVIDER_STEP]({ isPending: true });
+    handlers[contract.FIRST_RUN_PROVIDER_STEP]({ isPending: false });
+    expect(providerSteps).toEqual([true, false]);
   });
 
   it("asks a ready workspace for its chat root, before the held message goes, only when the wait wants it", () => {
@@ -318,6 +330,7 @@ describe("buildEmbedHandlers", () => {
         opensCustomSchemeLinks: false,
         opensLocalFiles: true,
         immersive: true,
+        washesFirstRunExit: true,
       },
     ]);
     const desktop = makeHandlers({ canPopOut: true, opensExternalLinks: true });
@@ -329,6 +342,7 @@ describe("buildEmbedHandlers", () => {
         opensCustomSchemeLinks: true,
         opensLocalFiles: true,
         immersive: true,
+        washesFirstRunExit: true,
       },
     ]);
     const frameless = makeHandlers({ canImmerse: false });
@@ -340,6 +354,7 @@ describe("buildEmbedHandlers", () => {
         opensCustomSchemeLinks: false,
         opensLocalFiles: true,
         immersive: false,
+        washesFirstRunExit: true,
       },
     ]);
     // Someone else's workspace is neither pulled out nor given local files,
@@ -353,6 +368,7 @@ describe("buildEmbedHandlers", () => {
         opensCustomSchemeLinks: true,
         opensLocalFiles: false,
         immersive: true,
+        washesFirstRunExit: false,
       },
     ]);
   });

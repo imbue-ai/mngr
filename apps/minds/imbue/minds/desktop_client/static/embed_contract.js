@@ -30,7 +30,7 @@
 // types, or by adding optional fields to an existing type. CONTRACT_VERSION
 // below tracks doc revisions only.
 
-export const CONTRACT_VERSION = "16";
+export const CONTRACT_VERSION = "17";
 
 // workspace -> embedder: open the shell's permission-request modal focused on
 // one request. Payload: { requestId }.
@@ -75,6 +75,19 @@ export const CHAT_ON_SCREEN = "minds:chat-on-screen";
 // wash lifts on this as well as on the welcome chat's CHAT_ON_SCREEN, since the
 // user's next step is to pick a provider whichever chat is behind it.
 export const PROVIDER_CHOOSER_ON_SCREEN = "minds:provider-chooser-on-screen";
+// workspace -> embedder: whether the first run's provider page covers the
+// workspace. Payload: { isPending }. `true` when the page goes up: the chrome
+// keeps its own frame in the first run's cream while it is. `false` when the
+// owner has connected a provider or skipped: a chrome whose
+// EMBEDDER_CAPABILITIES carried `washesFirstRunExit: true` grows the
+// workspace's color from the window's center until it covers the window, which
+// takes FIRST_RUN_EXIT_COVER_MS, and the workspace keeps the page up that long
+// before taking it down under the color. Any other chrome ignores it, and the
+// workspace takes the page down at once.
+export const FIRST_RUN_PROVIDER_STEP = "minds:first-run-provider-step";
+// How long after FIRST_RUN_PROVIDER_STEP's `isPending: false` the chrome's
+// color covers the whole window: the workspace takes its page down then.
+export const FIRST_RUN_EXIT_COVER_MS = 560;
 // workspace -> embedder: a provider sign-in (Claude, ChatGPT) is waiting on
 // the user in a browser; relay its loopback callback into the workspace and
 // open the sign-in page. Payload: { url, flowId } -- the provider's
@@ -173,10 +186,12 @@ export const FOCUS_CHAT = "minds:focus-chat";
 export const PROVIDER_SIGN_IN_ACK = "minds:provider-sign-in-ack";
 // embedder -> workspace: what this chrome can do, sent right after
 // WORKSPACE_READY. Payload: { canPopOut, opensExternalLinks?,
-// opensCustomSchemeLinks?, opensLocalFiles?, immersive? }: `opensExternalLinks: true`
-// says it takes OPEN_EXTERNAL, `opensCustomSchemeLinks: true` that it takes
-// custom-scheme links there too, `opensLocalFiles: true` that it takes
-// OPEN_LOCAL_FILES, and `immersive: true` that it takes IMMERSIVE_REQUEST. A
+// opensCustomSchemeLinks?, opensLocalFiles?, immersive?, washesFirstRunExit? }:
+// `opensExternalLinks: true` says it takes OPEN_EXTERNAL, `opensCustomSchemeLinks:
+// true` that it takes custom-scheme links there too, `opensLocalFiles: true` that
+// it takes OPEN_LOCAL_FILES, `immersive: true` that it takes IMMERSIVE_REQUEST,
+// and `washesFirstRunExit: true` that it covers the window in the workspace's
+// color on FIRST_RUN_PROVIDER_STEP's end (see FIRST_RUN_EXIT_COVER_MS). A
 // workspace that never receives it (an older chrome, a plain browser) keeps
 // its pull-out gesture off, opens external links itself, offers no way to
 // reach the Local files settings, and never asks for immersive mode.
@@ -375,6 +390,9 @@ const WORKSPACE_TO_EMBEDDER_VALIDATORS = {
   [PROVIDER_CHOOSER_ON_SCREEN]: function () {
     return true;
   },
+  [FIRST_RUN_PROVIDER_STEP]: function (data) {
+    return typeof data.isPending === 'boolean';
+  },
   [PROVIDER_SIGN_IN]: function (data) {
     return isSignInUrlShapeValid(data.url) && typeof data.flowId === 'string' && FLOW_ID_PATTERN.test(data.flowId);
   },
@@ -442,7 +460,8 @@ const EMBEDDER_TO_WORKSPACE_VALIDATORS = {
       isOptionalBoolean(data.opensExternalLinks) &&
       isOptionalBoolean(data.opensCustomSchemeLinks) &&
       isOptionalBoolean(data.opensLocalFiles) &&
-      isOptionalBoolean(data.immersive)
+      isOptionalBoolean(data.immersive) &&
+      isOptionalBoolean(data.washesFirstRunExit)
     );
   },
   [REATTACH_WINDOW]: function (data) {

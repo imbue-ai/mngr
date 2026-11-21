@@ -22,6 +22,8 @@ export interface OperationProgress {
   percent_per_second: number;
   /** The remaining time, said coarsely; empty while nothing is known. */
   remaining_text: string;
+  /** Whether remaining_text names minutes rather than seconds. */
+  is_over_a_minute_left: boolean;
   /** The caption of the innermost running step; empty before the first. */
   current_label: string;
   steps: ProgressStepSummary[];
@@ -73,6 +75,11 @@ export class ProgressDisplay {
 
   remainingText(): string {
     return this.latest?.remaining_text ?? "";
+  }
+
+  /** Whether the remaining time, as said, is a matter of minutes. */
+  isOverAMinuteLeft(): boolean {
+    return this.latest?.is_over_a_minute_left ?? false;
   }
 }
 
