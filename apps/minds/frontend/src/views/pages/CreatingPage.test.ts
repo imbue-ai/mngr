@@ -6,22 +6,15 @@ import { createEmptyStores } from "../../models/boot";
 import type { CreateAttemptDetail } from "../../models/create";
 import type { ErrorAction, UserFacingError } from "../../models/errors";
 import {
-  READY_LINE,
   SETUP_LINE,
   SHOWCASE_APP,
   SHOWCASE_INTRO_LINE,
   readyTurnMarkdown,
   showcaseMarkdown,
 } from "../../models/creationTranscript";
-import {
-  FLOW_OPTIONS_GAP_MS,
-  FLOW_THINK_MS,
-  MANIFESTO_OPENER,
-  MANIFESTO_QUESTION,
-  REPORTING_ASK,
-  startFlow,
-  streamDurationMs,
-} from "../../models/startFlow";
+import { firstRun } from "../../models/firstRun";
+import { firstRunCover } from "../../models/firstRunCover";
+import { MANIFESTO_OPENER, MANIFESTO_QUESTION, REPORTING_ASK } from "../../models/manifesto";
 import { wash } from "../../models/wash";
 import { manifestoOpenerMarkdown } from "../../models/welcomeChat";
 import { WELCOME_CHAT_WAIT_BOUND_MS, welcomeChatArrival } from "../../models/welcomeChatArrival";
@@ -47,6 +40,7 @@ import { ChatError } from "./start/ChatError";
 import type { ChatErrorAttrs } from "./start/ChatError";
 import { ShellState } from "../shell/shell-state";
 import { CreatingPage, failureTurn } from "./CreatingPage";
+import { STUDIO_TYPE_QUESTION } from "./create/FirstRunWelcome";
 
 describe("failureTurn", () => {
   /** The turn as one live component, so its See details stays open across a
@@ -143,7 +137,8 @@ function retryFormAttrs(view: unknown): Record<string, unknown> | undefined {
 
 describe("CreatingPage across a route change", () => {
   afterEach(() => {
-    startFlow.reset();
+    firstRun.noteCreate("", null);
+    firstRunCover.lower();
     wash.cancel();
     welcomeChatArrival.cancel();
     vi.useRealTimers();
@@ -371,7 +366,7 @@ describe("CreatingPage across a route change", () => {
   /** Run a mounted, finished attempt to its entry: the workspace mounted under the cover and the page gone. */
   async function runToEntry(mounted: ReturnType<typeof mountDoneAttempt>): Promise<void> {
     await vi.waitFor(() => expect(mounted.seedBodies).toHaveLength(2));
-    await vi.advanceTimersByTimeAsync(FLOW_THINK_MS + streamDurationMs(READY_LINE) + 1);
+    await vi.advanceTimersByTimeAsync(1);
     expect(mounted.entered).toEqual(["agent-0123abcd"]);
     (mounted.page.onremove as () => void).call(mounted.page);
   }
@@ -406,11 +401,13 @@ describe("CreatingPage across a route change", () => {
     expect(keys).not.toContain("showcase-todo-list");
     const ready = nodes.find((node) => attrsOf(node).key === "creation-ready") as AnyVnode;
     expect(classTokensOf(ready)).toContain("mt-20");
+    // The ready line streams at once, under the wash that is already coming up.
+    const readyStyles = collectVnodes(ready).map((node) => String(attrsOf(node).style ?? ""));
+    expect(readyStyles.some((style) => style.includes("--start-char-delay: 0ms;"))).toBe(true);
+    expect(wash.active).not.toBeNull();
 
-    // The ready line streams first.
-    expect(entered).toEqual([]);
-    await vi.advanceTimersByTimeAsync(FLOW_THINK_MS + streamDurationMs(READY_LINE) + 1);
-    // Then the workspace mounts behind the cover with the seed still in flight, and the page goes away.
+    // The workspace mounts behind the cover with the seed still in flight, and the page goes away.
+    await vi.advanceTimersByTimeAsync(1);
     expect(entered).toEqual(["agent-0123abcd"]);
     (page.onremove as () => void).call(page);
     expect(wash.active).not.toBeNull();
@@ -443,13 +440,29 @@ describe("CreatingPage across a route change", () => {
     expect(landings).toEqual([{ landing: "SEED_FAILED", waited_ms: expect.any(Number) }]);
   });
 
+  it("lifts the cover once the provider chooser is on screen, before the seed answers, and still asks for the chat", async () => {
+    const mounted = mountDoneAttempt("create-attempt-p");
+    const { focusRequests, landings, settleSeed } = mounted;
+    await runToEntry(mounted);
+
+    welcomeChatArrival.noteProviderChooserOnScreen();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(wash.active).toBeNull();
+    expect(landings).toEqual([{ landing: "PROVIDER_CHOOSER_ON_SCREEN", waited_ms: expect.any(Number) }]);
+
+    settleSeed();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(focusRequests).toEqual([["agent-0123abcd", "agent-seeded"]]);
+    expect(landings).toHaveLength(1);
+  });
+
   it("lifts the cover at the bound when the chat never shows, so the user is not stranded", async () => {
     const mounted = mountDoneAttempt("create-attempt-t");
     const { landings, settleSeed } = mounted;
     await runToEntry(mounted);
     settleSeed();
 
-    await vi.advanceTimersByTimeAsync(WELCOME_CHAT_WAIT_BOUND_MS - FLOW_THINK_MS - streamDurationMs(READY_LINE) - 1000);
+    await vi.advanceTimersByTimeAsync(WELCOME_CHAT_WAIT_BOUND_MS - 1000);
     expect(wash.active?.isLifting).toBe(false);
     await vi.advanceTimersByTimeAsync(2000);
     expect(wash.active).toBeNull();
@@ -524,8 +537,6 @@ describe("CreatingPage across a route change", () => {
   });
 
   it("shows an onboarding attempt's recording under its intro line, with no caption, before the box, and hands it over at once", async () => {
-    // Submitted by the start flow, as an onboarding create is, so its turns arrive on the agent's clock.
-    startFlow.submittedCreateAttemptId = "create-attempt-k";
     const { page, entered, seedBodies, settleSeed, setStatus } = mountDoneAttempt("create-attempt-k", "CREATING_WORKSPACE", true);
     const render = (): m.Vnode => (page.view as (v: m.Vnode) => m.Vnode).call(page, vnodeFor("create-attempt-k"));
     await vi.waitFor(() => expect(seedBodies).toHaveLength(1));
@@ -543,13 +554,9 @@ describe("CreatingPage across a route change", () => {
     const image = collectVnodes(showcase).find((node) => node.tag === "img") as AnyVnode;
     expect(attrsOf(image).src).toBe(SHOWCASE_APP.gifUrl);
     expect(attrsOf(image).alt).toBe(SHOWCASE_APP.label);
-    // The recording arrives once its intro has landed, and the box a beat after the recording.
-    const introAt = FLOW_THINK_MS + streamDurationMs(SETUP_LINE) + FLOW_OPTIONS_GAP_MS;
-    const recordingAt = introAt + streamDurationMs(SHOWCASE_INTRO_LINE) + FLOW_OPTIONS_GAP_MS;
-    expect(String(attrsOf(showcase).style)).toContain(`--start-chat-delay: ${recordingAt}ms`);
-    expect(String(attrsOf(columnTurn(building, "creation-box")).style)).toContain(
-      `--start-chat-delay: ${recordingAt + FLOW_THINK_MS}ms`,
-    );
+    // Reached from the form, everything up to the box is already on the page.
+    expect(String(attrsOf(showcase).style)).toContain("--start-chat-delay: 0ms");
+    expect(String(attrsOf(columnTurn(building, "creation-box")).style)).toContain("--start-chat-delay: 0ms");
 
     // The conversation went over with the recording in it, ahead of the welcome.
     const tail = seedBodies[0].turns.slice(-3).map((turn) => turn.text);
@@ -565,6 +572,60 @@ describe("CreatingPage across a route change", () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(entered).toEqual(["agent-0123abcd"]);
     settleSeed();
+    (page.onremove as () => void).call(page);
+  });
+
+  it("welcomes a first-run create, hands the picks over while it builds, and enters under the cover once the workspace has them", async () => {
+    firstRun.noteCreate("create-attempt-w", { userId: "user-1", email: "gleb@example.com", displayName: "Gleb Denisov" });
+    const { page, entered, seedBodies, settleSeed, setStatus } = mountDoneAttempt(
+      "create-attempt-w",
+      "CREATING_WORKSPACE",
+      true,
+    );
+    const render = (): m.Vnode => (page.view as (v: m.Vnode) => m.Vnode).call(page, vnodeFor("create-attempt-w"));
+    await vi.waitFor(() => expect(seedBodies).toHaveLength(1));
+
+    // The welcome, not the transcript: the greeting, the question, the pills, and no Continue while it builds.
+    const building = renderDeep(render());
+    expect(attrsOf(building as AnyVnode)["data-first-run"]).toBe("true");
+    expect(allText(byId(building, "creating-welcome"))).toBe("Welcome, Gleb!");
+    expect(allText(byId(building, "studio-type-question"))).toBe(STUDIO_TYPE_QUESTION);
+    expect(byId(building, "creating-continue")).toBeUndefined();
+    expect(collectText(building).join("")).not.toContain(MANIFESTO_OPENER);
+    // The first hand-over carries the arrival flag and nothing picked yet.
+    expect(seedBodies[0]).toEqual({ title: "Welcome", turns: [], is_first_run: true, context: "" });
+
+    // A pick is handed over again at once, so the seed at the attempt's end carries it.
+    const writing = collectVnodes(building).find((node) => attrsOf(node)["data-studio-type"] === "writing") as AnyVnode;
+    (attrsOf(writing).onclick as () => void)();
+    expect(seedBodies).toHaveLength(2);
+    expect(seedBodies[1].context).toBe("I want to use Studio for: Writing.");
+    expect(attrsOf(collectVnodes(renderDeep(render())).find((node) => attrsOf(node)["data-studio-type"] === "writing") as AnyVnode)["aria-pressed"]).toBe("true");
+
+    // Done: nothing is offered here. The workspace is entered only once it has the hand-over (which tells it this
+    // is a first run), under the shell's cover, and the cover is ready only when the workspace says so.
+    setStatus("DONE");
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(byId(renderDeep(render()), "creating-continue")).toBeUndefined();
+    expect(entered).toEqual([]);
+    expect(firstRunCover.state).toBeNull();
+    settleSeed();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(entered).toEqual(["agent-0123abcd"]);
+    expect(firstRunCover.state).toMatchObject({ createAttemptId: "create-attempt-w", isReady: false });
+    settleSeed();
+    await vi.advanceTimersByTimeAsync(WELCOME_CHAT_WAIT_BOUND_MS + 1_000);
+    expect(firstRunCover.state?.isReady).toBe(true);
+    expect(seedBodies.at(-1)?.context).toBe("I want to use Studio for: Writing.");
+    (page.onremove as () => void).call(page);
+  });
+
+  it("greets a first-run create with no name to use plainly", async () => {
+    firstRun.noteCreate("create-attempt-n", null);
+    const { page, seedBodies } = mountDoneAttempt("create-attempt-n", "CREATING_WORKSPACE", true);
+    const render = (): m.Vnode => (page.view as (v: m.Vnode) => m.Vnode).call(page, vnodeFor("create-attempt-n"));
+    await vi.waitFor(() => expect(seedBodies).toHaveLength(1));
+    expect(allText(byId(renderDeep(render()), "creating-welcome"))).toBe("Welcome!");
     (page.onremove as () => void).call(page);
   });
 
@@ -616,17 +677,6 @@ describe("CreatingPage across a route change", () => {
     welcomeChatArrival.noteChatOnScreen("agent-seeded");
     await vi.advanceTimersByTimeAsync(0);
     expect(wash.active).toBeNull();
-  });
-
-  it("does not enter the workspace when the page was left during the ready turn", async () => {
-    const { page, entered, landings, seedBodies } = mountDoneAttempt("create-attempt-e");
-
-    await vi.waitFor(() => expect(seedBodies).toHaveLength(2));
-    (page.onremove as () => void).call(page);
-    await vi.advanceTimersByTimeAsync(WELCOME_CHAT_WAIT_BOUND_MS + 1000);
-    expect(entered).toEqual([]);
-    expect(wash.active).toBeNull();
-    expect(landings).toEqual([]);
   });
 
   it("hands the conversation over while the workspace is still being built, so leaving the page cannot lose it", async () => {

@@ -51,17 +51,10 @@ test('unanswered consent screen -> consent, before create and restore', () => {
   );
 });
 
-test('an install that never finished onboarding stays on start even when consent is unanswered', () => {
-  assert.equal(
-    decideStartupRoute({
-      authenticated: true,
-      isOnboardingComplete: false,
-      workspaceCount: 0,
-      restorableCount: 0,
-      needsConsent: true,
-    }),
-    'start',
-  );
+test('a new install lands on the first run, whose sign-in page carries the consent answer', () => {
+  const newInstall = { authenticated: true, isOnboardingComplete: false, workspaceCount: 0, restorableCount: 0 };
+  assert.equal(decideStartupRoute({ ...newInstall, needsConsent: true }), 'start');
+  assert.equal(decideStartupRoute({ ...newInstall, needsConsent: false }), 'start');
 });
 
 test('onboarding incomplete with no workspaces and no saved windows -> start', () => {

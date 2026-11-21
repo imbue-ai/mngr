@@ -14,12 +14,11 @@ import {
   CHAT_STREAM_FADE_MS,
   CHAT_STREAM_STEP_MS,
   streamDurationMs,
-} from "../../../models/startFlow";
-import type { DisclosurePoint, TableColumn } from "../../../models/startFlow";
+} from "../../../models/manifesto";
+import type { DisclosurePoint } from "../../../models/manifesto";
 import { Button } from "../../components/Button";
 import { Disclosure } from "../../components/Disclosure";
 import { Icon16 } from "../../components/Icon";
-import { Spinner } from "../../components/Spinner";
 
 /** The column every transcript sits in: the chat's 720px measure, 48px between turns. */
 export const TRANSCRIPT_COLUMN_CLASS =
@@ -171,26 +170,6 @@ function turnDetails(details: TurnDetails): m.Children {
   );
 }
 
-/**
- * The agent working on something the user is waiting for: a spinner and what
- * is under way, quieter than a turn. It arrives after `delayMs`, so a wait that
- * is over by then never shows it.
- */
-export function pendingTurn(attrs: ArrivalAttrs & { text: string; id?: string }): m.Children {
-  return m(
-    "p",
-    {
-      key: attrs.key,
-      id: attrs.id,
-      role: "status",
-      class: "mt-10 flex items-center gap-2 text-secondary first:mt-0" + arrivalClass(attrs),
-      style: arrivalStyle(attrs),
-    },
-    [m(Spinner, { size: "sm" }), attrs.text],
-  );
-}
-
-/** A quiet toggle at the end of an agent turn, and the aside it opens under it. */
 export interface TurnMore {
   id?: string;
   label: string;
@@ -475,96 +454,6 @@ export function linkButton(
   );
 }
 
-/**
- * Answers' points in columns, as an agent would lay them out: markdown's
- * furniture and no more, a rule under the headings as wide as the columns'
- * text, 14px against the chat's body. Each point carries a check, filled in
- * the recommended column.
- */
-export function choiceTable(
-  attrs: ArrivalAttrs & { columns: TableColumn[] },
-): m.Children {
-  return m(
-    "div",
-    {
-      key: attrs.key,
-      class: "mt-5 w-full max-w-[calc(100%-100px)]" + arrivalClass(attrs),
-      style: arrivalStyle(attrs),
-    },
-    m(
-      "table",
-      { class: "w-max max-w-full border-collapse text-left type-body" },
-      [
-        m(
-          "thead",
-          m(
-            "tr",
-            { class: "border-b border-default" },
-            attrs.columns.map((column) =>
-              m(
-                "th",
-                {
-                  key: column.title,
-                  class: "py-2 pr-6 last:pr-0 align-top font-semibold",
-                },
-                [
-                  column.title,
-                  column.badge
-                    ? m(
-                        "span",
-                        {
-                          class:
-                            "ml-2 inline-flex items-center rounded-md px-2 py-0.5 type-helper font-bold uppercase tracking-wide " +
-                            (column.isEmphasized
-                              ? "bg-accent/15 text-accent"
-                              : "bg-fill-subtle text-secondary"),
-                        },
-                        column.badge,
-                      )
-                    : null,
-                ],
-              ),
-            ),
-          ),
-        ),
-        m(
-          "tbody",
-          m(
-            "tr",
-            attrs.columns.map((column) =>
-              m(
-                "td",
-                {
-                  key: column.title,
-                  class: "py-3 pr-6 last:pr-0 align-top leading-[1.45]",
-                },
-                m(
-                  "ul",
-                  { class: "flex flex-col gap-1.5" },
-                  column.points.map((point) =>
-                    m("li", { key: point, class: "flex items-start gap-2" }, [
-                      m(
-                        "span",
-                        {
-                          class: "shrink-0 leading-[1.45]",
-                          "aria-hidden": "true",
-                        },
-                        column.isEmphasized ? "\u2705" : "\u2713",
-                      ),
-                      point,
-                    ]),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ],
-    ),
-  );
-}
-
-/** What the scroller reads off the anchor; a real element is one, and tests pass a stub. */
 export interface ScrollTarget {
   scrollIntoView?: (options: ScrollIntoViewOptions) => void;
 }

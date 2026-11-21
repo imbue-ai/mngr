@@ -151,6 +151,7 @@ from imbue.minds.desktop_client.turn_credentials import ConnectorTurnCredentialC
 from imbue.minds.desktop_client.turn_credentials import TurnCredentialBroker
 from imbue.minds.desktop_client.ui_api_settings import apply_account_settings_change_side_effects
 from imbue.minds.desktop_client.welcome_chat import WelcomeChatSeeder
+from imbue.minds.desktop_client.welcome_chat import make_chat_app_forward_route
 from imbue.minds.desktop_client.workspace_defaults import DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
 from imbue.minds.desktop_client.workspace_defaults import FALLBACK_BRANCH
 from imbue.minds.desktop_client.workspace_defaults import is_local_workspace_defaults_opt_in
@@ -909,9 +910,16 @@ def run(
         PendingCreateAttemptDiscoverySweep(store=pending_create_attempt_store, backend_resolver=backend_resolver)
     )
 
+    # The proxy signs its TLS leaves with the local CA it keeps under this host
+    # dir, which is the one it was spawned with; every probe of it pins that CA.
+    forward_ca_cert_path = local_ca_cert_path(mngr_host_dir)
     # Shared by the agent creator (it seeds a finished attempt's held conversation) and the creation
     # page's route (it hands the conversation over, and waits on the seed while the page is open).
-    welcome_chat_seeder = WelcomeChatSeeder(mngr_caller=mngr_caller, backend_resolver=backend_resolver)
+    welcome_chat_seeder = WelcomeChatSeeder(
+        mngr_caller=mngr_caller,
+        backend_resolver=backend_resolver,
+        chat_app_route=make_chat_app_forward_route(mngr_forward_port, preauth_cookie, forward_ca_cert_path),
+    )
     # Materializes the workspace profile snapshot (spec section 8): on create (below, riding
     # the creator's done hook right after the welcome chat is seeded, with the device's zone
     # for the once-at-create timezone file), on each sync pass (the scheduler below), and on
@@ -925,9 +933,6 @@ def run(
         hashes_dir=paths.data_dir / "workspace_profile_hashes",
     )
 
-    # The proxy signs its TLS leaves with the local CA it keeps under this host
-    # dir, which is the one it was spawned with; every probe of it pins that CA.
-    forward_ca_cert_path = local_ca_cert_path(mngr_host_dir)
     agent_creator = AgentCreator(
         paths=paths,
         server_port=port,

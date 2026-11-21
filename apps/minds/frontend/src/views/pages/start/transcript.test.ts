@@ -1,9 +1,8 @@
-import m from "mithril";
 import { describe, expect, it } from "vitest";
 import type { AnyVnode } from "../../../testing";
 import { attrsOf, classesOf, collectText, collectVnodes } from "../../../testing";
 import type { ScrollTarget } from "./transcript";
-import { TranscriptScroller, agentTurn, answerRow, choiceTable, userTurn } from "./transcript";
+import { TranscriptScroller, agentTurn, answerRow, userTurn } from "./transcript";
 
 function anchor(scrolls: string[], label: string): ScrollTarget {
   return { scrollIntoView: () => scrolls.push(label) };
@@ -54,42 +53,6 @@ describe("TranscriptScroller", () => {
   it("copes with an anchor that cannot scroll itself into view", () => {
     const scroller = new TranscriptScroller();
     expect(() => scroller.mounted({}, 1)).not.toThrow();
-  });
-});
-
-describe("choiceTable", () => {
-  /** The <th> cells of the header row. */
-  function headerCells(table: m.Vnode): m.Vnode[] {
-    const tableEl = (table.children as m.Vnode[])[0];
-    const thead = (tableEl.children as m.Vnode[])[0];
-    const row = (thead.children as m.Vnode[])[0];
-    return row.children as m.Vnode[];
-  }
-
-  /** The badge pill inside a header cell, whose other child is the bare title. */
-  function badgeClassOf(cell: m.Vnode): string {
-    const badge = (cell.children as (m.Vnode | string | null)[]).find(
-      (child) => child !== null && typeof child === "object" && child.tag === "span",
-    ) as m.Vnode | undefined;
-    return String((badge?.attrs as Record<string, unknown> | undefined)?.className ?? "");
-  }
-
-  it("paints the emphasized column's badge in the accent and the rest in grayscale", () => {
-    // Both columns carry a badge; only the recommended one is blue, so the
-    // other reads as a qualifier rather than a second recommendation.
-    const table = choiceTable({
-      key: "t",
-      delayMs: 0,
-      columns: [
-        { title: "Imbue Cloud", badge: "Recommended", isEmphasized: true, points: ["a"] },
-        { title: "Custom setup", badge: "Advanced", isEmphasized: false, points: ["b"] },
-      ],
-    }) as m.Vnode;
-    const [cloud, custom] = headerCells(table);
-
-    expect(badgeClassOf(cloud)).toContain("text-accent");
-    expect(badgeClassOf(custom)).toContain("text-secondary");
-    expect(badgeClassOf(custom)).not.toContain("text-accent");
   });
 });
 

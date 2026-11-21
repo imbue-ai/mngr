@@ -10,6 +10,8 @@ any workspaces yet). The SPA routes to ``/consent`` while
 """
 
 import json
+import os
+from typing import Final
 
 from flask import Blueprint
 from flask import Response
@@ -98,6 +100,11 @@ def _handle_onboarding_complete() -> Response:
     return _ok_response()
 
 
+# Set by a developer replaying the first run: every sign-in lands as an account with no workspaces, so the
+# first run plays for an account that already has some.
+FORCE_FIRST_RUN_ENV_VAR: Final[str] = "MINDS_DEV_FORCE_FIRST_RUN"
+
+
 def _handle_signin_landing() -> Response:
     """Answer where the start flow's existing-login sign-in should land (GET /ui/api/onboarding/signin-landing).
 
@@ -114,6 +121,8 @@ def _handle_signin_landing() -> Response:
     account_id = request.args.get("account", "")
     if not is_valid_account_id(account_id):
         return make_json_error_response("The account query parameter must name an account id", 400)
+    if os.environ.get(FORCE_FIRST_RUN_ENV_VAR) == "1":
+        return Response(json.dumps({"state": "done", "workspace_count": 0}), mimetype="application/json")
     scheduler = get_state().sync_scheduler
     if scheduler is None:
         # No sync machinery (minimal test apps): there are no synced records to wait for.

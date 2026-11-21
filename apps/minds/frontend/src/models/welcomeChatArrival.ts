@@ -1,7 +1,8 @@
-// Knowing when a new workspace's welcome chat is really on screen, so the wash
-// over the workspace can stay up until then. Outlives the creation page, like
-// the wash it releases: the page is gone once the workspace is mounted, and the
-// answer only comes from the workspace's frame after that.
+// Knowing when a new workspace's welcome chat, or the AI-provider chooser, is
+// really on screen, so the wash over the workspace can stay up until then.
+// Outlives the creation page, like the wash it releases: the page is gone once
+// the workspace is mounted, and the answer only comes from the workspace's
+// frame after that.
 
 /** Far above a healthy create's seed and first paint, so only a chat that is not coming waits this long. */
 export const WELCOME_CHAT_WAIT_BOUND_MS = 45_000;
@@ -9,9 +10,16 @@ export const WELCOME_CHAT_WAIT_BOUND_MS = 45_000;
 /** How the wait ended; the values are what the desktop client's landing route takes. */
 export type WelcomeChatLanding =
   | "ON_SCREEN"
+  | "PROVIDER_CHOOSER_ON_SCREEN"
   | "SEED_FAILED"
   | "NO_CHAT_REPORT"
   | "TIMED_OUT";
+
+/** What a workspace's page promised to report when it announced itself (minds:workspace-ready). */
+export interface WorkspaceReporting {
+  reportsChatOnScreen: boolean;
+  reportsProviderChooserOnScreen: boolean;
+}
 
 interface ArrivalWait {
   chatId: string | null;
@@ -36,8 +44,9 @@ export class WelcomeChatArrival {
   }
 
   /**
-   * Wait for the chat `seed` names to be reported on screen. `seed` answers null for a seed that
-   * failed. Resolves with how the wait ended, or null when it was cancelled or a later one took over.
+   * Wait for the chat `seed` names, or the provider chooser, to be reported on screen. `seed`
+   * answers null for a seed that failed. Resolves with how the wait ended, or null when it was
+   * cancelled or a later one took over.
    */
   begin(seed: Promise<string | null>): Promise<WelcomeChatLanding | null> {
     this.cancel();
@@ -68,11 +77,30 @@ export class WelcomeChatArrival {
     this.finishIfAnswered(this.wait);
   }
 
-  /** The workspace's page announced itself; one that does not promise the report will never send it. */
-  noteWorkspaceReady(reportsChatOnScreen: boolean): void {
-    if (this.wait === null || reportsChatOnScreen) return;
-    this.wait.isWorkspaceSilent = true;
-    this.finishIfAnswered(this.wait);
+  /**
+   * The provider chooser is on screen. The user's next step is to pick a provider whichever chat is
+   * behind it, so the wait ends without the seed's answer.
+   */
+  noteProviderChooserOnScreen(): void {
+    if (this.wait !== null) this.finish(this.wait, "PROVIDER_CHOOSER_ON_SCREEN");
+  }
+
+  /**
+   * The workspace's page announced itself; one that does not promise the chat report will never
+   * send it. Answers whether to ask that page to show its chat root window now, so the chooser can
+   * come up before the welcome chat exists: only while waiting, only for a page that reports the
+   * chooser (and so takes that ask), and only before the seed has answered, after which the ask to
+   * show the welcome chat itself is already on its way.
+   */
+  noteWorkspaceReady(reporting: WorkspaceReporting): boolean {
+    const wait = this.wait;
+    if (wait === null) return false;
+    const isChatRootWanted = reporting.reportsProviderChooserOnScreen && wait.chatId === null;
+    if (!reporting.reportsChatOnScreen) {
+      wait.isWorkspaceSilent = true;
+      this.finishIfAnswered(wait);
+    }
+    return isChatRootWanted;
   }
 
   cancel(): void {

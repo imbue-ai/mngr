@@ -1,9 +1,12 @@
-// The onboarding conversation as the workspace's first chat. Once a create attempt is
-// done, the creation page hands everything said so far (the manifesto exchange, the
-// questions and their answers, the settings, the setup line, the recording an onboarding
-// create shows, the welcome) to the desktop client, which seeds a chat inside the new
-// workspace with it, so the conversation simply continues there. This module turns the page's transcript into that chat's turns, as
-// markdown the chat app renders; the toggles become <details> blocks, which it allows.
+// The creation conversation as the workspace's first chat. The creation page hands
+// everything said so far (the manifesto exchange, the settings, the setup line, the
+// recording an onboarding create shows, the welcome) to the desktop client, which seeds a
+// chat inside the new workspace with it, so the conversation simply continues there. This
+// module turns the page's transcript into that chat's turns, as markdown the chat app
+// renders; the toggles become <details> blocks, which it allows.
+//
+// A first-run create (specs/ftue-onboarding-v2) sends no turns: the workspace plays its own
+// arrival in the chat, and the body carries only what the user told the welcome, for the agent.
 
 import type { CreateAttemptRequestSummary } from "./create";
 import {
@@ -13,13 +16,8 @@ import {
   showcaseMarkdown,
   summaryLines,
 } from "./creationTranscript";
-import type {
-  DisclosurePoint,
-  TableColumn,
-  TranscriptEntry,
-} from "./startFlow";
+import type { DisclosurePoint } from "./manifesto";
 import {
-  FLOW,
   MANIFESTO_HEADING,
   MANIFESTO_OPENER,
   MANIFESTO_OPENER_EMPHASIS,
@@ -28,8 +26,7 @@ import {
   REPORTING_ASK,
   REPORTING_MORE_DETAIL,
   REPORTING_MORE_LABEL,
-  stepText,
-} from "./startFlow";
+} from "./manifesto";
 import type { WelcomeChatLanding } from "./welcomeChatArrival";
 
 export interface WelcomeChatTurn {
@@ -40,6 +37,10 @@ export interface WelcomeChatTurn {
 export interface WelcomeChatBody {
   title: string;
   turns: WelcomeChatTurn[];
+  /** Whether the workspace plays its first-run arrival in the chat instead of showing turns. */
+  is_first_run?: boolean;
+  /** What the user told the first run, for the agent; the chat never shows it. */
+  context?: string;
 }
 
 /** What the seeded chat is called in the workspace. */
@@ -56,14 +57,6 @@ function assistant(text: string): WelcomeChatTurn {
 /** A point behind a chevron, as a toggle the chat app opens the same way. */
 export function disclosureMarkdown(point: DisclosurePoint): string {
   return `<details><summary>${point.label}</summary>\n\n${point.detail}\n\n</details>`;
-}
-
-/** A comparison column as a titled bullet list. */
-export function tableColumnMarkdown(column: TableColumn): string {
-  const title = column.badge
-    ? `**${column.title}** (${column.badge})`
-    : `**${column.title}**`;
-  return [title, ...column.points.map((point) => `- ${point}`)].join("\n");
 }
 
 /** The opener with the phrase it is about emphasised, as the start flow draws it. */
@@ -83,8 +76,6 @@ export function manifestoTurns(): WelcomeChatTurn[] {
         ...MANIFESTO_POINTS.map((point) => disclosureMarkdown(point)),
       ].join("\n"),
     ),
-    // The answer rides in on the transcript's first `said` entry, so only the
-    // question itself is owed here.
     assistant(
       [
         REPORTING_ASK,
@@ -95,43 +86,13 @@ export function manifestoTurns(): WelcomeChatTurn[] {
   ];
 }
 
-/** The start flow's questions and answers, in order, one turn per side. */
-export function flowTurns(entries: TranscriptEntry[]): WelcomeChatTurn[] {
-  const turns: WelcomeChatTurn[] = [];
-  for (const entry of entries) {
-    if (entry.kind === "said") {
-      turns.push(user(entry.text));
-      continue;
-    }
-    if (entry.kind === "note") {
-      turns.push(assistant(entry.text));
-      continue;
-    }
-    const step = FLOW[entry.id];
-    const { lead, body: plainBody } = stepText(step, entry.ack);
-    const body = entry.email === undefined ? plainBody : plainBody.replace(entry.email, `**${entry.email}**`);
-    const parts: string[] = [];
-    if (lead !== "") parts.push(`**${lead}**`);
-    if (body !== "") parts.push(body);
-    if (step.table) parts.push(...step.table.map(tableColumnMarkdown));
-    turns.push(assistant(parts.join("\n\n")));
-    if (entry.answer !== null && entry.said !== "")
-      turns.push(user(entry.said));
-  }
-  return turns;
-}
-
 /**
  * The creation page's own turns: the settings, the setup line, the recording when the page showed one
  * (``isShowcaseShown``, the attempt's ``is_onboarding_driven_by_agent``), and the welcome.
  */
-export function creationTurns(
-  request: CreateAttemptRequestSummary,
-  isCloudPreset: boolean,
-  isShowcaseShown: boolean,
-): WelcomeChatTurn[] {
+export function creationTurns(request: CreateAttemptRequestSummary, isShowcaseShown: boolean): WelcomeChatTurn[] {
   return [
-    user(summaryLines(request, isCloudPreset).join("\n")),
+    user(summaryLines(request).join("\n")),
     assistant(SETUP_LINE),
     ...(isShowcaseShown ? [assistant(showcaseMarkdown(SHOWCASE_APP))] : []),
     assistant(readyTurnMarkdown()),
@@ -139,21 +100,16 @@ export function creationTurns(
 }
 
 /** The whole conversation so far, as the chat the workspace opens on. */
-export function welcomeChatBody(
-  entries: TranscriptEntry[],
-  request: CreateAttemptRequestSummary,
-  // Whether the create was the start flow's Imbue Cloud answer, which the settings turn restates as that one choice.
-  isCloudPreset: boolean,
-  isShowcaseShown: boolean,
-): WelcomeChatBody {
+export function welcomeChatBody(request: CreateAttemptRequestSummary, isShowcaseShown: boolean): WelcomeChatBody {
   return {
     title: WELCOME_CHAT_TITLE,
-    turns: [
-      ...manifestoTurns(),
-      ...flowTurns(entries),
-      ...creationTurns(request, isCloudPreset, isShowcaseShown),
-    ],
+    turns: [...manifestoTurns(), ...creationTurns(request, isShowcaseShown)],
   };
+}
+
+/** A first-run create's chat: no turns, the arrival flag, and the user's own words about their studio. */
+export function firstRunWelcomeChatBody(context: string): WelcomeChatBody {
+  return { title: WELCOME_CHAT_TITLE, turns: [], is_first_run: true, context };
 }
 
 /**

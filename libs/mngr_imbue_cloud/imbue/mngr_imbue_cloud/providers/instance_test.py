@@ -2700,6 +2700,35 @@ def test_build_host_object_always_pins_the_lease_agent_id(temp_mngr_ctx: MngrCon
     assert host.id == host_id
 
 
+# this tests: IF the fast path builds its host from the lease response
+# THEN: the host carries that response's published endpoints, and a host built from a listing carries none
+def test_build_host_object_gives_only_the_freshly_leased_host_its_lease_endpoints(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    provider = ImbueCloudProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        mngr_ctx=temp_mngr_ctx,
+        host_dir=Path("/tmp/imbue-cloud-test-host-dir"),
+        config=ImbueCloudProviderConfig(account=ImbueCloudAccount("alice@example.com")),
+    )
+    base_lease = _make_lease(HostId.generate())
+    lease = base_lease.model_copy_update(
+        to_update(base_lease.field_ref().container_ssh_port, provider.config.container_ssh_port),
+        to_update(
+            base_lease.field_ref().published_ports,
+            (PublishedPortInfo(guest_port=59000, protocol=PublishedPortProtocol.UDP, host_port=22012),),
+        ),
+    )
+
+    fresh_host = provider._build_host_object(lease, is_freshly_leased_by_this_process=True)
+    listed_host = provider._build_host_object(lease, is_freshly_leased_by_this_process=False)
+
+    assert fresh_host.lease_published_endpoints == (
+        PublishedEndpoint(guest_port=59000, protocol=PortProtocol.UDP, host="203.0.113.42", host_port=22012),
+    )
+    assert listed_host.lease_published_endpoints is None
+
+
 # discover_host_and_agents: the single-host read a pinned address (AGENT@HOST_ID.PROVIDER)
 # uses instead of discovery. It must report what discovery would for that host while
 # running the outer-SSH listing of that host alone.

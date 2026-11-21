@@ -15,7 +15,8 @@ keeps the bake's name (a constant such as ``system-services``) verbatim.
 Overrides:
 
 - ``get_published_endpoints`` asks the provider for the lease's current
-  published ports (specs/published-ports), which a restore re-picks.
+  published ports (specs/published-ports), which a restore re-picks; the
+  host the fast path builds answers from its lease response.
 - ``set_env_vars`` always merges into the pre-baked ``/mngr/env``
   (clobbering would lose ``MNGR_HOST_DIR``/``MNGR_PREFIX``/etc. that
   the pool baking wrote).
@@ -32,13 +33,17 @@ Overrides:
   that from disk alone -- the pinned-id full create has by then written a
   ``data.json`` at the pre-baked id -- so ``create_agent_state`` records
   which path it took on the host object.
-- ``lock_cooperatively``, ``read_file``, ``write_file`` and ``start_agents``
-  keep the host env file and the pre-baked agent's ``data.json`` in memory on
-  the host the fast path builds, while the create holds the host lock and
-  until its agents start (see ``is_freshly_leased_by_this_process``).
+- ``lock_cooperatively``, ``read_file``, ``write_file``,
+  ``_read_agent_data_files`` and ``start_agents`` keep the host env file and
+  the pre-baked agent's ``data.json`` in memory on the host the fast path
+  builds (see ``is_freshly_leased_by_this_process``): before the lock until
+  the first command or outer-host step, and again from taking the lock until
+  its agents start. The command and outer-host entry points drop what is
+  kept before the lock.
 """
 
 import json as _json
+from collections.abc import Callable
 from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -58,9 +63,11 @@ from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.host import DEFAULT_HOST_LOCK_TIMEOUT_SECONDS
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import CreateWorkDirResult
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
@@ -112,9 +119,10 @@ class ImbueCloudHost(Host):
         default=False,
         frozen=True,
         description=(
-            "Whether this is the host the fast path built right after this process took its lease. While the "
-            "create holds the host lock, until the host's agents start, it is then the sole writer of the host "
-            "env file and the pre-baked agent's data.json, so those are kept in memory instead of re-read over SSH."
+            "Whether this is the host the fast path built right after this process took its lease. Until the "
+            "host's agents start it is then the sole writer of the host env file and the pre-baked agent's "
+            "data.json, except through commands and outer-host steps, so those files are kept in memory "
+            "instead of re-read over SSH."
         ),
     )
     # The provider, under the one interface this host needs of it beyond the
@@ -122,6 +130,14 @@ class ImbueCloudHost(Host):
     published_endpoint_source: LeasePublishedEndpointsInterface = Field(
         frozen=True,
         description="Answers the lease's current published endpoints (specs/published-ports); the provider itself",
+    )
+    lease_published_endpoints: tuple[PublishedEndpoint, ...] | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "The published endpoints of the lease response this host was built from, set only on the host the fast "
+            "path builds right after its lease; None to ask ``published_endpoint_source`` instead"
+        ),
     )
 
     # Set by ``create_agent_state`` when it found no baked agent state and ran
@@ -139,25 +155,79 @@ class ImbueCloudHost(Host):
         # Relies on every write to these files in this window going through
         # this host; a step that may write them some other way must end the
         # window first.
-        return (
-            self.is_freshly_leased_by_this_process and self._is_host_lock_held and not self._is_sole_writer_window_over
-        )
+        return self.is_freshly_leased_by_this_process and not self._is_sole_writer_window_over
 
     def _end_sole_writer_window(self) -> None:
         self._is_sole_writer_window_over = True
         self._sole_writer_content_by_path.clear()
+
+    def _forget_contents_kept_before_the_lock(self) -> None:
+        # Before the lock the create runs post-host-create commands (inner and
+        # outer), which may write these files without going through this host.
+        if not self._is_host_lock_held:
+            self._sole_writer_content_by_path.clear()
 
     @contextmanager
     def lock_cooperatively(
         self, timeout_seconds: float | None = DEFAULT_HOST_LOCK_TIMEOUT_SECONDS
     ) -> Generator[None, None, None]:
         with super().lock_cooperatively(timeout_seconds=timeout_seconds):
+            # A holder of the lock before this one may have written the files.
+            self._sole_writer_content_by_path.clear()
             self._is_host_lock_held = True
             try:
                 yield
             finally:
                 self._is_host_lock_held = False
                 self._end_sole_writer_window()
+
+    def execute_idempotent_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+        raise_on_timeout: bool = False,
+    ) -> CommandResult:
+        self._forget_contents_kept_before_the_lock()
+        return super().execute_idempotent_command(
+            command, user=user, cwd=cwd, env=env, timeout_seconds=timeout_seconds, raise_on_timeout=raise_on_timeout
+        )
+
+    def execute_stateful_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+        on_output: Callable[[str, bool], None] | None = None,
+    ) -> CommandResult:
+        self._forget_contents_kept_before_the_lock()
+        return super().execute_stateful_command(
+            command, user=user, cwd=cwd, env=env, timeout_seconds=timeout_seconds, on_output=on_output
+        )
+
+    def execute_streaming_command(
+        self,
+        command: str,
+        on_line: Callable[[str], None],
+        *,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        self._forget_contents_kept_before_the_lock()
+        return super().execute_streaming_command(command, on_line, env=env, timeout_seconds=timeout_seconds)
+
+    @contextmanager
+    def outer_host(self) -> Generator[OuterHostInterface | None, None, None]:
+        self._forget_contents_kept_before_the_lock()
+        try:
+            with super().outer_host() as outer:
+                yield outer
+        finally:
+            self._forget_contents_kept_before_the_lock()
 
     def _pre_baked_data_path(self, pre_baked_agent_id: AgentId) -> Path:
         return get_agent_state_dir_path(self.host_dir, pre_baked_agent_id) / "data.json"
@@ -184,6 +254,28 @@ class ImbueCloudHost(Host):
         super().write_file(path, content, mode=mode, is_atomic=is_atomic)
         self._remember_sole_writer_content(path, content)
 
+    def _read_agent_data_files(
+        self, timeout_seconds: float | None, agent_ids: Sequence[AgentId] | None
+    ) -> dict[str, str] | None:
+        """Answer a read of the pre-baked agent's ``data.json`` alone from memory, and remember it from any read.
+
+        The create's duplicate-name check reads every agent's ``data.json``, so
+        the work-dir and start steps that follow reuse that read of the
+        pre-baked agent's.
+        """
+        pre_baked_agent_id = self.pre_baked_agent_id
+        if pre_baked_agent_id is None:
+            return super()._read_agent_data_files(timeout_seconds, agent_ids)
+        data_path = self._pre_baked_data_path(pre_baked_agent_id)
+        remembered = self._sole_writer_content_by_path.get(data_path) if self._is_sole_writer() else None
+        if remembered is not None and agent_ids is not None and list(agent_ids) == [pre_baked_agent_id]:
+            return {str(pre_baked_agent_id): remembered.decode("utf-8")}
+        content_by_agent_dir_name = super()._read_agent_data_files(timeout_seconds, agent_ids)
+        content = (content_by_agent_dir_name or {}).get(str(pre_baked_agent_id))
+        if content is not None:
+            self._remember_sole_writer_content(data_path, content.encode("utf-8"))
+        return content_by_agent_dir_name
+
     def start_agents(self, agent_ids: Sequence[AgentId]) -> None:
         # Starting the pre-baked agent alone, every read of these files during
         # the start precedes that agent's launch; an agent launched before it
@@ -200,8 +292,13 @@ class ImbueCloudHost(Host):
 
         Re-read on every call rather than captured at construction: a restore
         re-picks the box ports, and the provider's lease listing is what moves
-        with the host (as the SSH ports do).
+        with the host (as the SSH ports do). The host the fast path builds
+        answers from its lease response instead: its SSH coordinates come from
+        that same response, so it is as current as the connection this host
+        uses, and asking again would cost a connector listing.
         """
+        if self.lease_published_endpoints is not None:
+            return list(self.lease_published_endpoints)
         return self.published_endpoint_source.published_endpoints_for(self.id)
 
     def set_env_vars(self, env: Mapping[str, str]) -> None:

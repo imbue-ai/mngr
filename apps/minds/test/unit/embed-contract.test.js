@@ -120,7 +120,7 @@ test('workspace endpoint validates the permission-resolutions payload', () => {
   ]);
 });
 
-test('workspace endpoint validates the focus-chat chat id against the agent-id shape', () => {
+test('workspace endpoint validates the focus-chat chat id against the agent-id shape, and takes none as the chat root', () => {
   // A chat's id is its first agent's id, so it takes that shape.
   const seen = [];
   contract.createWorkspaceEndpoint({
@@ -131,10 +131,9 @@ test('workspace endpoint validates the focus-chat chat id against the agent-id s
   deliver({ chatId: 'agent-0a1b2c' });
   deliver({ chatId: '../escape' });
   deliver({ chatId: '' });
+  deliver({ chatId: 7 });
   deliver({});
-  // The pre-rename field name is not a chat id any more.
-  deliver({ agentId: 'agent-0a1b2c' });
-  assert.deepStrictEqual(seen, ['agent-0a1b2c']);
+  assert.deepStrictEqual(seen, ['agent-0a1b2c', undefined]);
 });
 
 test('embedder endpoint accepts a workspace readiness announcement', () => {
@@ -437,6 +436,41 @@ test('embedder endpoint reads reportsChatOnScreen on a readiness announcement on
   assert.deepStrictEqual(seen, [undefined, true, false]);
 });
 
+test('embedder endpoint reads reportsProviderChooserOnScreen on a readiness announcement only as a boolean or absent', () => {
+  const frameWin = makeWindowDouble();
+  const seen = [];
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    isExpectedOrigin: () => true,
+    handlers: { [contract.WORKSPACE_READY]: (msg) => seen.push(msg.reportsProviderChooserOnScreen) },
+  });
+  const announce = (payload) =>
+    win.deliver({ source: frameWin, origin: 'https://agent-1.localhost', data: { type: contract.WORKSPACE_READY, ...payload } });
+  announce({});
+  announce({ reportsProviderChooserOnScreen: true });
+  announce({ reportsProviderChooserOnScreen: false });
+  announce({ reportsProviderChooserOnScreen: 'yes' });
+  assert.deepStrictEqual(seen, [undefined, true, false]);
+});
+
+test('embedder endpoint takes a provider-chooser-on-screen report from its own frame, ignoring extra fields', () => {
+  const frameWin = makeWindowDouble();
+  const otherWin = makeWindowDouble();
+  let reportCount = 0;
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    isExpectedOrigin: () => true,
+    handlers: { [contract.PROVIDER_CHOOSER_ON_SCREEN]: () => reportCount++ },
+  });
+  const report = (source, payload) =>
+    win.deliver({ source, origin: 'https://agent-1.localhost', data: { type: contract.PROVIDER_CHOOSER_ON_SCREEN, ...payload } });
+  report(frameWin, {});
+  report(frameWin, { chatId: 'agent-0123' });
+  report(otherWin, {});
+  assert.strictEqual(contract.PROVIDER_CHOOSER_ON_SCREEN, 'minds:provider-chooser-on-screen');
+  assert.strictEqual(reportCount, 2);
+});
+
 test('embedder endpoint takes a chat-on-screen report only with a chat id of the agent shape', () => {
   const frameWin = makeWindowDouble();
   const seen = [];
@@ -557,8 +591,8 @@ test('embedder endpoint never honours an open-link, which only travels to the wo
   assert.deepStrictEqual(seen, []);
 });
 
-test('the contract is at version 15', () => {
-  assert.strictEqual(contract.CONTRACT_VERSION, '15');
+test('the contract is at version 16', () => {
+  assert.strictEqual(contract.CONTRACT_VERSION, '16');
 });
 
 test('embedder endpoint takes an immersive request only with a window id and a boolean on', () => {

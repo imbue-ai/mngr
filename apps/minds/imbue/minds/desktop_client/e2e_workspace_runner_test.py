@@ -28,6 +28,7 @@ from imbue.minds.desktop_client.e2e_workspace_runner import _START_WORKSPACE_CON
 from imbue.minds.desktop_client.e2e_workspace_runner import _STOP_WORKSPACE_CONTROL_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _build_electron_env
 from imbue.minds.desktop_client.e2e_workspace_runner import _drain_byte_stream_to_loguru
+from imbue.minds.desktop_client.e2e_workspace_runner import _provider_chooser_frame
 from imbue.minds.desktop_client.e2e_workspace_runner import _read_failure_message
 from imbue.minds.desktop_client.e2e_workspace_runner import chat_frame
 from imbue.minds.desktop_client.e2e_workspace_runner import enter_workspace_from_home_page
@@ -362,6 +363,53 @@ def test_chat_frame_raises_when_no_chat_opens_in_time() -> None:
     workspace = _FakeWorkspaceFrame(child_frame_lists=[[_FakeFrame(urls=[_TERMINAL_PAGE_URL])]])
     with pytest.raises(WorkspaceFlowError):
         chat_frame(cast(Frame, workspace), timeout_seconds=0)
+
+
+class _FakeChooserFrame:
+    """A frame of the chat window for the chooser lookup: ``chooser_reads`` says, one entry per read, whether the
+    chooser is drawn in it (the final entry repeats); ``parent_frame`` is the frame that frames it."""
+
+    def __init__(self, chooser_reads: Sequence[bool], parent_frame: "_FakeChooserFrame | None" = None) -> None:
+        self._chooser_reads = list(chooser_reads)
+        self.parent_frame = parent_frame
+        self.wait_for_timeout_calls = 0
+
+    def query_selector(self, selector: str) -> _FakeElement | None:
+        assert selector == "[data-e2e=provider-chooser]"
+        is_drawn = self._chooser_reads.pop(0) if len(self._chooser_reads) > 1 else self._chooser_reads[0]
+        return _FakeElement("Choose a provider") if is_drawn else None
+
+    def wait_for_timeout(self, timeout_ms: float) -> None:
+        self.wait_for_timeout_calls += 1
+
+    def evaluate(self, expression: str) -> str:
+        return "chat"
+
+    def is_detached(self) -> bool:
+        return False
+
+    @property
+    def url(self) -> str:
+        return _WELCOME_CHAT_PAGE_URL
+
+
+def test_the_provider_chooser_is_found_in_the_chat_list_that_frames_the_chat() -> None:
+    root = _FakeChooserFrame(chooser_reads=[True])
+    chat = _FakeChooserFrame(chooser_reads=[False], parent_frame=root)
+    assert _provider_chooser_frame(cast(Frame, chat), label="t", timeout_seconds=5) is cast(Frame, root)
+
+
+def test_the_provider_chooser_is_found_in_the_chats_own_page_on_an_older_template() -> None:
+    root = _FakeChooserFrame(chooser_reads=[False])
+    chat = _FakeChooserFrame(chooser_reads=[False, True], parent_frame=root)
+    assert _provider_chooser_frame(cast(Frame, chat), label="t", timeout_seconds=5) is cast(Frame, chat)
+    assert chat.wait_for_timeout_calls == 1
+
+
+def test_no_provider_chooser_in_time_raises() -> None:
+    chat = _FakeChooserFrame(chooser_reads=[False], parent_frame=_FakeChooserFrame(chooser_reads=[False]))
+    with pytest.raises(WorkspaceFlowError):
+        _provider_chooser_frame(cast(Frame, chat), label="t", timeout_seconds=0)
 
 
 class _FakeTypingLauncherWorkspace(_FakeWorkspaceFrame):

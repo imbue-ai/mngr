@@ -1337,65 +1337,96 @@ def _describe_chat_frame(chat: Frame) -> str:
     return f"url={chat.url} detached={chat.is_detached()} document={body!r}"
 
 
-def _click_in_chat(workspace: Page | Frame, chat: Frame, selector: str, *, label: str) -> None:
-    """Click ``selector`` in the chat's page, raising its window first if a shield takes the press."""
+def _click_in_chat(workspace: Page | Frame, frame: Frame, selector: str, *, label: str) -> None:
+    """Click ``selector`` in a frame of the chat window, raising the window first if a shield takes the press."""
     try:
-        chat.click(selector, timeout=10_000)
+        frame.click(selector, timeout=10_000)
     except PlaywrightTimeoutError:
         _raise_chat_window(workspace, label=label)
         try:
-            chat.click(selector, timeout=20_000)
+            frame.click(selector, timeout=20_000)
         except PlaywrightTimeoutError:
             logger.warning(
-                "[{}] could not click {} in the chat's page: {}", label, selector, _describe_chat_frame(chat)
+                "[{}] could not click {} in the chat window: {}", label, selector, _describe_chat_frame(frame)
             )
             raise
 
 
+_PROVIDER_CHOOSER_SELECTOR: Final[str] = "[data-e2e=provider-chooser]"
+_PROVIDER_CHOOSER_TIMEOUT_SECONDS: Final[float] = 120.0
+
+
+def _find_provider_chooser_frame(candidates: Sequence[Frame]) -> Frame | None:
+    """The first of ``candidates`` the provider chooser is drawn in, or None while it is in none."""
+    return next((frame for frame in candidates if frame.query_selector(_PROVIDER_CHOOSER_SELECTOR) is not None), None)
+
+
+def _provider_chooser_frame(chat: Frame, *, label: str, timeout_seconds: float) -> Frame:
+    """The frame the provider chooser opens in, once it has opened: the chat list framing ``chat`` (the chat root,
+    which owns the chooser in the current template), or the chat's own page (where an older template opens it).
+
+    Raises WorkspaceFlowError when neither shows the chooser within ``timeout_seconds``.
+    """
+    parent = chat.parent_frame
+    candidates = [chat] if parent is None else [parent, chat]
+    deadline = time.monotonic() + timeout_seconds
+    chooser = _find_provider_chooser_frame(candidates)
+    while chooser is None and time.monotonic() < deadline:
+        chat.wait_for_timeout(_CHAT_FRAME_POLL_INTERVAL_MS)
+        chooser = _find_provider_chooser_frame(candidates)
+    if chooser is None:
+        logger.warning("[{}] no provider chooser opened: {}", label, _describe_chat_frame(chat))
+        raise WorkspaceFlowError(
+            f"No provider chooser opened in the chat or the chat list around it within {timeout_seconds:.0f}s"
+        )
+    return chooser
+
+
 def sign_in_via_provider_chooser(workspace: Page | Frame, chat: Frame, *, api_key: SecretStr, label: str) -> None:
-    """Drive the provider chooser in the welcome chat's own frame through the Anthropic API-key path.
+    """Drive the provider chooser the welcome chat asks for through the Anthropic API-key path.
 
     A freshly created workspace has no provider accounts, so its welcome chat (the
-    conversation the creation page seeded) disables its composer and opens the chooser in
-    that chat's page -- the designed first-boot step. Signing in mints a provider account
-    holding the key rather than writing a shared settings block, launches the chat's agent on
-    that account, and enables the composer; a message sent before the chat app has reported
-    the chat creating waits for the chat and goes to it.
+    conversation the creation page seeded) disables its composer and the chooser opens --
+    the designed first-boot step. It opens in the chat list that frames the chat (or, on an
+    older template, in the chat's own page), so this drives it wherever it is. Signing in
+    mints a provider account holding the key rather than writing a shared settings block,
+    launches the chat's agent on that account, and enables the composer; a message sent
+    before the chat app has reported the chat creating waits for the chat and goes to it.
 
     Every control this clicks is targeted by a ``data-e2e`` attribute rather than copy or a
     tailwind class: this drives the template's dialog from the other repo, so it has to
     survive a wording change or a re-port of the UI.
     """
-    logger.info("[{}] waiting for the provider chooser to appear in the welcome chat's frame", label)
-    chat.wait_for_selector("[data-e2e=provider-chooser]", timeout=120_000)
+    logger.info("[{}] waiting for the provider chooser to appear around the welcome chat", label)
+    chooser = _provider_chooser_frame(chat, label=label, timeout_seconds=_PROVIDER_CHOOSER_TIMEOUT_SECONDS)
     _raise_chat_window(workspace, label=label)
     # Try again shows only once the chooser has stopped asking for its provider list by itself;
     # press it the way a user would.
-    chat.wait_for_selector("[data-e2e=lane-anthropic], [data-e2e=retry-providers]", timeout=60_000)
-    if chat.query_selector("[data-e2e=lane-anthropic]") is None:
+    chooser.wait_for_selector("[data-e2e=lane-anthropic], [data-e2e=retry-providers]", timeout=60_000)
+    if chooser.query_selector("[data-e2e=lane-anthropic]") is None:
         logger.warning(
             "[{}] the chooser could not load its providers; pressing Try again: {!r}",
             label,
-            chat.inner_text("[data-e2e=provider-chooser]"),
+            chooser.inner_text(_PROVIDER_CHOOSER_SELECTOR),
         )
-        _click_in_chat(workspace, chat, "[data-e2e=retry-providers]", label=label)
+        _click_in_chat(workspace, chooser, "[data-e2e=retry-providers]", label=label)
     # Anthropic's lane, then its API-key method under "Other ways to sign in" --
     # the lane's primary method is the browser sign-in, which needs a human. When the
     # desktop app relays that sign-in, the chooser waits on the browser, and the other
     # ways in are behind "Try another way".
-    _click_in_chat(workspace, chat, "[data-e2e=lane-anthropic]", label=label)
-    chat.wait_for_selector("[data-e2e=method-api_key], [data-e2e=sign-in-another-way]", timeout=30_000)
-    if chat.query_selector("[data-e2e=method-api_key]") is None:
-        _click_in_chat(workspace, chat, "[data-e2e=sign-in-another-way]", label=label)
-        chat.wait_for_selector("[data-e2e=method-api_key]", timeout=30_000)
-    _click_in_chat(workspace, chat, "[data-e2e=method-api_key]", label=label)
-    chat.wait_for_selector("[data-e2e=api-key-input]", timeout=30_000)
-    chat.fill("[data-e2e=api-key-input]", api_key.get_secret_value())
+    _click_in_chat(workspace, chooser, "[data-e2e=lane-anthropic]", label=label)
+    chooser.wait_for_selector("[data-e2e=method-api_key], [data-e2e=sign-in-another-way]", timeout=30_000)
+    if chooser.query_selector("[data-e2e=method-api_key]") is None:
+        _click_in_chat(workspace, chooser, "[data-e2e=sign-in-another-way]", label=label)
+        chooser.wait_for_selector("[data-e2e=method-api_key]", timeout=30_000)
+    _click_in_chat(workspace, chooser, "[data-e2e=method-api_key]", label=label)
+    chooser.wait_for_selector("[data-e2e=api-key-input]", timeout=30_000)
+    chooser.fill("[data-e2e=api-key-input]", api_key.get_secret_value())
     logger.info("[{}] submitting the API key through the chooser", label)
-    _click_in_chat(workspace, chat, "[data-e2e=save-key]", label=label)
+    _click_in_chat(workspace, chooser, "[data-e2e=save-key]", label=label)
     # An accepted key closes the chooser by itself, which ends the sign-in. The success screen it
     # can show on the way out is not a step: its Done may be gone before a click lands.
-    chat.wait_for_selector("[data-e2e=provider-chooser]", state="detached", timeout=300_000)
+    chooser.wait_for_selector(_PROVIDER_CHOOSER_SELECTOR, state="detached", timeout=300_000)
     logger.info("[{}] signed in via the chooser", label)
 
 

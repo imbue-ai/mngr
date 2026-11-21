@@ -168,7 +168,7 @@ _WORKSPACE_PROBE_PATH: Final[str] = "/"
 # Scheme of the `mngr forward` proxy origin. Imbue Studio always runs the proxy with
 # `--use-http2`, so it terminates TLS and the probe/redirect URLs the Python
 # side builds are always `https`.
-_MNGR_FORWARD_SCHEME: Final[str] = "https"
+MNGR_FORWARD_SCHEME: Final[str] = "https"
 
 
 def make_workspace_probe_client(
@@ -221,7 +221,7 @@ def probe_workspace_through_plugin(
     probe that fails while the renderer is connected through the same plugin
     cannot be diagnosed without it.
     """
-    probe_url = f"{_MNGR_FORWARD_SCHEME}://127.0.0.1:{mngr_forward_port}{_WORKSPACE_PROBE_PATH}"
+    probe_url = f"{MNGR_FORWARD_SCHEME}://127.0.0.1:{mngr_forward_port}{_WORKSPACE_PROBE_PATH}"
     try:
         response = probe_client.get(probe_url, headers={"Host": f"{workspace_id}.localhost"})
     except (httpx2.ConnectError, httpx2.RemoteProtocolError, httpx2.ReadError, httpx2.TimeoutException) as e:
@@ -3794,7 +3794,7 @@ class AgentCreator(MutableModel):
         """
         if self.mngr_forward_port == 0:
             return f"/goto/{agent_id}/"
-        return f"{_MNGR_FORWARD_SCHEME}://localhost:{self.mngr_forward_port}/goto/{agent_id}/"
+        return f"{MNGR_FORWARD_SCHEME}://localhost:{self.mngr_forward_port}/goto/{agent_id}/"
 
     def _wait_for_workspace_ready(
         self,

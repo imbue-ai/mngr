@@ -23,13 +23,16 @@ class InFlightCreateAttempt(FrozenModel):
         default=None, description="The canonical agent id once mngr create returned; None while still creating"
     )
     account_id: str = Field(default="", description="The account the workspace will associate with; empty for private")
+    create_attempt_id: CreateAttemptId = Field(
+        default_factory=CreateAttemptId.generate, description="The id the create attempt runs under"
+    )
 
 
 class InFlightAgentCreator(AgentCreator):
     """An agent creator that reports fixed live create attempts and never runs a create.
 
     Drives the gates that must wait for a create to finish (connection
-    removal, signout, dead-session retirement) and the providers panel's
+    removal, signout, dead-session retirement, the held periodic sync pass) and the providers panel's
     in-use count, which only read what is in flight.
     """
 
@@ -49,6 +52,9 @@ class InFlightAgentCreator(AgentCreator):
 
     def live_in_flight_account_ids(self) -> set[str]:
         return {attempt.account_id for attempt in self.in_flight_attempts if attempt.account_id}
+
+    def live_in_flight_create_attempt_ids(self) -> set[str]:
+        return {str(attempt.create_attempt_id) for attempt in self.in_flight_attempts}
 
     def list_create_attempt_infos(self) -> list[AgentCreateAttemptInfo]:
         return [

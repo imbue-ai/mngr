@@ -13,6 +13,7 @@ from imbue.minds.desktop_client.conftest import make_fresh_device_scheduler
 from imbue.minds.desktop_client.conftest import push_remote_workspace_record
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
+from imbue.minds.desktop_client.ui_api_onboarding import FORCE_FIRST_RUN_ENV_VAR
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 
 
@@ -164,6 +165,23 @@ def test_signin_landing_answers_done_with_the_fetched_workspace_count(tmp_path: 
     client = _client_with_scheduler(tmp_path, scheduler)
 
     assert _landing_body(client, user_id) == {"state": "done", "workspace_count": 1}
+
+
+def test_signin_landing_reports_no_workspaces_when_a_developer_forces_the_first_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user_id = uuid4().hex
+    email = f"user-{uuid4().hex}@example.com"
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=user_id, email=email)
+    push_remote_workspace_record(tmp_path, cli, user_id)
+    scheduler = make_fresh_device_scheduler(tmp_path, cli)
+    scheduler.note_account_signin(user_id, email)
+    scheduler.run_one_pass()
+    client = _client_with_scheduler(tmp_path, scheduler)
+    monkeypatch.setenv(FORCE_FIRST_RUN_ENV_VAR, "1")
+
+    assert _landing_body(client, user_id) == {"state": "done", "workspace_count": 0}
 
 
 def test_signin_landing_answers_done_with_zero_for_a_brand_new_account(tmp_path: Path) -> None:

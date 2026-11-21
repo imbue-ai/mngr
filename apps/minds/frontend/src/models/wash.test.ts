@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { settle } from "../testing";
-import { WASH_DISC_PX, WASH_EARLIEST_LIFT_MS, WASH_LIFT_MS, WASH_SWAP_AT_MS, WashModel, washScaleFor } from "./wash";
+import {
+  WASH_COVER_MS,
+  WASH_DISC_PX,
+  WASH_EARLIEST_LIFT_MS,
+  WASH_LIFT_MS,
+  WASH_SWAP_AT_MS,
+  WashModel,
+  washScaleFor,
+} from "./wash";
 
 describe("washScaleFor", () => {
   it("grows the disc to reach the farthest corner from its origin", () => {
@@ -12,6 +20,13 @@ describe("washScaleFor", () => {
   it("from the center every corner is equally far", () => {
     const scale = washScaleFor({ x: 150, y: 200 }, 300, 400);
     expect(scale).toBeCloseTo(250 / (WASH_DISC_PX / 2));
+  });
+});
+
+describe("the wash's beats", () => {
+  it("swap only under a whole cover, and keep the cover up past the swap", () => {
+    expect(WASH_COVER_MS).toBeLessThan(WASH_SWAP_AT_MS);
+    expect(WASH_SWAP_AT_MS).toBeLessThan(WASH_EARLIEST_LIFT_MS);
   });
 });
 

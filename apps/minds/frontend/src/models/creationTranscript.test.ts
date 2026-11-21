@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CreateAttemptFailure, CreateAttemptRequestSummary } from "./create";
 import {
-  IMBUE_CLOUD_SUMMARY_LINE,
   READY_LINE,
   SHOWCASE_APP,
   SHOWCASE_INTRO_LINE,
@@ -39,17 +38,8 @@ function request(
 }
 
 describe("summaryLines", () => {
-  it("restates an Imbue Cloud create as itself, without the settings behind it", () => {
-    // The flow picked the region, the backup, the template and the branch --
-    // reading them back makes the one choice they did make look like seven.
-    expect(summaryLines(request(), true)).toEqual([IMBUE_CLOUD_SUMMARY_LINE]);
-  });
-
-  it("still lists the settings when Imbue Cloud was chosen inside the form", () => {
-    // Same destination, different provenance: here the reader opened the form
-    // and picked, so the values are theirs and hiding them hides their work.
-    const lines = summaryLines(request(), false);
-    expect(lines).not.toEqual([IMBUE_CLOUD_SUMMARY_LINE]);
+  it("lists the settings an Imbue Cloud create was made with", () => {
+    const lines = summaryLines(request());
     expect(lines).toContain("Compute — imbue_cloud");
     expect(lines).toContain("Region — US-EAST-VA");
   });
@@ -62,7 +52,6 @@ describe("summaryLines", () => {
           backup_provider: "CONFIGURE_LATER",
           region: "",
         }),
-        false,
       ),
     ).toEqual([
       "Create a workspace with these settings:",
@@ -82,7 +71,6 @@ describe("summaryLines", () => {
         region: "",
         branch: "",
       }),
-      false,
     );
     expect(lines).not.toContainEqual(expect.stringMatching(/^Region/));
     expect(lines).not.toContainEqual(expect.stringMatching(/^Machine size/));
@@ -94,7 +82,6 @@ describe("summaryLines", () => {
     expect(
       summaryLines(
         request({ launch_mode: "LIMA", backup_provider: "API_KEY" }),
-        false,
       ),
     ).toContain("Backup — manual");
   });
@@ -110,7 +97,6 @@ describe("summaryLines", () => {
         region: "us-west-2",
         instance_type: "t3.large",
       }),
-      false,
     );
     expect(lines).toContain("Compute — team cloud (AWS)");
     expect(lines).toContain("Machine size — t3.large");
@@ -121,7 +107,6 @@ describe("summaryLines", () => {
     expect(
       summaryLines(
         request({ launch_mode: "AWS", cloud_account: connection }),
-        false,
       ),
     ).toContain(`Compute — ${connection}`);
   });
@@ -131,7 +116,6 @@ describe("summaryLines machine size in numbers", () => {
   it("restates a size chosen in numbers the way the settings page reads it", () => {
     const lines = summaryLines(
       request({ launch_mode: "LIMA", region: "", cpu_count: 2, memory_gb: 4, disk_gb: 100 }),
-      false,
     );
     expect(lines).toContain("Machine size — 2 CPUs · 4 GB RAM · 100 GB disk");
   });
@@ -274,11 +258,10 @@ describe("readyTurnMarkdown", () => {
 });
 
 describe("summarySettingLines", () => {
-  it("is what summaryLines says under its heading, and nothing for the Imbue Cloud answer", () => {
-    const lines = summarySettingLines(request(), false);
+  it("is what summaryLines says under its heading", () => {
+    const lines = summarySettingLines(request());
     expect(lines[0]).toBe("Name — workspace-1");
-    expect(summaryLines(request(), false)).toEqual([SUMMARY_HEADING, ...lines]);
-    expect(summarySettingLines(request(), true)).toEqual([]);
+    expect(summaryLines(request())).toEqual([SUMMARY_HEADING, ...lines]);
   });
 });
 

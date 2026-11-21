@@ -1,4 +1,5 @@
 import json
+import shlex
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -217,6 +218,70 @@ def test_freshly_leased_host_rereads_a_host_env_changed_before_it_took_the_lock(
         assert host.get_env_vars() == {"MNGR_PREFIX": "baked-30577-", "ANTHROPIC_API_KEY": "sk-30577"}
 
 
+# this tests: IF a step after the fast path's env write reads the host env before any command ran
+# (the latchkey on_host_created hook) THEN: it reuses the env the create just wrote instead of reading it again
+def test_freshly_leased_host_reuses_the_env_it_wrote_before_any_command_ran(
+    local_provider: LocalProviderInstance,
+) -> None:
+    host = _make_freshly_leased_host(local_provider, AgentId.generate(), host_class=ImbueCloudHost)
+    _write_host_env(host, "MNGR_PREFIX=baked-52931-\n")
+    host.set_env_vars({"LATCHKEY_GATEWAY": "http://gateway-52931"})
+
+    _write_host_env(host, "MNGR_PREFIX=rewritten-elsewhere-52931-\n")
+
+    assert host.get_env_vars() == {"MNGR_PREFIX": "baked-52931-", "LATCHKEY_GATEWAY": "http://gateway-52931"}
+
+
+# this tests: IF a post-host-create command runs on the host the fast path just leased, before the lock
+# THEN: the host forgets the env it kept and reads what the command left on disk
+def test_freshly_leased_host_rereads_the_env_after_a_command_before_the_lock(
+    local_provider: LocalProviderInstance,
+) -> None:
+    host = _make_freshly_leased_host(local_provider, AgentId.generate(), host_class=ImbueCloudHost)
+    _write_host_env(host, "MNGR_PREFIX=baked-64410-\n")
+    host.set_env_vars({"LATCHKEY_GATEWAY": "http://gateway-64410"})
+
+    env_path = shlex.quote(str(host.get_host_env_path()))
+    result = host.execute_idempotent_command(f"printf 'MNGR_PREFIX=seeded-64410-\\n' > {env_path}")
+
+    assert result.success
+    assert host.get_env_vars() == {"MNGR_PREFIX": "seeded-64410-"}
+
+
+# this tests: IF a post-host-create outer command runs for the host the fast path just leased, before the lock
+# THEN: the host forgets the env it kept, since the outer machine can write the container's files directly
+def test_freshly_leased_host_rereads_the_env_after_using_its_outer_host_before_the_lock(
+    local_provider: LocalProviderInstance,
+) -> None:
+    host = _make_freshly_leased_host(local_provider, AgentId.generate(), host_class=ImbueCloudHost)
+    _write_host_env(host, "MNGR_PREFIX=baked-17720-\n")
+    host.set_env_vars({"LATCHKEY_GATEWAY": "http://gateway-17720"})
+
+    with host.outer_host():
+        _write_host_env(host, "MNGR_PREFIX=written-from-outer-17720-\n")
+
+    assert host.get_env_vars() == {"MNGR_PREFIX": "written-from-outer-17720-"}
+
+
+# this tests: IF the create's duplicate-name check reads every agent's data.json while it holds the lock
+# THEN: the work-dir step reuses that read of the pre-baked agent's data.json instead of reading it again
+def test_freshly_leased_host_reuses_the_duplicate_checks_read_of_the_baked_agent_data(
+    local_provider: LocalProviderInstance, temp_work_dir: Path
+) -> None:
+    lease_agent_id = AgentId.generate()
+    host = _make_freshly_leased_host(local_provider, lease_agent_id, host_class=ImbueCloudHost)
+    baked_data = _baked_agent_data(lease_agent_id, temp_work_dir)
+    _write_baked_agent_data(local_provider, lease_agent_id, baked_data)
+
+    with host.lock_cooperatively(timeout_seconds=None):
+        assert [agent.id for agent in host.get_agents()] == [lease_agent_id]
+        _write_baked_agent_data(local_provider, lease_agent_id, {**baked_data, "work_dir": "/elsewhere-90215"})
+
+        work_dir_result = host.create_agent_work_dir(host, temp_work_dir, _create_options(agent_id=None))
+
+    assert work_dir_result.path == temp_work_dir
+
+
 # this tests: IF the fast path finds no baked agent state, so mngr's full create and provisioning run
 # THEN: the host stops keeping files in memory, since provisioning commands may rewrite them
 def test_freshly_leased_host_without_baked_state_rereads_the_host_env(
@@ -335,6 +400,23 @@ def test_freshly_leased_host_starting_more_than_its_pre_baked_agent_reads_from_d
         assert " -x 321 -y 54 " in launch_commands[0]
 
 
+# this tests: IF the fast path starts the pre-baked agent after its create read the agent's data.json
+# THEN: the start's lookup of that agent is answered from memory, without reading the agent's data.json again
+def test_freshly_leased_host_looks_up_its_pre_baked_agent_from_memory_when_starting_it(
+    local_provider: LocalProviderInstance, temp_work_dir: Path
+) -> None:
+    lease_agent_id = AgentId.generate()
+    host = _make_freshly_leased_start_recording_host(local_provider, lease_agent_id, temp_work_dir)
+
+    with host.lock_cooperatively(timeout_seconds=None):
+        host.create_agent_state(temp_work_dir, _create_options(agent_id=None))
+        _baked_agent_data_path(local_provider, lease_agent_id).unlink()
+
+        host.start_agents([lease_agent_id])
+
+    assert len(_tmux_launch_commands(host)) == 1
+
+
 # this tests: IF a leased host is asked for its published endpoints THEN: it asks its provider's
 # lease record every time, so a restore that re-picked the box ports is reported without a rebuild
 def test_get_published_endpoints_reads_the_lease_record_on_every_call(local_provider: LocalProviderInstance) -> None:
@@ -347,3 +429,23 @@ def test_get_published_endpoints_reads_the_lease_record_on_every_call(local_prov
     source.endpoints = [moved]
     assert host.get_published_endpoints() == [moved]
     assert source.asked_host_ids == [host.id, host.id]
+
+
+# this tests: IF the host the fast path built from its lease response is asked for its published endpoints
+# THEN: it answers that response's endpoints without asking the provider (no connector listing)
+def test_freshly_leased_host_answers_published_endpoints_from_its_lease(
+    local_provider: LocalProviderInstance,
+) -> None:
+    source = MockLeasePublishedEndpoints()
+    leased = PublishedEndpoint(guest_port=59000, protocol=PortProtocol.TCP, host="203.0.113.7", host_port=24518)
+    host = make_local_host_of_class(
+        local_provider,
+        ImbueCloudHost,
+        pre_baked_agent_id=AgentId.generate(),
+        is_freshly_leased_by_this_process=True,
+        published_endpoint_source=source,
+        lease_published_endpoints=(leased,),
+    )
+
+    assert host.get_published_endpoints() == [leased]
+    assert source.asked_host_ids == []
