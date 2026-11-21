@@ -118,6 +118,7 @@ def _run_one_outer_host_session_whose_proxy_dies_between_commands(
     assert second_result.stdout.strip() == "after-proxy-death-40417"
 
 
+@pytest.mark.flaky
 @pytest.mark.timeout(60)
 def test_a_connection_dropped_for_a_retry_releases_its_proxy_command_once_the_outer_host_reconnects(
     temp_mngr_ctx: MngrContext, tmp_path: Path

@@ -15,7 +15,7 @@ dependencies = [
     "cryptography>=42.0",
     "flask>=3.0",
     "httpx2>=2.13.1",
-    "imbue-common",
+    "imbue-common[crypto,sentry]",
     "itsdangerous>=2.2.0",
     # The smoke suite renders its run report from a template (imbue/minds/smoke_tests/report.py).
     "jinja2>=3.1",

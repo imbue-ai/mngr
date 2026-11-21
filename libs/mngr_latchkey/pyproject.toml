@@ -10,7 +10,7 @@ dependencies = [
     # reverse-tunnel paramiko handler; sharing the upstream copy keeps
     # the half-closed-channel fix in a single place.
     "imbue-mngr-forward==0.2.1",
-    "imbue-common==0.1.22",
+    "imbue-common[sentry]==0.1.22",
     "concurrency-group==0.1.22",
     "click>=8.0",
     "loguru>=0.7",

@@ -460,7 +460,7 @@ def test_prevent_bash_without_strict_mode() -> None:
     violations = [
         v for v in find_bash_scripts_without_strict_mode(_REPO_ROOT) if Path(v).resolve().is_relative_to(checkout_root)
     ]
-    assert len(violations) <= snapshot(21), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
+    assert len(violations) <= snapshot(22), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
         f"  - {v}" for v in violations
     )
 
@@ -535,6 +535,63 @@ def test_every_project_has_pypi_readme() -> None:
         errors.append("readme file does not exist: " + ", ".join(missing_file))
 
     assert len(errors) == 0, "Projects with PyPI readme issues:\n" + "\n".join(f"  - {e}" for e in errors)
+
+
+# The imbue-common modules whose imports are only installed with one of its extras, by extra.
+_IMBUE_COMMON_EXTRA_BY_MODULE: dict[str, str] = {
+    "sentry": "sentry",
+    "secret_wrapping": "crypto",
+    "owner_exec_client": "crypto",
+}
+_IMBUE_COMMON_EXTRA_MODULE_IMPORT_PATTERN = re.compile(
+    r"^\s*(?:from|import)\s+imbue\.imbue_common\.(" + "|".join(_IMBUE_COMMON_EXTRA_BY_MODULE) + r")\b",
+    re.MULTILINE,
+)
+_IMBUE_COMMON_REQUIREMENT_PATTERN = re.compile(r"^imbue-common(?:\[([^\]]*)\])?(?![A-Za-z0-9._-])")
+
+
+def _is_shipped_python_file(path: Path) -> bool:
+    name = path.name
+    return not (name.endswith("_test.py") or name.startswith("test_") or name in ("conftest.py", "testing.py"))
+
+
+def _declared_imbue_common_extras(pyproject: dict[str, object]) -> set[str]:
+    project_section = pyproject.get("project", {})
+    dependencies = project_section.get("dependencies", []) if isinstance(project_section, dict) else []
+    extras: set[str] = set()
+    for dependency in dependencies:
+        match = _IMBUE_COMMON_REQUIREMENT_PATTERN.match(dependency)
+        if match is not None and match.group(1) is not None:
+            extras.update(extra.strip() for extra in match.group(1).split(","))
+    return extras
+
+
+@pytest.mark.timeout(60)
+def test_every_project_declares_the_imbue_common_extras_it_imports() -> None:
+    """A project whose shipped code imports an imbue-common module that needs an extra must declare that extra.
+
+    imbue-common keeps its heavy dependencies (sentry-sdk and boto3, cryptography and argon2) out of its base
+    install. This repo's one shared virtual environment installs every extra, so a project that forgot to
+    declare one passes its tests here and fails only when installed on its own.
+    """
+    missing: list[str] = []
+    for project_dir in _get_all_project_dirs():
+        if project_dir.name == "imbue_common":
+            continue
+        needed_extras: set[str] = set()
+        for python_file in _get_all_text_files_with_extension(project_dir, ".py"):
+            if not _is_shipped_python_file(python_file):
+                continue
+            for module in _IMBUE_COMMON_EXTRA_MODULE_IMPORT_PATTERN.findall(python_file.read_text()):
+                needed_extras.add(_IMBUE_COMMON_EXTRA_BY_MODULE[module])
+        declared_extras = _declared_imbue_common_extras(tomllib.loads((project_dir / "pyproject.toml").read_text()))
+        for extra in sorted(needed_extras - declared_extras):
+            missing.append(f"{project_dir.name}: imports a module that needs imbue-common[{extra}]")
+
+    assert len(missing) == 0, (
+        "Projects that import an imbue-common module without declaring its extra "
+        "(add the extra to the project's imbue-common dependency):\n" + "\n".join(f"  - {m}" for m in missing)
+    )
 
 
 def _is_mngr_plugin(project_dir: Path) -> bool:

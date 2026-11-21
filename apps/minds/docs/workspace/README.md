@@ -13,6 +13,7 @@ The template repository (e.g. [default-workspace-template](https://github.com/im
 - `.agents/skills/` -- skills available to the agent
 - `system/scripts/` -- utility scripts (forward_port.py, etc.)
 - `system/apps/` -- everything the user can open as a window on the desktop (system_interface, chat, terminal, files, browser, and user-built apps); `system/services/` -- background services with no window (app_watcher, share_gateway, host_backup, ...); `system/libs/` -- support libraries (bootstrap, workspace_layout -- whose `uv run --no-sync workspace-layout` command is how an agent reads and arranges the desktop, ...)
+- `system/config/apps/` -- one record per app the workspace's agent built or installed (`<name>.toml`), written by the template's `app-install` command; the template ships none
 - `data/` -- gitignored workspace data (documents, uploads, memories, per-app data, machine state, secrets)
 
 ## Key files
@@ -52,6 +53,12 @@ work owns:
 [include]
 files = supervisord.conf.d/*.conf
 ```
+
+The program file of an app the workspace's agent built or installed is generated, by the template's
+`app-install` command, from the app's manifest (`app.toml`) and its record: it begins with a comment
+saying so, registers the app through the same `forward_port.py --manifest ... --url` call, and passes
+the app's port in the program's environment. It is changed by changing the manifest and running
+`app-install regenerate`, never by hand.
 
 This config is also read from outside the workspace -- the evals evidence capture
 joins each registered app to the program that registered it by scanning these
