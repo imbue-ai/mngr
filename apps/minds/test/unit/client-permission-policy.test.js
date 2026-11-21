@@ -152,13 +152,18 @@ test('parseDecisionBody reads the route answer, and nothing that is not one', ()
   }
 });
 
-test('describeDenialToast names the workspace and where to change the answer', () => {
-  const toast = describeDenialToast('Research notes');
+test('describeDenialToast names the workspace and links where to change the answer, within the toast body\'s two lines', () => {
+  const toast = describeDenialToast('Research notes', AGENT);
   assert.deepEqual(toast, {
     title: 'Microphone blocked for "Research notes"',
-    body: "This workspace isn't allowed to use the microphone on this computer. Change this under Permissions, Client permissions.",
+    body: 'Blocked on this computer. Change it under Permissions > Client permissions.',
+    link: { kind: 'client-permissions', workspaceId: AGENT, text: 'Permissions > Client permissions' },
   });
+  assert.ok(toast.body.includes(toast.link.text), toast.link.text);
   assert.doesNotMatch(toast.title + toast.body, /[–—]/);
+  // The toast layer clamps a body to two lines of a 320px card; past about 80 characters the end, which says
+  // where to change the answer, is cut off.
+  assert.ok(toast.body.length <= 80, toast.body);
 });
 
 test('isClientPermissionAnswer accepts only the declared answer shape', () => {
@@ -266,7 +271,7 @@ test('a stored denial denies and toasts once per workspace per run, naming the w
   harness.clock += 60000;
   assert.deepEqual(await request(harness, win), [false]);
   assert.equal(harness.toasts.length, 1);
-  assert.deepEqual(harness.toasts[0], { webContents: win, ...describeDenialToast('Research notes') });
+  assert.deepEqual(harness.toasts[0], { webContents: win, ...describeDenialToast('Research notes', AGENT) });
 });
 
 test('a default denial toasts too, and each workspace gets its own toast', async () => {

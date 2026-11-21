@@ -18,8 +18,9 @@ import type {
   UiNotificationEntry,
   UiNotificationsMessage,
 } from "../channel/messages";
-import { electronBridge } from "../electron-bridge";
+import { electronBridge, type ToastLink } from "../electron-bridge";
 import type { NotificationsStore } from "./notifications";
+import { CLIENT_PERMISSIONS_SECTION } from "./workspacePermissions";
 import type { WorkspaceMessage } from "./workspaceMessage";
 import { workspaceMessageFromDestination } from "./workspaceMessage";
 
@@ -270,6 +271,18 @@ export class NotificationGestures {
     }
     m.route.set(`/workspace/${this.agentScopedIdOf(workspaceAgentId)}/backups`);
   }
+
+  /** A toast's link to a workspace's Client permissions: the options panel's
+   * Permissions pane floated over the workspace, at that section. */
+  openClientPermissions(workspaceAgentId: string): void {
+    m.route.set(
+      `/workspace/${this.agentScopedIdOf(workspaceAgentId)}/options`,
+      {
+        tab: "permissions",
+        section: CLIENT_PERMISSIONS_SECTION,
+      },
+    );
+  }
 }
 
 export interface FetchLike {
@@ -297,18 +310,26 @@ export function postNotificationStyleWrite(
   });
 }
 
-/** A toast that is not a feed entry: a one-off message from the shell (the
- * "couldn't open link" fallback). It flashes and retires; nothing records it. */
+/** A toast that is not a feed entry: a one-off message from the shell. It
+ * flashes and retires; nothing records it. A click opens its link, when it
+ * has one. */
 export interface TransientToast {
   id: string;
   title: string;
   body: string;
+  link: ToastLink | null;
 }
 
 /** What the ToastLayer stacks: a feed entry's flash, or a transient message. */
 export type ToastItem =
   | { id: string; entry: UiNotificationEntry }
-  | { id: string; entry: null; title: string; body: string };
+  | {
+      id: string;
+      entry: null;
+      title: string;
+      body: string;
+      link: ToastLink | null;
+    };
 
 export interface NotificationsUiHooks {
   onEntryOpened?: () => void;
@@ -444,13 +465,22 @@ export class NotificationsUiController {
   }
 
   /** Flash a one-off message that is not a feed entry. */
-  showTransientToast(title: string, body: string): void {
+  showTransientToast(
+    title: string,
+    body: string,
+    link: ToastLink | null = null,
+  ): void {
     this.transientToastSequence += 1;
     this.transientToasts = [
-      { id: `transient-${this.transientToastSequence}`, title, body },
+      { id: `transient-${this.transientToastSequence}`, title, body, link },
       ...this.transientToasts,
     ];
     this.redraw();
+  }
+
+  /** A transient message's click: open its link. */
+  openToastLink(link: ToastLink): void {
+    this.gestures.openClientPermissions(link.workspaceId);
   }
 
   /** The live toasts as stack items, newest first (the ToastLayer's list):
@@ -462,6 +492,7 @@ export class NotificationsUiController {
       entry: null,
       title: toast.title,
       body: toast.body,
+      link: toast.link,
     }));
     for (const id of this.liveToastIds) {
       const entry = byId.get(id);

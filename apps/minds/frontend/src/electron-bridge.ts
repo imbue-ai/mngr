@@ -152,9 +152,8 @@ interface MindsNativeSurface {
   onWindowFocusChanged?(callback: (isFocused: boolean) => void): void;
   // The OS locked or unlocked the screen (macOS and Windows only).
   onScreenLockChanged?(callback: (isLocked: boolean) => void): void;
-  // Main asks this window to flash a plain in-app toast (the "couldn't open
-  // link" fallback).
-  onToast?(callback: (toast: { title: string; body: string }) => void): void;
+  // Main asks this window to flash an in-app toast.
+  onToast?(callback: (toast: NativeToast) => void): void;
   // Renderer -> main shell-event relay (workspace_stopped, focus requests).
   // Added alongside the SPA shell; older preloads lack it, hence optional.
   sendShellEvent?(event: { type: string } & Record<string, unknown>): void;
@@ -257,6 +256,21 @@ export interface ClientPermissionAnswer {
   promptId: string;
   decision: "granted" | "denied";
   isRemembered: boolean;
+}
+
+/** A toast's link to a workspace's Client permissions section; `text` is the
+ * words of the toast's body that open it. */
+export interface ToastLink {
+  kind: "client-permissions";
+  workspaceId: string;
+  text: string;
+}
+
+/** A one-off in-app toast main asks this window to show. */
+export interface NativeToast {
+  title: string;
+  body: string;
+  link: ToastLink | null;
 }
 
 /** What a shared workspace's frame document answered, as main read it off
@@ -495,7 +509,7 @@ export const electronBridge = {
   onScreenLockChanged(callback: (isLocked: boolean) => void): void {
     native()?.onScreenLockChanged?.(callback);
   },
-  onToast(callback: (toast: { title: string; body: string }) => void): void {
+  onToast(callback: (toast: NativeToast) => void): void {
     native()?.onToast?.(callback);
   },
   sendShellEvent(event: { type: string } & Record<string, unknown>): void {

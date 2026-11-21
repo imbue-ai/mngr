@@ -492,6 +492,8 @@ export function Shell(): m.Component<ShellAttrs> {
               onOpen: (item) => {
                 if (item.entry !== null)
                   shell.notificationsUi?.openEntry(item.entry);
+                else if (item.link !== null)
+                  shell.notificationsUi?.openToastLink(item.link);
               },
             })
           : null,

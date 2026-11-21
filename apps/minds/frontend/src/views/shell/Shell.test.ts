@@ -13,6 +13,8 @@ import { WorkspaceFrame } from "./WorkspaceFrame";
 import { AutoUpdatePromptModal } from "../components/AutoUpdatePromptModal";
 import { AutoUpdatePromptModel } from "../../models/autoUpdatePrompt";
 import type { UiNotificationEntry } from "../../channel/messages";
+import type { ToastLink } from "../../electron-bridge";
+import type { ToastItem } from "../../models/notificationsUi";
 import type { AnyVnode } from "../../testing";
 import {
   allText,
@@ -1074,14 +1076,19 @@ describe("Shell toast layer", () => {
     return collectVnodes(root).find((vnode) => vnode.tag === ToastLayer);
   }
 
-  it("wires the live toasts and dismiss callback from the notifications controller", () => {
+  it("wires the live toasts and the dismiss and open callbacks from the notifications controller", () => {
     const dismissed: string[] = [];
+    const openedEntries: string[] = [];
+    const openedLinks: ToastLink[] = [];
     const liveEntry = notificationEntry("n1");
     const { state } = makeShell({
       notificationsUi: {
         liveToastItems: (entries: UiNotificationEntry[]) =>
           entries.map((entry) => ({ id: entry.id, entry })),
         dismissToast: (id: string) => dismissed.push(id),
+        openEntry: (entry: UiNotificationEntry) =>
+          openedEntries.push(entry.id),
+        openToastLink: (link: ToastLink) => openedLinks.push(link),
       } as unknown as ShellState["notificationsUi"],
       accountId: "local",
       stores: {
@@ -1116,6 +1123,32 @@ describe("Shell toast layer", () => {
 
     (attrsOf(toastLayer as AnyVnode).onDismiss as (id: string) => void)("n1");
     expect(dismissed).toEqual(["n1"]);
+
+    const onOpen = attrsOf(toastLayer as AnyVnode).onOpen as (
+      item: ToastItem,
+    ) => void;
+    const link: ToastLink = {
+      kind: "client-permissions",
+      workspaceId: WORKSPACE_ID,
+      text: "Permissions > Client permissions",
+    };
+    onOpen({ id: "n1", entry: liveEntry });
+    onOpen({
+      id: "transient-1",
+      entry: null,
+      title: "Microphone blocked",
+      body: "Change it under Permissions > Client permissions.",
+      link,
+    });
+    onOpen({
+      id: "transient-2",
+      entry: null,
+      title: "Couldn't open link",
+      body: "Copied instead.",
+      link: null,
+    });
+    expect(openedEntries).toEqual(["n1"]);
+    expect(openedLinks).toEqual([link]);
   });
 
   it("suppresses the floating stack while the feed overlay is open, without even asking for the live toasts", () => {

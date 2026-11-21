@@ -5,7 +5,7 @@ import type {
   UiNotificationsMessage,
 } from "../channel/messages";
 import { jsonResponse, notificationEntry } from "../testing";
-import { electronBridge } from "../electron-bridge";
+import { electronBridge, type ToastLink } from "../electron-bridge";
 import {
   DEFAULT_NOTIFICATION_PREFS,
   NotificationsUiController,
@@ -341,6 +341,7 @@ describe("NotificationsUiController toast set", () => {
       entry: null,
       title: "Couldn't open link",
       body: "Copied instead.",
+      link: null,
     });
 
     // A transient toast retires through the same dismissal as an entry's
@@ -350,6 +351,35 @@ describe("NotificationsUiController toast set", () => {
     expect(controller.liveToastItems([])).toHaveLength(1);
     controller.dismissToast("transient-1");
     expect(controller.liveToastItems([])).toEqual([]);
+  });
+
+  it("carries a transient message's link, which opens the Permissions pane at Client permissions", () => {
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+    const gestures = new NotificationGestures(
+      gestureContext({ toAgentScopedId: () => "agent-aa11" }),
+    );
+    const { controller } = seeded({ gestures });
+    const link: ToastLink = {
+      kind: "client-permissions",
+      workspaceId: "host-99",
+      text: "Permissions > Client permissions",
+    };
+    controller.showTransientToast(
+      'Microphone blocked for "Research notes"',
+      "Blocked on this computer. Change it under Permissions > Client permissions.",
+      link,
+    );
+    expect(controller.liveToastItems([])).toMatchObject([
+      { entry: null, link },
+    ]);
+
+    controller.openToastLink(link);
+    expect(routeSet).toHaveBeenCalledWith("/workspace/agent-aa11/options", {
+      tab: "permissions",
+      section: "client-permissions",
+    });
   });
 });
 

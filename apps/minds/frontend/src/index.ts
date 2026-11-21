@@ -193,10 +193,10 @@ function main(): void {
     setScreenLocked(isLocked);
     channel.resendClientState();
   });
-  // A one-off message from main (the "couldn't open link" fallback) flashes
-  // as an in-app toast in the window it happened in.
+  // A one-off message from main flashes as an in-app toast in the window it
+  // happened in.
   electronBridge.onToast((toast) => {
-    notificationsUi.showTransientToast(toast.title, toast.body);
+    notificationsUi.showTransientToast(toast.title, toast.body, toast.link);
   });
   // A shared workspace's frame answered (specs/shared-with-me, 4.7): main read
   // the document's status off the response, and the tile records the verdict

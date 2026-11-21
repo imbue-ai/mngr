@@ -76,7 +76,8 @@ test('a workspace frame gets the microphone by its stored decision, and by the p
     expect((await harness(electronApp)).toasts).toEqual([
       {
         title: 'Microphone blocked for "Research notes"',
-        body: "This workspace isn't allowed to use the microphone on this computer. Change this under Permissions, Client permissions.",
+        body: 'Blocked on this computer. Change it under Permissions > Client permissions.',
+        link: { kind: 'client-permissions', workspaceId, text: 'Permissions > Client permissions' },
       },
     ]);
     expect(await tryMicrophone()).toBe('NotAllowedError');

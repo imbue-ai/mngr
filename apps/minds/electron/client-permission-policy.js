@@ -148,15 +148,18 @@ function parseDecisionBody(body) {
 /**
  * The toast shown in the asking window when a stored denial refuses the
  * microphone (D15): the page's own notice cannot tell a Studio refusal from
- * an OS or browser one, so Studio says where the answer is changed.
+ * an OS or browser one, so Studio says where the answer is changed, and the
+ * words saying so link there.
  *
  * @param {string} workspaceName
- * @returns {{title: string, body: string}}
+ * @param {string} workspaceId
+ * @returns {{title: string, body: string, link: {kind: 'client-permissions', workspaceId: string, text: string}}}
  */
-function describeDenialToast(workspaceName) {
+function describeDenialToast(workspaceName, workspaceId) {
   return {
     title: `Microphone blocked for "${workspaceName}"`,
-    body: "This workspace isn't allowed to use the microphone on this computer. Change this under Permissions, Client permissions.",
+    body: 'Blocked on this computer. Change it under Permissions > Client permissions.',
+    link: { kind: 'client-permissions', workspaceId, text: 'Permissions > Client permissions' },
   };
 }
 
@@ -223,7 +226,7 @@ function canonicalWorkspaceIdOf(mount) {
  *   The backend's stored decision (see parseDecisionBody), or null when it could not be had.
  * @param {(webContents: object, prompt: {promptId: string, workspaceId: string, permission: string, workspaceName: string}) => boolean} deps.sendPrompt
  *   Ask the window's page to draw the prompt; false when the page is gone.
- * @param {(webContents: object, toast: {title: string, body: string}) => void} deps.showToast
+ * @param {(webContents: object, toast: ReturnType<typeof describeDenialToast>) => void} deps.showToast
  * @param {() => string} deps.newPromptId
  * @param {(message: string) => void} deps.warn
  * @param {number} deps.cacheTtlMs
@@ -376,7 +379,7 @@ function createClientPermissionGate({
           const key = verdict.workspaceId === null ? null : decisionKey(verdict.workspaceId, permission);
           if (verdict.isStoredDenial && !toastedKeys.has(key)) {
             toastedKeys.add(key);
-            showToast(webContents, describeDenialToast(verdict.workspaceName));
+            showToast(webContents, describeDenialToast(verdict.workspaceName, verdict.workspaceId));
           }
         } else if (mountedWorkspaceOf(webContents, requestingUrl) !== verdict.workspaceId) {
           // The window left the workspace while the backend was being asked.

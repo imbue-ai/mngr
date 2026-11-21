@@ -8,8 +8,10 @@ import {
   attrsOf,
   classesOf,
   classTokensOf,
+  collectText,
   collectVnodes,
   notificationEntry,
+  required,
 } from "../../testing";
 import type { ToastLayerAttrs } from "./ToastLayer";
 import {
@@ -339,6 +341,7 @@ describe("ToastCard", () => {
         entry: null,
         title: "Couldn't open link",
         body: "Copied instead.",
+        link: null,
       },
       () => (dismissed += 1),
       { isReducedMotion: true, onOpen: () => (opened += 1) },
@@ -351,6 +354,47 @@ describe("ToastCard", () => {
     );
     (attrsOf(bodyButton as AnyVnode).onclick as () => void)();
     expect(opened).toBe(0);
+    expect(dismissed).toBe(1);
+  });
+
+  it("draws a transient message's link words as a link, and its click opens the link", () => {
+    let dismissed = 0;
+    const opened: ToastItem[] = [];
+    const item: ToastItem = {
+      id: "t2",
+      entry: null,
+      title: 'Microphone blocked for "Research notes"',
+      body: "Blocked on this computer. Change it under Permissions > Client permissions.",
+      link: {
+        kind: "client-permissions",
+        workspaceId: "agent-aa11",
+        text: "Permissions > Client permissions",
+      },
+    };
+    const { root } = mountCard(item, () => (dismissed += 1), {
+      isReducedMotion: true,
+      onOpen: (openedItem) => opened.push(openedItem),
+    });
+    const body = required(
+      collectVnodes(root).find((vnode) => vnode.tag === "p"),
+    );
+    expect(collectText(body).join("")).toBe(
+      "Blocked on this computer. Change it under Permissions > Client permissions.",
+    );
+    const linkWords = required(
+      collectVnodes(body).find(
+        (vnode) =>
+          vnode.tag === "span" &&
+          allText(vnode) === "Permissions > Client permissions",
+      ),
+    );
+    expect(classTokensOf(linkWords)).toContain("text-accent");
+    const bodyButton = collectVnodes(root).find(
+      (vnode) =>
+        vnode.tag === "button" && attrsOf(vnode)["aria-label"] !== "Dismiss",
+    );
+    (attrsOf(bodyButton as AnyVnode).onclick as () => void)();
+    expect(opened).toEqual([item]);
     expect(dismissed).toBe(1);
   });
 

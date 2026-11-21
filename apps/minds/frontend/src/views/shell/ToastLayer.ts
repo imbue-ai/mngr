@@ -111,6 +111,22 @@ export function toastMoreTopPx(frontHeightPx: number, count: number): number {
   );
 }
 
+/** A transient message's body with its link's words drawn as a link. The
+ * words are styled text, not an anchor: they sit inside the card's button,
+ * which is what opens the link. */
+function linkedBody(body: string, linkText: string): m.Children {
+  return body
+    .split(linkText)
+    .flatMap((part, index) =>
+      index === 0
+        ? [part]
+        : [
+            m("span", { class: "text-accent group-hover:underline" }, linkText),
+            part,
+          ],
+    );
+}
+
 interface ToastCardAttrs {
   item: ToastItem;
   isReducedMotion: boolean;
@@ -118,8 +134,9 @@ interface ToastCardAttrs {
    * countdown so nothing vanishes out from under a reader who is mid-hover. */
   isPaused: boolean;
   onDismiss: () => void;
-  /** The feed entry's click (what its feed row does). Not called for a
-   * transient message, which has nowhere to go. */
+  /** The feed entry's click (what its feed row does), or a transient
+   * message's link. Not called for a transient message without one, which
+   * has nowhere to go. */
   onOpen: (item: ToastItem) => void;
 }
 
@@ -127,8 +144,9 @@ interface ToastCardAttrs {
  * whole body wrapped in a real button (the entry's own open gesture, keyboard
  * accessible like `NotificationsPage.ts`'s `feedRow`) and a corner X that
  * only retires the flash. A transient message renders its title and body
- * plainly and its whole body is the dismissal. Owns its own enter/exit
- * motion and the TOAST_MS auto-dismiss timer. */
+ * plainly and its whole body is the dismissal, unless it has a link: then
+ * the link's words are drawn as a link and the whole body opens it. Owns its
+ * own enter/exit motion and the TOAST_MS auto-dismiss timer. */
 export function ToastCard(): m.Component<ToastCardAttrs> {
   // Drives both the enter (first paint hidden-above -> slide down) and the
   // exit (slide up + fade). False until the hidden first paint has landed.
@@ -247,12 +265,12 @@ export function ToastCard(): m.Component<ToastCardAttrs> {
             {
               type: "button",
               class:
-                "flex w-full cursor-pointer flex-col py-2.5 pr-8 pl-3 text-left " +
+                "group flex w-full cursor-pointer flex-col py-2.5 pr-8 pl-3 text-left " +
                 "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
               onclick: () => {
                 // The card acts like the feed row, from anywhere. The flash
                 // retires either way.
-                if (item.entry !== null) onOpen(item);
+                if (item.entry !== null || item.link !== null) onOpen(item);
                 close();
               },
             },
@@ -267,7 +285,9 @@ export function ToastCard(): m.Component<ToastCardAttrs> {
                   m(
                     "p",
                     { class: "mt-0.5 type-helper text-secondary line-clamp-2" },
-                    item.body,
+                    item.link === null
+                      ? item.body
+                      : linkedBody(item.body, item.link.text),
                   ),
                 ]),
           ),

@@ -233,12 +233,22 @@ contextBridge.exposeInMainWorld('mindsNative', {
   onScreenLockChanged: (callback) => {
     ipcRenderer.on('screen-lock-changed', (_event, isLocked) => callback(Boolean(isLocked)));
   },
-  // A one-off in-app toast main wants shown here (the "couldn't open link"
-  // fallback after the address was copied).
+  // A one-off in-app toast main wants shown here, with its link to a
+  // workspace's Client permissions section when it has one.
   onToast: (callback) => {
     ipcRenderer.on('show-toast', (_event, toast) => {
       if (!toast || typeof toast.title !== 'string' || typeof toast.body !== 'string') return;
-      callback({ title: toast.title, body: toast.body });
+      const { link } = toast;
+      const isClientPermissionsLink =
+        Boolean(link) &&
+        link.kind === 'client-permissions' &&
+        typeof link.workspaceId === 'string' &&
+        typeof link.text === 'string';
+      callback({
+        title: toast.title,
+        body: toast.body,
+        link: isClientPermissionsLink ? { kind: link.kind, workspaceId: link.workspaceId, text: link.text } : null,
+      });
     });
   },
 });
