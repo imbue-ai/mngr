@@ -362,6 +362,10 @@ destroys; it is on the ally plan, the only plan with an LLM budget. A script and
 a `just` recipe create it on a tier and put its credentials in the right Vault
 path -- the operator runs that once per tier, as part of deploying this suite.
 The throwaway account exists for the signup test and is deleted by `teardown`.
+Both are minted through the connector's `POST /admin/test-signup`, which marks
+them `is_smoke_test_account`, so the analytics lake leaves them out of product
+metrics; the download probe's `download_events` row carries the suite's
+User-Agent, which the analytics funnel leaves out as well.
 
 **Mutual exclusion and the single rerun.** Runs are rival and exclusive: no two
 smoke invocations run at the same time (a GitHub `concurrency` group per tier,

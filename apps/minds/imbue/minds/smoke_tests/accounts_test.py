@@ -33,6 +33,11 @@ def test_every_request_is_labelled_as_the_smoke_suite() -> None:
     assert with_bearer["Authorization"] == "Bearer token-value"
 
 
+def test_the_smoke_label_carries_the_prefix_the_analytics_funnel_leaves_out() -> None:
+    """apps/analytics drops the download events whose User-Agent starts with this prefix."""
+    assert SMOKE_USER_AGENT.startswith("imbue-studio-smoke-test/")
+
+
 def test_the_pool_row_ids_are_read_out_of_a_workspaces_listing_whatever_state_each_row_is_in() -> None:
     listing = [
         {"host_db_id": "row-1", "host_id": "host-a", "status": "running"},

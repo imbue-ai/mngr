@@ -152,7 +152,8 @@ def test_mac_download_redirect_serves_a_downloadable_installer(
     """The marketing site's download button lands on an installer the CDN actually serves.
 
     One request per run, so one ``download_events`` row tagged with the suite's
-    User-Agent; the other platforms are covered through the release feed.
+    User-Agent, which the analytics funnel leaves out of its download counts;
+    the other platforms are covered through the release feed.
     """
     download_host = origin_of(backend.chrome_origin or backend.connector_url)
 
