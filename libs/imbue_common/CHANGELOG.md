@@ -13,6 +13,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `imbue.imbue_common.container_meminfo_publisher`, the shared Perl that publishes each container's cgroup memory headroom as `.host-meminfo`.
 - Added: Shared pytest markers `ratchet_scan(source_dir)` (preloads a ratchet test's file scan during setup, via new `preload_text_scan`, `preload_python_ast_scan` and `preload_ratchet_scan_for_test`) and `harness_internals(harness)`.
 - Added: `imbue_common.public_email_domains.PUBLIC_EMAIL_DOMAINS`, the shared list of public mail providers that the desktop and connector use to refuse whole-domain share grants.
+- Added: `find_sentry_scrubbed_substrings` in `imbue_common.sentry.testing`, for checking that a log line survives Sentry's default scrubber.
 
 ### Changed
 
@@ -21,6 +22,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `find_bash_scripts_without_strict_mode` excludes sourced `*_lib.sh` shell libraries.
 - Changed: The shared conftest hooks extend a test's `pytest-timeout` deadline from 10s to 60s the first time it starts a child program (subprocess, exec, spawn); an explicit `@pytest.mark.timeout` still wins.
 - Changed: `check_no_type_errors` runs `uv run --no-sync ty check`, type-checking the environment as it is instead of syncing it first; an out-of-date environment shows up as unresolved imports.
+- Changed: The async/await ratchet (`check_async_await`, via new `find_async_await_usages`) counts `async def` and `await` from the Python syntax tree instead of a keyword regex, so prose and JavaScript in strings no longer count.
 
 ### Fixed
 

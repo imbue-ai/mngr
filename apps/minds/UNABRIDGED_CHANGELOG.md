@@ -4,6 +4,30 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-20
+
+The backup-update and restore gates no longer call a chat running when mngr could not read its state. `mngr list` reports a chat as UNKNOWN when a read times out on a loaded workspace, and a stopped chat can only ever read STOPPED or UNKNOWN; the gates counted UNKNOWN as running, so "Stop all chats and retry" could stop a chat and then answer blocked naming that same chat (MIND-723). The gates now keep unreadable chats apart from running ones, read them again for a bounded window (the listing after a stop is that window's first read), answer blocked only for chats that definitely run, and fail closed, naming the chats, when a state stays unreadable, since stopping a chat cannot make its state readable. The gate probe reports `unreadable_chats` as its own field, and the desktop logs them instead of ending the operation as blocked.
+
+A state that stays unreadable ends the operation with the new `CHAT_STATE_UNREADABLE` failure reason, which the app words as a workspace that may be busy and answers with Try again (a restore also offers Force restore).
+
+The reasons a failed backup update or restore can carry now reach the app by reference rather than as restated string literals. The backup operation status response joined the generated wire contract (`UiWireSchema`), so the app's generated `ui.ts` carries `OperationFailureReason` and `BackupProgramFailureReason`, and the app words each reason from a table keyed by that generated type: a reason added or renamed on the server no longer compiles in the app until it is worded, while a reason a page does not know (a server newer than the page) still falls back to the sentence for the kind of operation. Whether a failed restore offers Force restore or restoring without the safety backup is decided in that same table instead of by a second comparison of literals. The desktop reads the gate probe's, the update's and the restore's answers through typed models, and a backup program's `failure_reason` as the `BackupProgramFailureReason` enum itself, refusing one it does not know, since the programs ship from the same package.
+
+Experimental connectors: the "Use at your own risk" warning under Add connection, and the one under the header of a permission request for an experimental connector, now end in a "See more" that opens the reason underneath (it used to sit in a tooltip) and puts it away when pressed again.
+
+Custom services: a permission request for a connection whose browser sign-in captures a cookie or token from the service's own website carries a quieter note of the same kind, "This connection may rely on an unofficial API.", whose "See more" says that many such connections work fine but one could stop working without notice and, in rare cases, the service might restrict the account.
+
+Permission requests: the request window no longer flashes a scrollbar, and re-wraps its text around it, for the moment it takes to grow to a taller size (opening "See more" or the Adjust editor, or a request landing after its spinner).
+
+A smoke-suite runner in the workspace (the template's CI suites, the OOM drill) that finishes while its state is being read is reported as finished, not as a runner that died, so a complete template run no longer carries a spurious `('runner', '[run]')` failure.
+
+The Electron create-and-chat test (`test_create_workspace_and_sign_in_via_modal_then_chat_via_electron`, run by `test-minds-snapshot` on every push to main and every same-repo PR) now runs its chat on Haiku instead of the template's pinned `opus[1m]`. After the chooser sign-in, the test waits for the chat's agent to come up, then picks Haiku through the endpoint the chat's model picker posts to (`POST /api/chats/<id>/model`) before it sends the token prompt. It then reads the chat's events and fails unless the reply that echoed the token names a `claude-haiku` model, so a pick that silently did not land shows up as a failure rather than as Opus spend. The test's only claim is that the agent echoes a token, which Haiku proves as well as Opus.
+
+The test is no longer marked `@pytest.mark.flaky`. Offload starts every flaky test's retries in parallel up front, so the mark made each CI run send about seven chats on the CI key rather than one. It was added for the 240s reply wait timing out under CI load; on Haiku the reply arrives within a few seconds.
+
+The e2e runner gains `switch_chat_to_cheapest_model` and `read_model_of_chat_reply` for this, both built on `request_chat_api`, a same-origin call to the chat app from the chat's own page. The smoke journey's calls, to the desktop's routes and to the chat app's, go through the same in-page fetch, `fetch_from_page`. The testing overview now says the backup-update gate test runs against a stand-in agent held RUNNING rather than a live LLM-backed chat.
+
+The async/await ratchet now reads the Python syntax tree, so prose and the JavaScript the e2e drivers evaluate in pages no longer count as async code, and minds' recorded count drops from 11 to 0.
+
 ## 2026-11-19
 
 A smoke run that sets `MINDS_SMOKE_RUN_ID` no longer has its handoff refused. Before, a run id beside `MINDS_SMOKE_HANDOFF_FILE` errored the signup test at setup, claiming the environment's handoff was missing the throwaway account and mailbox values, and `smoke_tests.py teardown` stopped on the same error, before any of its cleanup steps, whenever the run id was exported. The signup test now reads the handoff file the run names. Given only a run id, it reads that run's handoff from Vault, as documented. A handoff with some of its account or mailbox values missing is still refused. The services runbook (`docs/deploy/ops/services.md`) no longer tells the release rehearsal to leave `MINDS_SMOKE_RUN_ID` unset.

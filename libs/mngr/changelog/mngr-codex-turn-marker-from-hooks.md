@@ -1,1 +1,0 @@
-The release-test profile's `is_waiting_after_create` and `is_reporting_running` docstrings no longer name codex as reading its state live: codex agents now keep the `active` marker like the other harnesses.

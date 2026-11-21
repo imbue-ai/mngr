@@ -30,6 +30,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: The mngr Docker image (`resources/Dockerfile`) installs Claude Code 2.1.323 (was 2.1.307), whose `fable` alias is Claude Fable 5.2.
 - Changed: An SSH connect that fails because the process ran out of file descriptors raises `LocalFileDescriptorsExhaustedError` at once instead of being retried.
 - Changed: `mngr observe`'s per-poll log lines are TRACE instead of DEBUG, so `logs/mngr/events.jsonl` no longer grows ~24 MB a day on an idle workspace.
+- Changed: The log line naming the client keys a host admits is worded so Sentry's default scrubber no longer blanks it; adds `is_per_host_key_path`.
 
 ### Fixed
 

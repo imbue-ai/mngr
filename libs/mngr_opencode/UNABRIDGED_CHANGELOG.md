@@ -4,6 +4,10 @@ Full, unedited changelog entries for the `mngr_opencode` project, consolidated n
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-20
+
+The async/await ratchet now reads the Python syntax tree instead of matching the keyword with a regex, so JavaScript held in this project's test strings no longer counts as async code. The recorded count drops to 0.
+
 ## 2026-11-19
 
 opencode agents record how each turn ended, which mngr publishes as `turn_end`: `COMPLETED` when opencode ends the turn on a final reply, with its `finish` (e.g. `stop`) as `native_type`; `FAILED` on an opencode error, with its name (e.g. `APIError`), or on a final reply whose `finish` is `error`; and `INTERRUPTED` on a `MessageAbortedError` or a declined permission or question (`PermissionRejectedError` or `QuestionRejectedError`). A new turn removes it, and a turn that leaves none of that evidence (a stop before a step's reply exists or during a subtask, a `!` shell command) reads null. Agents created before this version write nothing until `mngr c <name> --reuse --update`.

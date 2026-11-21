@@ -1,1 +1,0 @@
-The log line recording which client keys a host is configured to admit is worded so Sentry's default scrubber no longer blanks it. Adds `is_per_host_key_path` to tell a per-host key from a provider-wide one.

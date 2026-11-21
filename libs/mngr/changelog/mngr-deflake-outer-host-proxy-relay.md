@@ -1,1 +1,0 @@
-The ProxyCommand relay the outer-host tests use is single-threaded, so `test_a_connection_dropped_for_a_retry_releases_its_proxy_command_once_the_outer_host_reconnects` no longer sends its next command into a relay that Linux already reports as exited but whose second thread still holds its pipes (which cost a 15s keepalive wait per run and timed the test out in CI).

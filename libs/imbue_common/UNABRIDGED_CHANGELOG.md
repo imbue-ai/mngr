@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-20
+
+The async/await ratchet (`check_async_await`) now counts the lines that hold an `async def` or an `await` in the Python syntax tree, rather than matching the keyword with a regex. Prose naming the word ("then await recovery") and JavaScript held in a Python string are no longer counted, and nothing new is counted: across every project, the new count only drops sites the regex misread. `find_async_await_usages` is the new finder behind it. imbue_common's own count drops from 2 to 0.
+
+Adds `find_sentry_scrubbed_substrings` to `imbue_common.sentry.testing`, so a test can check that a log line survives Sentry's default password scrubber.
+
 ## 2026-11-19
 
 The shared async/await ratchet no longer counts an `await` at the start of a line. Formatted Python has the keyword only inside an indented function body, so a line-leading one is another language held in a Python string, such as the JavaScript that drives pi's extension in its tests. Across the repo this removes only those JavaScript lines, so `mngr_pi_coding`'s recorded count drops from 7 to 5; no other project's matches change.

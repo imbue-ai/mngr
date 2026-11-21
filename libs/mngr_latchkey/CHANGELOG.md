@@ -16,6 +16,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `is_chrome_profile_missing_failure` and `is_scopes_not_granted_failure` classify those sign-in failures.
 - Added: The `permission-requests` extension accepts `"proxy": true` on `custom-service` requests (booleans only, else HTTP 400) and stores it on the request's payload.
 - Added: Latchkey service plugins: `imbue.mngr_latchkey.service_plugins` pins Garmin Connect, Spotify and Strava (`KNOWN_SERVICE_PLUGINS`), installed by `mngr latchkey forward` before the gateway starts and by the `mngr-latchkey` Debian package on remote machines; the service catalog lists their services.
+- Added: `is_capture_login_flow` and `is_capture_login_registration` tell whether a custom service signs in by capturing a cookie or token (`cookie-capture`, `token-capture`).
 
 ### Changed
 
@@ -40,6 +41,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: Host policies are sent without whitespace, so long-lived remote workspaces no longer exceed the 100,000-byte remote command cap on sign-ins and grants.
 - Fixed: `mngr latchkey register-agent` adopts the remote machine's policy before registering and pushing, so grants made from another computer survive.
 - Fixed: A provider that cannot reach its backend while opening a remote host's outer host (e.g. a brief DNS failure) is treated as a transient wiring failure and retried, instead of reported as an error at once (or, in VPS gateway provisioning, escaping the worker thread).
+- Fixed: `mngr latchkey forward` no longer reports `InvalidConcurrencyGroupStateError` to Sentry when VPS gateway provisioning or a SIGHUP provider reload races with shutdown; it logs at debug instead.
 
 ### Security
 

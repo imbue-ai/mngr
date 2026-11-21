@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-20
+
+The reverse-tunnel warning for an SSH login the host refuses now reaches Sentry readable instead of `[Filtered]`: it is worded without the substrings Sentry's default scrubber blanks, and says whether the offered key is a per-host or provider-wide key. When the user's own SSH setup was offered instead, it counts the agent keys and lists the default `~/.ssh/id_*` files paramiko tried.
+
 ## 2026-11-19
 
 `mngr forward` loads a remote workspace's pages faster: its SSH connections to remote hosts now ask for zlib compression, so the uncompressed scripts and stylesheets a workspace serves cross the link at about a third of their size. Connections to a loopback host (a local VM or container behind a forwarded port) stay uncompressed, and a server that does not offer compression is connected to without it.

@@ -16,6 +16,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: "Send the email again" in the Share tab when an invitation or Mobile Access Link is refused for an unverified email; Create from Template waits on an unverified account's emailed link with the create form's "Resend email".
 - Added: Desktop microphone permission per workspace: a workspace's first request prompts (Allow / Don't allow, remembered on this computer or for the session), a remembered refusal shows a toast, and the Permissions tab's new **Client permissions** section sets it; answers never leave this computer.
 - Added: Resource warnings for the computer Studio runs on: a titlebar pill when disk (default on), memory or CPU (opt-in) runs low, opening Settings > This computer > Resource warnings.
+- Added: A permission request for a custom-service connection whose sign-in captures a cookie or token notes it "may rely on an unofficial API", with a "See more" explanation, as experimental-connector warnings now have.
 
 ### Changed
 
@@ -27,6 +28,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Every email resend reports its outcome (failed, already verified, or sent), including the Accounts page's "Resend email".
 - Changed: The bundled latchkey moves to 3.25.0.
 - Changed: When the background carry of a remote workspace's registered agents gives up, it logs one error with the failure attached (type, cause chain, the failed machine command), so Sentry groups it by failure.
+- Changed: Backup failure reasons (`OperationFailureReason`, `BackupProgramFailureReason`) join the generated wire contract (`UiWireSchema`), and the app words them from a table keyed by the generated types.
 
 ### Removed
 
@@ -40,6 +42,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: On macOS, the first click on a background Studio window reaches the page.
 - Fixed: Under WSL, links and sign-in pages open in the Windows default browser (re-run `scripts/install-linux.sh` to get the handler).
 - Fixed: Studio no longer sticks on "Starting Imbue Studio..." when its window is minimized, hidden or fully covered during startup.
+- Fixed: Backup-update and restore gates no longer count chats whose state cannot be read as running, so "Stop all chats and retry" no longer stops a chat and then reports that chat as blocking (MIND-723); a state that stays unreadable fails with the new `CHAT_STATE_UNREADABLE` reason (Try again; restore also offers Force restore).
+- Fixed: The permission request window no longer flashes a scrollbar while growing taller.
 
 ## [minds-v0.10.5] - 2026-11-17
 

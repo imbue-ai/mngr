@@ -16,6 +16,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `mngr forward` follows each agent's services with `mngr event <agent>@<host>.<provider>`, skipping a discovery pass so a new workspace's origins route sooner; it logs each stream's time to first event.
 - Changed: A broken-off connection gets a page with Try again and "See details", a spent sign-in link offers the path it was for, and framed proxy pages post their reason to the parent window.
 - Changed: `mngr forward` requests zlib compression on SSH connections to non-loopback hosts, so remote workspace pages load faster (~2.8 s vs ~4 s in one measurement).
+- Changed: The reverse-tunnel warning for a refused SSH login is worded to survive Sentry's default scrubber, says whether the offered key is per-host or provider-wide, and, when the user's own SSH setup was offered, counts agent keys and lists the `~/.ssh/id_*` files tried.
 
 ### Fixed
 

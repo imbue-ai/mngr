@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-20
+
+The release-test profile's `is_waiting_after_create` and `is_reporting_running` docstrings no longer name codex as reading its state live: codex agents now keep the `active` marker like the other harnesses.
+
+The ProxyCommand relay the outer-host tests use is single-threaded, so `test_a_connection_dropped_for_a_retry_releases_its_proxy_command_once_the_outer_host_reconnects` no longer sends its next command into a relay that Linux already reports as exited but whose second thread still holds its pipes (which cost a 15s keepalive wait per run and timed the test out in CI).
+
+The log line recording which client keys a host is configured to admit is worded so Sentry's default scrubber no longer blanks it. Adds `is_per_host_key_path` to tell a per-host key from a provider-wide one.
+
 ## 2026-11-19
 
 `mngr list`, `mngr observe` and `AgentDetails` publish `turn_end`, how and when the agent's last turn ended: `kind` (`COMPLETED`, `FAILED` or `INTERRUPTED`), `native_type` (e.g. `model_not_found`) and `ended_at`. It is null while a turn is open, for harnesses that record none, for agents created before this version, and for offline hosts. Hooks write it with `mngr_turn_end_write`.

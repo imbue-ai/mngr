@@ -4,6 +4,16 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-20
+
+Custom services: `is_capture_login_flow` and `is_capture_login_registration` say whether a login flow, or a registered service's, signs in by capturing the cookie or token the service's own website ends up holding (`cookie-capture` and `token-capture`, as opposed to `mcp`). Imbue Studio uses them to note on a permission request that such a connection may rely on an unofficial API.
+
+Fixed an undefined `Iterator` return annotation on a test helper in `core_test.py`, which was failing the repo-wide type check and lint ratchets. No behavior change.
+
+The async/await ratchet now reads the Python syntax tree instead of matching the keyword with a regex, so JavaScript held in this project's test strings no longer counts as async code. The recorded count drops to 0.
+
+`mngr latchkey forward` no longer reports an error to Sentry when shutting down races with in-flight work. Previously a discovery worker that tried to start VPS gateway provisioning, or a SIGHUP provider reload that started, after the forward had begun exiting logged `InvalidConcurrencyGroupStateError` at error level. Both now skip at debug level when the forward's concurrency group is exiting. The same error from a group that is not exiting is still logged at error level.
+
 ## 2026-11-19
 
 A failed command against a remote machine now says what it was carrying in each direction, as typed data instead of a description written at the call site. Every failure of `read-state`, `apply-state`, `announce-device`, `forget-request` and `list-requests` raises `MachineTransferError` (a `RemoteGatewayError`) with `sent` (`SentToMachine` members: the parts of the update, the device record, a request withdrawal, a fallback key) and `expected` (`ReceivedFromMachine` members: the parts the command answers with). This includes the SSH connection the first command opens, whose own error stays the cause, so transient-failure detection is unchanged. The parts are read off the document each command sends. The commands take the host id in place of their `failure_description` argument.
