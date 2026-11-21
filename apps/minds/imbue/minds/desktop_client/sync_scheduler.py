@@ -4,7 +4,10 @@ Runs the reconcile (pull + legacy migration + metadata refresh + dirty pushes
 + definitively-absent tombstoning) event-driven: once after the session's
 first complete discovery snapshot, then on a slow periodic tick, and
 immediately whenever :meth:`WorkspaceSyncScheduler.kick` is called (sign-in /
-sign-out, password changes). The legacy password-file conversion runs at the
+sign-out, password changes). A periodic pass that falls due while a workspace
+create is in flight is held until the create finishes and settles, so its cold
+``mngr imbue_cloud`` subprocesses never compete with the create; kicks are never
+held. The legacy password-file conversion runs at the
 start of every pass (a no-op once converted). Each pass also pulls every
 account's cloud connections, re-materializes the provider blocks, and retires accounts whose imbue_cloud session discovery
 reports as expired (one forced refresh; a definitive refusal signs the
@@ -66,6 +69,14 @@ from imbue.mngr.primitives import ProviderInstanceName
 # How often the loop re-reconciles when nothing kicks it. Records change
 # rarely; this bounds how stale another device's view can get.
 _SYNC_TICK_SECONDS = 60.0
+# How often a held periodic pass re-checks whether the create is still in flight.
+_CREATE_HOLD_POLL_SECONDS = 1.0
+# How long a held periodic pass keeps waiting after the last create finished:
+# the welcome-chat seed and the workspace page load run right after DONE.
+_POST_CREATE_SETTLE_SECONDS = 15.0
+# The longest one periodic pass is held for, so a create that runs long (a Lima
+# build inside the VM) still lets the records sync every few minutes.
+_MAX_CREATE_HOLD_SECONDS = 120.0
 # How often the loop re-checks for the first complete discovery snapshot
 # before the first reconcile can run.
 _DISCOVERY_POLL_SECONDS = 2.0
@@ -112,6 +123,22 @@ class InitialSyncStatus(FrozenModel):
     state: InitialSyncState = Field(description="PENDING (fetch in flight), FAILED (last pass errored), or DONE")
     workspace_count: int = Field(default=0, description="Active synced workspaces found (DONE only)")
     error: str | None = Field(default=None, description="The last pass's failure description (FAILED only)")
+
+
+class SyncLoopTiming(FrozenModel):
+    """The sync loop's waits, overridable so tests can run the loop in milliseconds."""
+
+    tick_seconds: float = Field(default=_SYNC_TICK_SECONDS, description="Wait between passes when nothing kicks")
+    create_hold_poll_seconds: float = Field(
+        default=_CREATE_HOLD_POLL_SECONDS, description="Re-check interval while a periodic pass is held for a create"
+    )
+    post_create_settle_seconds: float = Field(
+        default=_POST_CREATE_SETTLE_SECONDS,
+        description="How long a held pass keeps waiting after the last create ends",
+    )
+    max_create_hold_seconds: float = Field(
+        default=_MAX_CREATE_HOLD_SECONDS, description="The longest one periodic pass is held for"
+    )
 
 
 class WorkspaceSyncScheduler(MutableModel):
@@ -200,9 +227,11 @@ class WorkspaceSyncScheduler(MutableModel):
         frozen=True,
         description=(
             "Source of the creates in flight: an account with one on its providers is not retired, since "
-            "the create's later mngr calls need the account's blocks; None never defers a retirement"
+            "the create's later mngr calls need the account's blocks, and a periodic pass is held while any "
+            "create runs; None never defers a retirement or holds a pass"
         ),
     )
+    timing: SyncLoopTiming = Field(default_factory=SyncLoopTiming, frozen=True, description="The loop's waits")
     on_account_session_dead: Callable[[str], None] | None = Field(
         default=None,
         frozen=True,
@@ -562,9 +591,43 @@ class WorkspaceSyncScheduler(MutableModel):
                 # by the next pass instead of being lost.
                 self._kick_event.clear()
                 self.run_one_pass_guarded()
-                self._kick_event.wait(_SYNC_TICK_SECONDS)
+                is_kicked = self._kick_event.wait(self.timing.tick_seconds)
+                if not is_kicked:
+                    self._hold_periodic_pass_while_creating()
         finally:
             self._exited_event.set()
+
+    def _hold_periodic_pass_while_creating(self) -> None:
+        """Wait while a workspace create is in flight, and for a settle window after the last one ends.
+
+        A pass spawns several cold ``mngr imbue_cloud`` subprocesses that
+        compete for CPU with the create and with the workspace coming up.
+        Returns at once on a kick (a kick may carry state a user action needs,
+        such as a freshly signed-in account's key bundle mirror, which gates
+        the master-password change) or a stop, and after
+        ``max_create_hold_seconds`` at the latest.
+        """
+        if self.agent_creator is None:
+            return
+        hold_started_at = time.monotonic()
+        last_live_at: float | None = None
+        while not self._kick_event.is_set():
+            now = time.monotonic()
+            is_create_live = bool(self.agent_creator.live_in_flight_create_attempt_ids())
+            if is_create_live and last_live_at is None:
+                logger.debug("Holding the periodic sync pass: a workspace create is in flight")
+            if is_create_live:
+                last_live_at = now
+            is_settled = last_live_at is None or now - last_live_at >= self.timing.post_create_settle_seconds
+            if not is_create_live and is_settled:
+                return
+            if now - hold_started_at >= self.timing.max_create_hold_seconds:
+                logger.info(
+                    "Running the periodic sync pass held for a workspace create after {:.0f}s",
+                    now - hold_started_at,
+                )
+                return
+            self._kick_event.wait(self.timing.create_hold_poll_seconds)
 
     def start(self, concurrency_group: ConcurrencyGroup) -> None:
         """Start the daemon loop on the app's root concurrency group."""

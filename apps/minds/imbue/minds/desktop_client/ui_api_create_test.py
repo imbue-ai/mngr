@@ -894,6 +894,23 @@ def test_a_landing_with_the_welcome_chat_on_screen_is_logged_with_its_wait(tmp_p
     )
 
 
+def test_a_landing_with_the_provider_chooser_on_screen_is_logged_with_its_wait(tmp_path: Path) -> None:
+    client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=True)
+    create_attempt_id = str(CreateAttemptId.generate())
+
+    with capture_loguru(level="DEBUG") as log_output:
+        response = client.post(
+            f"/ui/api/create/attempts/{create_attempt_id}/welcome-chat/landing",
+            json={"landing": "PROVIDER_CHOOSER_ON_SCREEN", "waited_ms": 1904},
+        )
+
+    assert response.status_code == 204
+    assert (
+        f"Landed in the new workspace of create attempt {create_attempt_id} with its provider chooser on screen after 1904 ms"
+        in log_output.getvalue().splitlines()
+    )
+
+
 @pytest.mark.parametrize("landing", ["SEED_FAILED", "NO_CHAT_REPORT", "TIMED_OUT"])
 def test_a_landing_without_the_welcome_chat_on_screen_is_a_warning_naming_why(tmp_path: Path, landing: str) -> None:
     client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=True)

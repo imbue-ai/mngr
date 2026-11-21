@@ -30,7 +30,7 @@
 // types, or by adding optional fields to an existing type. CONTRACT_VERSION
 // below tracks doc revisions only.
 
-export const CONTRACT_VERSION = "15";
+export const CONTRACT_VERSION = "16";
 
 // workspace -> embedder: open the shell's permission-request modal focused on
 // one request. Payload: { requestId }.
@@ -54,19 +54,27 @@ export const BRING_APP_TO_FRONT = "minds:bring-app-to-front";
 export const OPEN_SHARE_SETTINGS = "minds:open-share-settings";
 // workspace -> embedder: this document's endpoint is listening, so anything
 // the embedder held for it can be sent now. Payload: { opensLinks?,
-// opensCustomSchemeLinks?, reportsChatOnScreen? }. Sent once per page load, after the workspace
+// opensCustomSchemeLinks?, reportsChatOnScreen?, reportsProviderChooserOnScreen? }. Sent once per
+// page load, after the workspace
 // registers its handlers. Without it the embedder cannot tell a loaded frame
 // from one whose page has not run its listener yet, since a send into a
 // not-yet-listening document is simply lost. `opensLinks: true` promises the
 // page handles OPEN_LINK, external links included; `false` or absent means it
 // does not. `opensCustomSchemeLinks: true` promises it takes custom-scheme
 // links (`slack:`, `vscode:`) in OPEN_LINK too. `reportsChatOnScreen: true`
-// promises CHAT_ON_SCREEN.
+// promises CHAT_ON_SCREEN. `reportsProviderChooserOnScreen: true` promises
+// PROVIDER_CHOOSER_ON_SCREEN, and that FOCUS_CHAT without a chat id shows the
+// chat root window.
 export const WORKSPACE_READY = "minds:workspace-ready";
 // Workspace -> embedder: this chat's transcript is drawn in a window the user
 // can see. Payload: { chatId } (the chat's id, which is its first agent's id).
 // The creation page's wash stays up until the welcome chat says this.
 export const CHAT_ON_SCREEN = "minds:chat-on-screen";
+// workspace -> embedder: the AI-provider chooser is drawn in a window the user
+// can see. Payload: {}. Sent once per chat root page load. The creation page's
+// wash lifts on this as well as on the welcome chat's CHAT_ON_SCREEN, since the
+// user's next step is to pick a provider whichever chat is behind it.
+export const PROVIDER_CHOOSER_ON_SCREEN = "minds:provider-chooser-on-screen";
 // workspace -> embedder: a provider sign-in (Claude, ChatGPT) is waiting on
 // the user in a browser; relay its loopback callback into the workspace and
 // open the sign-in page. Payload: { url, flowId } -- the provider's
@@ -147,8 +155,10 @@ export const OPEN_AI_KEYS_ACK = "minds:open-ai-keys-ack";
 // review popup, flipping the card ahead of the transcript's own notice.
 export const PERMISSION_RESOLUTIONS = "minds:permission-resolutions";
 // embedder -> workspace: the user opened a chat's notification; show that
-// chat. Payload: { chatId } -- the chat's id (its first agent's id). Which
-// window it lands in is the workspace's choice. Sent only to a workspace that
+// chat. Payload: { chatId? } -- the chat's id (its first agent's id). Which
+// window it lands in is the workspace's choice. Without `chatId` it means show
+// the chat root window, and is sent only to a workspace that announced
+// `reportsProviderChooserOnScreen: true` (an older one drops it). Sent only to a workspace that
 // has announced WORKSPACE_READY, which every workspace handling this type
 // does; a workspace on an older template announces nothing, never receives
 // the ask, and the user just lands on the workspace.
@@ -354,12 +364,16 @@ const WORKSPACE_TO_EMBEDDER_VALIDATORS = {
     return (
       isOptionalBoolean(data.opensLinks) &&
       isOptionalBoolean(data.opensCustomSchemeLinks) &&
-      isOptionalBoolean(data.reportsChatOnScreen)
+      isOptionalBoolean(data.reportsChatOnScreen) &&
+      isOptionalBoolean(data.reportsProviderChooserOnScreen)
     );
   },
   [CHAT_ON_SCREEN]: function (data) {
     // A chat's id is its first agent's id, so it takes the agent-id shape.
     return typeof data.chatId === 'string' && AGENT_ID_PATTERN.test(data.chatId);
+  },
+  [PROVIDER_CHOOSER_ON_SCREEN]: function () {
+    return true;
   },
   [PROVIDER_SIGN_IN]: function (data) {
     return isSignInUrlShapeValid(data.url) && typeof data.flowId === 'string' && FLOW_ID_PATTERN.test(data.flowId);
@@ -416,8 +430,8 @@ const EMBEDDER_TO_WORKSPACE_VALIDATORS = {
     return data.resolutions.every(isResolutionEntryValid);
   },
   [FOCUS_CHAT]: function (data) {
-    // A chat's id is its first agent's id, so it takes the agent-id shape.
-    return typeof data.chatId === 'string' && AGENT_ID_PATTERN.test(data.chatId);
+    // A chat's id is its first agent's id, so it takes the agent-id shape; absent asks for the chat root.
+    return data.chatId === undefined || (typeof data.chatId === 'string' && AGENT_ID_PATTERN.test(data.chatId));
   },
   [PROVIDER_SIGN_IN_ACK]: function (data) {
     return typeof data.relay === 'boolean' && (data.reason === undefined || typeof data.reason === 'string');

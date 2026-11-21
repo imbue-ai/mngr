@@ -163,6 +163,10 @@ class InvalidJsonBodyError(MindError, ValueError):
     ...
 
 
+class EmptyWelcomeChatError(MindError, ValueError):
+    """A welcome chat that is not a first-run arrival was handed over with no turns."""
+
+
 class RemoteCommandRequestError(MindError, ValueError):
     """Raised when a remote-execution request cannot be run as asked, before anything runs.
 

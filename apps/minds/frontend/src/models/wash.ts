@@ -10,10 +10,10 @@ import m from "mithril";
  * has not reached: the disc is whole from WASH_COVER_MS, and the swap comes
  * after that. How long the cover then stays is up to whoever started the wash.
  */
-export const WASH_COVER_MS = 864;
-export const WASH_SWAP_AT_MS = 950;
+export const WASH_COVER_MS = 500;
+export const WASH_SWAP_AT_MS = 560;
 /** The cover stays at least this long, so the swap has a beat under it. */
-export const WASH_EARLIEST_LIFT_MS = 1128;
+export const WASH_EARLIEST_LIFT_MS = 610;
 export const WASH_LIFT_MS = 312;
 /** The disc's drawn diameter; the growth scale is measured against it. */
 export const WASH_DISC_PX = 120;

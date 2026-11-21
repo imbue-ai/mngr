@@ -1,299 +1,144 @@
-// The start flow (/start): the first thing a new install shows once the
-// backend is up. The manifesto exchange plays on a fixed clock and ends on the
-// error-reporting question; answering that starts the first-run questions,
-// asked one at a time as a chat (see models/startFlow.ts for the transcript
-// and its transitions). The cloud answer submits the create form's remote
-// preset directly; the two quieter answers open the create form itself as a
-// modal, on their own preset; the title bar's "Already set up? Log in", offered
-// throughout the flow, signs in and, when
-// the account has workspaces, leaves for its home page -- with none, the
-// conversation continues under the signed-in account, since the first
-// workspace still needs to be made. A cloud create waits for the account's
-// email to be verified (the connector refuses it otherwise), polling and
-// offering a resend meanwhile. Submitting a create routes to the creation
-// page, which renders this transcript above its own turns.
+// The first run's sign-in page (/start, specs/ftue-onboarding-v2): one line,
+// Sign in, and "Use without an account". Sign in opens the browser sign-in;
+// the account that lands either has workspaces (its home page) or gets its
+// first cloud workspace started at once, after the email-verification gate
+// the connector requires, and the page hands over to the creation page, which
+// welcomes the user while the workspace is built. "Use without an account"
+// opens the create form on its run-on-this-computer preset.
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
-import { accountHubRoute } from "../shell/classify";
 import { electronBridge } from "../../electron-bridge";
 import type { CreateFormDefaults, CreateSubmitResult } from "../../models/create";
 import { fetchCreateFormDefaults, submitCreateRequest } from "../../models/create";
+import {
+  RESEND_EMAIL_LABEL,
+  VERIFICATION_POLL_MS,
+  fetchIsEmailVerified,
+  resendVerificationEmail,
+  verificationEmailSentNote,
+} from "../../models/emailVerification";
 import { fallbackErrorSentence } from "../../models/errors";
-import { VERIFICATION_POLL_MS, fetchIsEmailVerified, resendVerificationEmail } from "../../models/emailVerification";
-import { fetchSigninLanding, markOnboardingComplete, recordErrorReportingConsent } from "../../models/onboarding";
-import type { SigninLanding } from "../../models/onboarding";
+import type { FirstRunAccount, FirstRunStage } from "../../models/firstRun";
 import {
-  CHAT_STREAM_STEP_MS,
-  CLOUD_CREATE_CHECKING_TEXT,
-  CLOUD_CREATE_STARTING_TEXT,
-  FLOW,
-  FLOW_OPTIONS_GAP_MS,
-  FLOW_THINK_MS,
-  MANIFESTO_HEADING,
-  MANIFESTO_OPENER,
-  MANIFESTO_OPENER_EMPHASIS,
-  MANIFESTO_POINTS,
-  MANIFESTO_QUESTION,
-  REPORTING_ACCEPT_LABEL,
-  REPORTING_ASK,
-  REPORTING_DECLINE_LABEL,
-  REPORTING_MORE_DETAIL,
-  REPORTING_MORE_LABEL,
-  SIGN_IN_INTRO_BY_CHOICE,
-  answerStep,
-  chooseExistingLogin,
-  cloudCreatePendingAtMs,
-  continueExistingLoginWithoutWorkspaces,
-  dismissPendingModal,
-  finishPendingModal,
-  isFormChoice,
-  manifestoSchedule,
-  noteVerificationEmailSent,
-  observeEmailVerified,
-  reaskEmailVerification,
-  refuseCreateForSignedOutAccount,
-  requireEmailVerification,
-  settleAwaitedSignIn,
-  settleCloudCreate,
-  startFlow,
-  startQuestions,
-  stepText,
-  streamDurationMs,
-  undoAnswer,
-  undoReporting,
-} from "../../models/startFlow";
-import type {
-  ChoiceId,
-  FlowAccount,
-  FlowChoice,
-  FormChoiceId,
-  StartFlowModel,
-  StepId,
-  TranscriptEntry,
-} from "../../models/startFlow";
+  SIGN_IN_STAGE,
+  accountOf,
+  cancelSignIn,
+  firstNameOf,
+  firstRun,
+  landAccount,
+  noteResend,
+  refuseCreate,
+  retryCreate,
+  settleLanding,
+  settleVerification,
+  startSignIn,
+  welcomeHeading,
+} from "../../models/firstRun";
+import { REPORTING_DETAIL_BODY } from "../../models/manifesto";
+import {
+  REPORTING_CONSENT_QUESTION,
+  fetchSigninLanding,
+  markOnboardingComplete,
+  recordErrorReportingConsent,
+} from "../../models/onboarding";
 import { webLogin } from "../../models/webLogin";
+import { accountHubRoute } from "../shell/classify";
 import { createFormModal } from "./CreatePage";
-import type { PresetName } from "./create/form-model";
 import { CreateFormModel, createSubmitRefusal } from "./create/form-model";
-import {
-  TRANSCRIPT_COLUMN_CLASS,
-  agentTurn,
-  answerRow,
-  choiceTable,
-  disclosureList,
-  pendingTurn,
-  scrollAnchor,
-  userTurn,
-} from "./start/transcript";
-import type { AnswerButton } from "./start/transcript";
 
-const FORM_PRESET_BY_CHOICE: Record<FormChoiceId, PresetName> = { local: "local", "own-cloud": "own-cloud" };
+export const SIGN_IN_LINE_LEAD = "Reimagine";
+export const SIGN_IN_LINE_REST = " your personal computer";
+export const SIGN_IN_LABEL = "Sign in";
+export const WITHOUT_ACCOUNT_LABEL = "Use without an account";
+export const REPORTING_LABEL = "Help improve Imbue Studio";
+const PRIVACY_POLICY_URL = "https://imbue.com/privacy/";
+export const SIGN_IN_MESSAGE = "Sign in to Imbue Studio, or create an account.";
+export const SETTING_UP_LINE = "Just a sec, we're setting up your workspace";
+export const VERIFY_LINE = "Check your email";
+export const TRY_AGAIN_LABEL = "Try again";
 
-/** How long "I verified it" keeps checking before the agent says it is not verified yet. */
-export const VERIFICATION_PRESS_WAIT_MS = 10000;
-export const VERIFICATION_PRESS_STEP_MS = 2000;
-
-/** How long the existing-login landing waits on the first record fetch before treating the account as new. */
+/** How long the landing waits on the first record fetch before treating the account as new. */
 export const SIGNIN_LANDING_WAIT_MS = 15000;
 export const SIGNIN_LANDING_POLL_MS = 1000;
-/** What the agent shows while the landing decision is in flight. */
-export const SIGNIN_LANDING_CHECKING_TEXT = "Checking your account for existing workspaces...";
-
-/**
- * The turns of a start-flow transcript, rendered. Shared with the creation
- * page, which shows the conversation that led to its create above its own
- * turns; there every turn is already on the page (`isInstant`) and nothing is
- * pressable, so the handlers are optional.
- *
- * A question re-opened by an undo (`reopenedStepIndex`) has already been read:
- * its buttons come back at once rather than after the ask's streaming time.
- */
-export function transcriptTurns(
-  entries: TranscriptEntry[],
-  options: {
-    isInstant: boolean;
-    isPressable: boolean;
-    reopenedStepIndex?: number | null;
-    onAnswer?: (at: number, choiceId: ChoiceId) => void;
-    onUndo?: (at: number) => void;
-    /** Take back the reporting answer, the transcript's opening user turn. */
-    onUndoReporting?: () => void;
-    onAside?: (stepId: StepId) => void;
-  },
-): m.Children[] {
-  const turns: m.Children[] = [];
-  entries.forEach((entry, at) => {
-    const key = `entry-${at}`;
-    if (entry.kind === "said") {
-      const onUndoReporting = options.isPressable ? options.onUndoReporting : undefined;
-      turns.push(userTurn({ key, delayMs: 0, isInstant: options.isInstant, text: entry.text, onUndo: onUndoReporting }));
-      return;
-    }
-    if (entry.kind === "note") {
-      turns.push(agentTurn({ key, text: entry.text, startAtMs: FLOW_THINK_MS, isInstant: options.isInstant }));
-      return;
-    }
-    const step = FLOW[entry.id];
-    const { lead, body: ask } = stepText(step, entry.ack);
-    turns.push(
-      agentTurn({
-        key: `${key}-ask`,
-        lead,
-        text: ask,
-        strong: entry.email,
-        startAtMs: FLOW_THINK_MS,
-        isInstant: options.isInstant,
-      }),
-    );
-    let optionsAt = FLOW_THINK_MS + streamDurationMs(`${lead}${ask}`) + FLOW_OPTIONS_GAP_MS;
-    if (step.table) {
-      turns.push(choiceTable({ key: `${key}-table`, delayMs: optionsAt, isInstant: options.isInstant, columns: step.table }));
-      optionsAt += FLOW_OPTIONS_GAP_MS * 2;
-    }
-    if (entry.answer !== null) {
-      turns.push(
-        userTurn({
-          key: `${key}-answer`,
-          delayMs: 0,
-          isInstant: options.isInstant,
-          text: entry.said,
-          onUndo:
-            options.isPressable && options.onUndo && step.isUndoable !== false ? () => options.onUndo?.(at) : undefined,
-        }),
-      );
-      return;
-    }
-    if (!options.isPressable) return;
-    const buttonsAt = at === options.reopenedStepIndex ? 0 : optionsAt;
-    const aside = step.aside;
-    const toButton = (choice: FlowChoice): AnswerButton => ({
-      id: choice.id,
-      label: choice.label,
-      isEmphasized: choice.isEmphasized,
-      onPress: () => options.onAnswer?.(at, choice.id),
-    });
-    turns.push(
-      answerRow({
-        key: `${key}-buttons`,
-        delayMs: buttonsAt,
-        buttons: step.choices.map(toButton),
-        minorButtons: (step.minorChoices ?? []).map(toButton),
-        aside: aside ? { label: aside.label, onPress: () => options.onAside?.(entry.id) } : undefined,
-      }),
-    );
-  });
-  return turns;
-}
 
 /**
  * Whether a cached defaults payload can still back a cloud create under the
- * flow's account. The route reads the defaults when it mounts, which on a
- * first run is before the user has an account; a payload read under another
- * account (or none) cannot name this one for the create to run under.
+ * account. The page reads the defaults when it mounts, before anyone has
+ * signed in; a payload read under another account (or none) cannot name this
+ * one for the create to run under.
  */
-export function areDefaultsStale(
-  defaults: CreateFormDefaults | null,
-  accountId: string,
-): boolean {
+export function areDefaultsStale(defaults: CreateFormDefaults | null, accountId: string): boolean {
   return defaults === null || defaults.account?.user_id !== accountId;
 }
 
 /**
- * What the start chat says when its cloud create is refused: the refusal's own
+ * What the page says when the cloud create is refused: the refusal's own
  * sentence, which the create form shows too, or the fallback when it carries
  * none. A request that got no answer may still have been taken, so it claims
  * nothing about what was created.
  */
 export function cloudCreateRefusal(result: CreateSubmitResult): string {
-  if (result.status === 0) return "Imbue Studio didn't respond. Pick again.";
+  if (result.status === 0) return "Imbue Studio didn't respond.";
   const reason = createSubmitRefusal(result, "").message;
-  if (reason === "") return fallbackErrorSentence("I couldn't set that up");
-  return `I couldn't set that up: ${/[.!?]$/.test(reason) ? reason : `${reason}.`}`;
+  if (reason === "") return fallbackErrorSentence("Imbue Studio couldn't set up your workspace");
+  return `Imbue Studio couldn't set up your workspace: ${/[.!?]$/.test(reason) ? reason : `${reason}.`}`;
 }
 
 /**
- * The create form's remote preset under the flow's account, submitted without the form. The first workspace's
- * creation page shows the onboarding examples, as it does for the flow's form answers.
+ * The first workspace's create under the account, submitted without the form, as an onboarding create: the
+ * create form's remote preset, or its local one when the defaults say the first run is local.
  */
 export function cloudCreateBody(defaults: CreateFormDefaults, accountId: string): Record<string, unknown> {
   const model = new CreateFormModel();
   model.applyDefaults(defaults);
   model.accountId = accountId;
-  model.applyPreset("remote");
+  model.applyPreset(defaults.is_first_run_local === true ? "local" : "remote");
   model.isOnboardingDrivenByAgent = true;
   return { ...model.submitBody() };
 }
 
-/** The signed-in accounts as the flow names them, and the one it offers to continue as: the window's, else the first. */
-function signedInAccounts(): {
-  all: FlowAccount[];
-  default: FlowAccount | null;
-} {
-  const { stores, shell } = getAppContext();
-  const entries = stores.accounts.accounts;
-  const toFlowAccount = (entry: (typeof entries)[number]): FlowAccount => ({
-    userId: entry.user_id,
-    email: entry.email,
-  });
-  const offered =
-    stores.accounts.signedInAccount(shell.accountId) ?? entries[0];
+/** The account a finished browser sign-in reported, else the one the accounts frame lists; null if neither names one. */
+function landedAccount(): FirstRunAccount | null {
+  const entries = getAppContext().stores.accounts.accounts;
+  const reportedEmail = webLogin.email;
+  const listed = entries.find((entry) => reportedEmail !== "" && entry.email === reportedEmail) ?? entries[0];
+  const userId = webLogin.userId !== "" ? webLogin.userId : (listed?.user_id ?? "");
+  if (userId === "") return null;
+  const entry = entries.find((candidate) => candidate.user_id === userId) ?? listed;
   return {
-    all: entries.map(toFlowAccount),
-    default: offered === undefined ? null : toFlowAccount(offered),
+    userId,
+    email: reportedEmail !== "" ? reportedEmail : (entry?.email ?? ""),
+    displayName: entry?.display_name ?? "",
   };
 }
 
-/** The account a cloud create is owed under; the flow only owes one once its account step has settled. */
-function flowAccount(flow: StartFlowModel): FlowAccount {
-  const account = flow.state.account;
-  if (account === null) throw new Error("A cloud create is owed with no account settled");
-  return account;
-}
-
 export const StartPage: m.ClosureComponent = () => {
-  const flow: StartFlowModel = startFlow;
-  const schedule = manifestoSchedule();
+  let stage: FirstRunStage = SIGN_IN_STAGE;
   let defaults: CreateFormDefaults | null = null;
-  // The preset the create form is open on, for a form answer; null while it is closed.
-  let formPreset: PresetName | null = null;
-  let isSubmittingCloud = false;
-  // The manifesto points the reader has opened.
-  const openManifestoIds = new Set<string>();
-  let isReportingMoreOpen = false;
-  // The verification gate: one check may be in flight, and a poll runs while
-  // the flow waits on the emailed link.
+  let isFormOpen = false;
+  // The account ids signed in when Sign in was pressed: one appearing later is the sign-in landing.
+  let accountIdsAtSignIn = new Set<string>();
+  let landingTimer: ReturnType<typeof setTimeout> | null = null;
+  let verificationTimer: ReturnType<typeof setInterval> | null = null;
   let isCheckingVerification = false;
-  let verificationPollTimer: ReturnType<typeof setInterval> | null = null;
-  let verificationPressTimer: ReturnType<typeof setTimeout> | null = null;
-  // The question most recently re-opened by an undo, whose buttons come back
-  // without the arrival delay. Cleared when taking back the reporting answer
-  // empties the transcript, so a later question at the same index arrives afresh.
-  let reopenedStepIndex: number | null = null;
-  // The reporting question re-opened by taking its answer back: it has been
-  // read, so it and its buttons come back at once instead of on the opening's clock.
-  let isReportingReopened = false;
-  // The existing-login landing decision in flight: the sign-in finished and
-  // the flow is waiting to hear whether the account has workspaces (its home
-  // page) or none (the conversation continues). Null while no sign-in is
-  // being landed.
-  let signinLanding: {
-    accountId: string;
-    email: string;
-    deadline: number;
-    timer: ReturnType<typeof setTimeout> | null;
-  } | null = null;
-  // A window that already reached the creation page from this flow and came
-  // back here starts the conversation afresh.
-  flow.reset();
+  let isRemoved = false;
+  let isReportingAllowed = true;
+  let isReportingDetailOpen = false;
 
-  function redraw(): void {
+  function setStage(next: FirstRunStage): void {
+    stage = next;
     m.redraw();
   }
 
-  // The defaults only ever build the Imbue Cloud body, so the local probes are left out.
+  function stopTimers(): void {
+    if (landingTimer !== null) clearTimeout(landingTimer);
+    if (verificationTimer !== null) clearInterval(verificationTimer);
+    landingTimer = null;
+    verificationTimer = null;
+  }
+
   function loadDefaults(): void {
-    if (defaults !== null) return;
     fetchCreateFormDefaults(null, getAppContext().shell.accountId, true)
       .then((loaded) => {
         defaults = loaded;
@@ -301,522 +146,362 @@ export const StartPage: m.ClosureComponent = () => {
       .catch(() => undefined);
   }
 
-  function enterCreation(operationId: string, isCloudPreset = false): void {
-    flow.submittedCreateAttemptId = operationId;
-    flow.isSubmittedCreateCloudPreset = isCloudPreset;
-    m.route.set(`/creating/${operationId}`);
+  /** Either way on from this page records the checkbox as it stands, before anything else happens. */
+  function saveReportingAnswer(): void {
+    void recordErrorReportingConsent(isReportingAllowed).then((isRecorded) => {
+      if (!isRecorded) console.warn("The error-reporting answer could not be saved");
+    });
   }
 
-  function stopVerificationTimers(): void {
-    if (verificationPollTimer !== null) clearInterval(verificationPollTimer);
-    if (verificationPressTimer !== null) clearTimeout(verificationPressTimer);
-    verificationPollTimer = null;
-    verificationPressTimer = null;
+  function signIn(): void {
+    saveReportingAnswer();
+    accountIdsAtSignIn = new Set(getAppContext().stores.accounts.accounts.map((entry) => entry.user_id));
+    setStage(startSignIn(stage));
+    void webLogin.start(SIGN_IN_MESSAGE);
   }
 
-  /** The email is verified: the question is answered and the create goes out. */
-  function finishVerification(): void {
-    stopVerificationTimers();
-    // The link is clicked in a browser, which took OS focus with it, so the
-    // answer lands while the user is looking at something else. A no-op when
-    // this window already has focus -- which is the "I verified it" path,
-    // unless the user went back to the browser while that one was retrying.
-    electronBridge.bringAppToFront();
-    flow.state = observeEmailVerified(flow.state);
-    if (flow.state.isCloudCreatePending) submitCloudCreate();
-    redraw();
+  /** While the browser sign-in is open, an account landing moves the page on; the modal closing without one goes back. */
+  function syncSignIn(): void {
+    if (stage.kind !== "signing-in") return;
+    const accounts = getAppContext().stores.accounts.accounts;
+    const isNewAccountListed = accounts.some((entry) => !accountIdsAtSignIn.has(entry.user_id));
+    if (webLogin.state === "done" || (isNewAccountListed && !webLogin.isOpen)) {
+      const account = landedAccount();
+      webLogin.noteSignedIn();
+      webLogin.dismiss();
+      if (account === null) {
+        // Nothing names the account that landed, so no create can be owed under it.
+        void markOnboardingComplete();
+        getAppContext().shell.routeToHub();
+        return;
+      }
+      getAppContext().shell.adoptAccount(account.userId);
+      stage = landAccount(stage, account);
+      beginLanding(account);
+      return;
+    }
+    if (!webLogin.isOpen) stage = cancelSignIn(stage);
+  }
+
+  function beginLanding(account: FirstRunAccount): void {
+    const deadline = Date.now() + SIGNIN_LANDING_WAIT_MS;
+    const poll = async (): Promise<void> => {
+      landingTimer = null;
+      let verdict: Awaited<ReturnType<typeof fetchSigninLanding>> | null = null;
+      try {
+        verdict = await fetchSigninLanding(account.userId);
+      } catch {
+        // An unreachable backend is asked again until the deadline.
+      }
+      if (isRemoved || stage.kind !== "landing") return;
+      if (verdict !== null && verdict.state === "done") {
+        settleLandingWith(verdict.workspace_count > 0);
+        return;
+      }
+      // A failed record fetch and a wait that runs out both read as a new
+      // account: a first workspace strands nobody, while the bare home page
+      // would skip the setup.
+      if ((verdict !== null && verdict.state === "failed") || Date.now() >= deadline) {
+        settleLandingWith(false);
+        return;
+      }
+      landingTimer = setTimeout(() => void poll(), SIGNIN_LANDING_POLL_MS);
+    };
+    void poll();
+  }
+
+  function settleLandingWith(hasWorkspaces: boolean): void {
+    if (stage.kind !== "landing") return;
+    if (hasWorkspaces) {
+      void markOnboardingComplete();
+      m.route.set(accountHubRoute(stage.account.userId));
+      return;
+    }
+    setStage(settleLanding(stage, false));
+    checkVerification();
   }
 
   /**
-   * A cloud create is owed. The connector refuses one for an unverified
-   * email, so the flow asks first and, when the answer is no, waits on the
-   * emailed link instead of letting the create fail. A check that cannot be
-   * made does not block: the create itself will say what is wrong. An undo
-   * while the check runs takes the create back, and the verdict is dropped.
+   * The connector refuses a cloud create for an unverified email, so the page
+   * checks first and, when the answer is no, waits on the emailed link. A
+   * check that cannot be made does not block: the create itself will say what
+   * is wrong.
    */
-  function startCloudCreate(): void {
-    if (isSubmittingCloud || isCheckingVerification || !flow.state.isCloudCreatePending) return;
-    const email = flowAccount(flow).email;
+  function checkVerification(): void {
+    const account = accountOf(stage);
+    if (account === null || isCheckingVerification) return;
     isCheckingVerification = true;
-    fetchIsEmailVerified(email).then(
+    fetchIsEmailVerified(account.email).then(
       (isVerified) => {
         isCheckingVerification = false;
-        if (!flow.state.isCloudCreatePending) return;
-        // The create may have been re-owed under another account while this check ran.
-        if (flowAccount(flow).email !== email) {
-          startCloudCreate();
-          return;
-        }
-        if (isVerified) {
-          submitCloudCreate();
-          return;
-        }
-        flow.state = requireEmailVerification(flow.state);
-        // No send here: the link went out when the account was created, and
-        // originating another one would only burn the cooldown that the
-        // user's own resend needs.
-        stopVerificationTimers();
-        verificationPollTimer = setInterval(() => void pollVerification(), VERIFICATION_POLL_MS);
-        redraw();
+        applyVerification(isVerified);
       },
       () => {
         isCheckingVerification = false;
-        if (!flow.state.isCloudCreatePending) return;
-        if (flowAccount(flow).email !== email) startCloudCreate();
-        else submitCloudCreate();
+        applyVerification(true);
       },
     );
   }
 
-  /**
-   * One quiet poll while the flow waits on the link; a failed check simply
-   * waits for the next. Polls hold off while the title bar's log-in is
-   * signing in, which may replace this account.
-   */
-  async function pollVerification(): Promise<void> {
-    const isPollHeld = (): boolean => flow.state.pending === "existing-login";
-    if (flow.state.verificationEmail === null || isCheckingVerification || isPollHeld()) return;
-    const email = flow.state.verificationEmail;
-    isCheckingVerification = true;
-    try {
-      if ((await fetchIsEmailVerified(email)) && flow.state.verificationEmail === email && !isPollHeld()) {
-        finishVerification();
-      }
-    } catch {
-      // Left for the next poll.
-    } finally {
-      isCheckingVerification = false;
+  function applyVerification(isVerified: boolean): void {
+    if (isRemoved) return;
+    const wasWaiting = stage.kind === "verify";
+    setStage(settleVerification(stage, isVerified));
+    if (stage.kind === "verify" && verificationTimer === null) {
+      verificationTimer = setInterval(() => {
+        if (stage.kind === "verify") checkVerification();
+      }, VERIFICATION_POLL_MS);
     }
-    // A create owed under another account while this poll ran was turned away by the check in flight.
-    if (flow.state.isCloudCreatePending) startCloudCreate();
+    if (stage.kind === "creating") {
+      if (verificationTimer !== null) clearInterval(verificationTimer);
+      verificationTimer = null;
+      // The link is clicked in a browser, which took OS focus with it.
+      if (wasWaiting) electronBridge.bringAppToFront();
+      submitCloudCreate(stage.account);
+    }
   }
 
-  /**
-   * "I verified it" was pressed: check for a while (the click on the link
-   * takes a moment to land), and only if it still is not verified, say so and
-   * ask again.
-   */
-  function pressVerified(): void {
-    if (verificationPressTimer !== null || flow.state.verificationEmail === null) return;
-    const email = flow.state.verificationEmail;
-    const deadline = Date.now() + VERIFICATION_PRESS_WAIT_MS;
-    const attempt = (): void => {
-      fetchIsEmailVerified(email).then(
-        (isVerified) => {
-          // An undo since the press may have moved the wait to another account's email.
-          if (flow.state.verificationEmail !== email) return;
-          if (isVerified) {
-            finishVerification();
-            return;
-          }
-          if (Date.now() < deadline) {
-            verificationPressTimer = setTimeout(attempt, VERIFICATION_PRESS_STEP_MS);
-            return;
-          }
-          verificationPressTimer = null;
-          flow.state = reaskEmailVerification(flow.state);
-          redraw();
-        },
-        () => {
-          if (flow.state.verificationEmail !== email) return;
-          verificationPressTimer = null;
-          flow.state = reaskEmailVerification(flow.state);
-          redraw();
-        },
-      );
+  function resend(): void {
+    if (stage.kind !== "verify") return;
+    resendVerificationEmail(stage.account.email).then((outcome) => setStage(noteResend(stage, outcome)));
+  }
+
+  function submitCloudCreate(account: FirstRunAccount): void {
+    const fail = (message: string): void => {
+      if (!isRemoved) setStage(refuseCreate(stage, message));
     };
-    verificationPressTimer = setTimeout(attempt, 0);
-  }
-
-  function resendVerification(): void {
-    const email = flow.state.verificationEmail;
-    if (email === null) return;
-    resendVerificationEmail(email).then((outcome) => {
-      flow.state = noteVerificationEmailSent(flow.state, outcome);
-      redraw();
-    });
-  }
-
-  function submitCloudCreate(): void {
-    if (isSubmittingCloud) return;
-    flow.state = refuseCreateForSignedOutAccount(
-      flow.state,
-      signedInAccounts().all.map((account) => account.userId),
+    // A local first run needs the local probes the cloud-only read leaves out.
+    const ready = (
+      defaults !== null && !areDefaultsStale(defaults, account.userId)
+        ? Promise.resolve(defaults)
+        : fetchCreateFormDefaults(null, account.userId, true)
+    ).then((loaded) =>
+      loaded.is_first_run_local === true ? fetchCreateFormDefaults(null, account.userId, false) : loaded,
     );
-    if (!flow.state.isCloudCreatePending) {
-      redraw();
-      return;
-    }
-    isSubmittingCloud = true;
-    // The line under the transcript now says the workspace is starting.
-    redraw();
-    const accountId = flowAccount(flow).userId;
-    // The create is submitted under the flow's account, so the window becomes
-    // that account's (its creation page and first workspace belong to it) --
-    // without a navigation, the start flow being the device's route.
-    getAppContext().shell.adoptAccount(accountId);
-    // Async so that a body that fails to build rejects rather than throwing past the caller's catch.
-    const submit = async (loaded: CreateFormDefaults): Promise<void> => {
-      const result = await submitCreateRequest(cloudCreateBody(loaded, accountId));
-      isSubmittingCloud = false;
-      if (result.status === 202 && typeof result.data.operation_id === "string") {
-        flow.state = settleCloudCreate(flow.state, null);
-        enterCreation(result.data.operation_id, true);
-        return;
-      }
-      flow.state = settleCloudCreate(flow.state, cloudCreateRefusal(result));
-      redraw();
-    };
-    const cached = defaults;
-    const ready =
-      cached !== null && !areDefaultsStale(cached, accountId)
-        ? Promise.resolve(cached)
-        : fetchCreateFormDefaults(null, accountId, true);
-    const fail = (refusal: string): void => {
-      isSubmittingCloud = false;
-      flow.state = settleCloudCreate(flow.state, refusal);
-      redraw();
-    };
-    // The rejection handler belongs to the read it names, not to the whole
-    // chain: a submit that throws is caught as its own failure.
+    // The rejection handler belongs to the read it names: a submit that throws is caught as its own failure.
     void ready.then(
-      (loaded) => {
+      async (loaded) => {
         defaults = loaded;
-        return submit(loaded).catch(() => fail(fallbackErrorSentence("I couldn't set that up")));
+        try {
+          const result = await submitCreateRequest(cloudCreateBody(loaded, account.userId));
+          if (result.status === 202 && typeof result.data.operation_id === "string") {
+            firstRun.noteCreate(result.data.operation_id, account);
+            m.route.set(`/creating/${result.data.operation_id}`);
+            return;
+          }
+          fail(cloudCreateRefusal(result));
+        } catch {
+          fail(fallbackErrorSentence("Imbue Studio couldn't set up your workspace"));
+        }
       },
-      () => fail(fallbackErrorSentence("I couldn't load the options for your workspace")),
+      () => fail(fallbackErrorSentence("Imbue Studio couldn't load the options for your workspace")),
     );
   }
 
-  /** Drop a landing decision still in flight: an undo or another answer has replaced the wait. */
-  function cancelSigninLanding(): void {
-    if (signinLanding === null) return;
-    if (signinLanding.timer !== null) clearTimeout(signinLanding.timer);
-    signinLanding = null;
+  function retry(): void {
+    setStage(retryCreate(stage));
+    checkVerification();
   }
 
-  /** The landing verdict arrived (or the wait ran out): leave for the account's home page, or continue the conversation. */
-  function settleSigninLanding(hasWorkspaces: boolean): void {
-    const landing = signinLanding;
-    cancelSigninLanding();
-    // An answer given while the check ran has replaced the wait; its own path governs.
-    if (landing === null || flow.state.pending !== "existing-login") {
-      redraw();
-      return;
-    }
-    if (hasWorkspaces) {
-      flow.state = dismissPendingModal(flow.state);
-      void markOnboardingComplete();
-      m.route.set(accountHubRoute(landing.accountId));
-      return;
-    }
-    flow.state = continueExistingLoginWithoutWorkspaces(flow.state, {
-      userId: landing.accountId,
-      email: landing.email,
-    });
-    if (flow.state.verificationEmail === null) stopVerificationTimers();
-    redraw();
+  function signInView(): m.Children {
+    const isBusy = stage.kind === "signing-in";
+    return [
+      m("h1", { id: "start-line", class: "first-run-headline text-center text-[clamp(44px,6.4vw,88px)]" }, [
+        m("span", { class: "first-run-reimagine" }, SIGN_IN_LINE_LEAD),
+        SIGN_IN_LINE_REST,
+      ]),
+      m(
+        "button",
+        {
+          id: "start-sign-in",
+          type: "button",
+          class: "first-run-button mt-14 rounded-full px-8 py-3.5 text-[18px] font-semibold",
+          disabled: isBusy,
+          onclick: signIn,
+        },
+        SIGN_IN_LABEL,
+      ),
+      // The page's quieter choices, together at its foot.
+      m("div", { class: "absolute bottom-8 flex flex-col items-center gap-4" }, [
+        reportingChoice(),
+        m(
+          "button",
+          {
+            id: "start-without-account",
+            type: "button",
+            class: "first-run-link text-[16px]",
+            onclick: () => {
+              saveReportingAnswer();
+              isFormOpen = true;
+            },
+          },
+          WITHOUT_ACCOUNT_LABEL,
+        ),
+      ]),
+    ];
   }
 
-  /** One quiet ask per second until the record fetch settles or the wait runs out. */
-  async function pollSigninLanding(): Promise<void> {
-    const landing = signinLanding;
-    if (landing === null) return;
-    if (flow.state.pending !== "existing-login") {
-      cancelSigninLanding();
-      return;
-    }
-    let verdict: SigninLanding | null = null;
-    try {
-      verdict = await fetchSigninLanding(landing.accountId);
-    } catch {
-      // An unreachable backend is asked again until the deadline.
-    }
-    if (signinLanding !== landing) return;
-    if (verdict !== null && verdict.state === "done") {
-      settleSigninLanding(verdict.workspace_count > 0);
-      return;
-    }
-    // A failed record fetch and a wait that runs out both read as a new user:
-    // the conversation continuing strands nobody, while the bare home page
-    // would skip the rest of the setup.
-    if ((verdict !== null && verdict.state === "failed") || Date.now() >= landing.deadline) {
-      settleSigninLanding(false);
-      return;
-    }
-    landing.timer = setTimeout(() => void pollSigninLanding(), SIGNIN_LANDING_POLL_MS);
-  }
-
-  /** Either answer to the reporting question: it is saved, and it is what starts the questions. */
-  function answerReporting(isAllowed: boolean): void {
-    // A failed save is asked again on the consent screen at a later launch.
-    void recordErrorReportingConsent(isAllowed).then((isRecorded) => {
-      if (!isRecorded) console.warn("The error-reporting answer could not be saved");
-    });
-    flow.state = startQuestions(flow.state, isAllowed ? REPORTING_ACCEPT_LABEL : REPORTING_DECLINE_LABEL);
-  }
-
-  function onAnswer(at: number, choiceId: ChoiceId): void {
-    if (choiceId === "verified") {
-      pressVerified();
-      return;
-    }
-    cancelSigninLanding();
-    const accounts = signedInAccounts();
-    flow.state = answerStep(flow.state, at, choiceId, {
-      signedInAccount: accounts.default,
-      knownAccountIds: accounts.all.map((account) => account.userId),
-    });
-    if (isFormChoice(flow.state.pending)) {
-      formPreset = FORM_PRESET_BY_CHOICE[flow.state.pending];
-    } else if (flow.state.pending === "signup" || flow.state.pending === "signin") {
-      void webLogin.start(SIGN_IN_INTRO_BY_CHOICE[flow.state.pending]);
-    }
-    if (flow.state.isCloudCreatePending) startCloudCreate();
-  }
-
-  function onAside(stepId: StepId): void {
-    if (stepId === "verify" || stepId === "verify-again") resendVerification();
+  function closeReportingDetailOnOutsidePress(event: Event): void {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    // The label toggles it itself, and a press inside it (the privacy link) leaves it up.
+    if (target.closest("#start-reporting-detail, #start-reporting-label") !== null) return;
+    isReportingDetailOpen = false;
+    m.redraw();
   }
 
   /**
-   * The title bar's log-in for a returning user, at any point of the flow but
-   * a cloud create under way: from the owed create's verification check to
-   * the request itself.
+   * The error-reporting answer, at the page's foot: a checkbox that starts checked, and its label, which opens what
+   * the answer means rather than toggling it, so reading about it never changes it.
    */
-  function logInExisting(): void {
-    if (isSubmittingCloud || flow.state.isCloudCreatePending) return;
-    cancelSigninLanding();
-    flow.state = chooseExistingLogin(flow.state);
-    void webLogin.start("Sign in to see your existing workspaces.");
+  function reportingChoice(): m.Children {
+    return m("div", { class: "relative flex items-center justify-center gap-2.5" }, [
+      m("input", {
+        id: "start-reporting-checkbox",
+        type: "checkbox",
+        class: "first-run-checkbox",
+        "aria-label": REPORTING_LABEL,
+        checked: isReportingAllowed,
+        onchange: (event: Event) => {
+          isReportingAllowed = (event.target as HTMLInputElement).checked;
+        },
+      }),
+      m(
+        "button",
+        {
+          id: "start-reporting-label",
+          type: "button",
+          class: "first-run-link text-[15px]",
+          "aria-expanded": isReportingDetailOpen ? "true" : "false",
+          "aria-controls": "start-reporting-detail",
+          onclick: () => {
+            isReportingDetailOpen = !isReportingDetailOpen;
+          },
+        },
+        REPORTING_LABEL,
+      ),
+      isReportingDetailOpen
+        ? [
+            m(
+              "div",
+              {
+                id: "start-reporting-detail",
+                role: "dialog",
+                "aria-label": REPORTING_LABEL,
+                class: "first-run-popover absolute bottom-full left-1/2 z-20 mb-3 w-[min(720px,92vw)] -translate-x-1/2",
+                // A press anywhere else closes it without being swallowed, so Sign in still signs in.
+                oncreate: (vnode: m.VnodeDOM) => {
+                  (vnode.dom as HTMLElement).focus();
+                  document.addEventListener("pointerdown", closeReportingDetailOnOutsidePress, true);
+                },
+                onremove: () => document.removeEventListener("pointerdown", closeReportingDetailOnOutsidePress, true),
+                tabindex: -1,
+                onkeydown: (event: KeyboardEvent) => {
+                  if (event.key === "Escape") isReportingDetailOpen = false;
+                },
+              },
+              [
+                m("p", `${REPORTING_CONSENT_QUESTION} ${REPORTING_DETAIL_BODY}`),
+                m("p", { class: "mt-3" }, [
+                  "Our privacy policy is ",
+                  m(
+                    "a",
+                    { class: "underline", href: PRIVACY_POLICY_URL, target: "_blank", rel: "noopener" },
+                    "here",
+                  ),
+                  ".",
+                ]),
+              ],
+            ),
+          ]
+        : null,
+    ]);
   }
 
-  // An answer that is being acted on cannot be taken back: the POST it caused
-  // is already on its way, and a create that lands must find it in place.
-  function onUndo(at: number): void {
-    if (isSubmittingCloud) return;
-    stopVerificationTimers();
-    cancelSigninLanding();
-    flow.state = undoAnswer(flow.state, at);
-    reopenedStepIndex = at;
-    formPreset = null;
-  }
-
-  function onUndoReporting(): void {
-    if (isSubmittingCloud) return;
-    stopVerificationTimers();
-    cancelSigninLanding();
-    flow.state = undoReporting(flow.state);
-    reopenedStepIndex = null;
-    isReportingReopened = true;
-    formPreset = null;
-  }
-
-  function toggleManifestoPoint(id: string): void {
-    if (openManifestoIds.has(id)) openManifestoIds.delete(id);
-    else openManifestoIds.add(id);
-  }
-
-  function closeCreateForm(): void {
-    formPreset = null;
-    flow.state = dismissPendingModal(flow.state);
-  }
-
-  // The sign-in modals report through the accounts store: an account appearing
-  // while the flow waits on one advances it, whether or not the modal is still
-  // up. The existing-login answer waits for the landing verdict instead: the
-  // account's home page when it has workspaces, the conversation otherwise.
-  function syncAccounts(): void {
-    const accounts = getAppContext().stores.accounts;
-    const pending = flow.state.pending;
-    if (pending === "existing-login") {
-      if (signinLanding !== null) return;
-      if (webLogin.state === "done" || (accounts.hasAccounts && !webLogin.isOpen)) {
-        webLogin.noteSignedIn();
-        // The account the sign-in reported, else the one that landed. The
-        // poll can name the account before the accounts frame lists it, so
-        // its user id is taken first.
-        const reportedUserId = webLogin.userId;
-        const reportedEmail = webLogin.email;
-        const signedIn =
-          accounts.accounts.find(
-            (account) =>
-              reportedEmail !== "" && account.email === reportedEmail,
-          ) ?? accounts.accounts[0];
-        webLogin.dismiss();
-        const accountId = reportedUserId !== "" ? reportedUserId : (signedIn?.user_id ?? "");
-        const email = reportedEmail !== "" ? reportedEmail : (signedIn?.email ?? "");
-        if (accountId === "") {
-          // Nothing names the account that landed, so there is no account to
-          // continue the conversation under.
-          flow.state = dismissPendingModal(flow.state);
-          void markOnboardingComplete();
-          getAppContext().shell.routeToHub();
-          return;
-        }
-        // The window becomes the signed-in account's either way: the home-page
-        // landing and a continued conversation's create both belong to it.
-        getAppContext().shell.adoptAccount(accountId);
-        signinLanding = { accountId, email, deadline: Date.now() + SIGNIN_LANDING_WAIT_MS, timer: null };
-        void pollSigninLanding();
-      } else if (!webLogin.isOpen) {
-        flow.state = dismissPendingModal(flow.state);
-      }
-      return;
+  /** Signed in: the welcome the creation page carries on, with what the page is waiting on under it. */
+  function signedInView(account: FirstRunAccount): m.Children {
+    const heading = m(
+      "h1",
+      { id: "start-welcome", class: "first-run-headline text-center text-[clamp(40px,4.6vw,64px)]" },
+      welcomeHeading(firstNameOf(account)),
+    );
+    if (stage.kind === "verify") {
+      return [
+        heading,
+        m("p", { id: "start-verify", class: "mt-6 text-center text-[18px] font-semibold" }, VERIFY_LINE),
+        m(
+          "p",
+          { class: "mt-2 max-w-[480px] text-center text-[16px]" },
+          `Open the link we sent to ${account.email} and your workspace will start.`,
+        ),
+        stage.lastResend === null
+          ? null
+          : m(
+              "p",
+              { id: "start-verify-note", class: "mt-3 text-center text-[14px] text-[color:var(--first-run-ink-muted)]" },
+              verificationEmailSentNote(account.email, stage.lastResend),
+            ),
+        m("button", { id: "start-resend", type: "button", class: "first-run-link mt-6 text-[15px]", onclick: resend }, RESEND_EMAIL_LABEL),
+      ];
     }
-    if (pending === "signup" || pending === "signin") {
-      // Either signal settles the question: the account the sign-in flow
-      // reports, or an account that was not signed in when the button was
-      // pressed landing on the channel. A closed modal does not end the wait:
-      // the sign-in keeps listening after a dismiss, and an account that lands
-      // later advances the flow as if the modal had reported it. Undo, or
-      // pressing a button again, is what replaces the wait.
-      const settled = settleAwaitedSignIn(
-        flow.state,
-        signedInAccounts().all,
-        webLogin.state === "done" ? webLogin.email : "",
-      );
-      if (settled !== flow.state) {
-        // The cached defaults may have been read before this account existed.
-        defaults = null;
-        flow.state = settled;
-        // Dismissing stops the poll, so tell the flow the sign-in landed
-        // first -- on this branch the channel may well have got there before
-        // any poll did, and the raise is the poll's job otherwise.
-        webLogin.noteSignedIn();
-        webLogin.dismiss();
-        if (flow.state.isCloudCreatePending) startCloudCreate();
-      }
+    if (stage.kind === "refused") {
+      return [
+        heading,
+        m("p", { id: "start-refused", class: "mt-6 max-w-[520px] text-center text-[16px]" }, stage.message),
+        m(
+          "button",
+          { id: "start-retry", type: "button", class: "first-run-button mt-6 rounded-full px-6 py-2.5 text-[16px] font-semibold", onclick: retry },
+          TRY_AGAIN_LABEL,
+        ),
+      ];
     }
+    return [heading, m("p", { id: "start-setting-up", class: "mt-6 text-center text-[16px]" }, SETTING_UP_LINE)];
   }
 
   return {
     oninit() {
       loadDefaults();
-      flow.logInExisting = logInExisting;
-      // The shell drew the title bar ahead of this page, before the log-in was registered.
-      redraw();
     },
     onupdate() {
-      syncAccounts();
+      syncSignIn();
     },
     onremove() {
-      stopVerificationTimers();
-      cancelSigninLanding();
-      if (flow.logInExisting === logInExisting) flow.logInExisting = null;
+      isRemoved = true;
+      stopTimers();
     },
     view() {
-      const state = flow.state;
-      const pointsAt = schedule.answerAt + streamDurationMs(MANIFESTO_HEADING) + CHAT_STREAM_STEP_MS;
-      // Every child is keyed: Mithril rejects a fragment that mixes keyed
-      // vnodes with holes, so optional pieces are appended rather than nulled.
-      const children: m.Children[] = [
-        agentTurn({
-          key: "manifesto-opener",
-          text: MANIFESTO_OPENER,
-          emphasis: MANIFESTO_OPENER_EMPHASIS,
-          startAtMs: schedule.openerAt,
-        }),
-        userTurn({ key: "manifesto-question", delayMs: schedule.questionAt, text: MANIFESTO_QUESTION }),
-        agentTurn({ key: "manifesto-answer", text: MANIFESTO_HEADING, startAtMs: schedule.answerAt }),
-        disclosureList({
-          key: "manifesto-points",
-          startAtMs: pointsAt,
-          points: MANIFESTO_POINTS,
-          openIds: openManifestoIds,
-          onToggle: toggleManifestoPoint,
-        }),
-      ];
-      children.push(
-        agentTurn({
-          key: "manifesto-reporting",
-          id: "start-reporting-ask",
-          text: REPORTING_ASK,
-          startAtMs: schedule.reportingAt,
-          isInstant: state.isStarted || isReportingReopened,
-          more: {
-            id: "start-reporting-more",
-            label: REPORTING_MORE_LABEL,
-            detail: REPORTING_MORE_DETAIL,
-            isOpen: isReportingMoreOpen,
-            onToggle: () => {
-              isReportingMoreOpen = !isReportingMoreOpen;
-            },
-          },
-        }),
+      const account = accountOf(stage);
+      return m(
+        "div",
+        {
+          id: "start-flow",
+          "data-stage": stage.kind,
+          class: "first-run relative flex min-h-full w-full flex-col items-center justify-center px-6 py-16",
+        },
+        [
+          m(
+            "div",
+            { key: "start-content", class: "contents" },
+            account === null ? signInView() : signedInView(account),
+          ),
+          ...(isFormOpen
+            ? [createFormModal({
+                key: "start-create-form",
+                id: "start-create-form",
+                onClose: () => {
+                  isFormOpen = false;
+                },
+                initialPreset: "local",
+                isOnboardingDrivenByAgent: true,
+                onSubmitted: (operationId: string) => {
+                  isFormOpen = false;
+                  firstRun.noteCreate(operationId, null);
+                  m.route.set(`/creating/${operationId}`);
+                },
+              })]
+            : []),
+        ],
       );
-      if (!state.isStarted) {
-        children.push(
-          answerRow({
-            key: "manifesto-reporting-answers",
-            delayMs: isReportingReopened ? 0 : schedule.answersAt,
-            buttons: [
-              {
-                id: "reporting-no",
-                label: REPORTING_DECLINE_LABEL,
-                isEmphasized: false,
-                onPress: () => answerReporting(false),
-              },
-              {
-                id: "reporting-yes",
-                label: REPORTING_ACCEPT_LABEL,
-                isEmphasized: true,
-                onPress: () => answerReporting(true),
-              },
-            ],
-          }),
-        );
-      }
-      children.push(
-        ...transcriptTurns(state.entries, {
-          isInstant: false,
-          isPressable: true,
-          reopenedStepIndex,
-          onAnswer,
-          onUndo: isSubmittingCloud ? undefined : onUndo,
-          onUndoReporting: isSubmittingCloud ? undefined : onUndoReporting,
-          onAside,
-        }),
-      );
-      if (signinLanding !== null) {
-        children.push(
-          agentTurn({
-            key: "signin-landing-checking",
-            text: SIGNIN_LANDING_CHECKING_TEXT,
-            startAtMs: FLOW_THINK_MS,
-          }),
-        );
-      }
-      // A create that is being checked or sent says which; the verification
-      // wait, which polls the same check, has its own question instead.
-      if (state.isCloudCreatePending && (isCheckingVerification || isSubmittingCloud)) {
-        children.push(
-          pendingTurn({
-            key: `cloud-create-pending-${state.entries.length}`,
-            id: "start-cloud-create-pending",
-            delayMs: cloudCreatePendingAtMs(state.entries),
-            text: isSubmittingCloud ? CLOUD_CREATE_STARTING_TEXT : CLOUD_CREATE_CHECKING_TEXT,
-          }),
-        );
-      }
-      children.push(scrollAnchor(state.entries.length));
-      if (formPreset !== null) {
-        children.push(
-          createFormModal({
-            key: "start-create-form",
-            id: "start-create-form",
-            onClose: closeCreateForm,
-            initialPreset: formPreset,
-            isOnboardingDrivenByAgent: true,
-            onSubmitted: (operationId: string) => {
-              formPreset = null;
-              flow.state = finishPendingModal(flow.state);
-              enterCreation(operationId);
-            },
-          }),
-        );
-      }
-      return m("div", { id: "start-flow", class: TRANSCRIPT_COLUMN_CLASS }, children);
     },
   };
 };

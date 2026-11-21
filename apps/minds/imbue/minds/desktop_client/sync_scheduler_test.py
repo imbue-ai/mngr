@@ -6,6 +6,7 @@ into the shared in-memory fake connector; device B signs in fresh and pulls.
 
 import json
 import threading
+import time
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -32,10 +33,14 @@ from imbue.minds.desktop_client.conftest import seed_shared_with_me_listing
 from imbue.minds.desktop_client.forward_identity import ForwardHeadersFile
 from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
 from imbue.minds.desktop_client.forward_identity import IDENTITY_HEADER
+from imbue.minds.desktop_client.mock_agent_creator_test import InFlightAgentCreator
+from imbue.minds.desktop_client.mock_agent_creator_test import InFlightCreateAttempt
+from imbue.minds.desktop_client.mock_agent_creator_test import make_in_flight_agent_creator
 from imbue.minds.desktop_client.shared_with_me_store import SHARED_WITH_ME_DOCUMENT_KIND
 from imbue.minds.desktop_client.shared_with_me_store import SharedAccessVerdict
 from imbue.minds.desktop_client.shared_with_me_store import SharedWithMeStore
 from imbue.minds.desktop_client.sync_scheduler import InitialSyncState
+from imbue.minds.desktop_client.sync_scheduler import SyncLoopTiming
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.testing import decode_written_profile_snapshot
 from imbue.minds.desktop_client.workspace_profile_writer import WorkspaceProfileWriter
@@ -493,3 +498,90 @@ def test_a_failed_account_listing_keeps_every_shared_with_me_cache(tmp_path: Pat
 
     assert device.shared_store.list_cached_user_ids() == [device.user_id]
     assert change_signals == []
+
+
+class _CountingPassScheduler(WorkspaceSyncScheduler):
+    """Scheduler whose pass only records that it ran, to observe when the loop runs passes."""
+
+    _passes: threading.Semaphore = PrivateAttr(default_factory=lambda: threading.Semaphore(0))
+
+    def run_one_pass(self) -> None:
+        self._passes.release()
+
+
+def _make_counting_scheduler(
+    tmp_path: Path, creator: InFlightAgentCreator, timing: SyncLoopTiming
+) -> _CountingPassScheduler:
+    record_store, session_store = make_sync_test_device(tmp_path, f"hold-{uuid4().hex}", make_fake_imbue_cloud_cli())
+    resolver = make_resolver_with_data(agents_json=json.dumps({"agents": []}))
+    return _CountingPassScheduler(
+        record_store=record_store, session_store=session_store, resolver=resolver, agent_creator=creator, timing=timing
+    )
+
+
+def _make_live_creator(tmp_path: Path, root_concurrency_group: ConcurrencyGroup) -> InFlightAgentCreator:
+    attempt = InFlightCreateAttempt(provider_instance_name="imbue_cloud_user", host_name="workspace-1")
+    return make_in_flight_agent_creator(tmp_path, root_concurrency_group, (attempt,))
+
+
+def test_periodic_pass_waits_for_the_create_and_its_settle_window(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    creator = _make_live_creator(tmp_path, root_concurrency_group)
+    timing = SyncLoopTiming(
+        tick_seconds=0.05, create_hold_poll_seconds=0.01, post_create_settle_seconds=1.0, max_create_hold_seconds=60.0
+    )
+    scheduler = _make_counting_scheduler(tmp_path, creator, timing)
+
+    with ConcurrencyGroup(name="test-sync-hold") as concurrency_group:
+        scheduler.start(concurrency_group)
+        try:
+            assert scheduler._passes.acquire(timeout=5.0)
+
+            # Many ticks elapse while the create runs; none of them runs a pass.
+            assert not scheduler._passes.acquire(timeout=0.5)
+
+            creator.in_flight_attempts = ()
+            # The settle window counts from the last poll that saw the create, which a busy machine can leave
+            # well behind the create's end, so only the window's first half is held to running no pass.
+            assert not scheduler._passes.acquire(timeout=timing.post_create_settle_seconds / 2)
+            assert scheduler._passes.acquire(timeout=5.0)
+        finally:
+            scheduler.stop()
+
+
+def test_kick_runs_a_pass_while_a_create_is_in_flight(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    creator = _make_live_creator(tmp_path, root_concurrency_group)
+    timing = SyncLoopTiming(tick_seconds=0.05, create_hold_poll_seconds=0.01, max_create_hold_seconds=60.0)
+    scheduler = _make_counting_scheduler(tmp_path, creator, timing)
+
+    with ConcurrencyGroup(name="test-sync-hold-kick") as concurrency_group:
+        scheduler.start(concurrency_group)
+        try:
+            assert scheduler._passes.acquire(timeout=5.0)
+            assert not scheduler._passes.acquire(timeout=0.3)
+
+            scheduler.kick()
+            assert scheduler._passes.acquire(timeout=5.0)
+        finally:
+            scheduler.stop()
+
+
+def test_periodic_pass_hold_ends_after_the_maximum_even_if_the_create_still_runs(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    creator = _make_live_creator(tmp_path, root_concurrency_group)
+    timing = SyncLoopTiming(tick_seconds=0.05, create_hold_poll_seconds=0.01, max_create_hold_seconds=0.3)
+    scheduler = _make_counting_scheduler(tmp_path, creator, timing)
+
+    with ConcurrencyGroup(name="test-sync-hold-max") as concurrency_group:
+        scheduler.start(concurrency_group)
+        try:
+            assert scheduler._passes.acquire(timeout=5.0)
+            first_pass_at = time.monotonic()
+            assert scheduler._passes.acquire(timeout=5.0)
+            assert time.monotonic() - first_pass_at >= timing.max_create_hold_seconds
+        finally:
+            scheduler.stop()

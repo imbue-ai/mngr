@@ -1955,6 +1955,9 @@ class ImbueCloudProvider(BaseProviderInstance, LeasePublishedEndpointsInterface)
             host_dir_override=self._load_resolved_host_dir(host_id),
             is_freshly_leased_by_this_process=is_freshly_leased_by_this_process,
             published_endpoint_source=self,
+            lease_published_endpoints=(
+                tuple(_published_endpoints_of_lease(lease)) if is_freshly_leased_by_this_process else None
+            ),
         )
         self._evict_cached_host(host_id, replacement=host)
         return host

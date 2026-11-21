@@ -150,9 +150,9 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
                 log_sink.put(LOG_SENTINEL)
 
                 # The creation page enters the workspace once its status poll
-                # sees DONE: the ready line streams, then the wash covers the
-                # window and the shell swaps the route under it (a few seconds
-                # in all). Entry is an in-app route change: the SPA
+                # sees DONE: the wash covers the window while the ready line
+                # streams, and the shell swaps the route under it (well under
+                # a second). Entry is an in-app route change: the SPA
                 # extracts the agent id from the `/goto/<agent>/` redirect URL
                 # and routes to `/workspace/<agent-id>` (the workspace
                 # surface), so that main-frame URL is the observable

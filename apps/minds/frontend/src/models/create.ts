@@ -116,6 +116,8 @@ export interface CreateFormDefaults {
   local_prerequisites: LocalBackendPrerequisite[];
   /** The compute mode the local preset selects: the first local backend that is ready here. */
   local_launch_mode: string;
+  /** Whether the first run's own create runs on this computer: an operator launch on a local template worktree. */
+  is_first_run_local?: boolean;
 }
 
 export interface OrphanedFailedDestroy {

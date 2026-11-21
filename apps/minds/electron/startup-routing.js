@@ -12,8 +12,7 @@
  * is reopened (dock-icon click, second launch) with no window open.
  *
  * Returns one of:
- *   'start'   -> the first-run start flow (`/start`): the manifesto exchange
- *                and the first workspace's questions, asked as a chat
+ *   'start'   -> the first run's sign-in page (`/start`)
  *   'consent' -> the once-per-install error-reporting consent screen (`/consent`)
  *   'create'  -> the home / create-agent page (`/`)
  *   'restore' -> reopen the previous session's saved windows
@@ -30,9 +29,11 @@
  *      non-workspace saved window must NOT suppress the start flow for an
  *      install that has never made a workspace. (A bare `/` window survives
  *      restore-filtering because it isn't a workspace URL, so without this
- *      clause it would silently win over the start flow.)
- *   3. The error-reporting consent screen was never answered -> consent.
- *      Answering it records the answer, so the route never recurs.
+ *      clause it would silently win over the start flow.) The start flow's
+ *      sign-in page carries the error-reporting answer itself.
+ *   3. The error-reporting consent screen was never answered -> consent: an
+ *      install that got past the start flow without answering. Answering it
+ *      records the answer, so the route never recurs.
  *   4. Nothing restorable -> the home/create page.
  *   5. Otherwise -> restore the saved windows.
  *

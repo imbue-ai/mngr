@@ -1,11 +1,21 @@
 import base64
+import io
 import json
 import re
 import shlex
 import threading
+from collections.abc import Callable
 from collections.abc import Sequence
+from pathlib import Path
+
+import httpx2
+import pytest
+from pydantic import ValidationError
+from starlette.testclient import TestClient
 
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.welcome_chat import ChatAppForwardRoute
+from imbue.minds.desktop_client.welcome_chat import ForwardSeedAttempt
 from imbue.minds.desktop_client.welcome_chat import SEED_SCRIPT_PATH
 from imbue.minds.desktop_client.welcome_chat import SEED_TIMEOUT_SECONDS
 from imbue.minds.desktop_client.welcome_chat import WelcomeChatOutcome
@@ -15,6 +25,7 @@ from imbue.minds.desktop_client.welcome_chat import WelcomeChatSeeder
 from imbue.minds.desktop_client.welcome_chat import WelcomeChatTurn
 from imbue.minds.desktop_client.welcome_chat import build_seed_welcome_chat_args
 from imbue.minds.desktop_client.welcome_chat import seed_welcome_chat
+from imbue.minds.desktop_client.welcome_chat import seed_welcome_chat_through_forward
 from imbue.minds.primitives import CreateAttemptId
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
@@ -22,7 +33,16 @@ from imbue.minds.utils.testing import HookedMngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.minds.utils.testing import ScriptedMngrCaller
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentInstanceKey
+from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.testing import capture_loguru
+from imbue.mngr_forward.auth import FileAuthStore
+from imbue.mngr_forward.data_types import ForwardServiceStrategy
+from imbue.mngr_forward.envelope import EnvelopeWriter
+from imbue.mngr_forward.primitives import MNGR_FORWARD_SESSION_COOKIE_NAME
+from imbue.mngr_forward.resolver import ForwardResolver
+from imbue.mngr_forward.server import create_forward_app
+from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 
 _AGENT_ID = AgentId("agent-0123456789abcdef0123456789abcdef")
 
@@ -53,6 +73,27 @@ def test_the_seed_runs_the_templates_script_in_the_workspace_with_the_transcript
             {"role": "assistant", "text": 'It works "for you".\nNo lock-in.'},
         ],
     }
+
+
+def _decoded_seed_body(welcome_chat: WelcomeChatRequest) -> dict[str, object]:
+    inner = shlex.split(build_seed_welcome_chat_args(_AGENT_ID, welcome_chat)[3])
+    return json.loads(base64.b64decode(inner[3]).decode("utf-8"))
+
+
+def test_a_first_run_seed_carries_no_turns_the_arrival_flag_and_the_users_words() -> None:
+    welcome_chat = WelcomeChatRequest(title="Welcome", is_first_run=True, context="I want to use Studio for: Writing.")
+
+    assert _decoded_seed_body(welcome_chat) == {
+        "title": "Welcome",
+        "turns": [],
+        "is_first_run": True,
+        "context": "I want to use Studio for: Writing.",
+    }
+
+
+def test_a_seed_that_is_not_a_first_run_needs_a_turn() -> None:
+    with pytest.raises(ValidationError):
+        WelcomeChatRequest(title="Welcome")
 
 
 def test_a_seeded_chat_reads_its_id_off_the_scripts_json_line() -> None:
@@ -145,7 +186,7 @@ def test_a_conversation_handed_over_while_the_workspace_was_built_is_seeded_when
 
     (argv,) = caller.calls
     assert argv[:3] == ["exec", "--agent", str(_AGENT_ID)]
-    assert _seeded_transcript(argv) == _request().model_dump(mode="json")
+    assert _seeded_transcript(argv) == _request().seed_body()
 
 
 def test_a_conversation_handed_over_again_before_the_attempt_finishes_replaces_the_one_held() -> None:
@@ -161,7 +202,38 @@ def test_a_conversation_handed_over_again_before_the_attempt_finishes_replaces_t
     seeder.seed_held(_ATTEMPT_ID, _AGENT_ID)
 
     (argv,) = caller.calls
-    assert _seeded_transcript(argv) == revisited.model_dump(mode="json")
+    assert _seeded_transcript(argv) == revisited.seed_body()
+
+
+def test_a_first_run_answer_given_after_the_seed_is_handed_over_again_as_the_user_enters() -> None:
+    """The workspace is seeded the moment it finishes; a studio type picked after that still reaches it, in one
+    more hand-over when the page asks for the seed on Continue, and an unchanged answer is not sent twice."""
+    caller = RecordingMngrCaller(result=_SEEDED)
+    seeder = _seeder(caller)
+    before = WelcomeChatRequest(title="Welcome", is_first_run=True, context="")
+    after = WelcomeChatRequest(title="Welcome", is_first_run=True, context="I want to use Studio for: Film.")
+
+    seeder.hold(_ATTEMPT_ID, before)
+    seeder.seed_held(_ATTEMPT_ID, _AGENT_ID)
+    outcome = seeder.seed(_ATTEMPT_ID, _AGENT_ID, after)
+    seeder.seed(_ATTEMPT_ID, _AGENT_ID, after)
+
+    assert outcome.is_seeded
+    assert [_seeded_transcript(argv)["context"] for argv in caller.calls] == ["", "I want to use Studio for: Film."]
+
+
+def test_a_conversation_that_is_not_a_first_run_is_never_handed_over_twice() -> None:
+    caller = RecordingMngrCaller(result=_SEEDED)
+    seeder = _seeder(caller)
+    later = WelcomeChatRequest(
+        title="Welcome", turns=(*_request().turns, WelcomeChatTurn(role=WelcomeChatRole.ASSISTANT, text="Later"))
+    )
+
+    seeder.hold(_ATTEMPT_ID, _request())
+    seeder.seed_held(_ATTEMPT_ID, _AGENT_ID)
+    seeder.seed(_ATTEMPT_ID, _AGENT_ID, later)
+
+    assert len(caller.calls) == 1
 
 
 def test_an_attempt_whose_page_handed_nothing_over_is_not_seeded() -> None:
@@ -255,3 +327,235 @@ def test_a_failed_seed_logs_its_duration_and_one_warning_with_the_reason() -> No
         _seed_warning_line("Could not seed the welcome chat: the chat app answered HTTP 503")
     ]
     assert not [line for line in lines if line.startswith("Seeded welcome chat")]
+
+
+_FORWARD_PORT = 8421
+_SEED_URL = f"https://127.0.0.1:{_FORWARD_PORT}/api/chats/seed"
+_CHAT_ORIGIN_HOST = f"chat.{_AGENT_ID}.localhost"
+
+ForwardHandler = Callable[[httpx2.Request], httpx2.Response]
+
+
+def _forward_route(handler: ForwardHandler, window_seconds: float = 30.0) -> ChatAppForwardRoute:
+    return ChatAppForwardRoute(
+        forward_port=_FORWARD_PORT,
+        make_client=lambda: httpx2.Client(transport=httpx2.MockTransport(handler), follow_redirects=False),
+        window_seconds=window_seconds,
+        retry_interval_seconds=0.0,
+    )
+
+
+def _answering(*answers: httpx2.Response | Exception) -> tuple[list[httpx2.Request], ForwardHandler]:
+    """A forward that answers each request with the next of ``answers`` (the last one repeats), and what it was sent."""
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        answer = answers[min(len(requests), len(answers)) - 1]
+        if isinstance(answer, Exception):
+            raise answer
+        # A fresh copy: a response's body stream is consumed by the client that reads it.
+        return httpx2.Response(answer.status_code, headers=answer.headers, content=answer.content)
+
+    return requests, handler
+
+
+_CREATED = httpx2.Response(201, json={"chat_id": "agent-over-forward", "name": "main", "display_name": "Main"})
+_FORWARD_NOT_ROUTED = httpx2.Response(503, text="Backend not yet available")
+_CHAT_APP_NOT_READY = httpx2.Response(
+    503, json={"detail": "The chat app has not read its agent list from mngr yet; try again shortly."}
+)
+
+
+def _forward_seeder(caller: MngrCaller, route: ChatAppForwardRoute) -> WelcomeChatSeeder:
+    return WelcomeChatSeeder(mngr_caller=caller, backend_resolver=MngrCliBackendResolver(), chat_app_route=route)
+
+
+def _seed_over(route: ChatAppForwardRoute) -> ForwardSeedAttempt:
+    with route.make_client() as client:
+        return seed_welcome_chat_through_forward(route, client, _AGENT_ID, _request())
+
+
+def test_the_seed_is_posted_to_the_chat_apps_origin_through_the_forward_without_running_mngr() -> None:
+    requests, handler = _answering(_CREATED)
+    caller = RecordingMngrCaller(result=_SEEDED)
+
+    outcome = _forward_seeder(caller, _forward_route(handler)).seed(_ATTEMPT_ID, _AGENT_ID, _request())
+
+    assert outcome == WelcomeChatOutcome(chat_id="agent-over-forward")
+    (request,) = requests
+    assert request.method == "POST"
+    assert str(request.url) == _SEED_URL
+    assert request.headers["host"] == _CHAT_ORIGIN_HOST
+    assert json.loads(request.content) == _request().seed_body()
+    assert caller.calls == []
+
+
+def test_the_forward_route_retries_while_the_chat_app_cannot_be_reached_or_is_not_ready() -> None:
+    requests, handler = _answering(
+        httpx2.ConnectError("connection refused"), _FORWARD_NOT_ROUTED, _CHAT_APP_NOT_READY, _CREATED
+    )
+
+    attempt = _seed_over(_forward_route(handler))
+
+    assert attempt == ForwardSeedAttempt(outcome=WelcomeChatOutcome(chat_id="agent-over-forward"))
+    assert len(requests) == 4
+
+
+def test_a_seed_the_forward_cannot_deliver_within_its_window_goes_through_mngr_exec() -> None:
+    _requests, handler = _answering(_CHAT_APP_NOT_READY)
+    caller = RecordingMngrCaller(result=_SEEDED)
+
+    with capture_loguru(level="INFO") as log_output:
+        outcome = _forward_seeder(caller, _forward_route(handler, window_seconds=0.0)).seed(
+            _ATTEMPT_ID, _AGENT_ID, _request()
+        )
+
+    assert outcome == WelcomeChatOutcome(chat_id="agent-seeded")
+    (argv,) = caller.calls
+    assert argv[:3] == ["exec", "--agent", str(_AGENT_ID)]
+    assert (
+        f"Could not seed the welcome chat in workspace {_AGENT_ID} through the forward (not delivered within 0s: "
+        "The chat app has not read its agent list from mngr yet; try again shortly.); seeding it through mngr exec"
+    ) in log_output.getvalue().splitlines()
+
+
+def test_an_answer_only_an_unreachable_route_gives_sends_the_seed_through_mngr_exec() -> None:
+    """A redirect, an auth refusal, or a chat app from before the seed route: the route, not the seed, is at fault."""
+    for answer in (
+        httpx2.Response(302, headers={"Location": "https://localhost:8421/goto/"}),
+        httpx2.Response(403, text="Not authenticated"),
+        httpx2.Response(404, json={"detail": "Not Found"}),
+    ):
+        requests, handler = _answering(answer)
+        caller = RecordingMngrCaller(result=_SEEDED)
+
+        outcome = _forward_seeder(caller, _forward_route(handler)).seed(_ATTEMPT_ID, _AGENT_ID, _request())
+
+        assert outcome == WelcomeChatOutcome(chat_id="agent-seeded")
+        assert len(requests) == 1
+        assert len(caller.calls) == 1
+
+
+def test_a_route_whose_client_cannot_be_built_sends_the_seed_through_mngr_exec() -> None:
+    def no_ca_certificate() -> httpx2.Client:
+        raise FileNotFoundError("no such file: forward-ca.pem")
+
+    caller = RecordingMngrCaller(result=_SEEDED)
+    route = ChatAppForwardRoute(forward_port=_FORWARD_PORT, make_client=no_ca_certificate)
+
+    outcome = _forward_seeder(caller, route).seed(_ATTEMPT_ID, _AGENT_ID, _request())
+
+    assert outcome == WelcomeChatOutcome(chat_id="agent-seeded")
+    assert len(caller.calls) == 1
+
+
+def test_a_request_that_failed_after_it_went_out_is_not_retried_over_the_forward() -> None:
+    requests, handler = _answering(httpx2.ReadTimeout("timed out"))
+
+    attempt = _seed_over(_forward_route(handler))
+
+    assert attempt == ForwardSeedAttempt(unavailable_reason="the request failed: ReadTimeout: timed out")
+    assert len(requests) == 1
+
+
+def test_the_chat_apps_refusal_is_the_seeds_outcome_rather_than_a_reason_to_run_mngr() -> None:
+    _requests, handler = _answering(httpx2.Response(409, json={"detail": "A chat named Main already exists"}))
+    caller = RecordingMngrCaller(result=_SEEDED)
+
+    outcome = _forward_seeder(caller, _forward_route(handler)).seed(_ATTEMPT_ID, _AGENT_ID, _request())
+
+    assert outcome == WelcomeChatOutcome(
+        failure_detail="the chat app refused the seed: A chat named Main already exists"
+    )
+    assert caller.calls == []
+
+
+def test_a_created_answer_without_a_chat_id_is_a_failed_seed() -> None:
+    _requests, handler = _answering(httpx2.Response(201, json={"name": "main"}))
+
+    attempt = _seed_over(_forward_route(handler))
+
+    assert attempt == ForwardSeedAttempt(
+        outcome=WelcomeChatOutcome(failure_detail="the chat app answered without a chat id")
+    )
+
+
+def test_a_seed_through_the_forward_logs_its_start_its_duration_and_the_chat_it_opened() -> None:
+    _requests, handler = _answering(_CREATED)
+
+    with capture_loguru(level="DEBUG") as log_output:
+        _forward_seeder(RecordingMngrCaller(result=_SEEDED), _forward_route(handler)).seed(
+            _ATTEMPT_ID, _AGENT_ID, _request()
+        )
+
+    lines = log_output.getvalue().splitlines()
+    closed = _assert_seed_span_timed(lines)
+    seeded = f"Seeded welcome chat agent-over-forward for create attempt {_ATTEMPT_ID}"
+    assert lines.index(_SEED_STARTED_LINE) < lines.index(closed) < lines.index(seeded)
+
+
+_PREAUTH_COOKIE = "preauth-welcome-seed"
+_WORKSPACE_HOST_ID = HostId("host-0123456789abcdef0123456789abcdef")
+
+
+def _seed_through_a_real_forward(
+    tmp_path: Path, chat_app: ForwardHandler, cookie: str
+) -> tuple[ForwardSeedAttempt, list[httpx2.Request]]:
+    """Seed through the ``mngr forward`` app itself, whose chat service is ``chat_app``, with ``cookie`` as the session."""
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    instance_key = AgentInstanceKey.build(_AGENT_ID, _WORKSPACE_HOST_ID)
+    resolver.add_known_agent(instance_key)
+    # As a workspace registers them: each service under a minted ``<name>-<rand>`` origin label.
+    resolver.update_services(
+        instance_key,
+        {"system_interface": "http://shell.invalid", "chat": "http://chat.invalid"},
+        {"system-interface-a1b2c3": "system_interface", "chat-d4e5f6": "chat"},
+    )
+    forward = create_forward_app(
+        auth_store=FileAuthStore(data_directory=tmp_path),
+        resolver=resolver,
+        tunnel_manager=SSHTunnelManager(),
+        envelope_writer=EnvelopeWriter(output=io.StringIO()),
+        listen_host="127.0.0.1",
+        listen_port=_FORWARD_PORT,
+        preauth_cookie_value=_PREAUTH_COOKIE,
+        allow_host_loopback=True,
+    )
+    backend_requests: list[httpx2.Request] = []
+
+    def backend(request: httpx2.Request) -> httpx2.Response:
+        backend_requests.append(request)
+        return chat_app(request)
+
+    with TestClient(
+        forward, base_url=f"https://127.0.0.1:{_FORWARD_PORT}", cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie}
+    ) as client:
+        forward.state.http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(backend))
+        route = ChatAppForwardRoute(
+            forward_port=_FORWARD_PORT, make_client=lambda: client, window_seconds=5.0, retry_interval_seconds=0.01
+        )
+        attempt = seed_welcome_chat_through_forward(route, client, _AGENT_ID, _request())
+    return attempt, backend_requests
+
+
+def test_the_forward_routes_the_chat_apps_name_to_its_service_and_retries_until_it_is_ready(tmp_path: Path) -> None:
+    """The chat app's origin is addressed by its service name, not its minted label, with the session cookie."""
+    _chat_requests, chat_app = _answering(_CHAT_APP_NOT_READY, _CREATED)
+
+    attempt, backend_requests = _seed_through_a_real_forward(tmp_path, chat_app, _PREAUTH_COOKIE)
+
+    assert attempt == ForwardSeedAttempt(outcome=WelcomeChatOutcome(chat_id="agent-over-forward"))
+    assert [str(request.url) for request in backend_requests] == ["http://chat.invalid/api/chats/seed"] * 2
+    assert json.loads(backend_requests[-1].content) == _request().seed_body()
+    # The forward keeps its own session cookie from the workspace's services.
+    assert MNGR_FORWARD_SESSION_COOKIE_NAME not in backend_requests[-1].headers.get("cookie", "")
+
+
+def test_a_forward_that_refuses_the_session_leaves_the_seed_to_mngr_exec(tmp_path: Path) -> None:
+    _chat_requests, chat_app = _answering(_CREATED)
+
+    attempt, backend_requests = _seed_through_a_real_forward(tmp_path, chat_app, "not-the-preauth-cookie")
+
+    assert attempt == ForwardSeedAttempt(unavailable_reason="the forward answered HTTP 403")
+    assert backend_requests == []

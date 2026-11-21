@@ -36,6 +36,7 @@ logic is re-derived from the same underlying modules. When the legacy SSE
 surface is deleted, those helpers should collapse into one shared home.
 """
 
+import os
 import platform
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -107,6 +108,7 @@ from imbue.minds.desktop_client.workspace_create import default_modal_region_cho
 from imbue.minds.desktop_client.workspace_create import default_region_for_provider_with_config
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_git_url
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
+from imbue.minds.desktop_client.workspace_defaults import is_local_workspace_defaults_opt_in
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CONFIGURED_AWS_INSTANCE_TYPES
 from imbue.minds.primitives import CONFIGURED_AWS_REGIONS
@@ -243,6 +245,18 @@ class CreateFormDefaultsResponse(FrozenModel):
     local_launch_mode: str = Field(
         description="The compute mode the local preset selects: the first local backend that is ready here"
     )
+    is_first_run_local: bool = Field(
+        default=False,
+        description=(
+            "Whether the first run's own create runs on this computer instead of Imbue Cloud: true for an operator "
+            "launch on a local template worktree, which no pool host can clone"
+        ),
+    )
+
+
+# Set by a developer whose pool has a slice baked from their template worktree: the first run's own create
+# goes to Imbue Cloud even on a launch that opted into local workspace defaults.
+FIRST_RUN_ON_CLOUD_ENV_VAR: Final[str] = "MINDS_DEV_FIRST_RUN_ON_CLOUD"
 
 
 class OrphanedFailedDestroy(FrozenModel):
@@ -341,6 +355,7 @@ class WelcomeChatLanding(UpperCaseStrEnum):
     """How the wash over a new workspace came to lift."""
 
     ON_SCREEN = auto()
+    PROVIDER_CHOOSER_ON_SCREEN = auto()
     SEED_FAILED = auto()
     NO_CHAT_REPORT = auto()
     TIMED_OUT = auto()
@@ -528,6 +543,7 @@ def _handle_create_form_defaults() -> Response:
         prefill=_read_retry_prefill(request.args.get("retry", ""), cloud_accounts),
         local_prerequisites=local_prerequisites,
         local_launch_mode=local_launch_mode_for(host_platform, local_prerequisites).value,
+        is_first_run_local=is_local_workspace_defaults_opt_in() and os.environ.get(FIRST_RUN_ON_CLOUD_ENV_VAR) != "1",
     )
     return _json_response(response)
 
@@ -829,6 +845,12 @@ def _handle_welcome_chat_landing(create_attempt_id: str) -> Response:
         case WelcomeChatLanding.ON_SCREEN:
             logger.debug(
                 "Landed in the new workspace of create attempt {} with its welcome chat on screen after {} ms",
+                parsed_id,
+                body.waited_ms,
+            )
+        case WelcomeChatLanding.PROVIDER_CHOOSER_ON_SCREEN:
+            logger.debug(
+                "Landed in the new workspace of create attempt {} with its provider chooser on screen after {} ms",
                 parsed_id,
                 body.waited_ms,
             )

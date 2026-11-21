@@ -10,14 +10,20 @@
 // onboarding examples?") shows a recording of apps built in Studio, under a
 // line introducing it, between the setup line and the loading box.
 //
+// A first-run create (the sign-in page's, models/firstRun.ts) shows the welcome
+// instead (specs/ftue-onboarding-v2): "Welcome, <name>!", the studio-type
+// question, and the build's progress under it; when the workspace is ready the
+// user presses Continue, and what they picked goes to the workspace for the agent.
+//
 // The whole conversation is handed over as the new workspace's first chat
 // (models/welcomeChat.ts) as soon as the page knows the attempt's settings, so
 // it is seeded even if the page is left before the workspace is ready. When
-// the attempt is ready the agent says so and the wash comes up: the workspace
-// mounts behind it, and it lifts once the workspace reports the welcome chat on
-// screen (models/welcomeChatArrival.ts). A failure or an interrupted record
-// becomes an agent turn with Retry and Dismiss / Discard, the retry reopening
-// the create form as a modal prefilled from the attempt's record.
+// the attempt is ready the agent says so as the wash comes up: the workspace
+// mounts behind it, and it lifts once the workspace reports the welcome chat or
+// the provider chooser on screen (models/welcomeChatArrival.ts). A failure or
+// an interrupted record becomes an agent turn with Retry and Dismiss / Discard,
+// the retry reopening the create form as a modal prefilled from the attempt's
+// record.
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
@@ -30,7 +36,6 @@ import { CreateAttemptWatcher, fetchCreateAttemptDetail } from "../../models/cre
 import { ProgressDisplay } from "../../models/progress";
 import type { FailureCopy, ShowcaseApp } from "../../models/creationTranscript";
 import {
-  IMBUE_CLOUD_SUMMARY_LINE,
   READY_LINE,
   SETUP_LINE,
   SHOWCASE_APP,
@@ -42,8 +47,9 @@ import {
 } from "../../models/creationTranscript";
 import type { ErrorAction, UserFacingError } from "../../models/errors";
 import { errorFromResponse, fallbackErrorSentence } from "../../models/errors";
+import { firstRun, studioTypeLine } from "../../models/firstRun";
+import { firstRunCover } from "../../models/firstRunCover";
 import {
-  FLOW_OPTIONS_GAP_MS,
   FLOW_THINK_MS,
   MANIFESTO_HEADING,
   MANIFESTO_OPENER,
@@ -53,11 +59,14 @@ import {
   REPORTING_ASK,
   REPORTING_MORE_DETAIL,
   REPORTING_MORE_LABEL,
-  startFlow,
-  streamDurationMs,
-} from "../../models/startFlow";
+} from "../../models/manifesto";
 import { wash } from "../../models/wash";
-import { postWelcomeChat, postWelcomeChatLanding, welcomeChatBody } from "../../models/welcomeChat";
+import {
+  firstRunWelcomeChatBody,
+  postWelcomeChat,
+  postWelcomeChatLanding,
+  welcomeChatBody,
+} from "../../models/welcomeChat";
 import { welcomeChatArrival } from "../../models/welcomeChatArrival";
 import { defaultFetchJson } from "../../models/workspaceOptions";
 import { Button } from "../components/Button";
@@ -68,8 +77,9 @@ import { ImageLightbox } from "../components/ImageLightbox";
 import { PageContainer } from "../components/Layout";
 import { Spinner } from "../components/Spinner";
 import { createFormModal } from "./CreatePage";
+import { firstRunWelcome } from "./create/FirstRunWelcome";
+import { SETTING_UP_LINE } from "./StartPage";
 import { TRANSCRIPT_COLUMN_CLASS, agentTurn, disclosureList, scrollAnchor, userTurn } from "./start/transcript";
-import { transcriptTurns } from "./StartPage";
 
 /** How often a running discard is checked on. */
 const DISCARD_POLL_MS = 1000;
@@ -111,8 +121,6 @@ interface CreatingState {
   isReportingMoreOpen: boolean;
   /** Settles when the wash over the new workspace may lift. */
   coverUntil: Promise<void>;
-  /** Set once the wash is up, from when the page going away is the entry working rather than the user leaving. */
-  isEntryStarted: boolean;
   isActionPending: boolean;
   isRetryFormOpen: boolean;
   /** The retry form runs the attempt on this computer ("Run on this computer"). */
@@ -127,9 +135,12 @@ interface CreatingState {
   /** Whether the showcase recording is open enlarged over the page. */
   isShowcaseLightboxOpen: boolean;
   progressTimer: ReturnType<typeof setInterval> | null;
-  washTimer: ReturnType<typeof setTimeout> | null;
-  /** The start-flow transcript this create came out of, if this window's flow submitted it. */
-  isFromStartFlow: boolean;
+  /** Whether this window's sign-in page sent the create: the page shows the welcome instead of the transcript. */
+  isFirstRun: boolean;
+  /** Whether the studio-type question's "Something else" field is open. */
+  isSomethingElseOpen: boolean;
+  /** Set once the first-run entry began: the workspace loads under the shell's cover from then on. */
+  isFirstRunEntryStarted: boolean;
 }
 
 /** The workspace id in a /goto/<workspace-id>/ URL; the shell resolves either coordinate. */
@@ -204,7 +215,6 @@ function freshState(createAttemptId: string): CreatingState {
     openManifestoIds: new Set<string>(),
     isReportingMoreOpen: false,
     coverUntil: Promise.resolve(),
-    isEntryStarted: false,
     isActionPending: false,
     isRetryFormOpen: false,
     isRetryRunHere: false,
@@ -214,8 +224,9 @@ function freshState(createAttemptId: string): CreatingState {
     isStopped: false,
     isShowcaseLightboxOpen: false,
     progressTimer: null,
-    washTimer: null,
-    isFromStartFlow: startFlow.submittedCreateAttemptId === createAttemptId,
+    isFirstRun: firstRun.isFirstRunCreate(createAttemptId),
+    isSomethingElseOpen: false,
+    isFirstRunEntryStarted: false,
   };
 }
 
@@ -233,7 +244,7 @@ export const CreatingPage: m.ClosureComponent = () => {
   // moment the wash starts (the transcript scrolls as it grows, so an earlier
   // measurement would name where the box was).
   function washOrigin(): { x: number; y: number } {
-    const blob = document.getElementById("creating-blob");
+    const blob = document.getElementById("creating-continue") ?? document.getElementById("creating-blob");
     if (blob === null) return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
     const rect = blob.getBoundingClientRect();
     return {
@@ -246,15 +257,10 @@ export const CreatingPage: m.ClosureComponent = () => {
     if (state.redirectUrl) enterWorkspaceFromRedirect(state.redirectUrl);
   }
 
-  /** When the ready line that starts streaming at ``readyStartAtMs`` has landed, and the entry begins. */
-  function readyLandedAtMs(readyStartAtMs: number): number {
-    return readyStartAtMs + streamDurationMs(READY_LINE);
-  }
-
   // The workspace's color takes the window, the shell enters the workspace while
-  // the cover is whole, and the cover stays until the welcome chat is on screen.
+  // the cover is whole, and the cover stays until the welcome chat or the
+  // provider chooser is on screen.
   function startEntry(): void {
-    state.isEntryStarted = true;
     const isInstant = isReducedMotion();
     wash.start(
       accentForAttempt(),
@@ -265,15 +271,6 @@ export const CreatingPage: m.ClosureComponent = () => {
       state.coverUntil,
       isInstant,
     );
-  }
-
-  /** The ready turn, streaming from ``readyStartAtMs``, gets its moment, then the entry begins. */
-  function scheduleEntry(readyStartAtMs: number): void {
-    const own = state;
-    state.washTimer = setTimeout(() => {
-      own.washTimer = null;
-      startEntry();
-    }, readyLandedAtMs(readyStartAtMs));
   }
 
   /** Whether the attempt is an onboarding create, which shows the recording under the setup line. */
@@ -291,12 +288,10 @@ export const CreatingPage: m.ClosureComponent = () => {
   function handOverWelcomeChat(): Promise<string | null> {
     const request = state.detail?.live?.request;
     if (request === undefined || request === null) return Promise.resolve(null);
-    const entries = state.isFromStartFlow ? startFlow.state.entries : [];
-    const isCloudPreset = state.isFromStartFlow && startFlow.isSubmittedCreateCloudPreset;
-    return postWelcomeChat(
-      state.createAttemptId,
-      welcomeChatBody(entries, request, isCloudPreset, isShowcaseShown()),
-    ).then(
+    const body = state.isFirstRun
+      ? firstRunWelcomeChatBody(studioTypeLine(firstRun.studioTypes))
+      : welcomeChatBody(request, isShowcaseShown());
+    return postWelcomeChat(state.createAttemptId, body).then(
       (chatId) => (chatId === "" ? null : chatId),
       (error: unknown) => {
         console.warn("The conversation could not be handed to the new workspace:", error);
@@ -306,9 +301,9 @@ export const CreatingPage: m.ClosureComponent = () => {
   }
 
   /**
-   * Seed the welcome chat and wait for it to be on screen; settles when the wash may lift. A chat
-   * the workspace knows about is asked for at once, since left alone its app only looks for the
-   * workspace's page every few seconds.
+   * Seed the welcome chat and wait for it, or the provider chooser, to be on screen; settles when the
+   * wash may lift. A chat the workspace knows about is asked for at once, even after the chooser has
+   * lifted the wash, since left alone its app only looks for the workspace's page every few seconds.
    */
   function awaitWelcomeChatOnScreen(redirectUrl: string): Promise<void> {
     const createAttemptId = state.createAttemptId;
@@ -338,8 +333,14 @@ export const CreatingPage: m.ClosureComponent = () => {
       onDone(redirectUrl) {
         state.isDone = true;
         state.redirectUrl = redirectUrl;
+        if (state.isFirstRun) {
+          beginFirstRunEntry(redirectUrl);
+          return;
+        }
         state.coverUntil = awaitWelcomeChatOnScreen(redirectUrl);
-        scheduleEntry(FLOW_THINK_MS);
+        // The ready line streams while the wash grows, so nothing stands between the attempt being
+        // done and the workspace starting to load.
+        startEntry();
       },
       onFailed(failure) {
         state.isFailed = true;
@@ -428,29 +429,18 @@ export const CreatingPage: m.ClosureComponent = () => {
     });
   }
 
-  /**
-   * The user turn restating the settings; the reload path rebuilds it from the
-   * record. The start flow's Imbue Cloud answer restates only itself, which is
-   * provenance the record cannot carry -- so a create being watched in the
-   * session that submitted it reads as that answer, and one picked up after a
-   * reload falls back to the settings, the way the rest of this page already
-   * degrades to a record view.
-   */
-  function summaryTurn(request: CreateAttemptRequestSummary, isInstant: boolean): m.Children {
-    const isCloudPreset = state.isFromStartFlow && startFlow.isSubmittedCreateCloudPreset;
-    if (isCloudPreset) {
-      return userTurn({ key: "creation-summary", delayMs: 0, isInstant, text: IMBUE_CLOUD_SUMMARY_LINE });
-    }
+  /** The user turn restating the settings; the reload path rebuilds it from the record. */
+  function summaryTurn(request: CreateAttemptRequestSummary): m.Children {
     // The settings sit behind a toggle: the heading is what was said, the lines are what it meant.
     return userTurn({
       key: "creation-summary",
       delayMs: 0,
-      isInstant,
+      isInstant: true,
       text: SUMMARY_HEADING,
       details: {
         id: "creation-summary-details",
         label: SUMMARY_DETAILS_LABEL,
-        lines: summarySettingLines(request, isCloudPreset),
+        lines: summarySettingLines(request),
         isOpen: state.isSummaryDetailsOpen,
         onToggle: () => {
           state.isSummaryDetailsOpen = !state.isSummaryDetailsOpen;
@@ -753,31 +743,25 @@ export const CreatingPage: m.ClosureComponent = () => {
 
   /**
    * A live attempt: the setup line, then either the live failure, or the recording under its intro line (for
-   * an onboarding attempt) and the loading box, with the ready line under them once the attempt is done.
+   * an onboarding attempt) and the loading box, with the ready line under them once the attempt is done. Every
+   * turn but the ready line is already on the page: the page is reached from the create form or a reload.
    */
-  function liveTurns(
-    request: CreateAttemptRequestSummary | null,
-    workspaceName: string,
-    isInstant: boolean,
-  ): m.Children[] {
-    const setupAt = isInstant ? 0 : FLOW_THINK_MS;
+  function liveTurns(request: CreateAttemptRequestSummary | null, workspaceName: string): m.Children[] {
     const turns: m.Children[] = [
-      agentTurn({ key: "creation-setup", text: SETUP_LINE, startAtMs: setupAt, isInstant }),
+      agentTurn({ key: "creation-setup", text: SETUP_LINE, startAtMs: 0, isInstant: true }),
     ];
     if (state.isFailed && state.failure !== null) {
       turns.push(...failureTurns(workspaceName, state.failure, request, state.logLines));
       return turns;
     }
-    const afterSetupAt = isInstant ? 0 : setupAt + streamDurationMs(SETUP_LINE) + FLOW_OPTIONS_GAP_MS;
-    if (!isShowcaseShown()) {
-      turns.push(loadingBox(afterSetupAt));
-    } else {
-      turns.push(agentTurn({ key: "creation-showcase-intro", text: SHOWCASE_INTRO_LINE, startAtMs: afterSetupAt, isInstant }));
-      const showcaseAt = isInstant ? 0 : afterSetupAt + streamDurationMs(SHOWCASE_INTRO_LINE) + FLOW_OPTIONS_GAP_MS;
-      turns.push(showcaseBlock(SHOWCASE_APP, showcaseAt));
-      turns.push(loadingBox(isInstant ? 0 : showcaseAt + FLOW_THINK_MS));
+    if (isShowcaseShown()) {
+      turns.push(
+        agentTurn({ key: "creation-showcase-intro", text: SHOWCASE_INTRO_LINE, startAtMs: 0, isInstant: true }),
+      );
+      turns.push(showcaseBlock(SHOWCASE_APP, 0));
     }
-    if (state.isDone) turns.push(readyTurn(FLOW_THINK_MS));
+    turns.push(loadingBox(0));
+    if (state.isDone) turns.push(readyTurn(0));
     return turns;
   }
 
@@ -823,7 +807,6 @@ export const CreatingPage: m.ClosureComponent = () => {
 
   /** The page's own turns: the settings, then the attempt as it stands. */
   function creationTurns(detail: CreateAttemptDetail): m.Children[] {
-    const isInstant = detail.kind === "record" || !state.isFromStartFlow;
     const request =
       detail.kind === "record" ? detail.record?.request : detail.live?.request;
     const workspaceName =
@@ -832,21 +815,107 @@ export const CreatingPage: m.ClosureComponent = () => {
         : detail.live?.workspace_name) ?? "";
     const summary =
       request !== undefined && request !== null
-        ? [summaryTurn(request, isInstant)]
+        ? [summaryTurn(request)]
         : [];
     if (detail.kind === "record" && detail.record !== null) {
       return [...summary, ...recordTurns(detail.record)];
     }
-    return [...summary, ...liveTurns(request ?? null, workspaceName, isInstant)];
+    return [...summary, ...liveTurns(request ?? null, workspaceName)];
+  }
+
+  /** Hand the picks over again while the workspace is still being built: the latest hand-over is the one seeded. */
+  function onStudioTypesChanged(): void {
+    if (!state.isDone) void handOverWelcomeChat();
+  }
+
+  /**
+   * A first-run create is done: hand the answer over, and once the workspace has it (which is what tells it this
+   * is a first run) load the workspace under the shell's cover, which carries this welcome on and offers Continue
+   * only when the workspace has its provider page up.
+   */
+  function beginFirstRunEntry(redirectUrl: string): void {
+    const own = state;
+    own.isFirstRunEntryStarted = true;
+    void handOverWelcomeChat().then(() => {
+      if (state !== own || own.isStopped) return;
+      firstRunCover.raise(own.createAttemptId, own.isSomethingElseOpen);
+      void awaitWelcomeChatOnScreen(redirectUrl).then(() => firstRunCover.markReady(own.createAttemptId));
+      enterWorkspaceFromRedirect(redirectUrl);
+    });
+  }
+
+  /** Under the question: the build's progress, its failure, or the ready line and Continue. */
+  function welcomeStatus(): m.Children {
+    const request = state.detail?.live?.request ?? null;
+    const workspaceName = state.detail?.live?.workspace_name ?? "";
+    if (state.isFailed && state.failure !== null) {
+      return m("div", { class: "mt-12 w-full max-w-[720px] text-primary" }, failureTurns(workspaceName, state.failure, request, state.logLines));
+    }
+    const percent = state.progress.percentAt(Date.now(), state.isDone);
+    return m("div", { class: "mt-14 flex w-full max-w-[420px] flex-col items-center" }, [
+      m("p", { id: "creating-setting-up", class: "text-[17px]" }, SETTING_UP_LINE),
+      m(
+        "div",
+        { class: "first-run-bar mt-4 h-1 w-full overflow-hidden rounded-full" },
+        m("div", {
+          id: "creating-welcome-bar",
+          class: "h-full rounded-full transition-[width] duration-300 ease-out",
+          style: `width: ${percent.toFixed(1)}%`,
+        }),
+      ),
+      m(
+        "button",
+        {
+          type: "button",
+          class: "first-run-link mt-4 text-[14px] no-underline hover:underline",
+          onclick: () => {
+            state.isLogOpen = !state.isLogOpen;
+          },
+        },
+        state.isLogOpen ? "Hide details" : "Show details",
+      ),
+      state.isLogOpen
+        ? m(
+            "pre",
+            {
+              id: "logs",
+              class: "mt-3 w-[min(720px,90vw)] type-helper font-mono bg-fill-subtle rounded-md p-3 max-h-[22vh] overflow-y-auto text-left",
+              oncreate: (vnode) => {
+                state.isLogPinnedToEnd = true;
+                state.pinnedLogLineCount = 0;
+                pinLogToEnd(vnode.dom as HTMLElement);
+              },
+              onupdate: (vnode) => pinLogToEnd(vnode.dom as HTMLElement),
+              onscroll: (event: Event) => {
+                const element = event.target as HTMLElement;
+                state.isLogPinnedToEnd = element.scrollHeight - element.scrollTop - element.clientHeight <= LOG_PIN_SLACK_PX;
+              },
+            },
+            state.logLines.join("\n"),
+          )
+        : null,
+    ]);
+  }
+
+  /** A first-run create: the welcome, the studio-type question, and the build under it. */
+  function welcomeView(): m.Children {
+    return firstRunWelcome({
+      id: "creating",
+      attemptId: state.createAttemptId,
+      isOtherOpen: state.isSomethingElseOpen,
+      setOtherOpen: (isOpen) => {
+        state.isSomethingElseOpen = isOpen;
+      },
+      onChanged: onStudioTypesChanged,
+      status: welcomeStatus(),
+    });
   }
 
   /** Leave `state` behind: the page is being removed, or a later attempt is taking it over. */
   function stopWatching(): void {
     state.isStopped = true;
-    if (state.isDone && !state.isEntryStarted) welcomeChatArrival.cancel();
     state.watcher?.stop();
     if (state.progressTimer !== null) clearInterval(state.progressTimer);
-    if (state.washTimer !== null) clearTimeout(state.washTimer);
     if (state.discardTimer !== null) clearTimeout(state.discardTimer);
   }
 
@@ -893,12 +962,10 @@ export const CreatingPage: m.ClosureComponent = () => {
           m("div", { class: "flex justify-center pt-24" }, m(Spinner, { size: "lg" })),
         ]);
       }
-      const prelude = [
-        ...manifestoTurns(),
-        ...(state.isFromStartFlow
-          ? transcriptTurns(startFlow.state.entries, { isInstant: true, isPressable: false })
-          : []),
-      ];
+      if (state.isFirstRun && detail.kind === "live") {
+        return welcomeView();
+      }
+      const prelude = manifestoTurns();
       const turns = creationTurns(detail);
       return m(
         "div",

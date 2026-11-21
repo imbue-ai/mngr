@@ -37,6 +37,7 @@ import { SidebarMenu } from "./SidebarMenu";
 import { AccountSwitcherMenu } from "./AccountSwitcher";
 import { Titlebar } from "./Titlebar";
 import { ToastLayer } from "./ToastLayer";
+import { FirstRunCover } from "./FirstRunCover";
 import { Wash } from "./Wash";
 import { WorkspaceFrame } from "./WorkspaceFrame";
 import { LocalPageNotice } from "./LocalPageNotice";
@@ -465,6 +466,8 @@ export function Shell(): m.Component<ShellAttrs> {
         // The creation page's crossing into the workspace; it outlives that
         // page's route, so the shell owns it.
         m(Wash),
+        // A first-run workspace loads under the welcome it was created from.
+        m(FirstRunCover, { routePath }),
         isReconnecting
           ? m(
               "div",

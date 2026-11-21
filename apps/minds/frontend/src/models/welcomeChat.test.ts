@@ -6,21 +6,13 @@ import {
   readyTurnMarkdown,
   showcaseMarkdown,
 } from "./creationTranscript";
-import {
-  MANIFESTO_POINTS,
-  MANIFESTO_QUESTION,
-  REPORTING_ACCEPT_LABEL,
-  REPORTING_ASK,
-  REPORTING_MORE_DETAIL,
-} from "./startFlow";
-import type { TranscriptEntry } from "./startFlow";
+import { MANIFESTO_POINTS, MANIFESTO_QUESTION, REPORTING_ASK, REPORTING_MORE_DETAIL } from "./manifesto";
 import { jsonResponse } from "../testing";
 import {
   disclosureMarkdown,
-  flowTurns,
+  firstRunWelcomeChatBody,
   manifestoOpenerMarkdown,
   postWelcomeChat,
-  tableColumnMarkdown,
   welcomeChatBody,
 } from "./welcomeChat";
 
@@ -41,29 +33,15 @@ const REQUEST: CreateAttemptRequestSummary = {
   is_onboarding_driven_by_agent: false,
 };
 
-/** A cloud create by a returning user. */
-const ENTRIES: TranscriptEntry[] = [
-  { kind: "said", text: REPORTING_ACCEPT_LABEL },
-  { kind: "step", id: "run", ack: "", answer: "cloud", said: "Use Imbue Cloud" },
-  {
-    kind: "note",
-    text: "Imbue Cloud it is. You've signed in as me@example.com.",
-  },
-];
-
 describe("welcomeChatBody", () => {
-  it("opens with the manifesto, follows the flow, and closes with the settings, the setup line and the welcome", () => {
-    const body = welcomeChatBody(ENTRIES, REQUEST, false, false);
+  it("opens with the manifesto and closes with the settings, the setup line and the welcome", () => {
+    const body = welcomeChatBody(REQUEST, false);
 
     expect(body.title).toBe("Welcome");
     expect(body.turns.map((turn) => turn.role)).toEqual([
       "assistant",
       "user",
       "assistant",
-      "assistant",
-      "user",
-      "assistant",
-      "user",
       "assistant",
       "user",
       "assistant",
@@ -77,17 +55,16 @@ describe("welcomeChatBody", () => {
     }
     expect(body.turns[3].text).toContain(REPORTING_ASK);
     expect(body.turns[3].text).toContain(REPORTING_MORE_DETAIL);
-    expect(body.turns[4].text).toBe(REPORTING_ACCEPT_LABEL);
-    expect(body.turns[6].text).toBe("Use Imbue Cloud");
-    expect(body.turns[8].text).toContain("Name — workspace-1");
-    expect(body.turns[8].text).toContain("Branch — latest");
-    expect(body.turns[9].text).toBe(SETUP_LINE);
-    expect(body.turns[10].text).toBe(readyTurnMarkdown());
+    expect(body.turns[4].text).toContain("Name — workspace-1");
+    expect(body.turns[4].text).toContain("Branch — latest");
+    expect(body.turns[5].text).toBe(SETUP_LINE);
+    expect(body.turns[6].text).toBe(readyTurnMarkdown());
+    expect(body.is_first_run).toBeUndefined();
   });
 
   it("carries the recording between the setup line and the welcome for an onboarding create", () => {
-    const built = welcomeChatBody(ENTRIES, REQUEST, false, true);
-    expect(built.turns.slice(9).map((turn) => [turn.role, turn.text])).toEqual([
+    const built = welcomeChatBody(REQUEST, true);
+    expect(built.turns.slice(5).map((turn) => [turn.role, turn.text])).toEqual([
       ["assistant", SETUP_LINE],
       ["assistant", showcaseMarkdown(SHOWCASE_APP)],
       ["assistant", readyTurnMarkdown()],
@@ -95,71 +72,22 @@ describe("welcomeChatBody", () => {
   });
 });
 
-describe("flowTurns", () => {
-  it("says a question with its recommended answer's points as one turn, and an unanswered question with no answer", () => {
-    const [ask] = flowTurns([
-      { kind: "step", id: "run", ack: "Welcome back.", answer: null, said: "" },
-    ]);
-    expect(ask.role).toBe("assistant");
-    expect(
-      ask.text.startsWith("Welcome back. Let's set up your workspace."),
-    ).toBe(true);
-    expect(ask.text).toContain(
-      "**Imbue Cloud** (Recommended)\n- 30 second setup",
-    );
-    expect(ask.text.endsWith("- Easy to share with others")).toBe(true);
-    expect(
-      flowTurns([{ kind: "step", id: "run", ack: "", answer: null, said: "" }]),
-    ).toHaveLength(1);
-  });
-
-  it("bolds a question's lead and keeps the verified answer as the user's own words", () => {
-    const turns = flowTurns([
-      {
-        kind: "step",
-        id: "verify",
-        ack: "(click the link sent to me@example.com)",
-        answer: "verified",
-        said: "I verified it",
-      },
-    ]);
-    expect(
-      turns[0].text.startsWith(
-        "**You must verify your email**\n\n(click the link",
-      ),
-    ).toBe(true);
-    expect(turns[1]).toEqual({ role: "user", text: "I verified it" });
-  });
-
-  it("bolds the signed-in email the account question names", () => {
-    const [ask] = flowTurns([
-      {
-        kind: "step",
-        id: "account",
-        ack: "Imbue Cloud it is. You're signed in as me@example.com.",
-        answer: null,
-        said: "",
-        email: "me@example.com",
-      },
-    ]);
-    expect(ask.text).toBe(
-      "Imbue Cloud it is. You're signed in as **me@example.com**. Continue with this account or use a different one?",
-    );
+describe("firstRunWelcomeChatBody", () => {
+  it("sends no turns, flags the arrival, and carries the user's words for the agent", () => {
+    expect(firstRunWelcomeChatBody("I want to use Studio for: Writing.")).toEqual({
+      title: "Welcome",
+      turns: [],
+      is_first_run: true,
+      context: "I want to use Studio for: Writing.",
+    });
   });
 });
 
 describe("the markdown pieces", () => {
-  it("renders a point as a details toggle and a column as a titled list", () => {
-    expect(
-      disclosureMarkdown({ id: "a", label: "is loyal", detail: "Always." }),
-    ).toBe("<details><summary>is loyal</summary>\n\nAlways.\n\n</details>");
-    expect(
-      tableColumnMarkdown({
-        title: "Custom",
-        isEmphasized: false,
-        points: ["one", "two"],
-      }),
-    ).toBe("**Custom**\n- one\n- two");
+  it("renders a point as a details toggle", () => {
+    expect(disclosureMarkdown({ id: "a", label: "is loyal", detail: "Always." })).toBe(
+      "<details><summary>is loyal</summary>\n\nAlways.\n\n</details>",
+    );
   });
 });
 

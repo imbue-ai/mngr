@@ -1,6 +1,6 @@
 # The Imbue Studio embed contract
 
-Version: 15 (tracks `CONTRACT_VERSION` in
+Version: 16 (tracks `CONTRACT_VERSION` in
 `apps/minds/imbue/minds/desktop_client/static/embed_contract.js`)
 
 The Imbue Studio chrome (the "embedder") displays workspace content in a
@@ -55,7 +55,7 @@ Payloads that carry ids are validated against conservative server-issued
 shapes on receive (and re-validated by anything that builds a URL from them);
 see the `*_PATTERN` constants in the module.
 
-## Message inventory (v15)
+## Message inventory (v16)
 
 ### workspace -> embedder
 
@@ -66,8 +66,9 @@ see the `*_PATTERN` constants in the module.
 | `minds:open-ai-keys-page` | `{ hostId? }` | Open the AI-key mint modal for this workspace. The embedder replies with `minds:open-ai-keys-ack`. |
 | `minds:bring-app-to-front` | `{}` | OAuth finished in the external browser; raise the app window (Electron) / no-op (plain browser). |
 | `minds:open-share-settings` | `{ serviceName? }` | Open the shell's share panel for this workspace, focused on that service, or on the whole workspace when `serviceName` is absent. A present name must match `SERVICE_NAME_PATTERN`. Fire-and-forget (no ack). |
-| `minds:workspace-ready` | `{ opensLinks?, opensCustomSchemeLinks?, reportsChatOnScreen? }` | This document's endpoint is listening; the embedder may send what it held for it. Sent once per page load, after the workspace registers its handlers. `opensLinks: true` promises the page handles `minds:open-link`, external links included; `false` or absent means it does not. `opensCustomSchemeLinks: true` promises it takes custom-scheme links (`slack:`, `vscode:`) in `minds:open-link` too. `reportsChatOnScreen: true` promises `minds:chat-on-screen`. A value that is not a boolean rejects the message. |
-| `minds:chat-on-screen` | `{ chatId }` | This chat's transcript is drawn in a window the user can see. Sent once per chat page load, from the chat page itself; the chat root and the shell forward it up unchanged like every other `minds:` message. The creation page keeps its wash over a new workspace until the welcome chat says this. |
+| `minds:workspace-ready` | `{ opensLinks?, opensCustomSchemeLinks?, reportsChatOnScreen?, reportsProviderChooserOnScreen? }` | This document's endpoint is listening; the embedder may send what it held for it. Sent once per page load, after the workspace registers its handlers. `opensLinks: true` promises the page handles `minds:open-link`, external links included; `false` or absent means it does not. `opensCustomSchemeLinks: true` promises it takes custom-scheme links (`slack:`, `vscode:`) in `minds:open-link` too. `reportsChatOnScreen: true` promises `minds:chat-on-screen`. `reportsProviderChooserOnScreen: true` promises `minds:provider-chooser-on-screen`, and that `minds:focus-chat` without a `chatId` shows the chat root window. A value that is not a boolean rejects the message. |
+| `minds:chat-on-screen` | `{ chatId }` | This chat's transcript is drawn in a window the user can see. Sent once per chat page load, from the chat page itself; the chat root and the shell forward it up unchanged like every other `minds:` message. The creation page keeps its wash over a new workspace until the welcome chat says this, or the provider chooser is on screen. |
+| `minds:provider-chooser-on-screen` | `{}` | The AI-provider chooser is drawn in a window the user can see. Sent once per chat root page load, by the page that draws the chooser. The creation page lifts its wash over a new workspace on this too, without waiting for the welcome chat: whichever chat ends up behind the chooser, the user's next step is to pick a provider. |
 | `minds:provider-sign-in` | `{ url, flowId }` | A provider sign-in is waiting on the user in a browser. The embedder listens for the sign-in's loopback callback, relays it into the workspace's flow `flowId`, and opens `url`. It replies with `minds:provider-sign-in-ack`. |
 | `minds:provider-sign-in-end` | `{ flowId }` | The sign-in `flowId` has ended (signed in, failed, or abandoned); the embedder stops listening on its port. Fire-and-forget (no ack). |
 | `minds:pop-out-window` | `{ windowId, title, width, height }` | Open this window in a desktop window of its own beside the Imbue Studio window (the pull-out-window spec). `width` and `height` are the window's rendered size in CSS px. Sent again for a window already out to show its popout. |
@@ -87,7 +88,7 @@ see the `*_PATTERN` constants in the module.
 | `minds:open-ai-keys-ack` | `{}` | An Imbue Studio chrome is present and has opened (or will open) the mint modal. With no chrome (direct share visit) no ack arrives and the workspace shows its fallback text. |
 | `minds:permission-resolutions` | `{ resolutions }` | Permission-request verdicts, `{ requestId, resolution }` each. Sent as the workspace's recent-verdicts snapshot when its frame (re)loads, and with one entry the moment the user resolves a request. |
 | `minds:provider-sign-in-ack` | `{ relay, reason? }` | Answer to `minds:provider-sign-in`: `relay` is true when the embedder is listening for the callback and opened the page, false when it cannot relay. `reason` says why not: `port_taken` (something already answers on the callback port), `no_forward_channel`, or `no_browser`. With no chrome no ack arrives; the workspace treats that as false and offers its manual flow. |
-| `minds:focus-chat` | `{ chatId }` | The user opened a chat's notification; show that chat. Which window it lands in is the workspace's choice. Sent only after the workspace announces `minds:workspace-ready`; fire-and-forget from there (no ack). |
+| `minds:focus-chat` | `{ chatId? }` | The user opened a chat's notification; show that chat. Which window it lands in is the workspace's choice. Without `chatId`, show the chat root window: the creation page sends that as a new workspace announces itself, so the provider chooser can come up before the welcome chat exists, and only to a workspace whose `minds:workspace-ready` carried `reportsProviderChooserOnScreen: true`. Sent only after the workspace announces `minds:workspace-ready`; fire-and-forget from there (no ack). |
 | `minds:embedder-capabilities` | `{ canPopOut, opensExternalLinks?, opensCustomSchemeLinks?, opensLocalFiles?, immersive? }` | What this chrome can do, sent right after `minds:workspace-ready`. `opensExternalLinks: true` says it takes `minds:open-external`, and `opensCustomSchemeLinks: true` that it takes custom-scheme links there too; `false` or absent means the workspace opens those links itself. `opensLocalFiles: true` says it takes `minds:open-local-files`; `false` or absent means it does not. `immersive: true` says it takes `minds:immersive-request`; `false` or absent means the workspace hides its immersive control. A workspace that never receives it (an older chrome, a plain browser) keeps its pull-out gesture off, opens external links itself, offers no way to reach the Local files settings, and never asks for immersive mode. |
 | `minds:tear-out` | `{ windowId, phase }` | A step of the title-bar drag the embedder watches: `"out"` (the cursor left the Imbue Studio window by the tear-out distance and a popout follows it; the shell detaches the window, saved at once so the popout's own shell reads it, and hides it), `"in"` (the cursor came back and the popout is gone; the shell brings the window back and shows it again), or `"released"` (the button came up while out; the shell ends its gesture, the detach already saved). A word that lands after the shell's own release of the drag still stands (see `minds:window-drag-ended`). |
 | `minds:reattach-window` | `{ windowId, frame? }` | Return a pulled-out window to the desktop, shown and raised: at `frame` (`{ x, y, width, height }` in fractions of the workspace surface, which is the frame's whole viewport; the receiver maps it onto its own backdrop and clamps it) when given, else at its kept frame. This desktop app sends no `frame`. |
@@ -316,3 +317,13 @@ payloads -- to the console.
   workspace from before v15 announces no `reportsChatOnScreen`, so a v15 chrome
   knows the report will never come and lifts the wash once the seed has
   answered rather than waiting out its bound.
+- **16** -- added `provider-chooser-on-screen` (workspace -> embedder) and the
+  optional `reportsProviderChooserOnScreen` field on `workspace-ready`, and
+  `focus-chat`'s `chatId` became optional (absent: show the chat root
+  window). The creation page sends the nameless `focus-chat` as a new
+  workspace announces itself and lifts its wash once the chooser is on screen,
+  without waiting for the welcome chat's seed. A chrome from before v16
+  ignores the report and keeps waiting for `chat-on-screen`. A workspace from
+  before v16 announces no `reportsProviderChooserOnScreen`, so a v16 chrome
+  never sends it the nameless `focus-chat` (which its validator would drop)
+  and waits for its welcome chat as before.

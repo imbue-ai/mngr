@@ -1059,7 +1059,7 @@ body:has(#notice-band) .workspace-surface {
   to { transform: translate(-50%, -50%) scale(var(--wash-scale, 20)); opacity: 0; }
 }
 .wash-disc {
-  animation: wash-cover var(--wash-cover-ms, 864ms) cubic-bezier(0.4, 0, 0.2, 1) both;
+  animation: wash-cover var(--wash-cover-ms, 500ms) cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 .wash-disc--lifting {
   animation: wash-lift var(--wash-lift-ms, 312ms) cubic-bezier(0.4, 0, 0.2, 1) both;
@@ -1171,5 +1171,174 @@ html.typing-hides-cursor * {
 @media (prefers-reduced-motion: reduce) {
   .card-arrive {
     animation: none;
+  }
+}
+
+/*
+ * The first run's pages (views/pages/StartPage.ts, the creation page's welcome):
+ * a warm cream ground in the brand's brown, the headline in a serif. The
+ * prototype sets it in Caslon Ionic, which Studio does not ship; the stack
+ * falls back to the closest system serifs.
+ */
+.first-run {
+  --first-run-ground: #fff8e9;
+  --first-run-ink: #492222;
+  --first-run-ink-muted: #7a5a52;
+  --first-run-line: #e8d9c4;
+  background: var(--first-run-ground);
+  color: var(--first-run-ink);
+}
+.first-run-headline {
+  font-family: "Caslon Ionic", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  line-height: 1.05;
+}
+.first-run-button {
+  background: var(--first-run-ink);
+  color: var(--first-run-ground);
+  cursor: pointer;
+  transition: background-color 120ms ease-out;
+}
+.first-run-button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--first-run-ink) 80%, var(--first-run-ground));
+}
+.first-run-button:focus-visible,
+.first-run-link:focus-visible,
+.studio-type-pill:focus-visible {
+  outline: 2px solid var(--first-run-ink);
+  outline-offset: 3px;
+}
+.first-run-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.first-run-link {
+  cursor: pointer;
+  color: var(--first-run-ink-muted);
+  text-decoration: underline wavy;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 6px;
+}
+.first-run-link:hover {
+  color: var(--first-run-ink);
+}
+.first-run-checkbox {
+  width: 17px;
+  height: 17px;
+  cursor: pointer;
+  accent-color: var(--first-run-ink);
+}
+/* What a first-run control means, on the page's own ground, lifted a little off it. */
+.first-run-popover {
+  padding: 14px 18px;
+  border: 1px solid var(--first-run-line);
+  border-radius: 12px;
+  background: var(--first-run-ground);
+  color: var(--first-run-ink);
+  box-shadow: 0 10px 30px rgba(73, 34, 34, 0.18);
+  font-size: 13.5px;
+  line-height: 1.45;
+  text-align: left;
+  outline: none;
+}
+.first-run-bar {
+  background: var(--first-run-line);
+}
+.first-run-bar > div {
+  background: var(--first-run-ink);
+}
+/* "Reimagine": the brand's tints drifting through the letters. */
+.first-run-reimagine {
+  color: transparent;
+  background-image: linear-gradient(100deg, #d4646c, #d6922b, #9dac24, #538bba, #d4646c, #d6922b, #9dac24, #538bba, #d4646c);
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: first-run-reimagine-drift 10s ease-in-out infinite alternate;
+}
+@keyframes first-run-reimagine-drift {
+  from { background-position: 0% 50%; }
+  to { background-position: 100% 50%; }
+}
+/*
+ * The studio-type pills: an outline in the category's colour at rest; picked, filled, lifted a little, with a
+ * check in the left padding. The 2px border is always there, so a pick never changes the pill's size.
+ */
+.studio-type-pill {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 50px;
+  border: 2px solid var(--pill-line);
+  border-radius: 9999px;
+  color: var(--pill-line);
+  background: transparent;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 200ms, color 200ms, box-shadow 200ms, scale 200ms;
+}
+.studio-type-pill:hover {
+  scale: 1.03;
+}
+.studio-type-pill[aria-pressed="true"],
+.studio-type-pill--field[data-filled="true"] {
+  background: var(--pill-fill);
+  border-color: var(--pill-fill);
+  color: var(--pill-ink);
+}
+.studio-type-pill[aria-pressed="true"] {
+  scale: 1.05;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.12);
+}
+.studio-type-check {
+  position: absolute;
+  left: 13px;
+  top: 50%;
+  opacity: 0;
+  transform: translateY(-50%) scale(0.6);
+  transition: opacity 200ms, transform 200ms;
+}
+.studio-type-pill[aria-pressed="true"] .studio-type-check {
+  opacity: 1;
+  transform: translateY(-50%) scale(1);
+}
+.studio-type-label {
+  transition: transform 200ms;
+}
+.studio-type-pill[aria-pressed="true"] .studio-type-label {
+  transform: translateX(9px);
+}
+.studio-type-pill--field {
+  cursor: text;
+}
+.studio-type-pill--field input {
+  color: inherit;
+}
+.studio-type-pill--field input::placeholder {
+  color: rgba(73, 34, 34, 0.45);
+}
+.studio-type-pill--work { --pill-fill: #8eafcb; --pill-ink: #0b292b; --pill-line: #3d79ad; }
+.studio-type-pill--personal { --pill-fill: #cecd0c; --pill-ink: #0b292b; --pill-line: #7f7d00; }
+.studio-type-pill--creative { --pill-fill: #d26645; --pill-ink: #fcefd4; --pill-line: #b4502f; }
+.studio-type-pill--entertainment { --pill-fill: #e4999a; --pill-ink: #492222; --pill-line: #b85f61; }
+.studio-type-pill--other { --pill-fill: #492222; --pill-ink: #fcefd4; --pill-line: #492222; }
+@media (prefers-reduced-motion: reduce) {
+  .first-run-reimagine {
+    animation: none;
+  }
+  .studio-type-pill,
+  .studio-type-check,
+  .studio-type-label {
+    transition: none;
+  }
+  .studio-type-pill:hover,
+  .studio-type-pill[aria-pressed="true"] {
+    scale: 1;
   }
 }

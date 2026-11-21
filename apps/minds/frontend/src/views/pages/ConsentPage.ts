@@ -8,7 +8,7 @@ import {
   REPORTING_CONSENT_QUESTION,
   recordErrorReportingConsent,
 } from "../../models/onboarding";
-import { REPORTING_MORE_DETAIL } from "../../models/startFlow";
+import { REPORTING_MORE_DETAIL } from "../../models/manifesto";
 import { Button } from "../components/Button";
 import { Link } from "../components/Link";
 

@@ -30,7 +30,6 @@ import { TitlebarStatusPill } from "./titlebar-status";
 import { titlebarStatusFor } from "./workspace-notices";
 import { defaultFetchJson } from "../../models/workspaceOptions";
 import { warmPermissionsOverview } from "../../models/permissionsPrefetch";
-import { EXISTING_LOGIN_LABEL, startFlow } from "../../models/startFlow";
 
 export interface TitlebarAttrs {
   shell: ShellState;
@@ -108,21 +107,6 @@ function startTitlebar(shell: ShellState): m.Children {
         alt: "Imbue Studio",
         draggable: false,
       }),
-      ...(startFlow.logInExisting === null
-        ? []
-        : [
-            m(
-              TitlebarButton,
-              {
-                id: "start-log-in",
-                variant: "crumb",
-                tone: "muted",
-                extra: "group mr-3 translate-y-1",
-                onclick: () => startFlow.logInExisting?.(),
-              },
-              m("span", { class: "type-body text-tertiary group-hover:text-primary" }, EXISTING_LOGIN_LABEL),
-            ),
-          ]),
       m("div", { class: "flex" + (hasOwnWindowButtons(shell) ? "" : " hidden") }, [
         m(TitlebarButton, { variant: "control", "aria-label": "Minimize", hidden: !isDesktop, onclick: () => electronBridge.minimize() }, m(Icon12, { name: "minimize" })),
         m(TitlebarButton, { variant: "control", "aria-label": "Maximize", hidden: !isDesktop, onclick: () => electronBridge.maximize() }, m(Icon12, { name: "maximize" })),

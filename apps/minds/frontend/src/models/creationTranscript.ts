@@ -61,13 +61,6 @@ export function readyTurnMarkdown(): string {
   return `## ${READY_LINE}\n\n${WELCOME_BODY}`;
 }
 
-/**
- * What an Imbue Cloud create restates instead of its settings. The cloud
- * preset is not something the reader picked -- the flow chose every one of
- * those values for them -- so listing them back reads as configuration they
- * are answerable for rather than as the one choice they actually made.
- */
-export const IMBUE_CLOUD_SUMMARY_LINE = "Create on Imbue Cloud";
 const INTERRUPTED_LEAD = "The app closed while this workspace was being created.";
 
 /** The interrupted attempt's notice; with a held Retry, why it can't be retried in place of the offer to. */
@@ -280,18 +273,8 @@ export const SUMMARY_HEADING = "Create a workspace with these settings:";
 /**
  * The settings, one per line, in the order the create form asks for them, under SUMMARY_HEADING. Region and
  * machine size are omitted when the mode has none, so a local create does not read as missing something.
- * Empty for the start flow's Imbue Cloud answer, which restates only itself -- see IMBUE_CLOUD_SUMMARY_LINE
- * (choosing Imbue Cloud inside the form still lists everything: there the settings are yours).
- *
- * ``isCloudPreset`` is provenance, which the request itself does not carry --
- * the two submissions are identical on the wire -- so the caller passes what
- * the start flow remembers.
  */
-export function summarySettingLines(
-  request: CreateAttemptRequestSummary,
-  isCloudPreset: boolean,
-): string[] {
-  if (isCloudPreset) return [];
+export function summarySettingLines(request: CreateAttemptRequestSummary): string[] {
   const compute =
     request.cloud_account !== ""
       ? connectionSummaryLabel(request)
@@ -310,11 +293,7 @@ export function summarySettingLines(
     .map(([label, value]) => `${label} — ${value}`);
 }
 
-/** What the settings turn says in full: the heading over its lines, or the Imbue Cloud answer alone. */
-export function summaryLines(
-  request: CreateAttemptRequestSummary,
-  isCloudPreset: boolean,
-): string[] {
-  if (isCloudPreset) return [IMBUE_CLOUD_SUMMARY_LINE];
-  return [SUMMARY_HEADING, ...summarySettingLines(request, isCloudPreset)];
+/** What the settings turn says in full: the heading over its lines. */
+export function summaryLines(request: CreateAttemptRequestSummary): string[] {
+  return [SUMMARY_HEADING, ...summarySettingLines(request)];
 }
