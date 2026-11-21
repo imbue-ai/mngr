@@ -50,16 +50,16 @@ machine, and the key is tried here, so that costs no extra operation and the
 desktop's key reaches the machine only once it is known to be the machine's
 own.
 
-Crash recovery deliberately stops short of surviving a full *reboot*: the
-gateway's secrets are kept in a tmpfs directory under ``/run``, which is
-RAM-backed and so survives process crashes -- letting ``supervisord`` restart
-the gateway without a desktop round-trip -- but is wiped by a reboot. This is a
-deliberate choice to never persist the encryption key on the VPS disk beside
-the encrypted credential store (which would be equivalent to storing the
-credentials in plaintext from a disk-snapshot threat model). The package's
-scripts verify the directory really is RAM-backed and refuse to proceed
-otherwise. After a reboot the gateway stays down until the next provisioning
-pass re-writes the secrets.
+The machine keeps its own secrets -- the key its credential store is encrypted
+with and its gateway's listen password -- in its latchkey directory, on its
+disk beside that store. ``supervisord`` therefore brings the gateway back after
+a crash and after a reboot alike, with none of the user's computers online.
+The directory is root's on the VPS and is not mounted into the agent's
+container, so the agents cannot read it; anyone who can read the VPS's disk (a
+snapshot of it, a stopped machine's image) can read the credentials on it. A
+machine that lost its key is handed back the copy this computer recorded, when
+it has one; otherwise its store is given up and it starts again under a fresh
+key (see :func:`_resolve_machine_encryption_key`).
 """
 
 import time
@@ -105,7 +105,6 @@ from imbue.mngr_latchkey.remote._machine import apply_remote_state
 from imbue.mngr_latchkey.remote._machine import read_remote_state
 from imbue.mngr_latchkey.remote._mirror import generate_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
-from imbue.mngr_latchkey.remote._mirror import store_machine_gateway_password
 from imbue.mngr_latchkey.remote._mirror import stored_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import stored_machine_gateway_password
 from imbue.mngr_latchkey.remote._transfer import adopt_machine_custom_services
@@ -174,7 +173,7 @@ class _MachineKeyDecision(FrozenModel):
     )
     is_decided_here: bool = Field(
         description=(
-            "Whether this pass decided the key, rather than adopting the one the machine runs under or handing "
+            "Whether this pass decided the key, rather than adopting the one the machine holds or handing "
             "back the one recorded here. A decided key is recorded only once the machine has taken it."
         )
     )
@@ -544,15 +543,17 @@ def _resolve_machine_encryption_key(
 ) -> _MachineKeyDecision:
     """Return the encryption key this machine keeps its own credential store under.
 
-    The machine's own copy -- the tmpfs file its gateway reads, which the read
-    found -- is the source of truth while it exists: any of the user's
-    computers may have provisioned the machine, so what this computer recorded
-    is only a durable *mirror* of the machine's key, kept so a rebooted machine
-    (whose tmpfs is wiped) can be handed its key back. Adopting the running
-    key, rather than deciding one, is what lets two desktops manage one
-    machine without re-keying it out from under each other.
+    The machine's own copy -- the file in its latchkey directory, which the
+    read found -- is the source of truth: any of the user's computers may have
+    provisioned the machine, so what this computer recorded is only a *mirror*
+    of the machine's key, kept so that a push can be encrypted for the machine
+    without reading it first. Adopting the machine's key, rather than deciding
+    one, is what lets two desktops manage one machine without re-keying it out
+    from under each other.
 
-    Only when neither the machine nor this computer knows a key is one decided
+    A machine holding no key is one nothing has provisioned yet, or one that
+    lost it. It is handed back the key recorded here when there is one, and
+    otherwise gets one decided for it
     (see :func:`_decide_key_for_machine_with_no_known_key`). A decided key is
     not recorded here: the caller records it once the machine has taken it
     (:func:`_record_machine_encryption_key`), since the apply that hands it
@@ -568,11 +569,11 @@ def _resolve_machine_encryption_key(
         if state.encryption_key is not None:
             if recorded_key is None or recorded_key.get_secret_value() != state.encryption_key.get_secret_value():
                 store_machine_encryption_key(data_dir, host_id, state.encryption_key)
-                logger.info("Adopted the encryption key the machine of host {} is already running under", host_id)
+                logger.info("Adopted the encryption key the machine of host {} already holds", host_id)
             return _MachineKeyDecision(key=state.encryption_key, is_store_abandoned=False, is_decided_here=False)
+        # The machine lost its key; the one recorded here is what its store is
+        # written under, so handing it back keeps that store readable.
         if recorded_key is not None:
-            # The machine rebooted (or has never run a gateway); hand it back
-            # the key its store is already written under.
             return _MachineKeyDecision(key=recorded_key, is_store_abandoned=False, is_decided_here=False)
         decision = _decide_key_for_machine_with_no_known_key(latchkey, host_id, state)
     except (LatchkeyStoreError, LatchkeyEncryptionKeyPermissionError) as e:
@@ -581,7 +582,7 @@ def _resolve_machine_encryption_key(
 
 
 def _record_machine_encryption_key(latchkey_directory: Path, host_id: HostId, key: SecretStr) -> None:
-    """Record the key the machine has just taken, so a rebooted machine can be handed it back.
+    """Record the key the machine has just taken, which is what a push to it is encrypted with.
 
     Raises:
         RemoteGatewayError: when the record cannot be written.
@@ -608,41 +609,29 @@ def _resolve_machine_gateway_password(
     computer that wrote its own here would answer every one of their requests
     with a 401.
 
-    So the machine's running copy wins, this computer's record of it is the
-    fallback for a machine whose tmpfs a reboot wiped, and only a machine that
-    neither is running one nor has one recorded gets ``desktop_gateway_password``
-    -- the value this computer bakes into the hosts it creates, and hence
-    the right one for a machine it is about to provision for the first time.
-
-    One combination cannot be served, and is why the record is worth writing on
-    every pass: a machine whose password no computer has recorded yet, which
-    rebooted (wiping its own copy) before this computer -- not the one that
-    created its agents -- provisioned it. It is seeded with a password those
-    agents do not hold, and every later pass then adopts that, since nothing
-    anywhere still knows the value they were given. Their latchkey calls stay
-    unauthorized; a build that records the password while the machine is still
-    running closes the window for good.
+    So the machine's own copy wins. A machine holding none is handed back the
+    password recorded here when there is one, and otherwise gets
+    ``desktop_gateway_password`` -- the value this computer bakes into the
+    hosts it creates, and hence the right one for a machine it is about to
+    provision for the first time. A machine that lost its copy, with none
+    recorded here, is seeded the same way, which serves the agents on it only
+    if this computer created them.
 
     Raises:
-        RemoteGatewayError: when the password cannot be read or recorded.
+        RemoteGatewayError: when a password recorded here cannot be read.
     """
-    data_dir = plugin_data_dir(latchkey_directory)
+    if state.listen_password is not None:
+        return state.listen_password
+    # CLEANUP: drop this hand-back, with ``stored_machine_gateway_password`` and
+    # the record it reads, once no machine set up by a build that kept the
+    # machine's password in RAM remains to be upgraded. Such a machine lost its
+    # password to every reboot, and that build recorded it here to hand it back.
     try:
-        recorded_password = stored_machine_gateway_password(data_dir, host_id)
-        if state.listen_password is not None:
-            if state.listen_password != recorded_password:
-                store_machine_gateway_password(data_dir, host_id, state.listen_password)
-                logger.info(
-                    "Adopted the gateway listen password the machine of host {} is already running under", host_id
-                )
-            return state.listen_password
-        if recorded_password is not None:
-            # The machine rebooted (or has never run a gateway); hand it back
-            # the password its agents were created with.
-            return recorded_password
-        store_machine_gateway_password(data_dir, host_id, desktop_gateway_password)
+        recorded_password = stored_machine_gateway_password(plugin_data_dir(latchkey_directory), host_id)
     except LatchkeyStoreError as e:
-        raise RemoteGatewayError(f"Failed to resolve the gateway listen password for host {host_id}: {e}") from e
+        raise RemoteGatewayError(f"Failed to read the recorded gateway listen password of host {host_id}: {e}") from e
+    if recorded_password is not None:
+        return recorded_password
     logger.info("Host {} will hold its callers to this computer's gateway listen password", host_id)
     return desktop_gateway_password
 
@@ -650,7 +639,7 @@ def _resolve_machine_gateway_password(
 def _decide_key_for_machine_with_no_known_key(
     latchkey: Latchkey, host_id: HostId, state: RemoteMachineState
 ) -> _MachineKeyDecision:
-    """Decide the key for a machine that is not running one, with none recorded here.
+    """Decide the key for a machine that holds none, with none recorded here.
 
     A machine holding no credential store gets a fresh random key: there is
     nothing a key choice could make unreadable, and a key of its own means what
@@ -666,11 +655,10 @@ def _decide_key_for_machine_with_no_known_key(
     desktop's key goes to the machine only then, once it is known to be the
     machine's own.
 
-    When it does not, the store was written under a key nobody present holds:
-    another computer provisioned this machine and the machine rebooted since.
+    When it does not, the store was written under a key the machine has lost.
     The store is abandoned -- removed, and a fresh key minted -- because signing
-    the machine's services in again is always possible, while waiting for a
-    computer that may never return is not.
+    the machine's services in again is always possible, while a store without
+    its key can never be read again.
 
     CLEANUP: drop the desktop-key check (abandoning every store no recorded key
     opens) once no machine provisioned before per-machine keys remains.
@@ -694,8 +682,8 @@ def _decide_key_for_machine_with_no_known_key(
         )
         return _MachineKeyDecision(key=desktop_key, is_store_abandoned=False, is_decided_here=True)
     logger.warning(
-        "Abandoning the credential store of host {}: it was written under a key this computer does not hold "
-        "(provisioned by another computer, and the machine rebooted since); its services need signing in again",
+        "Abandoning the credential store of host {}: its machine no longer holds the key it was written under; "
+        "its services need signing in again",
         host_id,
     )
     return _MachineKeyDecision(key=generate_machine_encryption_key(), is_store_abandoned=True, is_decided_here=True)

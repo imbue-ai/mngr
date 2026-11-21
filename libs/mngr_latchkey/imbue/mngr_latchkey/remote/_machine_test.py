@@ -56,14 +56,14 @@ _EVERY_READ_ANSWERS = frozenset(
 def test_an_update_document_carries_only_what_the_update_sets() -> None:
     document = _update_document(
         RemoteStateUpdate(
-            fallback_encryption_key=SecretStr("key-2213"),
+            encryption_key=SecretStr("key-2213"),
             permissions_json='{"rules": []}',
             is_gateway_restarted=True,
         )
     )
 
     assert document == {
-        "fallback_encryption_key": b"key-2213",
+        "encryption_key": b"key-2213",
         "permissions_json": b'{"rules":[]}',
         "restart_gateway": b"1",
     }
@@ -330,18 +330,14 @@ def test_a_failed_apply_names_what_it_was_sending(tmp_path: Path) -> None:
     assert raised.value.host_id == _HOST_ID
 
 
-def test_a_failed_read_names_what_it_expected_back_and_what_it_sent_along(tmp_path: Path) -> None:
-    """A read carries a write too when it hands a rebooted machine its key back, so it names both directions."""
-    request = RemoteStateRequest(
-        is_credential_store_included=True,
-        fallback_encryption_key=SecretStr("key-3318"),
-        container_host_id=HostId.generate(),
-    )
+def test_a_failed_read_names_what_it_expected_back(tmp_path: Path) -> None:
+    """What a request asks for beyond the answers every read gives is named with them."""
+    request = RemoteStateRequest(is_credential_store_included=True, container_host_id=HostId.generate())
 
     with pytest.raises(MachineTransferError) as raised:
         read_remote_state(_failing(tmp_path), request, _HOST_ID)
 
-    assert raised.value.sent == {SentToMachine.FALLBACK_ENCRYPTION_KEY}
+    assert raised.value.sent == frozenset()
     assert raised.value.expected == _EVERY_READ_ANSWERS | {
         ReceivedFromMachine.CREDENTIAL_STORE,
         ReceivedFromMachine.CONTAINER_EXTRA_HOSTS,
@@ -363,7 +359,6 @@ def test_every_entry_an_update_can_send_belongs_to_a_named_part(tmp_path: Path) 
     """An update setting every field sends every part an apply can carry, and nothing a side command sends."""
     update = RemoteStateUpdate(
         encryption_key=SecretStr("key-4410"),
-        fallback_encryption_key=SecretStr("key-4411"),
         listen_password="password-4412",
         config_json="{}",
         credential_merge=RemoteCredentialMerge(

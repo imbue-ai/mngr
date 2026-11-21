@@ -32,12 +32,10 @@ the machine's RAM-backed scratch directory, and of the ``latchkey``
 invocations they make only the service and account names travel in ``argv``,
 never a key, a password or a store (those go by file, stdin or the
 environment). Neither is the machine's own key ever spelled into a command: a
-script that runs ``latchkey`` reads the key from the machine's RAM-backed
-secrets directory itself, a read answers with it the same base64 way as with
-everything else, and a machine that lost it to a reboot is handed it back
-inside the same document rather than in a second round trip. Nothing of this
-computer's own key material ever travels to the machine: a store read back is
-re-encrypted here, not there.
+script that runs ``latchkey`` reads the key from the machine's latchkey
+directory itself, and a read answers with it the same base64 way as with
+everything else. Nothing of this computer's own key material ever travels to
+the machine: a store read back is re-encrypted here, not there.
 
 A policy crosses the wire in the machine's projection of it, in both
 directions (:mod:`imbue.mngr_latchkey.remote._machine_policy`): what an update
@@ -127,34 +125,43 @@ OUTCOME_DONE_MARKER: Final[str] = "MNGR_LATCHKEY_OUTCOME=DONE"
 # runs writes to the same stdout.
 ANSWER_PREFIX: Final[str] = "MNGR_LATCHKEY_"
 
-# tmpfs (RAM-backed) directory holding the gateway's secrets: the machine's own
-# encryption key and listen password, and the records of the desktops connected
-# to it (each carrying the pair presented on the hop back to that desktop).
-# ``/run`` is the FHS location for runtime
-# state, is root-owned, and is a tmpfs under systemd (which we already require
-# for the supervisor service), so it is wiped on reboot -- the key is never
-# persisted to the VPS disk beside the encrypted credential store (which would
-# be equivalent to storing the credentials in plaintext against a disk-snapshot
-# threat model), yet it survives a process crash so supervisord can restart the
-# gateway without a desktop round-trip. The package's scripts verify this is
-# really a RAM-backed filesystem before writing to it.
+# tmpfs (RAM-backed) directory holding what should not outlive a boot: the
+# records of the desktops connected to the machine (each carrying the pair
+# presented on the hop back to that desktop, which is the desktop's secret
+# and not the machine's to keep) and the scratch space a command's document is
+# unpacked into. ``/run`` is the FHS location for runtime state, is root-owned,
+# and is a tmpfs under systemd (which we already require for the supervisor
+# service). The package's scripts verify this is really a RAM-backed
+# filesystem before writing to it.
 #
 # Deliberately not ``/tmp``: unlike ``/run``, ``/tmp`` is not reliably a tmpfs
 # (on many distros, incl. common Debian/Ubuntu VPS images, it is a normal
-# directory on the root disk and is cleaned by age rather than wiped on boot),
-# so the key could land on -- and survive on -- persistent disk. ``/tmp`` is
-# also world-writable (1777), exposing the classic hostile-symlink attack that a
-# root-owned ``/run`` avoids.
-TMPFS_SECRETS_DIR: Final[Path] = Path("/run/mngr-latchkey")
+# directory on the root disk and is cleaned by age rather than wiped on boot).
+# ``/tmp`` is also world-writable (1777), exposing the classic hostile-symlink
+# attack that a root-owned ``/run`` avoids.
+RUNTIME_DIR: Final[Path] = Path("/run/mngr-latchkey")
 
-# The machine's own two secrets: the key its credential store is encrypted with,
-# and the listen password its gateway holds every caller to. The password
-# belongs to the machine rather than to any one of the user's computers: it is
-# what the workspaces on it were created with (their host env file is written
-# once, at ``mngr create``), so it can never be replaced -- see
+# The machine's own two secrets, kept in its latchkey directory beside the
+# credential store: the key that store is encrypted with, and the listen
+# password its gateway holds every caller to. On the machine's disk, so its
+# gateway comes back after a reboot without any of the user's computers; the
+# directory is root's and out of the agent container's reach, and whoever can
+# read the machine's disk can read the credentials on it. The password belongs
+# to the machine rather than to any one of the user's computers: it is what the
+# workspaces on it were created with (their host env file is written once, at
+# ``mngr create``), so it can never be replaced -- see
 # :func:`~imbue.mngr_latchkey.remote.provisioning._resolve_machine_gateway_password`.
-GATEWAY_ENCRYPTION_KEY_FILENAME: Final[str] = "gateway_encryption_key"
-GATEWAY_LISTEN_PASSWORD_FILENAME: Final[str] = "gateway_listen_password"
+MACHINE_ENCRYPTION_KEY_FILENAME: Final[str] = "machine_encryption_key"
+MACHINE_GATEWAY_PASSWORD_FILENAME: Final[str] = "machine_gateway_password"
+
+# CLEANUP: drop these two names (with the postinst and gateway-run blocks
+# that use them) once none of the user's computers runs a build that kept the
+# machine's secrets in RAM. Under :data:`RUNTIME_DIR` they are where such a
+# build reads and writes the machine's secrets. The current names differ from
+# them because the postinst of such a build deletes these names from the
+# latchkey directory.
+LEGACY_RAM_ENCRYPTION_KEY_FILENAME: Final[str] = "gateway_encryption_key"
+LEGACY_RAM_LISTEN_PASSWORD_FILENAME: Final[str] = "gateway_listen_password"
 
 # What the logs say in place of a machine command. Its document carries secret
 # material -- a credential store, the gateway's secrets, the policy being
@@ -178,7 +185,6 @@ DIFFERENT_MACHINE_PASSWORD_MESSAGE: Final[str] = (
 # the way the package's scripts read them.
 _ENTRY_ABANDON_CREDENTIAL_STORE: Final[str] = "abandon_credential_store"
 _ENTRY_ENCRYPTION_KEY: Final[str] = "encryption_key"
-_ENTRY_FALLBACK_ENCRYPTION_KEY: Final[str] = "fallback_encryption_key"
 _ENTRY_LISTEN_PASSWORD: Final[str] = "listen_password"
 _ENTRY_CONFIG_JSON: Final[str] = "config_json"
 _ENTRY_CREDENTIAL_BUNDLE: Final[str] = "credential_bundle"
@@ -222,7 +228,6 @@ _FLAG_TRUE: Final[bytes] = b"1"
 # The part of what is sent that each document entry belongs to (see :func:`_command_parts`).
 _SENT_PART_BY_ENTRY: Final[Mapping[str, SentToMachine]] = {
     _ENTRY_ENCRYPTION_KEY: SentToMachine.ENCRYPTION_KEY,
-    _ENTRY_FALLBACK_ENCRYPTION_KEY: SentToMachine.FALLBACK_ENCRYPTION_KEY,
     _ENTRY_LISTEN_PASSWORD: SentToMachine.LISTEN_PASSWORD,
     _ENTRY_CONFIG_JSON: SentToMachine.CONFIG,
     _ENTRY_CREDENTIAL_BUNDLE: SentToMachine.CREDENTIAL_MERGE,
@@ -309,14 +314,6 @@ class RemoteStateRequest(FrozenModel):
             "Left out by a read that only needs the machine's secrets and policy."
         ),
     )
-    fallback_encryption_key: SecretStr | None = Field(
-        default=None,
-        description=(
-            "The machine's own key as recorded here, written back to a machine that lost its RAM-backed copy "
-            "to a reboot, so the key it answers with is the one its store is written under; a machine still "
-            "holding one keeps that."
-        ),
-    )
     container_host_id: HostId | None = Field(
         default=None,
         description=(
@@ -332,12 +329,10 @@ class RemoteMachineState(FrozenModel):
     package_version: str = Field(description="The version of the package whose ``read-state`` answered.")
     home: Path = Field(description="The remote user's home, under which the latchkey directory lives.")
     encryption_key: SecretStr | None = Field(
-        description="The key the machine's gateway is running under, or ``None`` when its RAM holds none."
+        description="The key the machine keeps its credential store under, or ``None`` when it holds none."
     )
     listen_password: str | None = Field(
-        description=(
-            "The listen password the machine's gateway holds its callers to, or ``None`` when its RAM holds none."
-        )
+        description=("The listen password the machine's gateway holds its callers to, or ``None`` when it holds none.")
     )
     has_credential_store: bool = Field(description="Whether the machine holds a credential store file.")
     config_json: str | None = Field(
@@ -416,10 +411,6 @@ class RemoteStateUpdate(FrozenModel):
             "The machine's own key. Adopted, never replaced: a machine already running under a different one "
             "refuses the whole update (see :data:`DIFFERENT_MACHINE_KEY_MESSAGE`)."
         ),
-    )
-    fallback_encryption_key: SecretStr | None = Field(
-        default=None,
-        description="The machine's own key, written only to a machine that has none (a reboot wiped it).",
     )
     listen_password: str | None = Field(
         default=None, description="The machine's own gateway listen password, adopted the way the key is."
@@ -547,8 +538,6 @@ def _request_document(request: RemoteStateRequest) -> dict[str, bytes]:
     document: dict[str, bytes] = {}
     if request.is_credential_store_included:
         document[_ENTRY_INCLUDE_CREDENTIAL_STORE] = _FLAG_TRUE
-    if request.fallback_encryption_key is not None:
-        document[_ENTRY_FALLBACK_ENCRYPTION_KEY] = request.fallback_encryption_key.get_secret_value().encode("utf-8")
     if request.container_host_id is not None:
         document[_ENTRY_CONTAINER_HOST_ID] = str(request.container_host_id).encode("utf-8")
     return document
@@ -561,8 +550,6 @@ def _update_document(update: RemoteStateUpdate) -> dict[str, bytes]:
         document[_ENTRY_ABANDON_CREDENTIAL_STORE] = _FLAG_TRUE
     if update.encryption_key is not None:
         document[_ENTRY_ENCRYPTION_KEY] = update.encryption_key.get_secret_value().encode("utf-8")
-    if update.fallback_encryption_key is not None:
-        document[_ENTRY_FALLBACK_ENCRYPTION_KEY] = update.fallback_encryption_key.get_secret_value().encode("utf-8")
     if update.listen_password is not None:
         document[_ENTRY_LISTEN_PASSWORD] = update.listen_password.encode("utf-8")
     if update.config_json is not None:

@@ -1,7 +1,7 @@
 """A fake VPS, and a fake latchkey CLI, for exercising the remote modules.
 
 ``FakeVps`` is an outer host backed by a directory tree standing in for the
-machine: its ``$HOME/.latchkey``, its RAM-backed secrets directory, and the
+machine: its ``$HOME/.latchkey``, its RAM-backed runtime directory, and the
 package's files unpacked where the package would put them. Commands the code
 under test sends it run under a real ``sh`` with that tree as the machine, so
 what a test exercises is the package's own scripts -- ``mngr-latchkey
@@ -13,7 +13,7 @@ fake container home), ``ssh-keygen``
 (mints a stand-in keypair), ``supervisorctl`` (records what it was asked),
 ``curl`` (records what the gateway was asked and answers with a canned status,
 and downloads only what a test serves) and the one ``stat`` probe that says
-whether the secrets directory is RAM-backed.
+whether the runtime directory is RAM-backed.
 The install itself (apt, dpkg) is faked too: the bootstrap command unpacks
 whatever ``.deb`` was last uploaded. The package's ``postinst`` is not part of
 that, but ``run_postinst`` runs it for real on the fake machine, where
@@ -64,8 +64,8 @@ from imbue.mngr_latchkey.filed_permission_requests import FILED_REQUESTS_DIR_NAM
 from imbue.mngr_latchkey.filed_permission_requests import FILED_REQUESTS_SCHEMA_VERSION
 from imbue.mngr_latchkey.filed_permission_requests import FILED_REQUEST_FILE_SUFFIX
 from imbue.mngr_latchkey.remote._machine import ANSWER_PREFIX
-from imbue.mngr_latchkey.remote._machine import GATEWAY_ENCRYPTION_KEY_FILENAME
-from imbue.mngr_latchkey.remote._machine import GATEWAY_LISTEN_PASSWORD_FILENAME
+from imbue.mngr_latchkey.remote._machine import MACHINE_ENCRYPTION_KEY_FILENAME
+from imbue.mngr_latchkey.remote._machine import MACHINE_GATEWAY_PASSWORD_FILENAME
 from imbue.mngr_latchkey.remote._machine import OUTCOME_DONE_MARKER
 from imbue.mngr_latchkey.remote._machine import REMOTE_COMMAND_NAME
 from imbue.mngr_latchkey.remote._machine import REMOTE_LATCHKEY_DIR_NAME
@@ -116,7 +116,7 @@ DEFAULT_DOCKER_BRIDGE_ADDRESS = "172.17.0.1"
 # ``docker inspect`` reports it.
 OUTER_HOST_EXTRA_HOST = "host.docker.internal:host-gateway"
 
-# The filesystem type the fake secrets directory reports unless a test says otherwise.
+# The filesystem type the fake runtime directory reports unless a test says otherwise.
 _RAM_BACKED_FSTYPE = "tmpfs"
 _SHELL_TIMEOUT_SECONDS = 60.0
 _FAKE_BIN_DIR_NAME = "fakebin"
@@ -199,8 +199,8 @@ class FakeVps(MutableModel):
         return self.home / REMOTE_LATCHKEY_DIR_NAME
 
     @property
-    def secrets_dir(self) -> Path:
-        return self.layout.secrets_dir
+    def runtime_dir(self) -> Path:
+        return self.layout.runtime_dir
 
     @property
     def plugins_dir(self) -> Path:
@@ -214,7 +214,7 @@ class FakeVps(MutableModel):
     def setup(self) -> None:
         """Lay out the machine and install the package on it, the way a provisioned VPS would look."""
         self.home.mkdir(parents=True, exist_ok=True)
-        self.secrets_dir.parent.mkdir(parents=True, exist_ok=True)
+        self.runtime_dir.parent.mkdir(parents=True, exist_ok=True)
         (self.root / "fstype").write_text(_RAM_BACKED_FSTYPE)
         self._write_fake_binaries()
         self.install_package()
@@ -250,14 +250,23 @@ class FakeVps(MutableModel):
         (self.latchkey_dir / PERMISSIONS_FORMAT_VERSION_FILENAME).write_text(str(version))
 
     def run_under(self, secret_filename: str, value: str) -> None:
-        """Put a secret in the machine's RAM-backed directory, as its running gateway would have it."""
-        self.secrets_dir.mkdir(parents=True, exist_ok=True)
-        (self.secrets_dir / secret_filename).write_text(value)
+        """Put one of the machine's own secrets in its latchkey directory, as a provisioned machine holds it."""
+        self.latchkey_dir.mkdir(parents=True, exist_ok=True)
+        (self.latchkey_dir / secret_filename).write_text(value)
 
     def run_under_key(self, key: str) -> None:
-        self.run_under(GATEWAY_ENCRYPTION_KEY_FILENAME, key)
+        self.run_under(MACHINE_ENCRYPTION_KEY_FILENAME, key)
 
-    def set_secrets_dir_filesystem_type(self, filesystem_type: str) -> None:
+    def lose_key(self) -> None:
+        """Leave the machine without its own key, as one whose latchkey directory lost it."""
+        (self.latchkey_dir / MACHINE_ENCRYPTION_KEY_FILENAME).unlink(missing_ok=True)
+
+    def hold_in_ram(self, filename: str, value: str) -> None:
+        """Put a file in the machine's RAM-backed directory, as a build that kept the machine's secrets there left it."""
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        (self.runtime_dir / filename).write_text(value)
+
+    def set_runtime_dir_filesystem_type(self, filesystem_type: str) -> None:
         (self.root / "fstype").write_text(filesystem_type)
 
     def fail_supervisorctl_for(self, program_name: str) -> None:
@@ -268,7 +277,7 @@ class FakeVps(MutableModel):
         """Give the machine a running gateway: the address apply-state wrote for it and the password it holds callers to."""
         self.latchkey_dir.mkdir(parents=True, exist_ok=True)
         (self.latchkey_dir / GATEWAY_CONF_FILENAME).write_text(f"LK_GATEWAY_LISTEN_HOST='{listen_host}'\n")
-        self.run_under(GATEWAY_LISTEN_PASSWORD_FILENAME, listen_password)
+        self.run_under(MACHINE_GATEWAY_PASSWORD_FILENAME, listen_password)
 
     def hold_filed_request(self, request_id: str, record_json: str) -> Path:
         """Leave the machine keeping a permission request its gateway forwarded, as its extension records one."""
@@ -316,19 +325,19 @@ class FakeVps(MutableModel):
     # The machine, as a test reads it back.
 
     def secret(self, filename: str) -> str | None:
-        path = self.secrets_dir / filename
+        path = self.latchkey_dir / filename
         return path.read_text().strip() if path.is_file() else None
 
     def secret_mode(self, filename: str) -> int:
-        return stat.S_IMODE((self.secrets_dir / filename).stat().st_mode)
+        return stat.S_IMODE((self.latchkey_dir / filename).stat().st_mode)
 
     def device_records(self) -> dict[str, str]:
         """The records of the desktops announced to the machine, by file name."""
-        devices_dir = self.secrets_dir / DEVICES_DIR_NAME
+        devices_dir = self.runtime_dir / DEVICES_DIR_NAME
         return {path.name: path.read_text() for path in sorted(devices_dir.iterdir())} if devices_dir.is_dir() else {}
 
     def device_record_path(self, filename: str) -> Path:
-        return self.secrets_dir / DEVICES_DIR_NAME / filename
+        return self.runtime_dir / DEVICES_DIR_NAME / filename
 
     def machine_accounts(self) -> dict[str, list[str]]:
         path = self.latchkey_dir / CREDENTIALS_STORE_FILENAME
@@ -375,11 +384,11 @@ class FakeVps(MutableModel):
     def latchkey_dir_entries(self) -> list[str]:
         return sorted(path.name for path in self.latchkey_dir.iterdir()) if self.latchkey_dir.is_dir() else []
 
-    def secrets_dir_entries(self) -> list[str]:
-        """The secret files the machine holds in RAM (the connected desktops' records live in a directory beside them)."""
+    def runtime_dir_entries(self) -> list[str]:
+        """What the machine holds in RAM other than the directory of the connected desktops' records."""
         return (
-            sorted(path.name for path in self.secrets_dir.iterdir() if path.is_file())
-            if self.secrets_dir.is_dir()
+            sorted(path.name for path in self.runtime_dir.iterdir() if path.name != DEVICES_DIR_NAME)
+            if self.runtime_dir.is_dir()
             else []
         )
 
@@ -564,15 +573,17 @@ def fake_vps(
 ) -> OuterHostInterface:
     """A fake VPS with the package installed, holding a credential store (and optionally a policy) of its own.
 
-    Its RAM-backed secrets directory starts empty, like a machine that rebooted
-    since it was provisioned; ``run_under_key`` gives it the key its gateway
-    would be running under. ``cast`` is used because the fake is
+    A machine given a store holds the key it is written under beside it, and
+    ``lose_key`` takes that away; one given none holds no key either, like a
+    machine nothing has provisioned yet. ``cast`` is used because the fake is
     structurally-but-not-nominally an OuterHostInterface (the interface has many
     other abstract methods that the code under test never calls).
     """
     vps = FakeVps(root=tmp_path / "vps", container_name=container_name, is_local=is_local)
     vps.setup()
-    vps.hold(accounts_by_service or {})
+    if accounts_by_service:
+        vps.hold(accounts_by_service)
+        vps.run_under_key(MACHINE_KEY)
     if machine_permissions is not None:
         vps.hold_permissions(machine_permissions)
     return cast(OuterHostInterface, vps)

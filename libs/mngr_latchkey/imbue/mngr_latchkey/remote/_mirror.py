@@ -16,7 +16,6 @@ The machine store is the per-host directory this plugin already owns::
         data-format-version           the mirror's own format stamp  (owned)
         latchkey_permissions.json     canonical per-host policy      (owned)
         machine_encryption_key        the machine's own key          (owned)
-        machine_gateway_password      the machine's own password     (owned)
         config.json                   the desktop's settings, with the
                                       machine's own custom services (owned)
         plugins/                   -> the desktop's latchkey plugins
@@ -119,19 +118,17 @@ _MACHINE_STORE_DIR_MODE: Final[int] = stat.S_IRWXU
 
 # Holds the encryption key the *remote machine* keeps its own store under -- not
 # the key this directory's own mirror uses, which is the desktop's (see the
-# module docstring). The machine's copy lives only in its RAM-backed secrets
-# directory, so this file is the durable one: without it, a rebooted machine's
-# store could never be read again. It sits inside the machine store so that
-# dropping the store drops the key with it, which is exactly right -- one is
-# worthless without the other.
+# module docstring). The machine's own copy, in its latchkey directory, is the
+# truth; this one is what a push to the machine is encrypted with, what a
+# machine that lost its own is handed back, and what says a provisioning pass
+# from this computer has reached the machine. It sits inside the machine store
+# so that dropping the store drops the key with it.
 _MACHINE_KEY_FILENAME: Final[str] = "machine_encryption_key"
 
-# Holds the listen password the *remote machine's* gateway holds its callers to,
-# durable for the same reason as the key above: the machine keeps its own copy
-# only in RAM. It cannot be re-derived here, because it is not this computer's
-# to decide -- the workspaces on that machine present it from a host env file
-# written once at ``mngr create``, so whichever of the user's computers created
-# them fixed the value for the machine's whole life.
+# CLEANUP: drop this record with the hand-back that reads it (see
+# ``provisioning._resolve_machine_gateway_password``). Holds the listen
+# password of a machine set up by a build that kept the machine's own copy in
+# RAM, recorded by that build to hand back after a reboot.
 _MACHINE_GATEWAY_PASSWORD_FILENAME: Final[str] = "machine_gateway_password"
 
 # Same 32 random bytes, URL-safe base64, that ``load_or_create_encryption_key``
@@ -161,7 +158,7 @@ def machine_key_path(data_dir: Path, host_id: HostId) -> Path:
 
 
 def machine_gateway_password_path(data_dir: Path, host_id: HostId) -> Path:
-    """Return the path to the desktop's copy of ``host_id``'s own gateway listen password."""
+    """Return the path to the record an earlier build kept of ``host_id``'s own gateway listen password."""
     return machine_store_dir(data_dir, host_id) / _MACHINE_GATEWAY_PASSWORD_FILENAME
 
 
@@ -181,10 +178,7 @@ def stored_machine_encryption_key(data_dir: Path, host_id: HostId) -> SecretStr 
 
 
 def stored_machine_gateway_password(data_dir: Path, host_id: HostId) -> str | None:
-    """Return the listen password ``host_id``'s machine holds its callers to, or ``None`` if unknown.
-
-    ``None`` means no provisioning pass from this desktop has ever seen the
-    machine's password -- not that it has none.
+    """Return the listen password an earlier build recorded for ``host_id``'s machine, or ``None`` if it recorded none.
 
     Raises:
         LatchkeyStoreError: when the password file exists but cannot be read.
@@ -200,33 +194,15 @@ def generate_machine_encryption_key() -> SecretStr:
 def store_machine_encryption_key(data_dir: Path, host_id: HostId, key: SecretStr) -> None:
     """Record the key ``host_id``'s machine keeps its own store under.
 
-    A durable mirror of the machine's own copy, which lives in RAM and does not
-    survive a reboot: this record is what lets a rebooted machine be handed
-    back the key its store is already encrypted with. It follows the machine,
-    not the other way around -- provisioning rewrites it whenever the machine
-    turns out to be running under a key another of the user's computers gave it.
+    A mirror of the machine's own copy, and what a machine that lost its own
+    is handed back. It follows the machine, not the other way around --
+    provisioning rewrites it whenever the machine turns out to hold a key
+    another of the user's computers gave it.
 
     Raises:
         LatchkeyStoreError: when the key cannot be written.
     """
     _write_machine_secret(machine_key_path(data_dir, host_id), key.get_secret_value(), "machine encryption key")
-
-
-def store_machine_gateway_password(data_dir: Path, host_id: HostId, password: str) -> None:
-    """Record the listen password ``host_id``'s machine holds its callers to.
-
-    Durable for the same reason as the key, and follows the machine the same
-    way: it is what a rebooted machine (whose RAM copy is gone) is handed back,
-    so that the workspaces on it keep authenticating with the password they were
-    created with even when the computer that created them is not the one
-    re-provisioning.
-
-    Raises:
-        LatchkeyStoreError: when the password cannot be written.
-    """
-    _write_machine_secret(
-        machine_gateway_password_path(data_dir, host_id), password, "machine gateway listen password"
-    )
 
 
 def _read_machine_secret(path: Path, description: str) -> str | None:

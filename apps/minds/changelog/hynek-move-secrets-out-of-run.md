@@ -1,0 +1,3 @@
+- A remote workspace's latchkey gateway now comes back after its VM reboots without the desktop app having to provision it again: the VM keeps the gateway's secrets on its disk (`/root/.latchkey/`) instead of only in RAM. A workspace whose agent still reaches its gateway over the legacy reverse tunnel is the exception: only provisioning starts that tunnel, so it waits for the desktop app as before.
+
+- The security boundaries note says what this exposes: a stopped workspace's artifact, and a provider's snapshot of a VPS in the user's own account, now hold the key to the workspace's latchkey credential store beside the store.

@@ -1,8 +1,9 @@
-; supervisord keeps the gateway up and relaunches it whenever it exits, so a
-; crash is recovered without a desktop round-trip. The small startretries is
-; deliberate: the one expected repeated start failure is a reboot (the RAM-backed
-; secrets are gone), where going quietly FATAL is the desired "down until
-; re-provisioned" state rather than an endless retry loop.
+; supervisord keeps the gateway up and relaunches it whenever it exits, and
+; starts it at boot, so neither a crash nor a reboot needs a desktop round-trip.
+; The small startretries is deliberate: the one expected repeated start failure
+; is a machine holding no secrets (never provisioned, or its latchkey directory
+; lost), where going quietly FATAL is the desired "down until provisioned" state
+; rather than an endless retry loop.
 [program:{{ gateway_program_name }}]
 command={{ sh_binary_path }} {{ layout.install_dir }}/gateway-run
 user=root

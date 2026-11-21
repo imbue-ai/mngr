@@ -25,10 +25,11 @@ LK_GATEWAY_CONF="$LK_LATCHKEY_DIR/{{ gateway_conf_filename }}"
 LK_TUNNEL_KEY="$LK_LATCHKEY_DIR/{{ container_tunnel_key_filename }}"
 LK_TUNNEL_CONF="$LK_LATCHKEY_DIR/{{ tunnel_conf_filename }}"
 
-LK_SECRETS_DIR='{{ layout.secrets_dir }}'
-LK_ENCRYPTION_KEY_FILE="$LK_SECRETS_DIR/{{ encryption_key_filename }}"
-LK_LISTEN_PASSWORD_FILE="$LK_SECRETS_DIR/{{ listen_password_filename }}"
-LK_DEVICES_DIR="$LK_SECRETS_DIR/{{ devices_dir_name }}"
+LK_ENCRYPTION_KEY_FILE="$LK_LATCHKEY_DIR/{{ encryption_key_filename }}"
+LK_LISTEN_PASSWORD_FILE="$LK_LATCHKEY_DIR/{{ listen_password_filename }}"
+
+LK_RUNTIME_DIR='{{ layout.runtime_dir }}'
+LK_DEVICES_DIR="$LK_RUNTIME_DIR/{{ devices_dir_name }}"
 
 LK_GATEWAY_PROGRAM='{{ gateway_program_name }}'
 LK_TUNNEL_PROGRAM='{{ tunnel_program_name }}'
@@ -40,20 +41,19 @@ lk_fail() {
   exit 1
 }
 
-# The gateway's secrets live in RAM only: a key file on the disk beside the
-# encrypted credential store would be the credentials in plaintext against a
-# disk-snapshot threat model. So before anything is written there, the
-# directory is checked to really be on a RAM-backed filesystem, and a machine
-# whose /run is not one is refused rather than quietly given a key on disk.
-# The records of the connected desktops live under it, so the same check covers
-# the secrets each of them carries.
-lk_require_secrets_dir() {
-  mkdir -p "$LK_SECRETS_DIR"
-  chmod 700 "$LK_SECRETS_DIR"
-  _lk_fstype="$(stat -f -c %T "$LK_SECRETS_DIR")"
+# What should not outlive a boot lives in RAM: the records of the connected
+# desktops, each carrying the secrets presented on the hop back to that
+# desktop, and the scratch space a document is unpacked into. So before
+# anything is written there, the directory is checked to really be on a
+# RAM-backed filesystem, and a machine whose /run is not one is refused rather
+# than quietly given a desktop's secrets on disk.
+lk_require_runtime_dir() {
+  mkdir -p "$LK_RUNTIME_DIR"
+  chmod 700 "$LK_RUNTIME_DIR"
+  _lk_fstype="$(stat -f -c %T "$LK_RUNTIME_DIR")"
   case "$_lk_fstype" in
     {{ ram_backed_filesystem_types | join('|') }}) ;;
-    *) lk_fail "refusing to store the latchkey encryption key: $LK_SECRETS_DIR is on a $_lk_fstype filesystem, not RAM-backed ({{ ram_backed_filesystem_types | join('/') }})" ;;
+    *) lk_fail "refusing to keep the connected desktops' secrets in $LK_RUNTIME_DIR: it is on a $_lk_fstype filesystem, not RAM-backed ({{ ram_backed_filesystem_types | join('/') }})" ;;
   esac
   mkdir -p "$LK_DEVICES_DIR"
   chmod 700 "$LK_DEVICES_DIR"
@@ -64,7 +64,7 @@ lk_require_secrets_dir() {
 # key under the scratch directory given here, so a script can ask whether an
 # entry is there and read it as bytes without any further parsing. The
 # scratch directory is the caller's to place (and to remove): entries can
-# carry secrets, so it belongs in RAM like everything else that does.
+# carry secrets, so it belongs in RAM.
 lk_read_document() {
   LK_DOC="$1"
   mkdir -p "$LK_DOC"
@@ -140,14 +140,6 @@ lk_adopt_secret() {
   lk_write_secret "$1" "$2"
 }
 
-# What a rebooted machine (whose RAM-backed copy is gone) is handed back; a
-# machine still holding one keeps it, whatever it is.
-lk_restore_secret() {
-  if ! [ -s "$1" ]; then
-    lk_write_secret "$1" "$2"
-  fi
-}
-
 # The address the gateway binds, decided by the user's computer (this machine's
 # docker bridge address, which the agent's container reaches by name) and
 # written by apply-state; a program that needs it before any pass wrote it
@@ -170,10 +162,10 @@ lk_find_container() {
 }
 
 # Every latchkey invocation on this machine runs under the machine's own key,
-# read from its RAM-backed file so it never appears in a process listing.
+# read from its file so it never appears in a process listing.
 lk_export_encryption_key() {
   if ! [ -s "$LK_ENCRYPTION_KEY_FILE" ]; then
-    lk_fail "Error: the machine has no encryption key in $LK_SECRETS_DIR (rebooted since it was provisioned?); it has to be provisioned again"
+    lk_fail "Error: the machine has no encryption key at $LK_ENCRYPTION_KEY_FILE; it has to be provisioned again"
   fi
   LATCHKEY_ENCRYPTION_KEY="$(lk_secret_value "$LK_ENCRYPTION_KEY_FILE")"
   LATCHKEY_DIRECTORY="$LK_LATCHKEY_DIR"

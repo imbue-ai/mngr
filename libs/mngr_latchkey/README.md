@@ -198,8 +198,8 @@ supervisor follows it within one discovery cycle: the container endpoint
 discovery reports each cycle is compared against the one the host's gateway
 route was resolved for, and a change drops the cached route, refreshes the
 provider's host listing, removes the desktop-to-VPS tunnel to the old endpoint,
-and re-runs the (idempotent) VPS gateway provisioning, since the recreated VM's
-tmpfs holds no gateway secrets. A desktop-to-VPS tunnel failure also stops the
+and re-runs the (idempotent) VPS gateway provisioning, since the VM may have
+been recreated without what an earlier pass left on it. A desktop-to-VPS tunnel failure also stops the
 cached route being reused, so a move the comparison did not see still
 re-resolves on the next cycle instead of streaking against a dead endpoint; the
 route stays cached as the comparison's baseline, since a migration usually
@@ -496,8 +496,29 @@ usr/lib/mngr-latchkey/extensions/            the desktop-gateway proxy extension
 etc/supervisor/conf.d/latchkey-*.conf        the two supervisord programs
 etc/nftables.d/mngr-bridge-services.nft      the policy keeping the bridge-bound ports on the docker bridge
 etc/systemd/system/mngr-bridge-services-firewall.service   the oneshot that loads it at boot
+etc/systemd/system/supervisor.service.d/mngr-latchkey.conf starts supervisord after docker at boot
 var/log/mngr-latchkey/                       gateway.log and tunnel.log
 ```
+
+The machine keeps its own two secrets in its latchkey directory, on its disk
+beside the credential store: `~/.latchkey/machine_encryption_key`, which that
+store is encrypted with, and `~/.latchkey/machine_gateway_password`, which its
+gateway holds every caller to. supervisord therefore brings the gateway back
+after a reboot with none of the user's computers online (the drop-in above
+makes it wait for the docker daemon, whose bridge address the gateway binds).
+An agent that reaches the gateway over the reverse tunnel (see below) is the
+exception: that tunnel is started only by a provisioning pass, so after a
+reboot such an agent has no route to the gateway until the next one.
+The directory is root's on the VPS and is not mounted into the agent's
+container, so an agent cannot read it. Whoever can read the VPS's disk can
+read the credentials on it: a snapshot or backup the provider takes, or the
+image of a stopped machine, holds the key beside the store it opens. What
+stays in RAM, under `/run/mngr-latchkey/`, is what should not outlive a boot:
+the records of the connected desktops (see [Desktops](#desktops)) and the
+scratch space a command's document is unpacked into. The gateway's wrapper
+also leaves a copy of the two secrets there each time it starts
+(`gateway_encryption_key` and `gateway_listen_password`), for a desktop on a
+build that kept the machine's secrets in RAM and still reads them from there.
 
 Files ending in `.j2` are jinja templates rendered from the versions, ports,
 paths and names the Python side decides (`RemotePackageContext`), so there is
@@ -551,8 +572,6 @@ invocations its scripts make, only the service and account names travel in
   under `~/.latchkey`), the container to tunnel into, and a gateway restart.
   Whatever the document carries, it also refreshes the gateway's extension
   from the package's copy, so a restart loads the installed package's version.
-  A machine that lost its key to a reboot is handed it back inside the same
-  document, so that costs no extra round trip.
 - `announce-device` records the desktop that sent it as connected to the
   machine (see [Desktops](#desktops)): its record, named by its device id,
   lands under the RAM-backed `devices/` directory.
@@ -606,7 +625,6 @@ what it says is about to be shown or acted on, never trusted between times:
     proxyRules.json               its desktop egress rules, cached (owned)
     permissions-format-version    the format the policy is in, cached (owned)
     machine_encryption_key        the machine's own key           (owned)
-    machine_gateway_password      the machine's own password      (owned)
     config.json                   the desktop's settings, with the machine's
                                   own custom services             (owned)
     plugins/                   -> the desktop's latchkey plugins
@@ -653,33 +671,38 @@ knowing:
   key never leaves this computer.
 
 - **Each machine's key is recorded in its machine store -- as a mirror, not the
-  truth.** A machine holds its own key only in RAM (provisioning writes it to a
-  tmpfs file, deliberately never to the disk beside the encrypted store), and
-  that RAM copy is authoritative while it exists: any of the user's computers
-  may have provisioned the machine, so each desktop's provisioning pass *adopts*
-  the key the machine is already running under rather than deciding one, and
-  keeps the durable copy so a rebooted machine (whose tmpfs is wiped) can be
-  handed its key back. Only a machine that is not running a key, with none
-  recorded here, gets one decided: a fresh key when it holds no credential
-  store; the desktop's key when its store verifiably opens under it (a machine
-  provisioned by a build older than minds-v0.5.1, which gave every machine the
-  desktop's key), tried here against the copy of the store the read brought
-  back, so the desktop's key reaches the machine only once it is known to be
-  the machine's own; and otherwise -- a store written under a key held only by a computer that is
-  gone -- the store is abandoned and a fresh key minted, because signing in
-  again is possible and waiting for a computer that may never return is not.
+  truth.** A machine keeps its own key in its latchkey directory
+  (`~/.latchkey/machine_encryption_key`, see [Remote gateway
+  package](#remote-gateway-package)), and that copy is authoritative: any of
+  the user's computers may have provisioned the machine, so each desktop's
+  provisioning pass *adopts* the key the machine holds rather than deciding
+  one. The record here is what a push to the machine is encrypted with, so a
+  push needs no read first, and what says a provisioning pass from this
+  computer has reached the machine. It is also what a machine that lost its
+  key is handed back on the next provisioning pass, so its store stays
+  readable. Only a machine that holds no key, with none recorded here, gets
+  one decided: a fresh key when it holds no credential store, and otherwise --
+  a store whose key nobody present holds -- the store is abandoned and a fresh
+  key minted, because signing in again is always possible and a store without
+  its key can never be read again. One case is handled before a store is
+  abandoned, for machines set up by a build older than minds-v0.5.1, which
+  gave every machine the desktop's key: the desktop's key is tried against the
+  copy of the store the read brought back, so it reaches the machine only once
+  it is known to be the machine's own.
 
-- **A machine's gateway listen password is recorded the same way, and is
-  adopted for a blunter reason.** It is the password the workspaces on that
+- **A machine's gateway listen password is the machine's too, and is adopted
+  for a blunter reason.** It is the password the workspaces on that
   machine present (`LATCHKEY_GATEWAY_PASSWORD`), and their host env file is
   written once, at `mngr create`, with nothing to rewrite it afterwards. So the
   value the creating computer chose is fixed for the machine's whole life: a
   second computer that wrote its own here would answer every request those
-  workspaces make with a 401. Provisioning therefore adopts what the machine is
-  running under, falls back to the record here for a machine whose tmpfs a
-  reboot wiped, and only seeds its own value (`Latchkey.derive_gateway_password`,
+  workspaces make with a 401. Provisioning therefore leaves the password the
+  machine holds (`~/.latchkey/machine_gateway_password`) as it is, and only
+  seeds its own value (`Latchkey.derive_gateway_password`,
   which is also what it bakes into the workspaces it creates) into a machine
-  neither is true of. The password the *desktop* gateway listens on is a
+  that holds none. A machine set up by a build that kept the password in RAM,
+  and that lost it to a reboot, is handed back the copy that build recorded in
+  the machine store (`machine_gateway_password`) instead. The password the *desktop* gateway listens on is a
   separate secret, and the one place the two used to be the same is described
   under [Remote desktop-gateway proxy
   extension](#remote-desktop-gateway-proxy-extension).
@@ -1213,8 +1236,9 @@ desktop keeps announcing, the most recently announced one is a live one
 whenever any desktop is connected. The extension reads the directory on every
 request, so a desktop arriving or leaving takes effect without a gateway
 restart, and a repaired tunnel's new port reaches the machine with the next
-announcement. The records live in RAM beside the machine's own secrets because
-each carries that desktop's; a reboot wipes them together, and the next
+announcement. The records live in RAM because each carries that desktop's
+secrets, which are not the machine's to keep on its disk; a reboot wipes them
+with the tunnels, and the next
 announcement from a connected desktop recreates its record. The device id is
 the one the desktop app identifies this install by; a standalone forward uses
 the mngr local host id, which the earliest installs of the desktop app adopted

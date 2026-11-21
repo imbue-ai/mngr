@@ -1,0 +1,7 @@
+# Shipped by the mngr-latchkey package.
+# supervisord starts the latchkey gateway at boot, and the gateway binds the
+# docker bridge address, which exists only once the docker daemon is up. Left
+# unordered, a boot can start supervisord first, and the few start attempts it
+# gives the gateway can all land before the bridge is there.
+[Unit]
+After=docker.service

@@ -56,10 +56,9 @@ BRIDGE_SERVICES_NFT_TABLE: Final[str] = "mngr_bridge_services"
 BRIDGE_SERVICES_NFT_POLICY_FILENAME: Final[str] = "mngr-bridge-services.nft"
 
 # The systemd oneshot that loads the policy at boot, ordered ahead of the
-# owner-exec daemon (which systemd brings back after a reboot) so the load runs
-# before the daemon listens. The gateway's tmpfs secrets do not survive a
-# reboot, so the gateway itself stays down until the next provisioning pass,
-# which re-applies the policy anyway.
+# owner-exec daemon (which systemd brings back after a reboot) and of
+# supervisord (which brings the gateway back) so the load runs before either
+# listens.
 BRIDGE_SERVICES_FIREWALL_UNIT_NAME: Final[str] = "mngr-bridge-services-firewall"
 NFT_BINARY_PATH: Final[str] = "/usr/sbin/nft"
 

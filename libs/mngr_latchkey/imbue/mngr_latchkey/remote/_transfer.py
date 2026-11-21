@@ -25,8 +25,7 @@ file.
 A push that brings credential material carries the key this computer recorded
 for the machine, and the machine refuses it if it is running under another one
 (re-keyed from another computer), rather than being handed a store its gateway
-could not read. A machine that lost its key to a reboot is handed it back in
-the same document, so that costs nothing extra.
+could not read.
 """
 
 import tempfile
@@ -101,12 +100,7 @@ class FetchedMachineState(FrozenModel):
     )
 
 
-def fetch_machine_state(
-    host: OuterHostInterface,
-    latchkey: Latchkey,
-    host_id: HostId,
-    machine_key: SecretStr,
-) -> FetchedMachineState:
+def fetch_machine_state(host: OuterHostInterface, latchkey: Latchkey, host_id: HostId) -> FetchedMachineState:
     """Read what a machine holds -- its credentials, its policy, its desktop egress rules and its custom services -- in one round trip.
 
     Deliberately does not write anything here: the caller decides what to adopt
@@ -121,14 +115,13 @@ def fetch_machine_state(
     it is, but means the same as none (see :func:`is_policy_provisioned`).
 
     The store arrives as the machine holds it and is re-encrypted for the
-    desktop here, under the key the machine reports running under -- which a
-    machine that lost its own to a reboot has just been handed back.
+    desktop here, under the key the machine reports keeping it under.
 
     Raises:
         RemoteGatewayError: when the machine cannot produce its store, or what
             it produced cannot be read.
     """
-    request = RemoteStateRequest(is_credential_store_included=True, fallback_encryption_key=machine_key)
+    request = RemoteStateRequest(is_credential_store_included=True)
     with log_span("Reading the latchkey state of host {} from VPS {}", host_id, host.get_name()):
         state = read_remote_state(host, request, host_id)
     store = (
@@ -456,7 +449,6 @@ def clear_remote_credentials(
     host_id: HostId,
     service_name: str,
     account: str,
-    machine_key: SecretStr,
     # The machine's ``config.json`` as the clear should leave it, when the account was a custom service's last;
     # ``None`` leaves the machine's config as it is.
     config_json: str | None,
@@ -465,11 +457,11 @@ def clear_remote_credentials(
 
     How a disconnection reaches a machine: the credential is the machine's, so
     the desktop cannot simply stop shipping it -- it has to be taken away. The
-    clear rewrites the machine's store, so it runs under the key the machine's
-    gateway is running under -- whichever that is. ``machine_key`` is only what
-    a machine that lost its key to a reboot is handed back: refusing a machine
-    re-keyed from another computer would leave a credential the user signed out
-    of sitting on it, which is the one outcome a sign-out must not have.
+    clear rewrites the machine's store, so it runs under the key the machine
+    keeps that store under -- whichever that is. It carries no key of its own:
+    refusing a machine re-keyed from another computer would leave a credential
+    the user signed out of sitting on it, which is the one outcome a sign-out
+    must not have.
 
     A custom service whose last account this takes away is deregistered in the
     same command, by ``config_json`` -- the machine's config as it was just
@@ -484,7 +476,6 @@ def clear_remote_credentials(
         apply_remote_state(
             host,
             RemoteStateUpdate(
-                fallback_encryption_key=machine_key,
                 config_json=config_json,
                 credential_clear=RemoteCredentialClear(service_name=service_name, account=account),
             ),
@@ -512,8 +503,7 @@ def push_permissions_snapshot(
     :mod:`imbue.mngr_latchkey.migrations.runner`).
 
     It carries no key: a policy is not encrypted, so it is applied to a
-    machine whatever key that machine is running under, and to a machine that
-    rebooted and is running under none.
+    machine whatever key that machine is running under.
 
     Raises:
         RemoteGatewayError: when the snapshot is not a policy this build can

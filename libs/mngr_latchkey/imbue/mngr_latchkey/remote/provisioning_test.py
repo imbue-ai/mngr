@@ -25,8 +25,8 @@ from imbue.mngr_latchkey.devices import DeviceRecord
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 from imbue.mngr_latchkey.migrations.runner import CURRENT_PERMISSIONS_FORMAT_VERSION
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
-from imbue.mngr_latchkey.remote._machine import GATEWAY_ENCRYPTION_KEY_FILENAME
-from imbue.mngr_latchkey.remote._machine import GATEWAY_LISTEN_PASSWORD_FILENAME
+from imbue.mngr_latchkey.remote._machine import MACHINE_ENCRYPTION_KEY_FILENAME
+from imbue.mngr_latchkey.remote._machine import MACHINE_GATEWAY_PASSWORD_FILENAME
 from imbue.mngr_latchkey.remote._machine import REMOTE_COMMAND_NAME
 from imbue.mngr_latchkey.remote._machine import RemoteStateRequest
 from imbue.mngr_latchkey.remote._machine import _ANNOUNCE_DEVICE_SUBCOMMAND
@@ -34,11 +34,10 @@ from imbue.mngr_latchkey.remote._machine import _remote_command
 from imbue.mngr_latchkey.remote._machine import announce_device
 from imbue.mngr_latchkey.remote._machine import read_remote_state
 from imbue.mngr_latchkey.remote._machine_policy import project_policy_for_machine
+from imbue.mngr_latchkey.remote._mirror import machine_gateway_password_path
 from imbue.mngr_latchkey.remote._mirror import machine_store_dir
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
-from imbue.mngr_latchkey.remote._mirror import store_machine_gateway_password
 from imbue.mngr_latchkey.remote._mirror import stored_machine_encryption_key
-from imbue.mngr_latchkey.remote._mirror import stored_machine_gateway_password
 from imbue.mngr_latchkey.remote.errors import MachineTransferError
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.remote.errors import SentToMachine
@@ -157,14 +156,15 @@ def test_provision_remote_gateway_installs_the_package_and_wires_a_fresh_machine
     assert "dpkg -i" in commands[0]
     assert commands[1].startswith(f"{REMOTE_COMMAND_NAME} read-state")
     assert commands[2].startswith(f"{REMOTE_COMMAND_NAME} apply-state")
-    # The machine's own secrets landed in RAM, owner-only; nothing of the
-    # desktop's own beyond the password the machine is seeded with (each
-    # desktop announces its own pair separately).
+    # The machine's own secrets landed in its latchkey directory, owner-only;
+    # nothing of the desktop's own beyond the password the machine is seeded
+    # with (each desktop announces its own pair separately).
     recorded_key = stored_machine_encryption_key(plugin_data_dir(latchkey_directory), host_id)
     assert recorded_key is not None
-    assert vps.secret(GATEWAY_ENCRYPTION_KEY_FILENAME) == recorded_key.get_secret_value()
-    assert vps.secret(GATEWAY_LISTEN_PASSWORD_FILENAME) == "desktop-password"
-    assert all(vps.secret_mode(name) == 0o600 for name in vps.secrets_dir_entries())
+    assert vps.secret(MACHINE_ENCRYPTION_KEY_FILENAME) == recorded_key.get_secret_value()
+    assert vps.secret(MACHINE_GATEWAY_PASSWORD_FILENAME) == "desktop-password"
+    assert vps.secret_mode(MACHINE_ENCRYPTION_KEY_FILENAME) == 0o600
+    assert vps.secret_mode(MACHINE_GATEWAY_PASSWORD_FILENAME) == 0o600
     # No secret ever traveled as a file write or in a bare command.
     assert [entry.path for entry in vps.written if b"desktop-password" in entry.content] == []
     assert all("desktop-password" not in command for command in commands)
@@ -194,13 +194,15 @@ def test_provision_remote_gateway_installs_the_package_and_wires_a_fresh_machine
         CONFIG_FILENAME,
         REMOTE_EXTENSIONS_DIR_NAME,
         GATEWAY_CONF_FILENAME,
+        MACHINE_ENCRYPTION_KEY_FILENAME,
+        MACHINE_GATEWAY_PASSWORD_FILENAME,
         PERMISSIONS_FORMAT_VERSION_FILENAME,
         PERMISSIONS_CONFIG_FILENAME,
     ]
-    # The apply left no scratch behind in RAM: only the secrets, and the
-    # (empty) directory the desktops announce themselves into.
-    assert vps.secrets_dir_entries() == [GATEWAY_ENCRYPTION_KEY_FILENAME, GATEWAY_LISTEN_PASSWORD_FILENAME]
-    assert (vps.secrets_dir / DEVICES_DIR_NAME).is_dir()
+    # The apply left no scratch behind in RAM: only the (empty) directory the
+    # desktops announce themselves into.
+    assert vps.runtime_dir_entries() == []
+    assert (vps.runtime_dir / DEVICES_DIR_NAME).is_dir()
     assert vps.device_records() == {}
 
 
@@ -214,12 +216,14 @@ def test_provisioning_again_adopts_what_the_machine_runs_under_and_bounces_only_
     latchkey_directory = _latchkey_directory(tmp_path)
     host_id = HostId.generate()
     _provision(outer, latchkey_directory, host_id)
-    secrets_before = {name: vps.secret(name) for name in vps.secrets_dir_entries()}
+    secret_filenames = (MACHINE_ENCRYPTION_KEY_FILENAME, MACHINE_GATEWAY_PASSWORD_FILENAME)
+    secrets_before = {name: vps.secret(name) for name in secret_filenames}
+    assert None not in secrets_before.values()
     tunnel_key_before = vps.tunnel_key()
 
     _provision(outer, latchkey_directory, host_id)
 
-    assert {name: vps.secret(name) for name in vps.secrets_dir_entries()} == secrets_before
+    assert {name: vps.secret(name) for name in secret_filenames} == secrets_before
     assert vps.tunnel_key() == tunnel_key_before
     # The tunnel target and the gateway's address are unchanged, so the tunnel
     # is only made sure to be running.
@@ -342,15 +346,16 @@ def test_provision_remote_gateway_raises_when_container_not_found(tmp_path: Path
         _provision(outer, _latchkey_directory(tmp_path), host_id)
 
 
-def test_provisioning_refuses_a_machine_whose_secrets_directory_is_on_disk(tmp_path: Path) -> None:
-    """The key must never land on a disk-backed filesystem, so a machine without a RAM-backed /run is refused."""
+def test_provisioning_refuses_a_machine_whose_runtime_directory_is_on_disk(tmp_path: Path) -> None:
+    """A connected desktop's secrets must never land on a disk, so a machine without a RAM-backed /run is refused."""
     outer = fake_vps(tmp_path)
-    as_vps(outer).set_secrets_dir_filesystem_type("ext4")
+    as_vps(outer).set_runtime_dir_filesystem_type("ext4")
 
     with pytest.raises(RemoteGatewayError, match="not RAM-backed"):
         _provision(outer, _latchkey_directory(tmp_path), HostId.generate())
 
-    assert as_vps(outer).secrets_dir_entries() == []
+    assert as_vps(outer).runtime_dir_entries() == []
+    assert as_vps(outer).secret(MACHINE_ENCRYPTION_KEY_FILENAME) is None
 
 
 def test_a_gateway_that_does_not_come_up_fails_the_pass(tmp_path: Path) -> None:
@@ -493,7 +498,7 @@ def test_a_tunnel_that_does_not_come_up_at_once_is_left_to_supervisord(tmp_path:
 
     assert vps.tunnel_conf() == "LK_CONTAINER_SSH_USER='root'\nLK_CONTAINER_SSH_PORT='2222'\n"
     assert vps.supervisorctl_calls() == [f"restart {TUNNEL_PROGRAM_NAME}", f"restart {GATEWAY_PROGRAM_NAME}"]
-    assert vps.secret(GATEWAY_ENCRYPTION_KEY_FILENAME) is not None
+    assert vps.secret(MACHINE_ENCRYPTION_KEY_FILENAME) is not None
 
 
 # The machine's own encryption key.
@@ -511,7 +516,7 @@ def test_a_fresh_machine_gets_a_key_of_its_own(tmp_path: Path) -> None:
     assert key is not None
     desktop_key = load_or_create_encryption_key(latchkey_directory).get_secret_value()
     assert key.get_secret_value() != desktop_key
-    assert as_vps(outer).secret(GATEWAY_ENCRYPTION_KEY_FILENAME) == key.get_secret_value()
+    assert as_vps(outer).secret(MACHINE_ENCRYPTION_KEY_FILENAME) == key.get_secret_value()
     assert not as_vps(outer).has_received(desktop_key)
 
 
@@ -533,19 +538,20 @@ def test_the_key_the_machine_is_running_under_is_adopted_never_replaced(tmp_path
 
     recorded = stored_machine_encryption_key(plugin_data_dir(latchkey_directory), host_id)
     assert recorded is not None and recorded.get_secret_value() == "other-installs-key-7841"
-    assert as_vps(outer).secret(GATEWAY_ENCRYPTION_KEY_FILENAME) == "other-installs-key-7841"
+    assert as_vps(outer).secret(MACHINE_ENCRYPTION_KEY_FILENAME) == "other-installs-key-7841"
 
 
-def test_a_rebooted_machine_is_handed_back_the_key_its_store_is_written_under(tmp_path: Path) -> None:
-    """A reboot wipes the RAM-backed copy; the record here is what puts it back."""
+def test_a_machine_that_lost_its_key_is_handed_back_the_one_recorded_here(tmp_path: Path) -> None:
+    """The record here is the key the machine's store is written under, so handing it back keeps the store readable."""
     outer = fake_vps(tmp_path, {"slack": ["a@example.com"]}, machine_permissions=_GRANTED_HERE)
+    as_vps(outer).lose_key()
     latchkey_directory = _latchkey_directory(tmp_path)
     host_id = HostId.generate()
     store_machine_encryption_key(plugin_data_dir(latchkey_directory), host_id, SecretStr("machine-key-5518"))
 
     _provision(outer, latchkey_directory, host_id)
 
-    assert as_vps(outer).secret(GATEWAY_ENCRYPTION_KEY_FILENAME) == "machine-key-5518"
+    assert as_vps(outer).secret(MACHINE_ENCRYPTION_KEY_FILENAME) == "machine-key-5518"
     assert as_vps(outer).machine_accounts() == {"slack": ["a@example.com"]}
 
 
@@ -560,7 +566,7 @@ def test_a_rebooted_legacy_machine_keeps_the_desktop_key_that_opens_its_store(tm
     _provision(outer, latchkey_directory, host_id)
 
     assert stored_machine_encryption_key(plugin_data_dir(latchkey_directory), host_id) == desktop_key
-    assert as_vps(outer).secret(GATEWAY_ENCRYPTION_KEY_FILENAME) == desktop_key.get_secret_value()
+    assert as_vps(outer).secret(MACHINE_ENCRYPTION_KEY_FILENAME) == desktop_key.get_secret_value()
     # The store opened, so nothing was abandoned; the key was tried here, not on the machine.
     assert as_vps(outer).machine_accounts() == {"slack": ["a@example.com"]}
     assert len([command for command in _latchkey_commands(as_vps(outer)) if "read-state" in command]) == 1
@@ -568,7 +574,7 @@ def test_a_rebooted_legacy_machine_keeps_the_desktop_key_that_opens_its_store(tm
 
 
 def test_a_store_nobody_present_can_read_is_abandoned_for_a_fresh_key(tmp_path: Path) -> None:
-    """Provisioned by a computer that is gone, rebooted since: signing in again is possible, waiting is not."""
+    """The machine lost the key its store is written under: signing in again is possible, reading the store is not."""
     latchkey_directory = _latchkey_directory(tmp_path)
     outer = fake_vps(tmp_path)
     as_vps(outer).hold({"slack": ["lost@example.com"]}, key="a-key-only-the-lost-computer-held")
@@ -582,7 +588,7 @@ def test_a_store_nobody_present_can_read_is_abandoned_for_a_fresh_key(tmp_path: 
     assert key.get_secret_value() != "a-key-only-the-lost-computer-held"
     desktop_key = load_or_create_encryption_key(latchkey_directory).get_secret_value()
     assert key.get_secret_value() != desktop_key
-    assert as_vps(outer).secret(GATEWAY_ENCRYPTION_KEY_FILENAME) == key.get_secret_value()
+    assert as_vps(outer).secret(MACHINE_ENCRYPTION_KEY_FILENAME) == key.get_secret_value()
     # The unreadable store is gone rather than left to break the freshly-keyed gateway.
     assert CREDENTIALS_STORE_FILENAME not in as_vps(outer).latchkey_dir_entries()
     # The desktop's key was tried here and turned out not to be the machine's, so it never went there.
@@ -648,7 +654,7 @@ def test_a_decided_key_is_recorded_only_once_the_machine_has_taken_it(tmp_path: 
 
     key = stored_machine_encryption_key(plugin_data_dir(latchkey_directory), host_id)
     assert key is not None
-    assert as_vps(outer).secret(GATEWAY_ENCRYPTION_KEY_FILENAME) == key.get_secret_value()
+    assert as_vps(outer).secret(MACHINE_ENCRYPTION_KEY_FILENAME) == key.get_secret_value()
     assert CREDENTIALS_STORE_FILENAME not in as_vps(outer).latchkey_dir_entries()
 
 
@@ -664,7 +670,7 @@ def test_a_storeless_machine_an_older_build_provisioned_gets_a_key_of_its_own(tm
     assert key is not None
     desktop_key = load_or_create_encryption_key(latchkey_directory).get_secret_value()
     assert key.get_secret_value() != desktop_key
-    assert as_vps(outer).secret(GATEWAY_ENCRYPTION_KEY_FILENAME) == key.get_secret_value()
+    assert as_vps(outer).secret(MACHINE_ENCRYPTION_KEY_FILENAME) == key.get_secret_value()
     assert not as_vps(outer).has_received(desktop_key)
 
 
@@ -679,9 +685,7 @@ def test_a_machine_nobody_has_provisioned_yet_takes_this_computers_password(tmp_
 
     _provision(outer, latchkey_directory, host_id)
 
-    assert as_vps(outer).secret(GATEWAY_LISTEN_PASSWORD_FILENAME) == "desktop-password"
-    # Recorded durably, so a reboot that wipes the machine's copy does not lose it.
-    assert stored_machine_gateway_password(plugin_data_dir(latchkey_directory), host_id) == "desktop-password"
+    assert as_vps(outer).secret(MACHINE_GATEWAY_PASSWORD_FILENAME) == "desktop-password"
 
 
 def test_provisioning_keeps_the_machines_password(tmp_path: Path) -> None:
@@ -692,25 +696,29 @@ def test_provisioning_keeps_the_machines_password(tmp_path: Path) -> None:
     answer every request they make with a 401.
     """
     outer = fake_vps(tmp_path)
-    as_vps(outer).run_under(GATEWAY_LISTEN_PASSWORD_FILENAME, "other-computers-password\n")
+    as_vps(outer).run_under(MACHINE_GATEWAY_PASSWORD_FILENAME, "other-computers-password\n")
     latchkey_directory = _latchkey_directory(tmp_path)
     host_id = HostId.generate()
 
     _provision(outer, latchkey_directory, host_id)
 
-    assert as_vps(outer).secret(GATEWAY_LISTEN_PASSWORD_FILENAME) == "other-computers-password"
-    assert stored_machine_gateway_password(plugin_data_dir(latchkey_directory), host_id) == "other-computers-password"
+    assert as_vps(outer).secret(MACHINE_GATEWAY_PASSWORD_FILENAME) == "other-computers-password"
 
 
-def test_a_rebooted_machine_is_handed_back_its_recorded_password(tmp_path: Path) -> None:
+def test_a_machine_an_earlier_build_left_without_its_password_is_handed_back_the_one_recorded_here(
+    tmp_path: Path,
+) -> None:
+    """Such a build kept the machine's password in RAM, where a reboot wiped it, and recorded it here to hand back."""
     outer = fake_vps(tmp_path)
     latchkey_directory = _latchkey_directory(tmp_path)
     host_id = HostId.generate()
-    store_machine_gateway_password(plugin_data_dir(latchkey_directory), host_id, "the-password-it-was-created-with")
+    record_path = machine_gateway_password_path(plugin_data_dir(latchkey_directory), host_id)
+    record_path.parent.mkdir(parents=True)
+    record_path.write_text("the-password-it-was-created-with\n")
 
     _provision(outer, latchkey_directory, host_id)
 
-    assert as_vps(outer).secret(GATEWAY_LISTEN_PASSWORD_FILENAME) == "the-password-it-was-created-with"
+    assert as_vps(outer).secret(MACHINE_GATEWAY_PASSWORD_FILENAME) == "the-password-it-was-created-with"
 
 
 # The gateway's config.
@@ -784,7 +792,7 @@ def test_provisioning_raises_on_an_invalid_remote_config(tmp_path: Path) -> None
         _provision(outer, _latchkey_directory(tmp_path), HostId.generate())
 
     # Nothing was applied to a machine whose config could not be merged.
-    assert as_vps(outer).secrets_dir_entries() == []
+    assert as_vps(outer).secret(MACHINE_ENCRYPTION_KEY_FILENAME) is None
 
 
 # Permission reconciliation.
@@ -956,7 +964,7 @@ def test_a_read_asked_about_a_container_the_machine_lacks_fails(tmp_path: Path) 
 
 
 def test_announcing_a_desktop_records_it_in_ram_and_refreshes_the_record(tmp_path: Path) -> None:
-    """The record lands under the secrets directory, owner-only, and a repeat announcement is a newer file.
+    """The record lands under the runtime directory, owner-only, and a repeat announcement is a newer file.
 
     Its age is what the gateway's extension reads as whether the desktop is
     still connected, so an unchanged record has to be written over all the
@@ -970,8 +978,8 @@ def test_announcing_a_desktop_records_it_in_ram_and_refreshes_the_record(tmp_pat
     record_name = f"{_DEVICE_RECORD.device_id}.json"
     assert vps.device_records() == {record_name: _DEVICE_RECORD.model_dump_json()}
     assert stat.S_IMODE(vps.device_record_path(record_name).stat().st_mode) == 0o600
-    # The record is all the announcement leaves; nothing lands beside the machine's own secrets.
-    assert vps.secrets_dir_entries() == []
+    # The record is all the announcement leaves in RAM.
+    assert vps.runtime_dir_entries() == []
     # The record carries the desktop's secrets, so the command that carried it stayed out of the logs.
     assert [entry.is_kept_out_of_logs for entry in vps.recorded] == [True]
     assert vps.recorded[0].command.startswith(f"{REMOTE_COMMAND_NAME} {_ANNOUNCE_DEVICE_SUBCOMMAND}")
@@ -1007,7 +1015,7 @@ def test_every_desktop_keeps_a_record_of_its_own(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("device_id", ["../escape", ".hidden", "with space", ""])
 def test_the_machine_refuses_a_device_id_that_is_not_a_safe_file_name(tmp_path: Path, device_id: str) -> None:
-    """The id names a file under the secrets directory, so the script holds it to safe characters itself."""
+    """The id names a file under the runtime directory, so the script holds it to safe characters itself."""
     outer = fake_vps(tmp_path)
     command = _remote_command(
         _ANNOUNCE_DEVICE_SUBCOMMAND,

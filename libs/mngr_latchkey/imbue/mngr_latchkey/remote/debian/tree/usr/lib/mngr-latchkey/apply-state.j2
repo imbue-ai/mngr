@@ -6,8 +6,6 @@
 #
 #   encryption_key                the machine's own key (adopted: refused if it
 #                                 already runs under a different one)
-#   fallback_encryption_key       the machine's own key, written only if it has
-#                                 none (a reboot wiped it)
 #   listen_password               the machine's own gateway password (adopted)
 #   abandon_credential_store      remove the store: nobody present holds its key
 #   clear_service, clear_account  an account to take away from the store
@@ -37,8 +35,8 @@ set -eu
 umask 077
 . '{{ layout.install_dir }}/functions'
 
-lk_require_secrets_dir
-_lk_scratch="$(mktemp -d "$LK_SECRETS_DIR/apply.XXXXXX")"
+lk_require_runtime_dir
+_lk_scratch="$(mktemp -d "$LK_RUNTIME_DIR/apply.XXXXXX")"
 trap 'rm -rf "$_lk_scratch"' EXIT
 lk_read_document "$_lk_scratch/doc"
 mkdir -p "$LK_LATCHKEY_DIR"
@@ -48,9 +46,6 @@ mkdir -p "$LK_LATCHKEY_DIR"
 # anything below (the abandon in particular) touches what its gateway serves.
 if lk_doc_has encryption_key; then
   lk_adopt_secret "$LK_ENCRYPTION_KEY_FILE" encryption_key {{ different_key_message | shquote }}
-fi
-if lk_doc_has fallback_encryption_key; then
-  lk_restore_secret "$LK_ENCRYPTION_KEY_FILE" fallback_encryption_key
 fi
 if lk_doc_has listen_password; then
   lk_adopt_secret "$LK_LISTEN_PASSWORD_FILE" listen_password {{ different_password_message | shquote }}

@@ -21,6 +21,10 @@ from imbue.mngr_latchkey.docker_bridge import BRIDGE_SERVICES_FIREWALL_UNIT_NAME
 from imbue.mngr_latchkey.docker_bridge import BRIDGE_SERVICES_NFT_TABLE
 from imbue.mngr_latchkey.owner_exec_vm import VM_EXEC_PORT
 from imbue.mngr_latchkey.remote._machine import DIFFERENT_MACHINE_PASSWORD_MESSAGE
+from imbue.mngr_latchkey.remote._machine import LEGACY_RAM_ENCRYPTION_KEY_FILENAME
+from imbue.mngr_latchkey.remote._machine import LEGACY_RAM_LISTEN_PASSWORD_FILENAME
+from imbue.mngr_latchkey.remote._machine import MACHINE_ENCRYPTION_KEY_FILENAME
+from imbue.mngr_latchkey.remote._machine import MACHINE_GATEWAY_PASSWORD_FILENAME
 from imbue.mngr_latchkey.remote._machine import REMOTE_COMMAND_NAME
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.remote.mock_outer_host_test import FakeVps
@@ -164,6 +168,7 @@ def test_the_package_lays_its_files_out_where_the_scripts_expect_them() -> None:
         "./etc/supervisor/conf.d/latchkey-gateway.conf",
         "./etc/supervisor/conf.d/latchkey-tunnel.conf",
         "./etc/systemd/system/mngr-bridge-services-firewall.service",
+        "./etc/systemd/system/supervisor.service.d/mngr-latchkey.conf",
         "./usr/bin/mngr-latchkey",
         "./usr/lib/mngr-latchkey/announce-device",
         "./usr/lib/mngr-latchkey/apply-state",
@@ -472,8 +477,10 @@ def test_the_gateway_wrapper_reads_its_secrets_from_files_and_execs_the_gateway(
     assert 'LATCHKEY_GATEWAY_LISTEN_PASSWORD="$(lk_secret_value "$LK_LISTEN_PASSWORD_FILE")"' in run_script
     assert f'export {DEVICES_DIR_ENV_VAR}="$LK_DEVICES_DIR"' in run_script
     assert f"export {DEVICE_ANNOUNCEMENT_INTERVAL_ENV_VAR}={DEVICE_ANNOUNCEMENT_INTERVAL_SECONDS}\n" in run_script
-    assert f'LK_DEVICES_DIR="$LK_SECRETS_DIR/{DEVICES_DIR_NAME}"' in functions
-    assert "LK_SECRETS_DIR='/run/mngr-latchkey'" in functions
+    assert f'LK_ENCRYPTION_KEY_FILE="$LK_LATCHKEY_DIR/{MACHINE_ENCRYPTION_KEY_FILENAME}"' in functions
+    assert f'LK_LISTEN_PASSWORD_FILE="$LK_LATCHKEY_DIR/{MACHINE_GATEWAY_PASSWORD_FILENAME}"' in functions
+    assert f'LK_DEVICES_DIR="$LK_RUNTIME_DIR/{DEVICES_DIR_NAME}"' in functions
+    assert "LK_RUNTIME_DIR='/run/mngr-latchkey'" in functions
     # The curl router reads the same records; nothing else names a desktop.
     assert "LATCHKEY_EXTENSION_DESKTOP_GATEWAY" not in run_script
     assert "LK_DESKTOP_PASSWORD_FILE" not in functions
@@ -496,10 +503,36 @@ def test_the_gateway_wrapper_reads_its_secrets_from_files_and_execs_the_gateway(
     # The router looks the rules up by the service latchkey names in this
     # header, and latchkey sends the header only when this variable asks for it.
     assert "export LATCHKEY_DIAGNOSTIC_HEADERS=1\n" in run_script
-    # Refuses to launch a keyless gateway when the RAM-backed secrets are gone;
-    # the connected desktops are deliberately not part of that gate.
-    assert "awaiting re-provision" in run_script
+    # Refuses to launch a keyless gateway; the connected desktops are
+    # deliberately not part of that gate.
+    assert "awaiting provisioning" in run_script
     assert 'LK_DEVICES_DIR" ]' not in run_script
+
+
+def test_the_gateway_wrapper_starts_a_rebooted_machines_gateway_with_nothing_from_a_desktop(tmp_path: Path) -> None:
+    """A reboot empties /run, so the wrapper puts back what the gateway and an earlier build's desktop look for there."""
+    _, root = _unpacked(tmp_path)
+
+    run_script = _code_lines((root / "usr/lib/mngr-latchkey/gateway-run").read_text())
+
+    # The directory the extension lists the connected desktops from is there before the gateway is.
+    assert run_script.index("lk_require_runtime_dir") < run_script.index("exec latchkey gateway")
+    # A desktop on a build that kept the machine's secrets in RAM finds them where it reads them.
+    for legacy_filename, secret_file in (
+        (LEGACY_RAM_ENCRYPTION_KEY_FILENAME, "$LK_ENCRYPTION_KEY_FILE"),
+        (LEGACY_RAM_LISTEN_PASSWORD_FILENAME, "$LK_LISTEN_PASSWORD_FILE"),
+    ):
+        mirror = f'lk_install_file "$LK_RUNTIME_DIR/{legacy_filename}" "{secret_file}"'
+        assert run_script.index("lk_require_runtime_dir") < run_script.index(mirror)
+        assert run_script.index(mirror) < run_script.index("exec latchkey gateway")
+
+
+def test_supervisord_starts_at_boot_only_once_the_docker_bridge_the_gateway_binds_is_up(tmp_path: Path) -> None:
+    _, root = _unpacked(tmp_path)
+
+    drop_in = _code_lines((root / "etc/systemd/system/supervisor.service.d/mngr-latchkey.conf").read_text())
+
+    assert drop_in.split() == ["[Unit]", "After=docker.service"]
 
 
 def test_the_supervisord_programs_keep_both_processes_up(tmp_path: Path) -> None:
@@ -517,7 +550,7 @@ def test_the_supervisord_programs_keep_both_processes_up(tmp_path: Path) -> None
         assert "stopasgroup=true" in conf
         assert "stdout_logfile=/var/log/mngr-latchkey/" in conf
         assert "stdout_logfile_maxbytes=10MB" in conf
-    # The gateway comes up on its own (and goes quietly FATAL after a reboot);
+    # The gateway comes up on its own (and goes quietly FATAL on a machine holding no secrets for it);
     # the tunnel is started only for a container that needs it, and once
     # started keeps retrying while the container's sshd comes up.
     assert "autostart=true" in gateway
@@ -740,6 +773,56 @@ def test_postinst_with_no_plugin_to_be_had_still_sets_the_machine_up(tmp_path: P
     assert installed.stderr.count(PLUGIN_SKIPPED_MESSAGE_PREFIX) == len(KNOWN_SERVICE_PLUGINS)
     assert not vps.plugins_dir.exists()
     assert vps.supervisorctl_calls() == ["reread", "update"]
+
+
+def test_postinst_keeps_the_secrets_an_earlier_builds_gateway_runs_under(tmp_path: Path) -> None:
+    """Such a build kept them in RAM only; this one reads them from the latchkey directory, where a reboot leaves them."""
+    vps = _provisioned_vps(tmp_path)
+    vps.hold_in_ram(LEGACY_RAM_ENCRYPTION_KEY_FILENAME, "the-running-key-3301\n")
+    vps.hold_in_ram(LEGACY_RAM_LISTEN_PASSWORD_FILENAME, "the-running-password-3302\n")
+
+    installed = vps.run_postinst()
+
+    assert installed.success, installed.stderr
+    assert vps.secret(MACHINE_ENCRYPTION_KEY_FILENAME) == "the-running-key-3301"
+    assert vps.secret(MACHINE_GATEWAY_PASSWORD_FILENAME) == "the-running-password-3302"
+    assert vps.secret_mode(MACHINE_ENCRYPTION_KEY_FILENAME) == 0o600
+    assert vps.secret_mode(MACHINE_GATEWAY_PASSWORD_FILENAME) == 0o600
+    assert stat.S_IMODE(vps.latchkey_dir.stat().st_mode) == stat.S_IRWXU
+    # The gateway still running under the earlier build's wrapper keeps what it read.
+    assert vps.runtime_dir_entries() == [LEGACY_RAM_ENCRYPTION_KEY_FILENAME, LEGACY_RAM_LISTEN_PASSWORD_FILENAME]
+
+
+def test_postinst_takes_the_key_an_earlier_build_gave_the_machine_but_not_its_password(tmp_path: Path) -> None:
+    """A desktop on such a build that found no secrets in RAM decided both afresh.
+
+    The key it decided is the one the store has been written under since, so
+    it replaces the one on disk. The password it seeded is its own, while the
+    one on disk is what the agents on the machine were created with.
+    """
+    vps = _provisioned_vps(tmp_path)
+    vps.run_under_key("the-key-on-disk-5101")
+    vps.run_under(MACHINE_GATEWAY_PASSWORD_FILENAME, "the-password-the-agents-hold-5102")
+    vps.hold_in_ram(LEGACY_RAM_ENCRYPTION_KEY_FILENAME, "the-key-the-earlier-build-decided-5103")
+    vps.hold_in_ram(LEGACY_RAM_LISTEN_PASSWORD_FILENAME, "the-earlier-builds-own-password-5104")
+
+    installed = vps.run_postinst()
+
+    assert installed.success, installed.stderr
+    assert vps.secret(MACHINE_ENCRYPTION_KEY_FILENAME) == "the-key-the-earlier-build-decided-5103"
+    assert vps.secret(MACHINE_GATEWAY_PASSWORD_FILENAME) == "the-password-the-agents-hold-5102"
+
+
+def test_postinst_leaves_the_secrets_of_a_machine_holding_none_in_ram_alone(tmp_path: Path) -> None:
+    vps = _provisioned_vps(tmp_path)
+    vps.run_under_key("the-key-on-disk-6201")
+    vps.run_under(MACHINE_GATEWAY_PASSWORD_FILENAME, "the-password-on-disk-6202")
+
+    installed = vps.run_postinst()
+
+    assert installed.success, installed.stderr
+    assert vps.secret(MACHINE_ENCRYPTION_KEY_FILENAME) == "the-key-on-disk-6201"
+    assert vps.secret(MACHINE_GATEWAY_PASSWORD_FILENAME) == "the-password-on-disk-6202"
 
 
 def test_postinst_fetches_the_plugins_in_the_background_and_installs_them_right_before_the_gateway_starts(

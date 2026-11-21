@@ -15,9 +15,11 @@ which drops one of them and withdraws it from every connected desktop (see
 Its ``postinst`` installs the pinned latchkey CLI, the curl shims and the
 pinned latchkey plugins (:mod:`imbue.mngr_latchkey.service_plugins`), loads
 the nftables policy that keeps the machine's bridge-bound services on the
-docker bridge (shipped with its boot-time systemd unit), scrubs what the
-ad-hoc provisioning left on a machine it set up, and registers the programs,
-so installing the package is the whole of "set this machine up".
+docker bridge (shipped with its boot-time systemd unit, and with a drop-in
+that starts supervisord, and so the gateway, only once the docker daemon has
+brought that bridge up), scrubs what the ad-hoc provisioning left on a machine
+it set up, and registers the programs, so installing the package is the whole
+of "set this machine up".
 
 The package's source is the ``debian/tree/`` directory beside this module,
 laid out exactly as the package's files land on the machine, with ``DEBIAN/``
@@ -88,11 +90,13 @@ from imbue.mngr_latchkey.owner_exec_vm import VM_EXEC_PORT
 from imbue.mngr_latchkey.remote._machine import ANSWER_PREFIX
 from imbue.mngr_latchkey.remote._machine import DIFFERENT_MACHINE_KEY_MESSAGE
 from imbue.mngr_latchkey.remote._machine import DIFFERENT_MACHINE_PASSWORD_MESSAGE
-from imbue.mngr_latchkey.remote._machine import GATEWAY_ENCRYPTION_KEY_FILENAME
-from imbue.mngr_latchkey.remote._machine import GATEWAY_LISTEN_PASSWORD_FILENAME
+from imbue.mngr_latchkey.remote._machine import LEGACY_RAM_ENCRYPTION_KEY_FILENAME
+from imbue.mngr_latchkey.remote._machine import LEGACY_RAM_LISTEN_PASSWORD_FILENAME
+from imbue.mngr_latchkey.remote._machine import MACHINE_ENCRYPTION_KEY_FILENAME
+from imbue.mngr_latchkey.remote._machine import MACHINE_GATEWAY_PASSWORD_FILENAME
 from imbue.mngr_latchkey.remote._machine import OUTCOME_DONE_MARKER
 from imbue.mngr_latchkey.remote._machine import REMOTE_LATCHKEY_DIR_NAME
-from imbue.mngr_latchkey.remote._machine import TMPFS_SECRETS_DIR
+from imbue.mngr_latchkey.remote._machine import RUNTIME_DIR
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.service_plugins import INSTALLED_COMMIT_STAMP_FILENAME
 from imbue.mngr_latchkey.service_plugins import KNOWN_SERVICE_PLUGINS
@@ -173,10 +177,10 @@ TUNNEL_PROGRAM_NAME: Final[str] = "latchkey-tunnel"
 
 # supervisord program tuning. ``startsecs`` is how long a program must stay up
 # to count as started; the gateway's few ``startretries`` let it go quietly
-# FATAL after a reboot (its RAM-backed secrets are gone), while the tunnel's
-# huge count keeps it retrying while the container's sshd comes up. The tunnel
-# is not autostarted: ``apply-state`` starts it only for a container that needs
-# it, and a reboot leaves it down beside the gateway until the next pass.
+# FATAL on a machine holding no secrets for it, while the tunnel's huge count
+# keeps it retrying while the container's sshd comes up. The tunnel is not
+# autostarted: ``apply-state`` starts it only for a container that needs it,
+# and a reboot leaves it down until the next pass.
 _SUPERVISOR_START_SECONDS: Final[int] = 5
 _SUPERVISOR_GATEWAY_START_RETRIES: Final[int] = 3
 _SUPERVISOR_TUNNEL_START_RETRIES: Final[int] = 1_000_000
@@ -205,7 +209,8 @@ _SH_BINARY_PATH: Final[str] = "/bin/sh"
 _SSH_BINARY_PATH: Final[str] = "/usr/bin/ssh"
 
 # Filesystem types (as reported by ``stat -f -c %T``) accepted as RAM-backed
-# for the secrets directory. Anything else means a key would land on disk.
+# for the runtime directory. Anything else means a connected desktop's secrets
+# would land on disk.
 _RAM_BACKED_FILESYSTEM_TYPES: Final[tuple[str, ...]] = ("ramfs", "tmpfs")
 
 # Docker label key every mngr container carries, valued with the host id (kept
@@ -332,11 +337,15 @@ class RemotePackageLayout(FrozenModel):
 
     install_dir: Path = Field(description="The package's private directory: its scripts and the extension.")
     bin_dir: Path = Field(description="Where the ``mngr-latchkey`` command lands.")
-    secrets_dir: Path = Field(description="The RAM-backed directory the gateway's secrets live in.")
+    runtime_dir: Path = Field(
+        description="The RAM-backed directory the connected desktops' records and the commands' scratch space live in."
+    )
     log_dir: Path = Field(description="Where supervisord writes the gateway's and the tunnel's logs.")
     supervisor_confd_dir: Path = Field(description="supervisord's drop-in directory the program configs land in.")
     nftables_confd_dir: Path = Field(description="Where the bridge-services nftables policy lands.")
-    systemd_unit_dir: Path = Field(description="Where the unit that loads that policy at boot lands.")
+    systemd_unit_dir: Path = Field(
+        description="Where the unit that loads that policy at boot lands, and the drop-in ordering supervisord."
+    )
     sshd_confd_dir: Path = Field(description="sshd's drop-in directory the tunnel keepalive settings land in.")
     curl_install_dir: Path = Field(description="Where the curl shims are installed.")
     artifact_dir: Path = Field(description="Where the built package is uploaded to before it is installed.")
@@ -369,7 +378,7 @@ class RemotePackageLayout(FrozenModel):
 DEFAULT_REMOTE_PACKAGE_LAYOUT: Final[RemotePackageLayout] = RemotePackageLayout(
     install_dir=Path("/usr/lib/mngr-latchkey"),
     bin_dir=Path("/usr/bin"),
-    secrets_dir=TMPFS_SECRETS_DIR,
+    runtime_dir=RUNTIME_DIR,
     log_dir=Path("/var/log/mngr-latchkey"),
     supervisor_confd_dir=Path("/etc/supervisor/conf.d"),
     nftables_confd_dir=Path("/etc/nftables.d"),
@@ -447,12 +456,18 @@ class RemotePackageContext(FrozenModel):
     gateway_conf_filename: str = Field(description="The gateway's bind address file, under the latchkey directory.")
     container_tunnel_key_filename: str = Field(description="The tunnel's private key, under the latchkey directory.")
     tunnel_conf_filename: str = Field(description="The tunnel target file, under the latchkey directory.")
-    encryption_key_filename: str = Field(description="The machine's own key, under the secrets directory.")
+    encryption_key_filename: str = Field(description="The machine's own key, under the latchkey directory.")
     listen_password_filename: str = Field(
-        description="The machine's own listen password, under the secrets directory."
+        description="The machine's own listen password, under the latchkey directory."
+    )
+    legacy_ram_encryption_key_filename: str = Field(
+        description="The machine's own key as a build that kept it in RAM named it, under the runtime directory."
+    )
+    legacy_ram_listen_password_filename: str = Field(
+        description="The machine's own listen password as such a build named it, under the runtime directory."
     )
     devices_dir_name: str = Field(
-        description="Where the connected desktops' records live, under the secrets directory."
+        description="Where the connected desktops' records live, under the runtime directory."
     )
     device_record_suffix: str = Field(description="The suffix of a desktop's record file, after its device id.")
     devices_dir_env_var: str = Field(description="How the gateway's extension is told where the records are.")
@@ -477,7 +492,7 @@ class RemotePackageContext(FrozenModel):
     )
     sshd_client_alive_count_max: int = Field(description="sshd ``ClientAliveCountMax`` for the tunnel sessions.")
     ram_backed_filesystem_types: tuple[str, ...] = Field(
-        description="Filesystem types accepted for the secrets directory."
+        description="Filesystem types accepted for the runtime directory."
     )
     docker_bridge_interface_name: str = Field(description="The docker bridge interface the policy confines to.")
     bridge_service_ports: tuple[int, ...] = Field(description="The bridge-bound ports the policy confines.")
@@ -573,8 +588,10 @@ def remote_package_context(layout: RemotePackageLayout) -> RemotePackageContext:
         gateway_conf_filename=GATEWAY_CONF_FILENAME,
         container_tunnel_key_filename=CONTAINER_TUNNEL_KEY_FILENAME,
         tunnel_conf_filename=TUNNEL_CONF_FILENAME,
-        encryption_key_filename=GATEWAY_ENCRYPTION_KEY_FILENAME,
-        listen_password_filename=GATEWAY_LISTEN_PASSWORD_FILENAME,
+        encryption_key_filename=MACHINE_ENCRYPTION_KEY_FILENAME,
+        listen_password_filename=MACHINE_GATEWAY_PASSWORD_FILENAME,
+        legacy_ram_encryption_key_filename=LEGACY_RAM_ENCRYPTION_KEY_FILENAME,
+        legacy_ram_listen_password_filename=LEGACY_RAM_LISTEN_PASSWORD_FILENAME,
         devices_dir_name=DEVICES_DIR_NAME,
         device_record_suffix=DEVICE_RECORD_SUFFIX,
         devices_dir_env_var=DEVICES_DIR_ENV_VAR,

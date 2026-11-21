@@ -2,7 +2,7 @@
 ; CONTAINER_TUNNEL_KEY_FILENAME in package.py).
 ; Not autostarted: only a container whose agent reaches the gateway at its own
 ; loopback needs the tunnel, and apply-state starts it for exactly those, so a
-; reboot leaves it down beside the gateway until the next provisioning pass.
+; reboot leaves it down until the next provisioning pass.
 ; Once started, the huge startretries keeps supervisord retrying while the
 ; container's sshd is still coming up (or a stale remote bind clears) instead
 ; of giving up.

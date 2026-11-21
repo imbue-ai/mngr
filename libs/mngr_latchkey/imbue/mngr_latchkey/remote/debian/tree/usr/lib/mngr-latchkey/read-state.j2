@@ -9,9 +9,7 @@
 # its own key. Every answer is one prefixed base64 line on stdout (see
 # lk_answer), and the last line says the script ran to its end.
 #
-# The document may also carry "fallback_encryption_key" (handed to a machine
-# that lost its key to a reboot, so the key it answers with is the one its
-# store is written under) and "container_host_id" (the agent's container to
+# The document may also carry "container_host_id" (the agent's container to
 # look up, answered as CONTAINER_EXTRA_HOSTS: the --add-host mappings it was
 # created with, as docker prints them; the read fails when there is no such
 # container).
@@ -22,14 +20,10 @@ set -eu
 umask 077
 . '{{ layout.install_dir }}/functions'
 
-lk_require_secrets_dir
-_lk_scratch="$(mktemp -d "$LK_SECRETS_DIR/read.XXXXXX")"
+lk_require_runtime_dir
+_lk_scratch="$(mktemp -d "$LK_RUNTIME_DIR/read.XXXXXX")"
 trap 'rm -rf "$_lk_scratch"' EXIT
 lk_read_document "$_lk_scratch/doc"
-
-if lk_doc_has fallback_encryption_key; then
-  lk_restore_secret "$LK_ENCRYPTION_KEY_FILE" fallback_encryption_key
-fi
 
 printf '%s' '{{ package_version }}' | lk_answer PACKAGE_VERSION
 printf '%s' "$LK_HOME" | lk_answer HOME

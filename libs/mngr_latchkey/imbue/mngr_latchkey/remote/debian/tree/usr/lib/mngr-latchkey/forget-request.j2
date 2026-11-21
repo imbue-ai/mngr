@@ -20,8 +20,8 @@ set -eu
 umask 077
 . '{{ layout.install_dir }}/functions'
 
-lk_require_secrets_dir
-_lk_scratch="$(mktemp -d "$LK_SECRETS_DIR/forget.XXXXXX")"
+lk_require_runtime_dir
+_lk_scratch="$(mktemp -d "$LK_RUNTIME_DIR/forget.XXXXXX")"
 trap 'rm -rf "$_lk_scratch"' EXIT
 lk_read_document "$_lk_scratch/doc"
 

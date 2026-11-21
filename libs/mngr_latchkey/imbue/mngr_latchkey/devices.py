@@ -16,7 +16,9 @@ ships) and drops the forwarded port with it, so a request for that desktop is
 refused rather than left hanging. The record carries the loopback port the
 desktop's tunnel binds on the machine and the two secrets the extension
 presents when it proxies a request back to that desktop's gateway, which is why
-it lives in RAM beside the machine's own secrets rather than on disk.
+it lives in RAM rather than on the machine's disk: the secrets are the
+desktop's, not the machine's, and the port is of no use once a reboot has taken
+the desktop's tunnel.
 
 The desktop gateway serves the desktop-owned routes itself and ignores
 :data:`DEVICE_HEADER`; its ``device_list.mjs`` extension answers ``/devices``
@@ -43,7 +45,7 @@ from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.pure import pure
 
 # Where a machine keeps the records of the desktops connected to it, under its
-# RAM-backed secrets directory, and how each record's file is named after the
+# RAM-backed runtime directory, and how each record's file is named after the
 # desktop's device id.
 DEVICES_DIR_NAME: Final[str] = "devices"
 DEVICE_RECORD_SUFFIX: Final[str] = ".json"

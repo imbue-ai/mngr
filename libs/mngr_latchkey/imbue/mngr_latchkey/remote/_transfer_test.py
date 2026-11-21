@@ -18,7 +18,7 @@ from imbue.mngr_latchkey.core import merge_minds_latchkey_config
 from imbue.mngr_latchkey.custom_services import build_custom_service_registration
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
-from imbue.mngr_latchkey.remote._machine import GATEWAY_ENCRYPTION_KEY_FILENAME
+from imbue.mngr_latchkey.remote._machine import MACHINE_ENCRYPTION_KEY_FILENAME
 from imbue.mngr_latchkey.remote._machine import RemoteCredentialClear
 from imbue.mngr_latchkey.remote._machine import RemoteCredentialMerge
 from imbue.mngr_latchkey.remote._machine import RemoteMachineState
@@ -106,7 +106,6 @@ def test_a_policy_is_provisioned_exactly_when_it_carries_a_rule() -> None:
 def test_the_grant_merges_the_named_account_and_installs_the_policy(tmp_path: Path) -> None:
     """One apply does both: a scoped merge into the store, then an atomic 0600 policy."""
     vps = as_vps(fake_vps(tmp_path, {"github": ["kept@example.com"]}))
-    vps.run_under_key(MACHINE_KEY)
     bundle = store_document({"slack": ["a@example.com", "not-asked-for@example.com"]}, MACHINE_KEY)
 
     _grant(vps, bundle, "a@example.com")
@@ -120,9 +119,10 @@ def test_the_grant_merges_the_named_account_and_installs_the_policy(tmp_path: Pa
         CREDENTIALS_STORE_FILENAME,
         UPSTREAM_DATA_FORMAT_VERSION_FILENAME,
         REMOTE_EXTENSIONS_DIR_NAME,
+        MACHINE_ENCRYPTION_KEY_FILENAME,
         PERMISSIONS_CONFIG_FILENAME,
     ]
-    assert vps.secrets_dir_entries() == [GATEWAY_ENCRYPTION_KEY_FILENAME]
+    assert vps.runtime_dir_entries() == []
 
 
 def test_the_grant_without_an_account_hands_over_the_whole_service(tmp_path: Path) -> None:
@@ -177,7 +177,6 @@ def test_a_disconnect_takes_one_account_away_and_leaves_its_siblings(tmp_path: P
     vps = as_vps(
         fake_vps(tmp_path, {"slack": ["gone@example.com", "kept@example.com"], "github": ["also-kept@example.com"]})
     )
-    vps.run_under_key(MACHINE_KEY)
 
     _apply(
         vps,
@@ -190,6 +189,7 @@ def test_a_disconnect_takes_one_account_away_and_leaves_its_siblings(tmp_path: P
 def test_a_credential_change_on_a_machine_with_no_key_fails_rather_than_guessing(tmp_path: Path) -> None:
     """Clearing rewrites the store, so it needs the machine's key like every other credential change."""
     vps = as_vps(fake_vps(tmp_path, {"slack": ["gone@example.com"]}))
+    vps.lose_key()
 
     with pytest.raises(RemoteGatewayError, match="has no encryption key"):
         _apply(
@@ -225,12 +225,12 @@ def test_a_refused_update_abandons_nothing(tmp_path: Path) -> None:
 
     assert vps.machine_accounts() == {"slack": ["live@example.com"]}
     assert vps.machine_permissions() == '{"rules": []}'
-    assert vps.secret(GATEWAY_ENCRYPTION_KEY_FILENAME) == "another-computers-key"
+    assert vps.secret(MACHINE_ENCRYPTION_KEY_FILENAME) == "another-computers-key"
     assert vps.supervisorctl_calls() == []
 
 
 def test_a_permissions_snapshot_needs_no_key_at_all(tmp_path: Path) -> None:
-    """A policy is not encrypted, so a machine that rebooted still takes one."""
+    """A policy is not encrypted, so a machine holding no key still takes one."""
     vps = as_vps(fake_vps(tmp_path))
 
     _apply(vps, RemoteStateUpdate(permissions_json=_SLACK_ANY))
@@ -239,7 +239,7 @@ def test_a_permissions_snapshot_needs_no_key_at_all(tmp_path: Path) -> None:
     assert permissions_path.read_text() == project_policy_for_machine(_SLACK_ANY)
     assert stat.S_IMODE(permissions_path.stat().st_mode) == 0o600
     assert vps.latchkey_dir_entries() == [REMOTE_EXTENSIONS_DIR_NAME, PERMISSIONS_CONFIG_FILENAME]
-    assert vps.secrets_dir_entries() == []
+    assert vps.runtime_dir_entries() == []
 
 
 def test_a_pushed_host_policy_lands_without_the_per_agent_gate_and_reads_back_with_it(tmp_path: Path) -> None:
@@ -275,14 +275,13 @@ def test_a_failed_merge_leaves_the_policy_alone_and_cleans_up(tmp_path: Path) ->
         _grant(vps, b"not a credential store", "")
 
     assert vps.machine_permissions() == '{"rules": []}'
-    assert vps.latchkey_dir_entries() == [PERMISSIONS_CONFIG_FILENAME]
-    assert vps.secrets_dir_entries() == [GATEWAY_ENCRYPTION_KEY_FILENAME]
+    assert vps.latchkey_dir_entries() == [MACHINE_ENCRYPTION_KEY_FILENAME, PERMISSIONS_CONFIG_FILENAME]
+    assert vps.runtime_dir_entries() == []
 
 
 def test_a_read_answers_with_the_store_as_the_machine_holds_it_and_the_policy(tmp_path: Path) -> None:
     """One read answers with everything the pane needs: the store, its stamp, the key it is under, and the policy."""
     vps = as_vps(fake_vps(tmp_path, {"slack": ["a@example.com"]}, machine_permissions=_SLACK_ANY))
-    vps.run_under_key(MACHINE_KEY)
 
     state = _read(vps, RemoteStateRequest(is_credential_store_included=True))
 
@@ -298,9 +297,10 @@ def test_a_read_answers_with_the_store_as_the_machine_holds_it_and_the_policy(tm
     assert vps.latchkey_dir_entries() == [
         CREDENTIALS_STORE_FILENAME,
         UPSTREAM_DATA_FORMAT_VERSION_FILENAME,
+        MACHINE_ENCRYPTION_KEY_FILENAME,
         PERMISSIONS_CONFIG_FILENAME,
     ]
-    assert vps.secrets_dir_entries() == [GATEWAY_ENCRYPTION_KEY_FILENAME]
+    assert vps.runtime_dir_entries() == []
 
 
 def test_a_read_answers_for_a_machine_that_holds_nothing_yet(tmp_path: Path) -> None:
@@ -317,22 +317,10 @@ def test_a_read_answers_for_a_machine_that_holds_nothing_yet(tmp_path: Path) -> 
     assert state.has_credential_store is False
 
 
-def test_a_read_of_a_rebooted_machine_hands_it_its_key_and_answers_with_the_store(tmp_path: Path) -> None:
-    """The key the read answers with is the one handed back, which is what the store is re-encrypted from here."""
-    vps = as_vps(fake_vps(tmp_path, {"slack": ["a@example.com"]}))
-
-    state = _read(
-        vps, RemoteStateRequest(is_credential_store_included=True, fallback_encryption_key=SecretStr(MACHINE_KEY))
-    )
-
-    assert state.credential_store is not None
-    assert state.encryption_key is not None and state.encryption_key.get_secret_value() == MACHINE_KEY
-    assert vps.secret(GATEWAY_ENCRYPTION_KEY_FILENAME) == MACHINE_KEY
-
-
 def test_a_read_brings_back_a_store_the_machine_holds_no_key_for(tmp_path: Path) -> None:
     """Nothing on the machine opens the store, so a machine that lost its key still hands it over for a key to be tried here."""
     vps = as_vps(fake_vps(tmp_path, {"slack": ["a@example.com"]}))
+    vps.lose_key()
 
     state = _read(vps, RemoteStateRequest(is_credential_store_included=True))
 
@@ -341,19 +329,10 @@ def test_a_read_brings_back_a_store_the_machine_holds_no_key_for(tmp_path: Path)
     assert state.encryption_key is None
 
 
-def test_a_read_leaves_a_live_key_alone(tmp_path: Path) -> None:
-    """The recorded key is written back only to a machine that lost its own, never over a live copy."""
-    vps = as_vps(fake_vps(tmp_path))
-    vps.run_under_key("the-machines-live-key")
-
-    _read(vps, RemoteStateRequest(fallback_encryption_key=SecretStr(MACHINE_KEY)))
-
-    assert vps.secret(GATEWAY_ENCRYPTION_KEY_FILENAME) == "the-machines-live-key"
-
-
 def test_a_read_answers_the_policy_of_a_machine_without_a_key_when_no_store_is_asked_for(tmp_path: Path) -> None:
-    """A rebooted machine can still say what its gateway enforces; only the store needs the key."""
+    """A machine that lost its key can still say what its gateway enforces; only the store needs the key."""
     vps = as_vps(fake_vps(tmp_path, {"slack": ["a@example.com"]}, machine_permissions=_SLACK_ANY))
+    vps.lose_key()
 
     state = _read(vps, RemoteStateRequest())
 
@@ -363,8 +342,9 @@ def test_a_read_answers_the_policy_of_a_machine_without_a_key_when_no_store_is_a
 
 
 def test_a_read_answers_the_desktop_egress_rules_even_of_a_machine_that_lost_its_key(tmp_path: Path) -> None:
-    """The rules are not encrypted, so a rebooted machine still says what its router routes."""
+    """The rules are not encrypted, so a machine that lost its key still says what its router routes."""
     vps = as_vps(fake_vps(tmp_path, {"slack": ["a@example.com"]}))
+    vps.lose_key()
     vps.hold_desktop_egress_rules(_SLACK_ROUTED)
 
     state = _read(vps, RemoteStateRequest())
@@ -393,7 +373,7 @@ def test_the_permissions_and_rules_update_installs_both_files(tmp_path: Path) ->
         PERMISSIONS_CONFIG_FILENAME,
         DESKTOP_EGRESS_RULES_FILENAME,
     ]
-    assert vps.secrets_dir_entries() == []
+    assert vps.runtime_dir_entries() == []
 
 
 def test_a_failed_merge_leaves_the_desktop_egress_rules_alone(tmp_path: Path) -> None:
@@ -413,7 +393,7 @@ def test_a_failed_merge_leaves_the_desktop_egress_rules_alone(tmp_path: Path) ->
         )
 
     assert vps.machine_desktop_egress_rules() == "{}"
-    assert vps.latchkey_dir_entries() == [DESKTOP_EGRESS_RULES_FILENAME]
+    assert vps.latchkey_dir_entries() == [MACHINE_ENCRYPTION_KEY_FILENAME, DESKTOP_EGRESS_RULES_FILENAME]
 
 
 def test_an_update_without_desktop_egress_rules_leaves_the_machines_alone(tmp_path: Path) -> None:
@@ -466,7 +446,6 @@ def test_a_config_snapshot_replaces_the_machines_file_whole(tmp_path: Path) -> N
 def test_a_clear_of_a_custom_service_the_machine_no_longer_names_is_refused(tmp_path: Path) -> None:
     """Why a deregistering disconnect clears before its config lands: latchkey knows no service its config lacks."""
     vps = as_vps(fake_vps(tmp_path, {"custom_https_api_example_com": [""]}))
-    vps.run_under_key(MACHINE_KEY)
     vps.hold_config(merge_minds_latchkey_config(None, {}))
 
     with pytest.raises(RemoteGatewayError, match="Unknown service: custom_https_api_example_com"):
@@ -475,7 +454,6 @@ def test_a_clear_of_a_custom_service_the_machine_no_longer_names_is_refused(tmp_
             HostId.generate(),
             "custom_https_api_example_com",
             "",
-            SecretStr(MACHINE_KEY),
             config_json=None,
         )
 
@@ -484,7 +462,6 @@ def test_a_clear_of_a_custom_service_the_machine_no_longer_names_is_refused(tmp_
 
 def test_a_disconnect_that_deregisters_lands_both_in_one_command(tmp_path: Path) -> None:
     vps = as_vps(fake_vps(tmp_path, {"custom_https_api_example_com": [""], "slack": ["a@example.com"]}))
-    vps.run_under_key(MACHINE_KEY)
     vps.hold_config(_CUSTOM_CONFIG)
     without_the_service = merge_minds_latchkey_config(None, {})
 
@@ -493,7 +470,6 @@ def test_a_disconnect_that_deregisters_lands_both_in_one_command(tmp_path: Path)
         HostId.generate(),
         "custom_https_api_example_com",
         "",
-        SecretStr(MACHINE_KEY),
         config_json=without_the_service,
     )
 
@@ -549,7 +525,6 @@ def test_a_grant_costs_one_remote_command(tmp_path: Path) -> None:
     """The whole point: no probes, no uploads, no cleanup calls -- one command, one round trip."""
     host_id = HostId.generate()
     outer = fake_vps(tmp_path, {"github": ["kept@example.com"]})
-    as_vps(outer).run_under_key(MACHINE_KEY)
 
     _push_grant(tmp_path, host_id, outer, "a@example.com")
 
@@ -562,7 +537,6 @@ def test_a_grant_costs_one_remote_command(tmp_path: Path) -> None:
 def test_a_grant_that_changes_a_route_still_costs_one_remote_command(tmp_path: Path) -> None:
     host_id = HostId.generate()
     outer = fake_vps(tmp_path, {"github": ["kept@example.com"]})
-    as_vps(outer).run_under_key(MACHINE_KEY)
 
     _push_grant(tmp_path, host_id, outer, "a@example.com", desktop_egress_rules_json=_SLACK_ROUTED)
 
@@ -600,7 +574,6 @@ def test_a_grant_with_desktop_egress_rules_the_router_could_not_read_never_reach
 def test_a_connect_costs_one_remote_command(tmp_path: Path) -> None:
     host_id = HostId.generate()
     outer = fake_vps(tmp_path, {"github": ["kept@example.com"]})
-    as_vps(outer).run_under_key(MACHINE_KEY)
     latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={"slack": ["a@example.com"]})
     machine_latchkey = latchkey_for_machine(latchkey, plugin_data_dir(latchkey.latchkey_directory), host_id)
 
@@ -638,9 +611,8 @@ def test_a_connect_carries_its_config_in_the_same_command(tmp_path: Path) -> Non
 def test_a_disconnect_costs_one_remote_command(tmp_path: Path) -> None:
     host_id = HostId.generate()
     outer = fake_vps(tmp_path, {"slack": ["gone@example.com", "kept@example.com"]})
-    as_vps(outer).run_under_key(MACHINE_KEY)
 
-    clear_remote_credentials(outer, host_id, "slack", "gone@example.com", SecretStr(MACHINE_KEY), config_json=None)
+    clear_remote_credentials(outer, host_id, "slack", "gone@example.com", config_json=None)
 
     assert len(as_vps(outer).recorded) == 1
     assert as_vps(outer).written == []
@@ -652,18 +624,17 @@ def test_a_disconnect_is_not_refused_by_a_machine_rekeyed_out_from_under_this_co
 
     A clear brings nothing of this computer's to write, so the recorded key is
     not what it needs -- only the machine's own, which is what it rewrites the
-    store with. The recorded key travels only as what a rebooted machine would
-    be handed back.
+    store with.
     """
     host_id = HostId.generate()
     outer = fake_vps(tmp_path)
     as_vps(outer).hold({"slack": ["gone@example.com", "kept@example.com"]}, key="another-computers-key")
     as_vps(outer).run_under_key("another-computers-key")
 
-    clear_remote_credentials(outer, host_id, "slack", "gone@example.com", SecretStr(MACHINE_KEY), config_json=None)
+    clear_remote_credentials(outer, host_id, "slack", "gone@example.com", config_json=None)
 
     assert as_vps(outer).machine_accounts() == {"slack": ["kept@example.com"]}
-    assert as_vps(outer).secret(GATEWAY_ENCRYPTION_KEY_FILENAME) == "another-computers-key"
+    assert as_vps(outer).secret(MACHINE_ENCRYPTION_KEY_FILENAME) == "another-computers-key"
 
 
 def test_a_permissions_snapshot_costs_one_remote_command_and_no_home_probe(tmp_path: Path) -> None:
@@ -689,13 +660,12 @@ def test_a_permissions_snapshot_is_run_without_its_command_reaching_the_logs(tmp
 
 
 def test_reading_a_machine_runs_without_its_command_reaching_the_logs(tmp_path: Path) -> None:
-    """The read's document carries the machine's key, handed back to a machine that lost it."""
+    """Every machine command is run that way, a read whose document carries nothing secret included."""
     host_id = HostId.generate()
     outer = fake_vps(tmp_path, {"slack": ["a@example.com"]})
-    as_vps(outer).run_under_key(MACHINE_KEY)
     latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={"slack": ["a@example.com"]})
 
-    fetch_machine_state(outer, latchkey, host_id, SecretStr(MACHINE_KEY))
+    fetch_machine_state(outer, latchkey, host_id)
 
     recorded = as_vps(outer).recorded
     assert recorded != []
@@ -757,7 +727,7 @@ def test_a_read_answers_with_the_desktop_egress_rules_the_machine_holds(tmp_path
     outer = fake_vps(tmp_path, machine_permissions=_SLACK_ANY)
     as_vps(outer).hold_desktop_egress_rules(_SLACK_ROUTED)
 
-    fetched = fetch_machine_state(outer, latchkey, host_id, SecretStr(MACHINE_KEY))
+    fetched = fetch_machine_state(outer, latchkey, host_id)
 
     assert fetched.desktop_egress_rules_json == _SLACK_ROUTED
     assert fetched.permissions_json == _SLACK_ANY
@@ -769,7 +739,7 @@ def test_a_read_of_a_machine_with_no_desktop_egress_rules_file_answers_none(tmp_
     latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={})
     outer = fake_vps(tmp_path, machine_permissions=_SLACK_ANY)
 
-    fetched = fetch_machine_state(outer, latchkey, host_id, SecretStr(MACHINE_KEY))
+    fetched = fetch_machine_state(outer, latchkey, host_id)
 
     assert fetched.desktop_egress_rules_json is None
 
@@ -848,7 +818,7 @@ def test_a_read_answers_the_format_version_the_machine_stamps_its_policy_with(tm
     outer = fake_vps(tmp_path, machine_permissions=_SLACK_ANY)
     as_vps(outer).hold_permissions_format_version(2)
 
-    fetched = fetch_machine_state(outer, latchkey, host_id, SecretStr(MACHINE_KEY))
+    fetched = fetch_machine_state(outer, latchkey, host_id)
 
     assert fetched.permissions_format_version == 2
 
@@ -859,7 +829,7 @@ def test_a_read_of_an_unstamped_machine_answers_format_version_zero(tmp_path: Pa
     latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={})
     outer = fake_vps(tmp_path, machine_permissions=_SLACK_ANY)
 
-    fetched = fetch_machine_state(outer, latchkey, host_id, SecretStr(MACHINE_KEY))
+    fetched = fetch_machine_state(outer, latchkey, host_id)
 
     assert fetched.permissions_format_version == 0
 
@@ -917,7 +887,6 @@ def test_adopting_the_machines_format_version_stamps_the_copy_here_only_when_it_
 def test_every_push_of_a_policy_carries_its_format_stamp(tmp_path: Path) -> None:
     host_id = HostId.generate()
     outer = fake_vps(tmp_path, {"github": ["kept@example.com"]})
-    as_vps(outer).run_under_key(MACHINE_KEY)
     latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={"slack": ["a@example.com"]})
     machine_latchkey = latchkey_for_machine(latchkey, plugin_data_dir(latchkey.latchkey_directory), host_id)
 
@@ -941,8 +910,8 @@ def test_every_push_of_a_policy_carries_its_format_stamp(tmp_path: Path) -> None
     assert as_vps(outer).machine_permissions_format_version() == 3
 
 
-def test_a_grant_to_a_rebooted_machine_lands_in_one_round_trip(tmp_path: Path) -> None:
-    """Handing the key back costs nothing extra: it rides in the same document as the grant."""
+def test_a_grant_to_a_machine_holding_no_key_gives_it_the_one_the_bundle_is_written_under(tmp_path: Path) -> None:
+    """The key rides in the same document as the grant, so a machine holding none can read what it merges."""
     host_id = HostId.generate()
     outer = fake_vps(tmp_path)
 
@@ -950,20 +919,9 @@ def test_a_grant_to_a_rebooted_machine_lands_in_one_round_trip(tmp_path: Path) -
 
     assert as_vps(outer).written == []
     assert len(as_vps(outer).recorded) == 1
-    assert as_vps(outer).secret(GATEWAY_ENCRYPTION_KEY_FILENAME) == MACHINE_KEY
+    assert as_vps(outer).secret(MACHINE_ENCRYPTION_KEY_FILENAME) == MACHINE_KEY
     assert as_vps(outer).machine_accounts() == {"slack": ["a@example.com"]}
     assert as_vps(outer).machine_permissions() == project_policy_for_machine(_SLACK_ANY)
-
-
-def test_a_disconnect_to_a_rebooted_machine_lands_in_one_round_trip(tmp_path: Path) -> None:
-    host_id = HostId.generate()
-    outer = fake_vps(tmp_path, {"slack": ["gone@example.com"]})
-
-    clear_remote_credentials(outer, host_id, "slack", "gone@example.com", SecretStr(MACHINE_KEY), config_json=None)
-
-    assert as_vps(outer).written == []
-    assert len(as_vps(outer).recorded) == 1
-    assert as_vps(outer).machine_accounts() == {}
 
 
 def test_a_grant_refuses_a_machine_rekeyed_out_from_under_this_computer(tmp_path: Path) -> None:
@@ -1008,11 +966,10 @@ def test_a_read_re_encrypts_the_store_for_this_computer_here(tmp_path: Path) -> 
     """The machine hands its store over as it holds it; the desktop's key never leaves this computer."""
     host_id = HostId.generate()
     outer = fake_vps(tmp_path, {"slack": ["a@example.com"]})
-    as_vps(outer).run_under_key(MACHINE_KEY)
     latchkey = desktop_latchkey(tmp_path, host_id=host_id)
     desktop_key = load_or_create_encryption_key(latchkey.latchkey_directory).get_secret_value()
 
-    fetched = fetch_machine_state(outer, latchkey, host_id, SecretStr(MACHINE_KEY))
+    fetched = fetch_machine_state(outer, latchkey, host_id)
 
     assert fetched.credentials is not None
     assert store_accounts(fetched.credentials) == {"slack": ["a@example.com"]}
@@ -1030,7 +987,7 @@ def test_a_read_re_encrypts_from_the_key_the_machine_runs_under(tmp_path: Path) 
     as_vps(outer).run_under_key("another-computers-key")
     latchkey = desktop_latchkey(tmp_path, host_id=host_id)
 
-    fetched = fetch_machine_state(outer, latchkey, host_id, SecretStr(MACHINE_KEY))
+    fetched = fetch_machine_state(outer, latchkey, host_id)
 
     assert fetched.credentials is not None
     assert store_accounts(fetched.credentials) == {"slack": ["a@example.com"]}
@@ -1043,10 +1000,9 @@ def test_a_read_opens_the_machines_store_under_its_own_key_whatever_the_operator
     monkeypatch.setenv("LATCHKEY_ENCRYPTION_KEY", "operator-key-3307")
     host_id = HostId.generate()
     outer = fake_vps(tmp_path, {"slack": ["a@example.com"]})
-    as_vps(outer).run_under_key(MACHINE_KEY)
     latchkey = desktop_latchkey(tmp_path, host_id=host_id)
 
-    fetched = fetch_machine_state(outer, latchkey, host_id, SecretStr(MACHINE_KEY))
+    fetched = fetch_machine_state(outer, latchkey, host_id)
 
     assert fetched.credentials is not None
     assert json.loads(fetched.credentials)["key"] == "operator-key-3307"
@@ -1057,11 +1013,10 @@ def test_a_read_of_a_machine_whose_last_account_was_disconnected_answers_no_cred
     """An emptied store is an ordinary machine holding nothing, not a failed read."""
     host_id = HostId.generate()
     outer = fake_vps(tmp_path, {"slack": ["gone@example.com"]})
-    as_vps(outer).run_under_key(MACHINE_KEY)
-    clear_remote_credentials(outer, host_id, "slack", "gone@example.com", SecretStr(MACHINE_KEY), config_json=None)
+    clear_remote_credentials(outer, host_id, "slack", "gone@example.com", config_json=None)
     latchkey = desktop_latchkey(tmp_path, host_id=host_id)
 
-    fetched = fetch_machine_state(outer, latchkey, host_id, SecretStr(MACHINE_KEY))
+    fetched = fetch_machine_state(outer, latchkey, host_id)
 
     assert fetched.credentials is None
     assert fetched.data_format_version == ""
@@ -1075,7 +1030,20 @@ def test_a_read_still_fails_loudly_when_the_store_cannot_be_re_encrypted(tmp_pat
     latchkey = desktop_latchkey(tmp_path, host_id=host_id)
 
     with pytest.raises(RemoteGatewayError, match="The encryption key may have changed"):
-        fetch_machine_state(outer, latchkey, host_id, SecretStr(MACHINE_KEY))
+        fetch_machine_state(outer, latchkey, host_id)
+
+
+def test_a_read_of_a_machine_that_lost_the_key_to_its_store_fails_rather_than_answering_without_it(
+    tmp_path: Path,
+) -> None:
+    """Nothing here could re-encrypt the store, and reporting it as empty would have the caller drop its copy."""
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path, {"slack": ["a@example.com"]})
+    as_vps(outer).lose_key()
+    latchkey = desktop_latchkey(tmp_path, host_id=host_id)
+
+    with pytest.raises(RemoteGatewayError, match="not with the key it is written under"):
+        fetch_machine_state(outer, latchkey, host_id)
 
 
 def test_a_read_maps_the_machines_answers_to_what_the_pane_shows(tmp_path: Path) -> None:
@@ -1083,7 +1051,7 @@ def test_a_read_maps_the_machines_answers_to_what_the_pane_shows(tmp_path: Path)
     outer = fake_vps(tmp_path, {"slack": ["a@example.com"]}, machine_permissions=_SLACK_ANY)
     latchkey = desktop_latchkey(tmp_path, host_id=host_id)
 
-    fetched = fetch_machine_state(outer, latchkey, host_id, SecretStr(MACHINE_KEY))
+    fetched = fetch_machine_state(outer, latchkey, host_id)
 
     assert fetched.credentials is not None
     assert store_accounts(fetched.credentials) == {"slack": ["a@example.com"]}

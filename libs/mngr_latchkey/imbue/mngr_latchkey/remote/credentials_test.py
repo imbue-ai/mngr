@@ -23,12 +23,13 @@ from imbue.mngr_latchkey.migrations.interface import PermissionsFormatNewerError
 from imbue.mngr_latchkey.migrations.mock_permissions_migration_test import RuleAppendingMigration
 from imbue.mngr_latchkey.migrations.runner import CURRENT_PERMISSIONS_FORMAT_VERSION
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
-from imbue.mngr_latchkey.remote._machine import GATEWAY_ENCRYPTION_KEY_FILENAME
+from imbue.mngr_latchkey.remote._machine import MACHINE_ENCRYPTION_KEY_FILENAME
 from imbue.mngr_latchkey.remote._machine_policy import project_policy_for_machine
 from imbue.mngr_latchkey.remote._mirror import machine_credentials_path
 from imbue.mngr_latchkey.remote._mirror import machine_store_dir
 from imbue.mngr_latchkey.remote._mirror import materialize_machine_store
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
+from imbue.mngr_latchkey.remote._mirror import stored_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import write_machine_credentials
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
 from imbue.mngr_latchkey.remote.credentials import MachineCredentialsError
@@ -142,7 +143,6 @@ def test_connecting_a_service_costs_one_round_trip_and_no_read_back(tmp_path: Pa
     """
     host_id = HostId.generate()
     outer = fake_vps(tmp_path, {"slack": ["already@example.com"]})
-    as_vps(outer).run_under_key(MACHINE_KEY)
     credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={"slack": ["new@example.com"]})
     data_dir = plugin_data_dir(credentials.latchkey.latchkey_directory)
 
@@ -196,14 +196,15 @@ def test_disconnecting_the_last_account_leaves_a_machine_holding_nothing(tmp_pat
     assert not machine_credentials_path(data_dir, host_id).exists()
 
 
-def test_an_operation_on_a_machine_this_computer_never_provisioned_is_refused(tmp_path: Path) -> None:
-    """Without the machine's key there is nothing to encrypt for it or read from it."""
+def test_a_sign_out_needs_no_key_recorded_here(tmp_path: Path) -> None:
+    """The clear runs under the machine's own key, so a computer that never provisioned the machine can still sign out."""
     latchkey = desktop_latchkey(tmp_path, host_id=HostId.generate(), machine_accounts={})
-    outer = fake_vps(tmp_path)
+    outer = fake_vps(tmp_path, {"slack": ["gone@example.com", "kept@example.com"]})
     credentials = MachineCredentials(host=outer, latchkey=latchkey, host_id=HostId.generate())
 
-    with pytest.raises(MachineCredentialsError, match="never been provisioned"):
-        credentials.disconnect_account("slack", "a@example.com", is_service_deregistered=False)
+    credentials.disconnect_account("slack", "gone@example.com", is_service_deregistered=False)
+
+    assert as_vps(outer).machine_accounts() == {"slack": ["kept@example.com"]}
 
 
 def test_a_read_adopts_what_a_machine_from_an_earlier_build_holds(tmp_path: Path) -> None:
@@ -241,7 +242,7 @@ def test_a_machine_store_written_here_is_not_lost_by_a_later_operation(tmp_path:
 
 
 def test_a_push_refuses_a_machine_rekeyed_out_from_under_this_computer(tmp_path: Path) -> None:
-    """A different key in the machine's tmpfs means another install re-keyed it; ours must not clobber it.
+    """A different key on the machine means another install re-keyed it; ours must not clobber it.
 
     A bundle is encrypted with the key this computer recorded, so merging it
     into such a machine would leave its gateway a store it cannot read. The
@@ -262,19 +263,18 @@ def test_a_push_refuses_a_machine_rekeyed_out_from_under_this_computer(tmp_path:
     assert fetched.credentials is not None
 
 
-def test_a_machines_key_is_restored_once_and_then_left_alone(tmp_path: Path) -> None:
-    """The tmpfs key is written back only when a reboot wiped it, never over a live copy."""
+def test_a_read_never_gives_a_machine_that_lost_its_key_the_one_recorded_here(tmp_path: Path) -> None:
+    """A read carries no key, so it has none to hand a machine that lost its own; it just fails."""
     host_id = HostId.generate()
     outer = fake_vps(tmp_path, {"slack": ["a@example.com"]})
+    as_vps(outer).lose_key()
     credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={})
 
-    credentials.refresh(MIGRATION_CONTEXT)
-    assert as_vps(outer).secret(GATEWAY_ENCRYPTION_KEY_FILENAME) == MACHINE_KEY
+    with pytest.raises(RemoteGatewayError, match="not with the key it is written under"):
+        credentials.refresh(MIGRATION_CONTEXT)
 
-    as_vps(outer).hold({"slack": ["a@example.com"]}, key="the-machines-live-key")
-    as_vps(outer).run_under_key("the-machines-live-key")
-    credentials.refresh(MIGRATION_CONTEXT)
-    assert as_vps(outer).secret(GATEWAY_ENCRYPTION_KEY_FILENAME) == "the-machines-live-key"
+    assert as_vps(outer).secret(MACHINE_ENCRYPTION_KEY_FILENAME) is None
+    assert not as_vps(outer).has_received(MACHINE_KEY)
 
 
 def test_refreshing_adopts_what_the_machine_holds(tmp_path: Path) -> None:
@@ -371,18 +371,24 @@ def test_a_read_adopts_an_account_this_computer_has_never_seen(tmp_path: Path) -
     }
 
 
-def test_a_read_of_a_machine_this_computer_never_provisioned_is_refused(tmp_path: Path) -> None:
-    """Without the machine's key there is nothing it could re-encrypt its store for."""
+def test_a_read_needs_no_key_recorded_here(tmp_path: Path) -> None:
+    """The machine answers with the key its store is under, so a computer that never provisioned it can still read it.
+
+    Reading does not record that key: the record stays what says a
+    provisioning pass from this computer has reached the machine.
+    """
     host_id = HostId.generate()
     latchkey_directory = tmp_path / "latchkey"
     latchkey_directory.mkdir()
     latchkey = Latchkey(latchkey_directory=latchkey_directory, latchkey_binary=str(fake_latchkey_binary(tmp_path)))
-    outer = fake_vps(tmp_path)
+    outer = fake_vps(tmp_path, {"slack": ["a@example.com"]})
 
-    with pytest.raises(MachineCredentialsError, match="never been provisioned"):
-        MachineCredentials(host=outer, latchkey=latchkey, host_id=host_id).refresh(MIGRATION_CONTEXT)
+    fetched = MachineCredentials(host=outer, latchkey=latchkey, host_id=host_id).refresh(MIGRATION_CONTEXT)
 
-    assert as_vps(outer).recorded == []
+    assert fetched.credentials is not None
+    data_dir = plugin_data_dir(latchkey_directory)
+    assert store_accounts(machine_credentials_path(data_dir, host_id).read_bytes()) == {"slack": ["a@example.com"]}
+    assert stored_machine_encryption_key(data_dir, host_id) is None
 
 
 def test_a_read_adopts_a_policy_this_computer_disagrees_with(tmp_path: Path) -> None:
@@ -687,7 +693,6 @@ def test_a_grant_lands_both_halves_on_the_machine_in_one_round_trip(tmp_path: Pa
     """The credential and the policy that grants it travel as one remote command."""
     host_id = HostId.generate()
     outer = fake_vps(tmp_path, {"github": ["kept@example.com"]})
-    as_vps(outer).run_under_key(MACHINE_KEY)
     credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={"slack": ["a@example.com"]})
 
     credentials.connect_service_with_permissions("slack", "a@example.com", SLACK_GRANTED)
@@ -701,7 +706,6 @@ def test_a_grant_lands_both_halves_on_the_machine_in_one_round_trip(tmp_path: Pa
 def test_a_grant_that_changes_a_route_lands_all_three_on_the_machine_in_one_round_trip(tmp_path: Path) -> None:
     host_id = HostId.generate()
     outer = fake_vps(tmp_path, {"github": ["kept@example.com"]})
-    as_vps(outer).run_under_key(MACHINE_KEY)
     credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={"slack": ["a@example.com"]})
 
     credentials.connect_service_with_permissions_and_desktop_egress_rules(
@@ -728,7 +732,7 @@ def test_a_grant_reads_nothing_back_like_every_other_push(tmp_path: Path) -> Non
 
 
 def test_a_permissions_snapshot_reaches_a_machine_that_has_lost_its_key(tmp_path: Path) -> None:
-    """A policy is not encrypted, so a rebooted machine's gateway still gets the rules it will enforce."""
+    """A policy is not encrypted, so a machine holding no key still gets the rules its gateway will enforce."""
     host_id = HostId.generate()
     outer = fake_vps(tmp_path)
     credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={})
@@ -736,7 +740,7 @@ def test_a_permissions_snapshot_reaches_a_machine_that_has_lost_its_key(tmp_path
     credentials.set_permissions(SLACK_GRANTED)
 
     assert as_vps(outer).machine_permissions() == project_policy_for_machine(SLACK_GRANTED)
-    assert as_vps(outer).secret(GATEWAY_ENCRYPTION_KEY_FILENAME) is None
+    assert as_vps(outer).secret(MACHINE_ENCRYPTION_KEY_FILENAME) is None
     assert len(as_vps(outer).recorded) == 1
     assert as_vps(outer).written == []
 

@@ -120,9 +120,7 @@ class MachineCredentials(FrozenModel):
 
     Built for the duration of one exchange with the machine: the caller opens
     the outer host, does what it came to do, and lets both go. Every method
-    costs a single remote command, in either direction: the key a rebooted
-    machine has to be handed back rides in the same document, so that costs
-    nothing extra.
+    costs a single remote command, in either direction.
     """
 
     model_config = {"arbitrary_types_allowed": True}
@@ -187,7 +185,10 @@ class MachineCredentials(FrozenModel):
             LatchkeyStoreError: when a copy here cannot be written, or the
                 migrated copy here cannot be read back.
         """
-        fetched = fetch_machine_state(self.host, self.latchkey, self.host_id, self._machine_key())
+        materialize_machine_store(
+            self.latchkey.latchkey_directory, plugin_data_dir(self.latchkey.latchkey_directory), self.host_id
+        )
+        fetched = fetch_machine_state(self.host, self.latchkey, self.host_id)
         adopt_machine_credentials(self.latchkey, self.host_id, fetched)
         adopt_machine_custom_services(self.latchkey, self.host_id, fetched.custom_service_registrations)
         seeded = self._reconcile_permissions(fetched.permissions_json, fetched.permissions_format_version)
@@ -385,7 +386,6 @@ class MachineCredentials(FrozenModel):
             self.host_id,
             service_name,
             account,
-            self._machine_key(),
             config_json=self._config_deregistering(service_name) if is_service_deregistered else None,
         )
 
@@ -581,7 +581,7 @@ def _recorded_machine_key(latchkey: Latchkey, host_id: HostId) -> SecretStr:
     fresh machine and adopts the key a machine another of the user's computers
     provisioned is already running under -- so its absence means no
     provisioning pass from this computer has reached the machine yet, and there
-    is nothing it can encrypt for it or read from it.
+    is nothing it can encrypt for it.
     """
     data_dir = plugin_data_dir(latchkey.latchkey_directory)
     try:

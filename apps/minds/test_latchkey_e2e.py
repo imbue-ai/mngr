@@ -268,7 +268,7 @@ def _root_sshd(scratch: Path, authorized_public_key: str) -> Generator[tuple[int
     The daemon runs as root (via ``sudo``) so the SSH login lands as ``root``
     -- the user the remote-gateway provisioning requires (it apt-installs
     packages, writes supervisord drop-ins, and uses a root-owned tmpfs
-    secrets dir). ``StrictModes no`` lets sshd accept the test-user-owned
+    runtime dir). ``StrictModes no`` lets sshd accept the test-user-owned
     key/config files without any chown dance. ``PidFile none`` keeps sshd
     from dropping a root-owned file into the pytest tmp tree (which would
     break tmp_path cleanup).
@@ -1026,9 +1026,9 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
                     forward_process.kill()
                     forward_process.wait()
             # Purging the package stops and unregisters its supervisord
-            # programs, unloads its nftables table and drops the RAM-backed
-            # secrets and the logs; the latchkey directory (the machine's own
-            # data) is the test's to remove.
+            # programs, unloads its nftables table and drops the connected
+            # desktops' records and the logs; the latchkey directory (the
+            # machine's own data) is the test's to remove.
             _run_on_vps(
                 ssh_config_path,
                 f"dpkg --purge {_VPS_PACKAGE_NAME} >/dev/null 2>&1; rm -rf {_VPS_LATCHKEY_DIR} /run/mngr-latchkey",

@@ -14,7 +14,6 @@ class SentToMachine(UpperCaseStrEnum):
     """A part of what one machine command hands the machine to hold or act on."""
 
     ENCRYPTION_KEY = auto()
-    FALLBACK_ENCRYPTION_KEY = auto()
     LISTEN_PASSWORD = auto()
     CONFIG = auto()
     CREDENTIAL_MERGE = auto()

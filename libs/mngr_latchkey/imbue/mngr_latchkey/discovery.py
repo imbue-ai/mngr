@@ -627,8 +627,9 @@ class LatchkeyDiscoveryHandler(MutableModel):
         cycle by ``_resolve_gateway_route`` (against a refreshed listing), the
         tunnel to the old outer endpoint is removed by its exact key so the
         health-check loop stops re-dialing a dead address, and the provisioned
-        marker is forgotten because the recreated VM's tmpfs holds no gateway
-        secrets, so one fresh idempotent provisioning pass is needed.
+        marker is forgotten because the VM may have been recreated without
+        what an earlier pass left on it, so one fresh idempotent provisioning
+        pass is needed.
         """
         host_id_str = str(host_id)
         current_endpoint = _ContainerEndpoint.from_ssh_info(ssh_info)

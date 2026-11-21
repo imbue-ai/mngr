@@ -114,18 +114,39 @@ fi
 # What earlier builds left on a machine they set up: the gateway wrapper the
 # ad-hoc provisioning wrote beside the store (supervisord runs the package's
 # now), the extension copy it staged, the secrets a build before the RAM-backed
-# directory kept on disk, and the one desktop's secret pair a build before the
-# per-desktop records kept for the curl router.
-rm -f "$LK_LATCHKEY_DIR/{{ encryption_key_filename }}" \
-  "$LK_LATCHKEY_DIR/{{ listen_password_filename }}" \
+# directory kept on disk under the names that directory then took over, and the
+# one desktop's secret pair a build before the per-desktop records kept for the
+# curl router.
+rm -f "$LK_LATCHKEY_DIR/{{ legacy_ram_encryption_key_filename }}" \
+  "$LK_LATCHKEY_DIR/{{ legacy_ram_listen_password_filename }}" \
   "$LK_LATCHKEY_DIR/desktop_permissions_override" \
-  "$LK_SECRETS_DIR/desktop_gateway_password" \
-  "$LK_SECRETS_DIR/desktop_permissions_override" \
+  "$LK_RUNTIME_DIR/desktop_gateway_password" \
+  "$LK_RUNTIME_DIR/desktop_permissions_override" \
   "$LK_LATCHKEY_DIR/{{ legacy_gateway_run_script_filename }}" \
   "$LK_EXTENSIONS_DIR/{{ extension_filename }}{{ legacy_extension_candidate_suffix }}"
 
-# The RAM-backed secrets directory the gateway reads its secrets from.
-lk_require_secrets_dir
+lk_require_runtime_dir
+
+# CLEANUP: drop this block (and the two legacy names in _machine.py) once none
+# of the user's computers runs a build that kept the machine's secrets in RAM.
+# The secrets such a build's gateway runs under are copied to the latchkey
+# directory, where this build's gateway reads them and a reboot leaves them.
+# A key in RAM replaces the one on disk: it is the key the gateway last wrote
+# the store under, whichever build gave it to the machine. A password in RAM
+# is kept only by a machine with none on disk: the one on disk is what the
+# agents on the machine were created with, while such a build seeds its own
+# into a machine it finds none in.
+_lk_ram_key="$LK_RUNTIME_DIR/{{ legacy_ram_encryption_key_filename }}"
+_lk_ram_password="$LK_RUNTIME_DIR/{{ legacy_ram_listen_password_filename }}"
+if [ -s "$_lk_ram_key" ] || [ -s "$_lk_ram_password" ]; then
+  (umask 077 && mkdir -p "$LK_LATCHKEY_DIR")
+fi
+if [ -s "$_lk_ram_key" ]; then
+  lk_install_file "$LK_ENCRYPTION_KEY_FILE" "$_lk_ram_key"
+fi
+if [ -s "$_lk_ram_password" ] && ! [ -s "$LK_LISTEN_PASSWORD_FILE" ]; then
+  lk_install_file "$LK_LISTEN_PASSWORD_FILE" "$_lk_ram_password"
+fi
 
 # The policy keeping the gateway's port (and the owner-exec daemon's) on the
 # docker bridge, loaded now and at every boot by the shipped oneshot, before

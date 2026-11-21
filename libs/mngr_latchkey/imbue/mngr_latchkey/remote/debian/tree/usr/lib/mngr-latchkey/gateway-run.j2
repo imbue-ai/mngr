@@ -1,7 +1,7 @@
 #!/bin/sh
 # What supervisord runs as the gateway program. Reads the machine's own key and
-# listen password from their RAM-backed files into the environment, the address
-# to bind from the file apply-state wrote, and execs the gateway, so supervisord
+# listen password from their files into the environment, the address to bind
+# from the file apply-state wrote, and execs the gateway, so supervisord
 # tracks the gateway's own PID and no secret ever appears in the supervisord
 # config or a process listing.
 #
@@ -18,12 +18,21 @@ set -eu
 # The npm global bin directory has to be on PATH whatever supervisord's is.
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
-# A reboot wipes the RAM-backed secrets. Refuse to run a keyless gateway: exit
-# non-zero so supervisord records a failed start, and the gateway stays down
-# until the next provisioning pass re-writes them.
+# Refuse to run a keyless gateway: exit non-zero so supervisord records a
+# failed start, and the gateway stays down until a provisioning pass writes
+# the machine's secrets.
 if ! [ -s "$LK_ENCRYPTION_KEY_FILE" ] || ! [ -s "$LK_LISTEN_PASSWORD_FILE" ]; then
-  lk_fail "latchkey gateway secrets are missing (tmpfs cleared by a reboot?); awaiting re-provision"
+  lk_fail "latchkey gateway secrets are missing from $LK_LATCHKEY_DIR; awaiting provisioning"
 fi
+# A reboot empties the directory the desktops' records live in; a gateway
+# started before any desktop has announced itself again finds it there, empty.
+lk_require_runtime_dir
+# CLEANUP: drop this block once none of the user's computers runs a build that
+# kept the machine's secrets in RAM. Such a build reads them from there, and
+# takes a machine holding none there for one that lost them: it gives up the
+# machine's store and seeds a listen password of its own.
+lk_install_file "$LK_RUNTIME_DIR/{{ legacy_ram_encryption_key_filename }}" "$LK_ENCRYPTION_KEY_FILE"
+lk_install_file "$LK_RUNTIME_DIR/{{ legacy_ram_listen_password_filename }}" "$LK_LISTEN_PASSWORD_FILE"
 LATCHKEY_ENCRYPTION_KEY="$(lk_secret_value "$LK_ENCRYPTION_KEY_FILE")"
 LATCHKEY_GATEWAY_LISTEN_PASSWORD="$(lk_secret_value "$LK_LISTEN_PASSWORD_FILE")"
 export LATCHKEY_ENCRYPTION_KEY LATCHKEY_GATEWAY_LISTEN_PASSWORD
