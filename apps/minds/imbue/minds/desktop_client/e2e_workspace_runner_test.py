@@ -1,4 +1,5 @@
 import io
+import json
 import re
 from collections.abc import Callable
 from collections.abc import Mapping
@@ -33,10 +34,13 @@ from imbue.minds.desktop_client.e2e_workspace_runner import enter_workspace_from
 from imbue.minds.desktop_client.e2e_workspace_runner import find_chat_frame
 from imbue.minds.desktop_client.e2e_workspace_runner import is_home_row_running
 from imbue.minds.desktop_client.e2e_workspace_runner import is_home_row_stopped
+from imbue.minds.desktop_client.e2e_workspace_runner import model_of_assistant_reply_containing
 from imbue.minds.desktop_client.e2e_workspace_runner import open_account_home_page
+from imbue.minds.desktop_client.e2e_workspace_runner import read_model_of_chat_reply
 from imbue.minds.desktop_client.e2e_workspace_runner import send_to_main_chat_from_launcher
 from imbue.minds.desktop_client.e2e_workspace_runner import start_workspace_from_home_page
 from imbue.minds.desktop_client.e2e_workspace_runner import stop_workspace_from_home_page
+from imbue.minds.desktop_client.e2e_workspace_runner import switch_chat_to_cheapest_model
 from imbue.minds.desktop_client.e2e_workspace_runner import wait_for_workspace_ready_or_failure
 
 # A workspace-ready URL (matches the agent-subdomain pattern) and a still-pending
@@ -725,3 +729,119 @@ def test_entering_raises_when_the_desktop_never_renders() -> None:
 
     with pytest.raises(WorkspaceFlowError, match="did not render"):
         enter_workspace_from_home_page(cast(Page, page), _WORKSPACE_AGENT_ID, timeout_seconds=0)
+
+
+class _FakeChatApiPage:
+    """A chat page whose requests to the chat app's API get scripted answers, recorded in the order made.
+
+    ``answers_by_request`` maps ``(method, path)`` to the answers that request gets, one per request; the
+    final entry repeats.
+    """
+
+    def __init__(self, url: str, answers_by_request: Mapping[tuple[str, str], Sequence[Mapping[str, object]]]) -> None:
+        self.url = url
+        self._answers_by_request = {request: list(answers) for request, answers in answers_by_request.items()}
+        self.requests: list[tuple[str, str, object]] = []
+        self.wait_for_timeout_calls = 0
+
+    def evaluate(self, expression: str, arg: Mapping[str, object]) -> Mapping[str, object]:
+        method, path = str(arg["method"]), str(arg["path"])
+        self.requests.append((method, path, arg["body"]))
+        answers = self._answers_by_request[(method, path)]
+        return answers.pop(0) if len(answers) > 1 else answers[0]
+
+    def wait_for_timeout(self, timeout_ms: float) -> None:
+        self.wait_for_timeout_calls += 1
+
+
+_MODEL_OPTIONS_REQUEST = ("GET", f"/api/chats/{_WELCOME_CHAT_ID}/model-options")
+_MODEL_PICK_REQUEST = ("POST", f"/api/chats/{_WELCOME_CHAT_ID}/model")
+_EVENTS_REQUEST = ("GET", f"/api/chats/{_WELCOME_CHAT_ID}/events")
+_CHAT_NOT_FOUND = {"status": 404, "body": '{"error": "Chat not found"}'}
+_OK = {"status": 200, "body": '{"status": "ok"}'}
+
+
+def test_switching_to_the_cheapest_model_waits_for_the_chat_s_agent_then_posts_the_picker_s_haiku_pick() -> None:
+    # The chat app knows no agent for the chat until its create lands, so its model options are a 404 until then.
+    chat = _FakeChatApiPage(
+        _WELCOME_CHAT_PAGE_URL,
+        {
+            _MODEL_OPTIONS_REQUEST: [_CHAT_NOT_FOUND, _CHAT_NOT_FOUND, {"status": 200, "body": '{"models": null}'}],
+            _MODEL_PICK_REQUEST: [_OK],
+        },
+    )
+
+    switch_chat_to_cheapest_model(cast(Frame, chat), agent_up_timeout_seconds=5, label="test")
+
+    assert [(method, path) for method, path, _body in chat.requests] == [
+        _MODEL_OPTIONS_REQUEST,
+        _MODEL_OPTIONS_REQUEST,
+        _MODEL_OPTIONS_REQUEST,
+        _MODEL_PICK_REQUEST,
+    ]
+    assert chat.requests[-1][2] == {
+        "model_id": "haiku",
+        "effort": "low",
+        "fast": False,
+        "axes": ["model", "effort"],
+    }
+    assert chat.wait_for_timeout_calls == 2
+
+
+def test_switching_to_the_cheapest_model_raises_when_the_chat_never_gets_an_agent() -> None:
+    chat = _FakeChatApiPage(_WELCOME_CHAT_PAGE_URL, {_MODEL_OPTIONS_REQUEST: [_CHAT_NOT_FOUND]})
+
+    with pytest.raises(WorkspaceFlowError, match="had no agent to pick a model for"):
+        switch_chat_to_cheapest_model(cast(Frame, chat), agent_up_timeout_seconds=0, label="test")
+
+    assert _MODEL_PICK_REQUEST not in [(method, path) for method, path, _body in chat.requests]
+
+
+def test_switching_to_the_cheapest_model_raises_with_the_chat_s_refusal() -> None:
+    refusal = {"status": 400, "body": '{"error": "This model requires an effort level"}'}
+    chat = _FakeChatApiPage(
+        _WELCOME_CHAT_PAGE_URL,
+        {_MODEL_OPTIONS_REQUEST: [{"status": 200, "body": '{"models": null}'}], _MODEL_PICK_REQUEST: [refusal]},
+    )
+
+    with pytest.raises(WorkspaceFlowError, match="refused the model pick .* with 400: .*requires an effort level"):
+        switch_chat_to_cheapest_model(cast(Frame, chat), agent_up_timeout_seconds=5, label="test")
+
+
+def test_switching_to_the_cheapest_model_raises_on_a_page_that_is_not_a_chat() -> None:
+    chat = _FakeChatApiPage(_TERMINAL_PAGE_URL, {})
+
+    with pytest.raises(WorkspaceFlowError, match="Not a chat page"):
+        switch_chat_to_cheapest_model(cast(Frame, chat), agent_up_timeout_seconds=5, label="test")
+
+    assert chat.requests == []
+
+
+_TOKEN = "q7r2x9z4"
+_SEEDED_WELCOME = {"type": "assistant_message", "text": "Welcome! Pick a provider to start.", "model": "seed"}
+_USER_TURN = {"type": "user_message", "text": f"Reply with exactly this token and nothing else: {_TOKEN}"}
+_REPLY = {"type": "assistant_message", "text": _TOKEN, "model": "claude-haiku-5-5"}
+
+
+def test_the_model_of_a_reply_is_the_one_its_assistant_message_names_and_not_the_user_turn_or_the_seed() -> None:
+    assert model_of_assistant_reply_containing([_SEEDED_WELCOME, _USER_TURN, _REPLY], _TOKEN) == "claude-haiku-5-5"
+
+
+def test_the_model_of_a_reply_is_none_while_no_assistant_message_carries_the_token() -> None:
+    assert model_of_assistant_reply_containing([_SEEDED_WELCOME, _USER_TURN], _TOKEN) is None
+    assert model_of_assistant_reply_containing([], _TOKEN) is None
+
+
+def test_reading_the_model_of_a_chat_reply_reads_the_chat_s_events() -> None:
+    events = {"events": [_SEEDED_WELCOME, _USER_TURN, _REPLY], "offset": 0, "total": 3}
+    chat = _FakeChatApiPage(_WELCOME_CHAT_PAGE_URL, {_EVENTS_REQUEST: [{"status": 200, "body": json.dumps(events)}]})
+
+    assert read_model_of_chat_reply(cast(Frame, chat), _TOKEN) == "claude-haiku-5-5"
+
+
+def test_reading_the_model_of_a_chat_reply_raises_when_the_transcript_has_no_such_reply() -> None:
+    events = {"events": [_SEEDED_WELCOME, _USER_TURN], "offset": 0, "total": 2}
+    chat = _FakeChatApiPage(_WELCOME_CHAT_PAGE_URL, {_EVENTS_REQUEST: [{"status": 200, "body": json.dumps(events)}]})
+
+    with pytest.raises(WorkspaceFlowError, match="holds no assistant message naming a model"):
+        read_model_of_chat_reply(cast(Frame, chat), _TOKEN)

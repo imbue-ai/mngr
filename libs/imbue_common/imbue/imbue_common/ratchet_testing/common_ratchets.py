@@ -181,25 +181,6 @@ PREVENT_ASYNCIO_IMPORT = RegexRatchetRule(
     pattern_string=r"\bimport\s+asyncio\b|\bfrom\s+asyncio\b",
 )
 
-PREVENT_ASYNC_AWAIT = RegexRatchetRule(
-    rule_name="async def / await usages",
-    rule_description=(
-        "Avoid async/await. We strongly prefer synchronous code: it is far easier to read, debug, and "
-        "reason about, and our software is intentionally low-scale, so async provides no benefit. There "
-        "are almost no valid exceptions. Write blocking, synchronous code instead (poll with wait_for, "
-        "use threads via ConcurrencyGroup if you need concurrency)."
-    ),
-    # The pattern requires what actually follows the keyword in Python -- whitespace before
-    # the awaited expression, or an opening paren -- rather than a bare word boundary. A bare
-    # boundary also matches prose: ``await-delivery`` is a real CLI subcommand
-    # (``minds-admin server await-delivery``), so every comment, docstring, and help
-    # string naming it counts as an async usage. NB: this file is scanned by this rule, so write
-    # any prose here with the keyword never followed by a space or an open paren, or the rule
-    # counts its own explanation. A line-leading ``await`` is skipped: formatted Python has the keyword
-    # only in an indented function body, so one at column 0 is another language held in a string.
-    pattern_string=r"\basync\s+def\b|(?<=.)\bawait\s|(?<=.)\bawait\(",
-)
-
 PREVENT_PANDAS_IMPORT = RegexRatchetRule(
     rule_name="pandas imports",
     rule_description="pandas is banned per style guide. Use polars instead",
@@ -491,6 +472,16 @@ PREVENT_ASSERT_ISINSTANCE = RatchetRuleInfo(
         "Do not use 'assert isinstance()'. Use match statements with exhaustive case handling instead. "
         "End your match with 'case _ as unreachable: assert_never(unreachable)' to ensure all cases are "
         "handled and catch new variants at compile time. See style guide for examples."
+    ),
+)
+
+PREVENT_ASYNC_AWAIT = RatchetRuleInfo(
+    rule_name="async def / await usages",
+    rule_description=(
+        "Avoid async/await. We strongly prefer synchronous code: it is far easier to read, debug, and "
+        "reason about, and our software is intentionally low-scale, so async provides no benefit. There "
+        "are almost no valid exceptions. Write blocking, synchronous code instead (poll with wait_for, "
+        "use threads via ConcurrencyGroup if you need concurrency)."
     ),
 )
 

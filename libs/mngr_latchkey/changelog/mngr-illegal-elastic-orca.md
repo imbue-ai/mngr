@@ -1,0 +1,1 @@
+The async/await ratchet now reads the Python syntax tree instead of matching the keyword with a regex, so JavaScript held in this project's test strings no longer counts as async code. The recorded count drops to 0.

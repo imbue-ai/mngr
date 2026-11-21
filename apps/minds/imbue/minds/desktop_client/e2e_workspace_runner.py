@@ -9,6 +9,7 @@ Everything in this module is non-pytest -- callers pass plain arguments
 and own the environment / cleanup story themselves.
 """
 
+import json
 import os
 import re
 import signal
@@ -23,6 +24,8 @@ from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
+from http import HTTPMethod
+from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -1223,18 +1226,25 @@ def descendant_frames(frame: Frame) -> list[Frame]:
     return found
 
 
-def _chat_frames_with_ids(workspace: Page | Frame) -> list[tuple[Frame, str]]:
-    """The chat pages' frames currently inside the workspace, each with its chat's agent id, in frame order.
+@pure
+def _chat_id_from_chat_page_url(url: str) -> str | None:
+    """The chat id a chat page's URL path ends in, or None when the URL is not a chat page's.
 
-    The id is the frame's URL path, so it names the same chat however the URL's query string
-    or trailing slash changes while the page is open.
+    Read from the path alone, so it names the same chat however the URL's query string or
+    trailing slash changes while the page is open.
     """
+    match = CHAT_PAGE_URL_PATTERN.search(url.split("?", 1)[0])
+    return None if match is None else match.group(1)
+
+
+def _chat_frames_with_ids(workspace: Page | Frame) -> list[tuple[Frame, str]]:
+    """The chat pages' frames currently inside the workspace, each with its chat's id, in frame order."""
     candidates = workspace.frames if isinstance(workspace, Page) else descendant_frames(workspace)
     matched: list[tuple[Frame, str]] = []
     for frame in candidates:
-        match = CHAT_PAGE_URL_PATTERN.search(frame.url.split("?", 1)[0])
-        if match is not None:
-            matched.append((frame, match.group(1)))
+        chat_id = _chat_id_from_chat_page_url(frame.url)
+        if chat_id is not None:
+            matched.append((frame, chat_id))
     return matched
 
 
@@ -1433,6 +1443,126 @@ def await_chat_reply(chat: Frame, page: Page | Frame, token: str) -> None:
     )
     logger.info("Agent reply echoed the token; chat works end-to-end")
     _debug_screenshot(page, "reply-received")
+
+
+# Claude Code's alias for its current Haiku, the cheapest model the template's chat picker offers.
+CHEAPEST_CHAT_MODEL_ID: Final[str] = "haiku"
+# What a reply from any Haiku names as its model, e.g. ``claude-haiku-5-5``.
+CHEAPEST_CHAT_MODEL_REPLY_PREFIX: Final[str] = "claude-haiku"
+# Haiku names no default effort, so a pick of it must carry one: the picker starts it on this.
+_CHEAPEST_CHAT_MODEL_EFFORT: Final[str] = "low"
+_CHAT_MODEL_CHOICE_AXES: Final[tuple[str, ...]] = ("model", "effort")
+_CHAT_API_POLL_INTERVAL_MS: Final[int] = 1000
+_CHAT_API_ANSWER_EXCERPT_LENGTH: Final[int] = 300
+# One same-origin request from a page to ``origin + path``; a null origin means the base path the page's meta tag
+# names. A request that gets no answer reads as status 0.
+_PAGE_FETCH_SCRIPT: Final[str] = """
+async ({origin, path, method, body}) => {
+    const meta = document.querySelector('meta[name="system-interface-base-path"]');
+    const base = origin ?? ((meta && meta.getAttribute('content')) || '').replace(/\\/+$/, '');
+    try {
+        const response = await fetch(base + path, {
+            method,
+            headers: body === null ? {} : {'Content-Type': 'application/json'},
+            body: body === null ? undefined : JSON.stringify(body),
+        });
+        return {status: response.status, body: await response.text()};
+    } catch (error) {
+        return {status: 0, body: String(error)};
+    }
+}
+"""
+
+
+class PageFetchAnswer(FrozenModel):
+    """What one same-origin request from a page was answered."""
+
+    status: int = Field(description="The HTTP status, or 0 when the request got no answer")
+    body: str = Field(description="The response body, as text")
+
+    def json_body(self) -> Any:
+        return json.loads(self.body) if self.body else None
+
+
+def fetch_from_page(
+    target: Page | Frame, origin: str | None, method: HTTPMethod, path: str, body: Mapping[str, object] | None
+) -> PageFetchAnswer:
+    """Request ``path`` from a page the app already has open, so that page's session authenticates it.
+
+    ``origin`` prefixes the path; None takes the base path the page declares.
+    """
+    return PageFetchAnswer.model_validate(
+        target.evaluate(_PAGE_FETCH_SCRIPT, {"origin": origin, "path": path, "method": method.value, "body": body})
+    )
+
+
+def request_chat_api(chat: Frame, method: HTTPMethod, path: str, body: Mapping[str, object] | None) -> PageFetchAnswer:
+    """Call one of the chat app's routes from the chat's own page, under the base path it declares."""
+    return fetch_from_page(chat, None, method, path, body)
+
+
+def _chat_id_of_chat_page(chat: Frame) -> str:
+    chat_id = _chat_id_from_chat_page_url(chat.url)
+    if chat_id is None:
+        raise WorkspaceFlowError(f"Not a chat page: {chat.url!r}")
+    return chat_id
+
+
+def switch_chat_to_cheapest_model(chat: Frame, *, agent_up_timeout_seconds: float, label: str) -> None:
+    """Pick the cheapest model for the chat through the endpoint its model picker posts to, once its agent is up."""
+    chat_id = _chat_id_of_chat_page(chat)
+    options_path = f"/api/chats/{chat_id}/model-options"
+    deadline = time.monotonic() + agent_up_timeout_seconds
+    options = request_chat_api(chat, HTTPMethod.GET, options_path, None)
+    while options.status != HTTPStatus.OK and time.monotonic() < deadline:
+        chat.wait_for_timeout(_CHAT_API_POLL_INTERVAL_MS)
+        options = request_chat_api(chat, HTTPMethod.GET, options_path, None)
+    if options.status != HTTPStatus.OK:
+        raise WorkspaceFlowError(
+            f"[{label}] chat {chat_id} had no agent to pick a model for within {agent_up_timeout_seconds:.0f}s; "
+            f"its model options last answered {options.status}: {options.body[:_CHAT_API_ANSWER_EXCERPT_LENGTH]!r}"
+        )
+    pick = {
+        "model_id": CHEAPEST_CHAT_MODEL_ID,
+        "effort": _CHEAPEST_CHAT_MODEL_EFFORT,
+        "fast": False,
+        "axes": list(_CHAT_MODEL_CHOICE_AXES),
+    }
+    answer = request_chat_api(chat, HTTPMethod.POST, f"/api/chats/{chat_id}/model", pick)
+    if answer.status != HTTPStatus.OK:
+        raise WorkspaceFlowError(
+            f"[{label}] chat {chat_id} refused the model pick {pick} with {answer.status}: "
+            f"{answer.body[:_CHAT_API_ANSWER_EXCERPT_LENGTH]!r}"
+        )
+    logger.info("[{}] switched chat {} to {}", label, chat_id, CHEAPEST_CHAT_MODEL_ID)
+
+
+@pure
+def model_of_assistant_reply_containing(events: Sequence[Mapping[str, object]], token: str) -> str | None:
+    """The model named by the first assistant message whose text contains ``token``, or None when none does or that
+    message names no model."""
+    for event in events:
+        text = event.get("text")
+        if event.get("type") == "assistant_message" and isinstance(text, str) and token in text:
+            model = event.get("model")
+            return model if isinstance(model, str) else None
+    return None
+
+
+def read_model_of_chat_reply(chat: Frame, token: str) -> str:
+    """The model that wrote the chat's reply containing ``token``, as the chat's transcript records it."""
+    chat_id = _chat_id_of_chat_page(chat)
+    answer = request_chat_api(chat, HTTPMethod.GET, f"/api/chats/{chat_id}/events", None)
+    if answer.status != HTTPStatus.OK:
+        raise WorkspaceFlowError(
+            f"Chat {chat_id}'s events answered {answer.status}: {answer.body[:_CHAT_API_ANSWER_EXCERPT_LENGTH]!r}"
+        )
+    model = model_of_assistant_reply_containing(answer.json_body()["events"], token)
+    if model is None:
+        raise WorkspaceFlowError(
+            f"Chat {chat_id}'s transcript holds no assistant message naming a model and {token!r}"
+        )
+    return model
 
 
 def launcher_opener_selector(workspace: Page | Frame) -> str:

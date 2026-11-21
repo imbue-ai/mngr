@@ -64,6 +64,7 @@ from imbue.minds.desktop_client.backup_provisioning import reinject_canonical_en
 from imbue.minds.desktop_client.backup_update import run_backup_restore_sequence
 from imbue.minds.desktop_client.backup_verification import MINIMUM_BACKUP_SERVICE_TAG
 from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
+from imbue.minds.desktop_client.e2e_workspace_runner import CHEAPEST_CHAT_MODEL_REPLY_PREFIX
 from imbue.minds.desktop_client.e2e_workspace_runner import _E2E_DATA_HOME_DIR_NAME
 from imbue.minds.desktop_client.e2e_workspace_runner import _REPO_ROOT
 from imbue.minds.desktop_client.e2e_workspace_runner import await_chat_reply
@@ -75,11 +76,13 @@ from imbue.minds.desktop_client.e2e_workspace_runner import ensure_minds_env_def
 from imbue.minds.desktop_client.e2e_workspace_runner import enter_workspace_from_home_page
 from imbue.minds.desktop_client.e2e_workspace_runner import find_free_port
 from imbue.minds.desktop_client.e2e_workspace_runner import open_account_home_page
+from imbue.minds.desktop_client.e2e_workspace_runner import read_model_of_chat_reply
 from imbue.minds.desktop_client.e2e_workspace_runner import resolve_default_workspace_template_path
 from imbue.minds.desktop_client.e2e_workspace_runner import send_chat_message
 from imbue.minds.desktop_client.e2e_workspace_runner import sign_in_via_provider_chooser
 from imbue.minds.desktop_client.e2e_workspace_runner import start_workspace_from_home_page
 from imbue.minds.desktop_client.e2e_workspace_runner import stop_workspace_from_home_page
+from imbue.minds.desktop_client.e2e_workspace_runner import switch_chat_to_cheapest_model
 from imbue.minds.desktop_client.e2e_workspace_runner import wait_for_chat_input
 from imbue.minds.desktop_client.e2e_workspace_runner import workspace_coordinate_from_subdomain
 from imbue.minds.desktop_client.restic_cli import ResticNotInstalledError
@@ -617,24 +620,25 @@ def _remove_containers_named_with_prefix(prefix: str) -> None:
         _run_docker(["rm", "--force", *container_ids], timeout=120)
 
 
+# How long the agent the sign-in launches can take to come up.
+_CHAT_AGENT_UP_TIMEOUT_SECONDS: Final[float] = 240.0
+
+
 def _sign_in_and_chat(page: Page | Frame, api_key: str, token: str) -> None:
-    """Sign in from the welcome chat the creation page opened, then message it; its composer waits for a provider."""
+    """Sign in from the welcome chat the creation page opened, move it to the cheapest model, then message it."""
     chat = wait_for_chat_input(page)
     sign_in_via_provider_chooser(page, chat, api_key=SecretStr(api_key), label="sign-in")
+    switch_chat_to_cheapest_model(chat, agent_up_timeout_seconds=_CHAT_AGENT_UP_TIMEOUT_SECONDS, label="sign-in")
     send_chat_message(chat, page, token)
     await_chat_reply(chat, page, token)
+    reply_model = read_model_of_chat_reply(chat, token)
+    assert reply_model.startswith(CHEAPEST_CHAT_MODEL_REPLY_PREFIX), f"The reply came from {reply_model}"
 
 
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.docker
 @pytest.mark.rsync
 @pytest.mark.timeout(900)
-# Drives a real Electron app end-to-end (launch, CDP attach, create flow, chooser
-# sign-in, chat), and the 240s wait for the agent's reply has intermittently timed
-# out under CI load; the marker routes the test into the retrying offload group. A
-# genuine break still surfaces by failing every retry, as MIND-285's New Tab
-# regression did.
-@pytest.mark.flaky
 def test_create_workspace_and_sign_in_via_modal_then_chat_via_electron(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -647,9 +651,10 @@ def test_create_workspace_and_sign_in_via_modal_then_chat_via_electron(
     the creation page seeds with the onboarding conversation, whose composer is
     disabled while the provider chooser opens in the chat's own frame; the test
     fills the API-key path in the real chooser UI (which mints a provider account
-    holding the key), sends the chat's first message, which launches its agent,
-    then asserts the agent answers it (echoes a unique token) -- end-to-end
-    through the real Electron app and the desktop client proxy.
+    holding the key and launches the chat's agent on it), picks the cheapest model
+    for the chat through the endpoint its model picker posts to, sends the chat a
+    message, then asserts that model answers it (echoes a unique token) --
+    end-to-end through the real Electron app and the desktop client proxy.
 
     Runs in the snapshot offload sandbox, reusing the warm Electron toolchain
     baked into the image (the ``xvfb_display`` fixture supplies the display the

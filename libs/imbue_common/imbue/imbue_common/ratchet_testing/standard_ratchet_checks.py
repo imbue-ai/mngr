@@ -69,6 +69,7 @@ from imbue.imbue_common.ratchet_testing.core import preload_text_scan
 from imbue.imbue_common.ratchet_testing.ratchets import TEST_FILE_PATTERNS
 from imbue.imbue_common.ratchet_testing.ratchets import _is_test_file
 from imbue.imbue_common.ratchet_testing.ratchets import find_assert_isinstance_usages
+from imbue.imbue_common.ratchet_testing.ratchets import find_async_await_usages
 from imbue.imbue_common.ratchet_testing.ratchets import find_cast_usages
 from imbue.imbue_common.ratchet_testing.ratchets import find_code_in_init_files
 from imbue.imbue_common.ratchet_testing.ratchets import find_if_elif_without_else
@@ -205,7 +206,8 @@ def check_async_await(
     max_count: int,
     excluded_patterns: tuple[str, ...] = (),
 ) -> None:
-    assert_ratchet(PREVENT_ASYNC_AWAIT, source_dir, max_count, excluded_patterns)
+    chunks = find_async_await_usages(source_dir, _SELF_EXCLUSION + excluded_patterns)
+    assert len(chunks) <= max_count, PREVENT_ASYNC_AWAIT.format_failure(chunks)
 
 
 def check_pandas_import(source_dir: Path, max_count: int) -> None:
@@ -489,6 +491,7 @@ _PYTHON_AST_CHECK_TEST_NAMES: Final[frozenset[str]] = frozenset(
         check_cast_usage,
         check_per_file_host_upload,
         check_assert_isinstance,
+        check_async_await,
     )
 )
 

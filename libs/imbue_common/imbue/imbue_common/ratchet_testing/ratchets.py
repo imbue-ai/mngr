@@ -431,6 +431,34 @@ def find_cast_usages(
     return tuple(sorted_chunks)
 
 
+def find_async_await_usages(
+    source_dir: Path,
+    excluded_path_patterns: tuple[str, ...] = (),
+) -> tuple[RatchetMatchChunk, ...]:
+    """Find the lines of Python files that hold an ``async def`` or an ``await``, one chunk per line.
+
+    Read from the syntax tree, so the keyword in prose, or in another language's code held in a
+    string, is not a usage.
+    """
+    file_paths = _get_non_ignored_text_files_with_extension(source_dir, FileExtension(".py"), excluded_path_patterns)
+    chunks: list[RatchetMatchChunk] = []
+    for file_path in file_paths:
+        async_nodes: list[ast.AsyncFunctionDef | ast.Await] = [
+            *get_ast_nodes_of_type(file_path, ast.AsyncFunctionDef),
+            *get_ast_nodes_of_type(file_path, ast.Await),
+        ]
+        for line in sorted({node.lineno for node in async_nodes}):
+            chunks.append(
+                RatchetMatchChunk(
+                    file_path=file_path,
+                    matched_content=f"async def / await at line {line}",
+                    start_line=LineNumber(line),
+                    end_line=LineNumber(line),
+                )
+            )
+    return tuple(sorted(chunks, key=lambda chunk: (str(chunk.file_path), chunk.start_line)))
+
+
 def find_assert_isinstance_usages(
     source_dir: Path,
     excluded_path_patterns: tuple[str, ...] = (),

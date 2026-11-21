@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from imbue.imbue_common.ratchet_testing.ratchets import find_async_await_usages
 from imbue.imbue_common.ratchet_testing.ratchets import find_if_elif_without_else
 from imbue.imbue_common.ratchet_testing.ratchets import parse_type_check_output
 
@@ -87,6 +88,41 @@ def test_finds_else_block_holding_only_an_if(git_repo: Path) -> None:
     )
 
     assert len(find_if_elif_without_else(git_repo)) == 1
+
+
+def test_async_await_usages_are_the_lines_that_define_an_async_function_or_await(git_repo: Path) -> None:
+    _commit_module(
+        git_repo,
+        """
+        async def f() -> None:
+            await g()
+            await(h())
+            value = await a(await b())
+        """,
+    )
+
+    assert [chunk.start_line for chunk in find_async_await_usages(git_repo)] == [1, 2, 3, 4]
+
+
+def test_async_await_usages_skip_the_keyword_in_prose_and_in_another_language_held_in_a_string(git_repo: Path) -> None:
+    _commit_module(
+        git_repo,
+        '''
+        def recover() -> None:
+            """Restart the host, then await recovery."""
+            # Send the message and await the reply.
+
+
+        FETCH_SCRIPT = """
+        async ({path}) => {
+            const response = await fetch(path);
+            return await response.text();
+        }
+        """
+        ''',
+    )
+
+    assert find_async_await_usages(git_repo) == ()
 
 
 # The diagnostics ty reported on CI run 34881780066 (commit 0c13a13c, branch

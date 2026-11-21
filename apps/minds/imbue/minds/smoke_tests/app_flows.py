@@ -15,11 +15,11 @@ routes behind the chooser's "Sign in with Imbue" lane; driving that lane's own
 controls is a follow-up recorded in the spec.
 """
 
-import json
 import re
 import threading
 import time
 from collections.abc import Mapping
+from http import HTTPMethod
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -30,15 +30,16 @@ from playwright.sync_api import Browser
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Frame
 from playwright.sync_api import Page
-from pydantic import Field
 
-from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.e2e_workspace_runner import DESKTOP_BACKDROP_SELECTOR
+from imbue.minds.desktop_client.e2e_workspace_runner import PageFetchAnswer
 from imbue.minds.desktop_client.e2e_workspace_runner import USER_TURN_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import chat_frame
+from imbue.minds.desktop_client.e2e_workspace_runner import fetch_from_page
 from imbue.minds.desktop_client.e2e_workspace_runner import find_chat_frame
 from imbue.minds.desktop_client.e2e_workspace_runner import open_account_home_page
+from imbue.minds.desktop_client.e2e_workspace_runner import request_chat_api
 from imbue.minds.desktop_client.e2e_workspace_runner import send_to_main_chat_from_launcher
 from imbue.minds.desktop_client.e2e_workspace_runner import stop_workspace_from_home_page
 from imbue.minds.desktop_client.e2e_workspace_runner import wait_for_workspace_ready_or_failure
@@ -154,60 +155,30 @@ _ACCOUNT_LABEL_SHOWN_JS: Final[str] = f"""(email) => {{
     const label = document.querySelector('{_CREATE_ACCOUNT_LABEL}');
     return label !== null && label.textContent.trim() === email;
 }}"""
-_FETCH_JS: Final[str] = """([origin, method, path, body]) => fetch(origin + path, {
-        method,
-        credentials: 'same-origin',
-        headers: body === null ? {} : {'Content-Type': 'application/json'},
-        body: body === null ? undefined : JSON.stringify(body),
-    }).then((response) => response.text().then((text) => ({status: response.status, body: text})))"""
 _SCREENSHOT_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"[^A-Za-z0-9._-]+")
-# What a workspace app's own frontend reads to address its backend (``base-path.ts``
-# in the template's workspace-ui): the prefix it is served under, empty at a domain root.
-_APP_BASE_PATH_JS: Final[str] = (
-    """() => (document.querySelector('meta[name="system-interface-base-path"]')"""
-    r"""?.getAttribute('content') ?? '').replace(/\/+$/, '')"""
-)
 
 
-class BackendAnswer(FrozenModel):
-    """What one of the app's own routes answered a same-origin fetch."""
-
-    status: int = Field(description="The HTTP status.")
-    body: str = Field(description="The response text, JSON for every route the journey reads.")
-
-    def json_body(self) -> Any:
-        return json.loads(self.body) if self.body else None
-
-
-def _fetch_from_page(
-    target: Page | Frame, origin: str, method: str, path: str, body: Mapping[str, Any] | None
-) -> BackendAnswer:
-    """Call ``origin + path`` from a page the app already has open, so that page's session authenticates it."""
-    try:
-        answer = target.evaluate(_FETCH_JS, [origin, method, path, body])
-    except PlaywrightError as exc:
-        raise SmokeAppError(f"The page at {target.url} could not fetch {method} {path}: {exc}") from exc
-    return BackendAnswer.model_validate(answer)
-
-
-def fetch_from_app(session: StudioAppSession, method: str, path: str, body: Mapping[str, Any] | None) -> BackendAnswer:
+def fetch_from_app(
+    session: StudioAppSession, method: HTTPMethod, path: str, body: Mapping[str, Any] | None
+) -> PageFetchAnswer:
     """Call one of the app's own routes from its chrome page, so its cookie session authenticates the call."""
-    return _fetch_from_page(session.page, str(session.backend_origin), method, path, body)
+    page = session.page
+    try:
+        return fetch_from_page(page, str(session.backend_origin), method, path, body)
+    except PlaywrightError as exc:
+        raise SmokeAppError(f"The page at {page.url} could not fetch {method.value} {path}: {exc}") from exc
 
 
-def _fetch_in_chat(chat: Frame, method: str, path: str, body: Mapping[str, Any] | None) -> BackendAnswer:
-    """Call one of the workspace chat app's routes from the chat's own page, under the base path it declares.
-
-    An app served behind a path prefix carries it in the meta tag its own
-    frontend reads to build every URL; one served at a domain root declares
-    none, and the path is used as-is.
-    """
-    base_path = str(chat.evaluate(_APP_BASE_PATH_JS))
-    return _fetch_from_page(chat, base_path, method, path, body)
+def _fetch_in_chat(chat: Frame, method: HTTPMethod, path: str, body: Mapping[str, Any] | None) -> PageFetchAnswer:
+    """Call one of the workspace chat app's routes from the chat's own page, under the base path it declares."""
+    try:
+        return request_chat_api(chat, method, path, body)
+    except PlaywrightError as exc:
+        raise SmokeAppError(f"The chat page at {chat.url} could not fetch {method.value} {path}: {exc}") from exc
 
 
 def fetch_json_from_app(session: StudioAppSession, path: str) -> Any:
-    answer = fetch_from_app(session, "GET", path, None)
+    answer = fetch_from_app(session, HTTPMethod.GET, path, None)
     if answer.status != 200:
         raise SmokeAppError(f"GET {path} answered {answer.status}: {answer.body[:300]!r}")
     return answer.json_body()
@@ -392,7 +363,7 @@ def open_welcome_chat(workspace_frame: Frame) -> Frame:
 
 def mint_workspace_llm_credentials(session: StudioAppSession, agent_id: str) -> str:
     """Mint the account's LiteLLM key for the workspace through the desktop, as the AI-keys modal does."""
-    answer = fetch_from_app(session, "POST", _MINT_AI_KEY_PATH, {"workspace": agent_id})
+    answer = fetch_from_app(session, HTTPMethod.POST, _MINT_AI_KEY_PATH, {"workspace": agent_id})
     if answer.status != 200:
         raise SmokeAppError(f"POST {_MINT_AI_KEY_PATH} answered {answer.status}: {answer.body[:300]!r}")
     body = answer.json_body()
@@ -414,7 +385,7 @@ def adopt_imbue_credentials(chat: Frame, credential_blob: str) -> str:
     chooser's own lane, whose paste textarea takes this blob, is not driven
     yet; that is a follow-up recorded in the spec.
     """
-    answer = _fetch_in_chat(chat, "POST", _SUBMIT_CREDENTIALS_PATH, {"credentials": credential_blob})
+    answer = _fetch_in_chat(chat, HTTPMethod.POST, _SUBMIT_CREDENTIALS_PATH, {"credentials": credential_blob})
     if answer.status != 200:
         raise SmokeAppError(f"POST {_SUBMIT_CREDENTIALS_PATH} answered {answer.status}: {answer.body[:300]!r}")
     body = answer.json_body()
@@ -455,7 +426,7 @@ def _main_chat_id(chat: Frame, timeout_seconds: float) -> str:
     deadline = time.monotonic() + timeout_seconds
     last_outcome = "not asked"
     while time.monotonic() < deadline:
-        answer = _fetch_in_chat(chat, "GET", _CHATS_PATH, None)
+        answer = _fetch_in_chat(chat, HTTPMethod.GET, _CHATS_PATH, None)
         body = answer.json_body() if answer.status == 200 else None
         main_chat_id = body.get("main_chat_id") if isinstance(body, dict) else None
         if isinstance(main_chat_id, str) and main_chat_id:
@@ -606,7 +577,7 @@ def wait_for_destroy_done(session: StudioAppSession, agent_id: str, timeout_seco
     message, where it says how far the destroy got.
     """
     deadline = time.monotonic() + timeout_seconds
-    last_answer: BackendAnswer | None = None
+    last_answer: PageFetchAnswer | None = None
     while time.monotonic() < deadline:
         # The chrome page routes away from the settings tab once the destroy is
         # confirmed, which can tear down the document a fetch was evaluated in.
@@ -614,7 +585,9 @@ def wait_for_destroy_done(session: StudioAppSession, agent_id: str, timeout_seco
             if is_workspace_gone(list_workspaces(session), agent_id):
                 logger.info("The destroy of workspace {} is done", agent_id)
                 return
-            last_answer = fetch_from_app(session, "GET", _DESTROY_OPERATION_PATH.format(agent_id=agent_id), None)
+            last_answer = fetch_from_app(
+                session, HTTPMethod.GET, _DESTROY_OPERATION_PATH.format(agent_id=agent_id), None
+            )
         except SmokeAppError as exc:
             logger.debug("The destroy poll could not run while the page navigated: {}", exc)
         threading.Event().wait(timeout=_POLL_SECONDS)
