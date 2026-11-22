@@ -72,6 +72,7 @@ from imbue.mngr_latchkey.remote._machine import read_filed_permission_requests
 # Re-exported (the redundant alias marks them as such): the read side of the
 # machine store that outside consumers -- notably the Imbue Studio desktop app -- are
 # meant to reach through this module rather than through the private mirror.
+from imbue.mngr_latchkey.remote._mirror import is_machine_recorded_as_newer as is_machine_recorded_as_newer
 from imbue.mngr_latchkey.remote._mirror import latchkey_for_machine as latchkey_for_machine
 from imbue.mngr_latchkey.remote._mirror import machine_store_dir
 from imbue.mngr_latchkey.remote._mirror import materialize_machine_store
@@ -655,8 +656,16 @@ def has_machine_of_its_own(data_dir: Path, host_id: HostId) -> bool:
     -- and for a remote host no provisioning pass from this computer has reached
     yet, which is handed both halves when one first seeds it.
 
+    ``True`` as well for a host whose machine is recorded as running software
+    of a newer generation than this build's
+    (:func:`is_machine_recorded_as_newer`), whether or not a key is recorded
+    for it: its credentials and policy live on that machine, which this build
+    cannot manage, and are never this computer's.
+
     Raises:
         LatchkeyStoreError: when the machine store cannot be read, which leaves
             it unknown whether there is anything to carry.
     """
-    return stored_machine_encryption_key(data_dir, host_id) is not None
+    return (
+        is_machine_recorded_as_newer(data_dir, host_id) or stored_machine_encryption_key(data_dir, host_id) is not None
+    )

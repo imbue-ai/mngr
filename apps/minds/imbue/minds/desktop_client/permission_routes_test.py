@@ -9,7 +9,9 @@ import json
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
+import pytest
 from flask import Request
 from flask import Response
 from flask.testing import FlaskClient
@@ -36,12 +38,14 @@ from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPerm
 from imbue.minds.desktop_client.latchkey.handlers.predefined import ManualCredentialSubmission
 from imbue.minds.desktop_client.latchkey.handlers.requested_proxy import DesktopEgressDecision
 from imbue.minds.desktop_client.latchkey.handlers.requested_proxy import NO_DESKTOP_EGRESS_CHANGE
+from imbue.minds.desktop_client.latchkey.machine_access import MACHINE_NEWER_FAILURE
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.latchkey.response_events import create_request_response_event
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.minds.desktop_client.latchkey.testing import leave_copies_on_this_computer_as_they_are
 from imbue.minds.desktop_client.latchkey.testing import leave_grant_on_this_computer
+from imbue.minds.desktop_client.mock_machine_operator_test import build_machine_operator_over
 from imbue.minds.desktop_client.mock_machine_operator_test import build_recording_machine_operator
 from imbue.minds.desktop_client.request_handler import RequestDetailPayload
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
@@ -60,6 +64,7 @@ from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
 from imbue.mngr_latchkey.core import LatchkeyServiceInfo
 from imbue.mngr_latchkey.core import ServiceAccountCredential
 from imbue.mngr_latchkey.credential_commands import CredentialCommandParameter
+from imbue.mngr_latchkey.remote._mirror import record_machine_as_newer
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.testing import FakeLatchkey
@@ -436,9 +441,117 @@ def test_post_permission_grant_reports_a_machine_that_cannot_be_read_as_502_and_
     )
 
     assert response.status_code == 502
-    assert "it is asleep" in response.get_json()["error"]
+    body = response.get_json()
+    # Our sentence on the visible line, the machine's own reason behind See details.
+    assert "couldn't reach this workspace's machine" in body["error"]
+    assert "it is asleep" in body["detail"]
+    assert "remedy" not in body
     assert handler.grant_calls == []
     assert _get_app_request_inbox(client).list_pending() != ()
+
+
+def _client_over_a_machine_recorded_as_newer(
+    tmp_path: Path, handler: _RecordingHandler, inbox: StaticPendingRequests, agent_id: AgentId
+) -> FlaskClient:
+    """A client whose one workspace runs on a machine a newer Imbue Studio set up, read by a real operator."""
+    host_id = HostId()
+    latchkey = _make_stub_latchkey(tmp_path)
+    record_machine_as_newer(latchkey.plugin_data_dir, host_id)
+    operator = build_machine_operator_over(
+        latchkey,
+        _HostKnownStaticResolver(url_by_agent_and_service={}, fixed_host_id=host_id, known_agent_ids=(agent_id,)),
+    )
+    return _build_authenticated_client(
+        tmp_path, handler, inbox, agent_id=agent_id, host_id=host_id, machine_operator=operator
+    )
+
+
+@pytest.mark.witnesses("remote-compatibility.newer-machine-request-stays-pending")
+@pytest.mark.parametrize("action", ["grant", "deny"])
+def test_post_permission_verdict_on_a_machine_recorded_as_newer_names_the_update_and_keeps_the_request_pending(
+    tmp_path: Path, action: str
+) -> None:
+    """This build leaves such a machine alone, so neither verdict is applied: an updated computer answers it.
+
+    A denial recorded here could not be carried to the machine, which would
+    go on showing the request as open to the user's other computers.
+    """
+    agent_id = AgentId()
+    request = create_predefined_permission_request(agent_id=str(agent_id), scope="slack-api", rationale="reason")
+    inbox = StaticPendingRequests(pending=(request,))
+    handler = _make_recording_handler(tmp_path)
+    client = _client_over_a_machine_recorded_as_newer(tmp_path, handler, inbox, agent_id)
+
+    response = client.post(
+        f"/requests/{request.request_id}/{action}",
+        data={"permissions": ["slack-read-all"], "account": _TEST_ACCOUNT},
+    )
+
+    assert response.status_code == 502
+    body = response.get_json()
+    assert body["error"] == MACHINE_NEWER_FAILURE.message
+    assert body["remedy"] == "UPDATE_APP"
+    assert handler.grant_calls == []
+    assert handler.deny_calls == []
+    assert _get_app_request_inbox(client).list_pending() != ()
+
+
+def test_inbox_card_says_why_a_request_of_a_machine_recorded_as_newer_cannot_be_answered_here(
+    tmp_path: Path,
+) -> None:
+    """The dialog learns it with the card, so a Deny, which does not wait for the backend, can say so too."""
+    agent_id = AgentId()
+    request = create_predefined_permission_request(agent_id=str(agent_id), scope="slack-api", rationale="reason")
+    inbox = StaticPendingRequests(pending=(request,))
+    newer_dir = tmp_path / "newer"
+    local_dir = tmp_path / "local"
+    newer_dir.mkdir()
+    local_dir.mkdir()
+    newer_client = _client_over_a_machine_recorded_as_newer(
+        newer_dir, _make_recording_handler(newer_dir), inbox, agent_id
+    )
+    local_client = _build_authenticated_client(
+        local_dir,
+        _make_recording_handler(local_dir),
+        inbox,
+        agent_id=agent_id,
+        machine_operator=build_recording_machine_operator(_make_stub_latchkey(local_dir)),
+    )
+
+    (newer_card,) = newer_client.get("/ui/api/inbox").get_json()["cards"]
+    (local_card,) = local_client.get("/ui/api/inbox").get_json()["cards"]
+
+    assert newer_card["id"] == request.request_id
+    assert newer_card["refusal_notice"]["message"] == MACHINE_NEWER_FAILURE.message
+    assert newer_card["refusal_notice"]["remedy"] == "UPDATE_APP"
+    assert local_card["refusal_notice"] is None
+
+
+def test_inbox_detail_offers_no_account_of_this_computers_for_a_machine_recorded_as_newer(tmp_path: Path) -> None:
+    """The accounts this computer holds are not that machine's, and the machine's cannot be read from here."""
+    agent_id = AgentId()
+    request = create_predefined_permission_request(agent_id=str(agent_id), scope="slack-api", rationale="reason")
+    inbox = StaticPendingRequests(pending=(request,))
+    newer_dir = tmp_path / "newer"
+    local_dir = tmp_path / "local"
+    newer_dir.mkdir()
+    local_dir.mkdir()
+    newer_client = _client_over_a_machine_recorded_as_newer(
+        newer_dir, _make_recording_handler(newer_dir), inbox, agent_id
+    )
+    local_client = _build_authenticated_client(local_dir, _make_recording_handler(local_dir), inbox, agent_id=agent_id)
+
+    newer_detail = newer_client.get(f"/ui/api/inbox/{request.request_id}/detail").get_json()["detail"]
+    local_detail = local_client.get(f"/ui/api/inbox/{request.request_id}/detail").get_json()["detail"]
+
+    def stored_accounts(detail: dict[str, Any]) -> list[str]:
+        return [choice["value"] for choice in detail["account_choices"] if choice["is_stored"]]
+
+    assert stored_accounts(local_detail) == [_TEST_ACCOUNT]
+    assert stored_accounts(newer_detail) == []
+    # How the service connects is the same on every machine, so the dialog still draws.
+    assert newer_detail["is_browser_auth_supported"] == local_detail["is_browser_auth_supported"]
+    assert newer_detail["display_name"] == "Slack"
 
 
 def test_post_permission_deny_does_not_read_the_machine(tmp_path: Path) -> None:

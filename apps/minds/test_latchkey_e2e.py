@@ -22,7 +22,9 @@ credentials at all:
    agent, provisions the VPS-resident gateway on the VPS's docker bridge
    address (the workspace's one fixed gateway URL names it), tunnels the
    desktop gateway onto the VPS for extension forwarding, and seeds the
-   machine's own permissions file.
+   machine's own permissions file. The VPS starts out holding a stand-in for
+   the owner-exec daemon an earlier build installed there, which the pass
+   removes.
 
 Asserted end-to-end, from *inside* the workspace via ``mngr exec``:
 
@@ -36,7 +38,8 @@ b. A native ``/gateway/...`` request is served by that same VPS gateway and
    on the retired port 1990, nothing is tunneled onto the container's own
    loopback port, no VPS->container reverse tunnel is registered, and the
    nftables policy keeping the gateway's port on the docker bridge is loaded
-   on the VPS.
+   on the VPS. That policy drops the owner-exec daemon's port everywhere, and
+   nothing of the stand-in daemon is left.
 c. Pushing the workspace's state to its machine the way the desktop app does
    -- open the workspace's outer host through its provider and hand the
    machine a grant (the ``slack-api`` scope granted in the local canonical
@@ -45,6 +48,11 @@ c. Pushing the workspace's state to its machine the way the desktop app does
    ``/root/.latchkey/permissions.json`` and the credentials at
    ``/root/.latchkey/credentials.json.enc``. Reading the machine back then
    answers with what it now holds.
+d. The installed package recorded its generation on the VPS. With that file
+   rewritten to a newer generation, a provisioning pass and a read of the
+   machine both stop at it: the installed package is the same build
+   afterwards and the gateway is still running. With the file put back, a
+   pass provisions the machine as before and nothing it held is lost.
 
 Gating: this test is deliberately invasive on the machine that runs it (it
 needs passwordless ``sudo`` to run a root sshd, apt-installs ``supervisor``
@@ -53,10 +61,11 @@ and ``nftables`` on the "VPS" = this machine, dpkg-installs the
 ``/usr/lib/mngr-latchkey``, the supervisord drop-ins under
 ``/etc/supervisor/conf.d/``, the curl shims under ``/usr/local/bin``, and the
 nftables policy plus the ``mngr-bridge-services-firewall`` systemd unit that
-drop the gateway's and owner-exec's ports off ``docker0``/loopback and every
-other new connection any container on this machine opens into it over
-``docker0`` -- and npm-installs the latchkey CLI globally as root), and
-writes under ``/root/.latchkey`` + ``/run/mngr-latchkey``), so it is
+drop the gateway's port off ``docker0``/loopback, port 8794 everywhere, and
+every other new connection any container on this machine opens into it over
+``docker0`` -- and npm-installs the latchkey CLI globally as root), installs
+and enables a stand-in ``owner-exec-vm`` systemd unit for the pass to remove,
+and writes under ``/root/.latchkey`` + ``/run/mngr-latchkey``), so it is
 opt-in via ``MNGR_LATCHKEY_E2E_TESTS=1``. CI sets the variable in the
 ``test-minds-release`` job (the ``run_minds_release_tests`` manual dispatch),
 which runs on a throwaway GitHub ubuntu runner. Once opted in, missing
@@ -106,12 +115,22 @@ from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.docker_bridge import BRIDGE_SERVICES_NFT_TABLE
 from imbue.mngr_latchkey.docker_bridge import DOCKER_BRIDGE_INTERFACE_NAME
 from imbue.mngr_latchkey.encryption_key import encryption_key_path
+from imbue.mngr_latchkey.remote._machine import MACHINE_GENERATION
 from imbue.mngr_latchkey.remote._mirror import materialize_machine_store
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
 from imbue.mngr_latchkey.remote.credentials import stored_machine_encryption_key
+from imbue.mngr_latchkey.remote.errors import MachineNewerError
+from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
+from imbue.mngr_latchkey.remote.errors import is_caused_by_newer_machine
+from imbue.mngr_latchkey.remote.package import DEFAULT_REMOTE_PACKAGE_LAYOUT
+from imbue.mngr_latchkey.remote.package import RETIRED_OWNER_EXEC_PORT
+from imbue.mngr_latchkey.remote.package import RETIRED_OWNER_EXEC_UNIT_NAME
+from imbue.mngr_latchkey.remote.package import remote_package_context
 from imbue.mngr_latchkey.remote.provisioning import CONTAINER_TUNNEL_KEY_FILENAME
+from imbue.mngr_latchkey.remote.provisioning import GATEWAY_PROGRAM_NAME
 from imbue.mngr_latchkey.remote.provisioning import LATCHKEY_VERSION
 from imbue.mngr_latchkey.remote.provisioning import TUNNEL_CONF_FILENAME
+from imbue.mngr_latchkey.remote.provisioning import provision_remote_gateway
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import forward_events_log_path
 from imbue.mngr_latchkey.store import load_permissions
@@ -616,6 +635,21 @@ def _machine_of(
             )
 
 
+def _run_provisioning_pass(machine: MachineCredentials) -> None:
+    """Run one provisioning pass against an opened machine from this process, as the forward's discovery does."""
+    provision_remote_gateway(
+        machine.host,
+        host_id=machine.host_id,
+        # Read only for a container that needs the reverse tunnel, which the workspace's does not.
+        container_ssh_user="root",
+        container_ssh_port=22,
+        latchkey=machine.latchkey,
+        desktop_gateway_password=machine.latchkey.derive_gateway_password(),
+        package_layout=DEFAULT_REMOTE_PACKAGE_LAYOUT,
+        migration_context=MIGRATION_CONTEXT,
+    )
+
+
 @contextmanager
 def _environment(env: dict[str, str]) -> Generator[None, None, None]:
     """Run the block with ``env`` as this process's environment, then restore it."""
@@ -712,6 +746,57 @@ def _closed_port_probe_command(port: int) -> str:
     exit status ``mngr exec`` does not reliably propagate.
     """
     return f"curl -sS -m 2 -o /dev/null -w '{_HTTP_STATUS_MARKER}%{{http_code}}' http://127.0.0.1:{port}/"
+
+
+def _owner_exec_stand_in_paths() -> tuple[Path, Path, Path, Path]:
+    """Where an earlier build's owner-exec daemon lives on a machine: its unit, binary, version stamp and config dir."""
+    context = remote_package_context(DEFAULT_REMOTE_PACKAGE_LAYOUT)
+    return (
+        context.retired_owner_exec_unit_path,
+        context.retired_owner_exec_binary_path,
+        context.retired_owner_exec_version_stamp_path,
+        DEFAULT_REMOTE_PACKAGE_LAYOUT.retired_owner_exec_config_dir,
+    )
+
+
+def _install_owner_exec_stand_in_command() -> str:
+    """A script that leaves the VPS as an earlier build left it: the daemon's four paths, with its unit enabled and running.
+
+    The stand-in binary only sleeps: what is under test is that the pass
+    removes whatever occupies those paths, not the daemon itself.
+    """
+    unit_path, binary_path, version_stamp_path, config_dir = _owner_exec_stand_in_paths()
+    unit = "\n".join(
+        (
+            "[Unit]",
+            "Description=stand-in for the owner-exec daemon",
+            "[Service]",
+            f"ExecStart={binary_path}",
+            "[Install]",
+            "WantedBy=multi-user.target",
+            "",
+        )
+    )
+    return " && ".join(
+        (
+            f"mkdir -p {config_dir}",
+            f"printf '%s\\n' 'role = \"vm\"' > {config_dir}/config.toml",
+            f"printf '%s\\n' '#!/bin/sh' 'exec sleep 86427' > {binary_path}",
+            f"chmod 755 {binary_path}",
+            f"printf '%s\\n' v0.0.0-stand-in > {version_stamp_path}",
+            f"printf '%s' {shlex.quote(unit)} > {unit_path}",
+            "systemctl daemon-reload",
+            f"systemctl enable --now {RETIRED_OWNER_EXEC_UNIT_NAME}",
+        )
+    )
+
+
+def _remove_owner_exec_stand_in_command() -> str:
+    unit_path, binary_path, version_stamp_path, config_dir = _owner_exec_stand_in_paths()
+    return (
+        f"systemctl disable --now {RETIRED_OWNER_EXEC_UNIT_NAME} >/dev/null 2>&1; "
+        f"rm -rf {unit_path} {binary_path} {version_stamp_path} {config_dir}; systemctl daemon-reload"
+    )
 
 
 def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: Path) -> None:
@@ -815,6 +900,16 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             # to stdout, so the env value is the first line only.
             assert env_probe.stdout.splitlines()[0].strip() == _WORKSPACE_GATEWAY_URL, (
                 f"unexpected {ENV_LATCHKEY_GATEWAY} value:\n{env_probe.stdout}"
+            )
+
+            # The VPS as an earlier build left it: running the owner-exec daemon.
+            stand_in = _run_on_vps(ssh_config_path, _install_owner_exec_stand_in_command())
+            assert stand_in.returncode == 0, (
+                f"could not put the owner-exec stand-in in place:\nstdout:\n{stand_in.stdout}\nstderr:\n{stand_in.stderr}"
+            )
+            stand_in_state = _run_on_vps(ssh_config_path, f"systemctl is-active {RETIRED_OWNER_EXEC_UNIT_NAME}")
+            assert stand_in_state.stdout.strip() == "active", (
+                f"the owner-exec stand-in is not running before the pass:\n{stand_in_state.stdout}"
             )
 
             # Step 4: run the forward supervisor (gateway + discovery + provisioning + sync)
@@ -960,10 +1055,36 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             assert f'iifname != "{DOCKER_BRIDGE_INTERFACE_NAME}"' in bridge_firewall.stdout, (
                 f"the loaded {BRIDGE_SERVICES_NFT_TABLE} table carries no docker-bridge rule:\n{bridge_firewall.stdout}"
             )
-            gateway_port_in_dport_set = rf"\bdport \{{[^}}]*\b{AGENT_SIDE_LATCHKEY_PORT}\b[^}}]*\}}"
-            assert re.search(gateway_port_in_dport_set, bridge_firewall.stdout), (
-                f"the loaded {BRIDGE_SERVICES_NFT_TABLE} table does not cover the gateway port:\n{bridge_firewall.stdout}"
+            # nft lists a set of one port either as the set or as the bare port.
+            accepted_from_the_bridge = [
+                line.strip()
+                for line in bridge_firewall.stdout.splitlines()
+                if f'iifname "{DOCKER_BRIDGE_INTERFACE_NAME}"' in line and line.strip().endswith("accept")
+            ]
+            assert len(accepted_from_the_bridge) == 1 and re.search(
+                rf"tcp dport (?:\{{ )?{AGENT_SIDE_LATCHKEY_PORT}(?: \}})? accept$", accepted_from_the_bridge[0]
+            ), (
+                f"the loaded {BRIDGE_SERVICES_NFT_TABLE} table does not accept the gateway port, and only it, from "
+                f"the docker bridge:\n{bridge_firewall.stdout}"
             )
+            assert re.search(
+                rf"^\s*tcp dport (?:\{{ )?{RETIRED_OWNER_EXEC_PORT}(?: \}})? counter .*\bdrop$",
+                bridge_firewall.stdout,
+                re.MULTILINE,
+            ), (
+                f"the loaded {BRIDGE_SERVICES_NFT_TABLE} table does not drop the owner-exec daemon's port on every "
+                f"interface:\n{bridge_firewall.stdout}"
+            )
+            # The pass removed the daemon an earlier build left on the machine.
+            for stand_in_path in _owner_exec_stand_in_paths():
+                assert _run_on_vps(ssh_config_path, f"test -e {stand_in_path}").returncode != 0, (
+                    f"the provisioning pass left {stand_in_path} of the owner-exec daemon on the VPS"
+                )
+            for unit_query in ("is-enabled", "is-active"):
+                assert (
+                    _run_on_vps(ssh_config_path, f"systemctl {unit_query} {RETIRED_OWNER_EXEC_UNIT_NAME}").returncode
+                    != 0
+                ), f"the owner-exec unit still answers systemctl {unit_query} after the provisioning pass"
             bridge_new_connection_drop = rf'iifname "{DOCKER_BRIDGE_INTERFACE_NAME}" ct state new counter .*\bdrop\b'
             assert re.search(bridge_new_connection_drop, bridge_firewall.stdout), (
                 f"the loaded {BRIDGE_SERVICES_NFT_TABLE} table does not drop the container's other new connections "
@@ -1012,6 +1133,48 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             assert fetched.permissions_json is not None and _GRANTED_SCOPE in fetched.permissions_json, (
                 f"reading the machine back did not report the pushed policy: {fetched.permissions_json!r}"
             )
+
+            # (d) a machine whose software is of a newer generation is left alone
+            generation_file = DEFAULT_REMOTE_PACKAGE_LAYOUT.generation_file
+            installed_version_query = f"dpkg-query -W -f '${{Version}}' {_VPS_PACKAGE_NAME}"
+            assert _run_on_vps(ssh_config_path, f"cat {generation_file}").stdout == f"{MACHINE_GENERATION}\n", (
+                f"the installed package did not record generation {MACHINE_GENERATION} at {generation_file}"
+            )
+            installed_version = _run_on_vps(ssh_config_path, installed_version_query).stdout
+            assert installed_version, f"could not read the installed {_VPS_PACKAGE_NAME} version"
+            newer_generation = MACHINE_GENERATION + 1
+            assert (
+                _run_on_vps(ssh_config_path, f"printf '%s\\n' {newer_generation} > {generation_file}").returncode == 0
+            )
+            with _machine_of(env, latchkey_directory, latchkey_binary, host_id) as machine:
+                with pytest.raises(MachineNewerError):
+                    _run_provisioning_pass(machine)
+                with pytest.raises(RemoteGatewayError) as read_failure:
+                    machine.refresh(MIGRATION_CONTEXT)
+            assert is_caused_by_newer_machine(read_failure.value), (
+                f"reading a machine of a newer generation failed for another reason: {read_failure.value}"
+            )
+            assert _run_on_vps(ssh_config_path, installed_version_query).stdout == installed_version, (
+                "a pass replaced the package on a machine of a newer generation"
+            )
+            assert _run_on_vps(ssh_config_path, f"cat {generation_file}").stdout == f"{newer_generation}\n"
+            gateway_status = _run_on_vps(ssh_config_path, f"supervisorctl status {GATEWAY_PROGRAM_NAME}")
+            assert "RUNNING" in gateway_status.stdout, (
+                f"the gateway of a machine of a newer generation is not running:\n{gateway_status.stdout}"
+            )
+
+            # Taken back to this build's generation, the machine is provisioned as before.
+            assert (
+                _run_on_vps(ssh_config_path, f"printf '%s\\n' {MACHINE_GENERATION} > {generation_file}").returncode
+                == 0
+            )
+            with _machine_of(env, latchkey_directory, latchkey_binary, host_id) as machine:
+                _run_provisioning_pass(machine)
+                refetched = machine.refresh(MIGRATION_CONTEXT)
+            assert _run_on_vps(ssh_config_path, f"cat {generation_file}").stdout == f"{MACHINE_GENERATION}\n"
+            assert refetched.permissions_json is not None and _GRANTED_SCOPE in refetched.permissions_json, (
+                f"the pass after the machine was taken back lost the granted policy: {refetched.permissions_json!r}"
+            )
         finally:
             # Best-effort teardown, most-dependent first: workspace, forward
             # supervisor (SIGTERM -> coupled gateway shutdown), VPS-side state,
@@ -1033,6 +1196,10 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
                 ssh_config_path,
                 f"dpkg --purge {_VPS_PACKAGE_NAME} >/dev/null 2>&1; rm -rf {_VPS_LATCHKEY_DIR} /run/mngr-latchkey",
             )
+            # Only there still when the test failed before the pass removed it.
+            _run_on_vps(ssh_config_path, _remove_owner_exec_stand_in_command())
+            # No package removes the generation file, so the test does.
+            _run_on_vps(ssh_config_path, f"rm -rf {DEFAULT_REMOTE_PACKAGE_LAYOUT.generation_file.parent}")
             _cleanup_test_containers()
 
 

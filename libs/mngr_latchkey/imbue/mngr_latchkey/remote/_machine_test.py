@@ -1,4 +1,5 @@
 import base64
+import subprocess
 from pathlib import Path
 from typing import cast
 
@@ -15,7 +16,9 @@ from imbue.mngr_latchkey.devices import DesktopDeviceId
 from imbue.mngr_latchkey.devices import DeviceRecord
 from imbue.mngr_latchkey.discovery import is_transient_remote_wiring_error
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
+from imbue.mngr_latchkey.remote._machine import MACHINE_GENERATION_FILE
 from imbue.mngr_latchkey.remote._machine import OUTCOME_DONE_MARKER
+from imbue.mngr_latchkey.remote._machine import OUTCOME_MACHINE_NEWER_MARKER
 from imbue.mngr_latchkey.remote._machine import RemoteCredentialClear
 from imbue.mngr_latchkey.remote._machine import RemoteCredentialMerge
 from imbue.mngr_latchkey.remote._machine import RemoteStateRequest
@@ -28,14 +31,20 @@ from imbue.mngr_latchkey.remote._machine import _update_document
 from imbue.mngr_latchkey.remote._machine import announce_device
 from imbue.mngr_latchkey.remote._machine import apply_remote_state
 from imbue.mngr_latchkey.remote._machine import forget_permission_request
+from imbue.mngr_latchkey.remote._machine import machine_generation_check
 from imbue.mngr_latchkey.remote._machine import read_filed_permission_requests
 from imbue.mngr_latchkey.remote._machine import read_remote_state
 from imbue.mngr_latchkey.remote._machine_policy import project_policy_for_machine
+from imbue.mngr_latchkey.remote.errors import MachineNewerError
 from imbue.mngr_latchkey.remote.errors import MachineTransferError
 from imbue.mngr_latchkey.remote.errors import ReceivedFromMachine
+from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.remote.errors import SentToMachine
+from imbue.mngr_latchkey.remote.errors import is_caused_by_newer_machine
 from imbue.mngr_latchkey.remote.mock_outer_host_test import AnsweringVps
 from imbue.mngr_latchkey.remote.mock_outer_host_test import UnreachableVps
+from imbue.mngr_latchkey.remote.mock_outer_host_test import as_vps
+from imbue.mngr_latchkey.remote.mock_outer_host_test import fake_vps
 from imbue.mngr_latchkey.store import dump_permissions_text
 
 _HOST_ID = HostId.generate()
@@ -129,10 +138,11 @@ def test_a_request_document_carries_only_what_the_request_sets() -> None:
 
 
 def test_the_command_hands_the_document_to_the_script_as_a_quoted_heredoc() -> None:
-    """One command string: the script on PATH, then the entries as base64 lines the shell never expands."""
+    """One command string: the generation check, the script on PATH, then the entries as base64 lines the shell never expands."""
     command = _remote_command("apply-state", {"permissions_json": b'{"rules": []}', "restart_gateway": b"1"})
 
     assert command.splitlines() == [
+        *machine_generation_check(MACHINE_GENERATION_FILE, None).splitlines(),
         "mngr-latchkey apply-state <<'MNGR_LATCHKEY_DOCUMENT_END'",
         "permissions_json " + base64.b64encode(b'{"rules": []}').decode("ascii"),
         "restart_gateway MQ==",
@@ -442,3 +452,131 @@ def test_a_failed_commands_message_names_its_parts_the_vps_and_the_host(tmp_path
         f"Failed to send DESKTOP_EGRESS_RULES, PERMISSIONS to VPS vps-test for host {host_id}: "
         "the command reported no reason"
     )
+
+
+# The generation check.
+
+_PROCEEDED = "PROCEEDED-7742"
+
+
+def _run_generation_check(generation_file: Path) -> subprocess.CompletedProcess[str]:
+    """Run the check ahead of a command that prints a marker, as every machine command carries it."""
+    script = machine_generation_check(generation_file, None) + f"\nprintf '%s\\n' {_PROCEEDED}\n"
+    return subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30.0)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param(None, id="absent"),
+        pytest.param("", id="empty"),
+        pytest.param("\n", id="blank"),
+        pytest.param("two\n", id="not-a-number"),
+        pytest.param("2 \n", id="number-with-trailing-text"),
+        pytest.param("-2\n", id="negative"),
+        pytest.param("1\n", id="this-generation"),
+        pytest.param("0\n", id="older"),
+    ],
+)
+def test_the_generation_check_lets_a_command_proceed_on_a_machine_of_this_generation(
+    tmp_path: Path, content: str | None
+) -> None:
+    """An absent or damaged generation file reads as generation 1, so only a whole number above this build's stops a command."""
+    generation_file = tmp_path / "generation"
+    if content is not None:
+        generation_file.write_text(content)
+
+    result = _run_generation_check(generation_file)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [_PROCEEDED]
+
+
+@pytest.mark.parametrize("content", ["2\n", "2", "17\n"])
+def test_the_generation_check_stops_a_command_on_a_newer_machine(tmp_path: Path, content: str) -> None:
+    generation_file = tmp_path / "generation"
+    generation_file.write_text(content)
+
+    result = _run_generation_check(generation_file)
+
+    # Successful, so the caller reads the outcome rather than a failure it would retry.
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [OUTCOME_MACHINE_NEWER_MARKER]
+
+
+def test_the_generation_check_runs_its_cleanup_only_on_a_newer_machine(tmp_path: Path) -> None:
+    generation_file = tmp_path / "generation"
+    leftover = tmp_path / "upload.deb"
+    script = machine_generation_check(generation_file, f"rm -f '{leftover}'")
+
+    leftover.write_text("uploaded")
+    subprocess.run(["sh", "-c", script], check=True, timeout=30.0)
+    is_kept_on_this_generation = leftover.exists()
+    generation_file.write_text("2\n")
+    subprocess.run(["sh", "-c", script], check=True, timeout=30.0)
+
+    assert is_kept_on_this_generation
+    assert not leftover.exists()
+
+
+@pytest.mark.parametrize(
+    "subcommand", ["read-state", "apply-state", "announce-device", "list-requests", "forget-request"]
+)
+def test_every_machine_command_carries_the_generation_check_ahead_of_it(subcommand: str) -> None:
+    command = _remote_command(subcommand, {})
+
+    check = machine_generation_check(MACHINE_GENERATION_FILE, None)
+    assert command.startswith(check + "\n")
+    assert command.index(check) < command.index(f"mngr-latchkey {subcommand}")
+
+
+def test_a_machine_command_raises_machine_newer_when_the_machine_reports_a_newer_generation(tmp_path: Path) -> None:
+    outer = _answering(tmp_path, f"{OUTCOME_MACHINE_NEWER_MARKER}\n")
+
+    with pytest.raises(MachineNewerError, match="newer version of mngr"):
+        read_remote_state(outer, RemoteStateRequest(), HostId.generate())
+
+
+def test_no_machine_command_runs_on_a_machine_of_a_newer_generation(tmp_path: Path) -> None:
+    """Each of the five commands stops at the check: the machine's own scripts never start."""
+    outer = fake_vps(tmp_path)
+    vps = as_vps(outer)
+    vps.hold_generation("2\n")
+    host_id = HostId.generate()
+    record = DeviceRecord(
+        device_id=DesktopDeviceId("desktop-9031"),
+        hostname="laptop.example",
+        port=41988,
+        gateway_password="desktop-password",
+        permissions_override="desktop-override-jwt",
+    )
+
+    with pytest.raises(MachineNewerError):
+        read_remote_state(outer, RemoteStateRequest(), host_id)
+    with pytest.raises(MachineNewerError):
+        apply_remote_state(outer, RemoteStateUpdate(permissions_json='{"rules": []}'), host_id)
+    with pytest.raises(MachineNewerError):
+        announce_device(outer, record, host_id)
+    with pytest.raises(MachineNewerError):
+        read_filed_permission_requests(outer, host_id)
+    with pytest.raises(MachineNewerError):
+        forget_permission_request(outer, "request-5521", host_id)
+
+    assert len(vps.recorded) == 5
+    # Nothing a script would have left: no record of this desktop, no policy, no scratch space.
+    assert vps.device_records() == {}
+    assert not (vps.latchkey_dir / "permissions.json").exists()
+    assert vps.runtime_dir_entries() == []
+
+
+def test_a_newer_machine_is_recognized_under_the_errors_it_caused() -> None:
+    newer = MachineNewerError("vps-test")
+    try:
+        try:
+            raise newer
+        except MachineNewerError as e:
+            raise RemoteGatewayError("Could not read the machine") from e
+    except RemoteGatewayError as wrapped:
+        assert is_caused_by_newer_machine(wrapped)
+    assert is_caused_by_newer_machine(newer)
+    assert not is_caused_by_newer_machine(RemoteGatewayError("the machine said no"))

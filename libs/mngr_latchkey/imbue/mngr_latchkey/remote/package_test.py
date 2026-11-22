@@ -1,3 +1,4 @@
+import os
 import re
 import shutil
 import stat
@@ -19,12 +20,14 @@ from imbue.mngr_latchkey.devices import DEVICE_ANNOUNCEMENT_INTERVAL_ENV_VAR
 from imbue.mngr_latchkey.devices import DEVICE_ANNOUNCEMENT_INTERVAL_SECONDS
 from imbue.mngr_latchkey.docker_bridge import BRIDGE_SERVICES_FIREWALL_UNIT_NAME
 from imbue.mngr_latchkey.docker_bridge import BRIDGE_SERVICES_NFT_TABLE
-from imbue.mngr_latchkey.owner_exec_vm import VM_EXEC_PORT
 from imbue.mngr_latchkey.remote._machine import DIFFERENT_MACHINE_PASSWORD_MESSAGE
 from imbue.mngr_latchkey.remote._machine import LEGACY_RAM_ENCRYPTION_KEY_FILENAME
 from imbue.mngr_latchkey.remote._machine import LEGACY_RAM_LISTEN_PASSWORD_FILENAME
 from imbue.mngr_latchkey.remote._machine import MACHINE_ENCRYPTION_KEY_FILENAME
 from imbue.mngr_latchkey.remote._machine import MACHINE_GATEWAY_PASSWORD_FILENAME
+from imbue.mngr_latchkey.remote._machine import MACHINE_GENERATION
+from imbue.mngr_latchkey.remote._machine import MACHINE_GENERATION_FILE
+from imbue.mngr_latchkey.remote._machine import OUTCOME_MACHINE_NEWER_MARKER
 from imbue.mngr_latchkey.remote._machine import REMOTE_COMMAND_NAME
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.remote.mock_outer_host_test import FakeVps
@@ -40,6 +43,8 @@ from imbue.mngr_latchkey.remote.package import MINIMUM_NODE_MAJOR_VERSION
 from imbue.mngr_latchkey.remote.package import OUTER_PORT
 from imbue.mngr_latchkey.remote.package import PACKAGE_NAME
 from imbue.mngr_latchkey.remote.package import PLUGIN_SKIPPED_MESSAGE_PREFIX
+from imbue.mngr_latchkey.remote.package import RETIRED_OWNER_EXEC_PORT
+from imbue.mngr_latchkey.remote.package import RETIRED_OWNER_EXEC_UNIT_NAME
 from imbue.mngr_latchkey.remote.package import RemotePackageArtifact
 from imbue.mngr_latchkey.remote.package import RemotePackageLayout
 from imbue.mngr_latchkey.remote.package import SSHD_DROP_IN_FILENAME
@@ -50,6 +55,7 @@ from imbue.mngr_latchkey.remote.package import _require_complete_sources
 from imbue.mngr_latchkey.remote.package import build_remote_package
 from imbue.mngr_latchkey.remote.package import remote_package_context
 from imbue.mngr_latchkey.remote.package import render_bootstrap_script
+from imbue.mngr_latchkey.remote.package import render_owner_exec_removal_script
 from imbue.mngr_latchkey.service_plugins import INSTALLED_COMMIT_STAMP_FILENAME
 from imbue.mngr_latchkey.service_plugins import KNOWN_SERVICE_PLUGINS
 from imbue.mngr_latchkey.service_plugins import ServicePlugin
@@ -364,7 +370,7 @@ def test_the_package_makes_sshd_retire_a_dead_desktops_tunnel_within_ninety_seco
     assert 'systemctl reload "$_lk_sshd_unit"' in postrm
 
 
-def test_the_package_fences_the_bridge_bound_ports_onto_the_docker_bridge(tmp_path: Path) -> None:
+def test_the_package_fences_the_gateway_port_onto_the_docker_bridge(tmp_path: Path) -> None:
     """The nftables policy and the oneshot that loads it at boot ship in the package; postinst loads it first."""
     _, root = _unpacked(tmp_path)
 
@@ -373,21 +379,29 @@ def test_the_package_fences_the_bridge_bound_ports_onto_the_docker_bridge(tmp_pa
     postinst = _code_lines((root / "DEBIAN/postinst").read_text())
     postrm = _code_lines((root / "DEBIAN/postrm").read_text())
 
-    # Its own table, added-deleted-added so re-loading converges; the two
-    # bridge-bound ports are dropped off every interface but the bridge and
-    # loopback, and the bridge may open new connections to those ports only.
+    # Its own table, added-deleted-added so re-loading converges; the gateway's
+    # port is dropped off every interface but the bridge and loopback, and the
+    # bridge may open new connections to that port only.
     assert policy.startswith("#!/usr/sbin/nft -f\n")
     assert f"add table inet {BRIDGE_SERVICES_NFT_TABLE}\ndelete table inet {BRIDGE_SERVICES_NFT_TABLE}\n" in policy
-    assert f'iifname != "docker0" iifname != "lo" tcp dport {{ {OUTER_PORT}, {VM_EXEC_PORT} }} counter drop' in policy
-    assert f'iifname "docker0" tcp dport {{ {OUTER_PORT}, {VM_EXEC_PORT} }} accept' in policy
-    assert 'iifname "docker0" ct state new counter drop' in policy
+    rules = [line.strip() for line in _code_lines(policy).splitlines() if "dport" in line or "ct state" in line]
+    assert rules == [
+        # The port of the daemon an earlier build left is dropped on every
+        # interface, ahead of the rule that accepts from the bridge.
+        f"tcp dport {RETIRED_OWNER_EXEC_PORT} counter drop",
+        f'iifname != "docker0" iifname != "lo" tcp dport {{ {OUTER_PORT} }} counter drop',
+        f'iifname "docker0" tcp dport {{ {OUTER_PORT} }} accept',
+        'iifname "docker0" ct state new counter drop',
+    ]
     assert "type filter hook input priority filter; policy accept;" in policy
     # Loaded at boot before the services it protects, after a distro policy
     # that would flush it.
     assert "Type=oneshot" in unit
     assert "RemainAfterExit=yes" in unit
     assert "After=nftables.service" in unit
-    assert "Before=docker.service owner-exec-vm.service supervisor.service" in unit
+    # Still ahead of the daemon an earlier build may have left: one whose
+    # removal failed starts again at boot.
+    assert f"Before=docker.service {RETIRED_OWNER_EXEC_UNIT_NAME}.service supervisor.service" in unit
     assert "ExecStart=/usr/sbin/nft -f /etc/nftables.d/mngr-bridge-services.nft" in unit
     assert "WantedBy=multi-user.target" in unit
     # Loaded now by the install too, ahead of the programs it protects; a
@@ -645,6 +659,151 @@ def test_the_bootstrap_puts_the_dependencies_in_place_and_installs_the_package()
     assert "apt-get install -y nodejs" in bootstrap
     assert 'dpkg -i "$_lk_deb"' in bootstrap
     assert 'rm -f "$_lk_deb"' in bootstrap
+
+
+def test_the_bootstrap_removes_the_owner_exec_daemon_after_the_install_and_never_masks_it() -> None:
+    context = remote_package_context(DEFAULT_REMOTE_PACKAGE_LAYOUT)
+
+    bootstrap = _code_lines(render_bootstrap_script(context, _build()))
+
+    assert _code_lines(render_owner_exec_removal_script(context)) in bootstrap
+    assert bootstrap.index('dpkg -i "$_lk_deb"') < bootstrap.index("systemctl disable --now 'owner-exec-vm'")
+    for path in (
+        "/etc/systemd/system/owner-exec-vm.service",
+        "/usr/local/bin/owner-exec",
+        "/usr/local/bin/.owner-exec-version",
+        "/etc/owner-exec",
+    ):
+        assert f"[ -e '{path}' ]" in bootstrap
+    assert "systemctl mask" not in bootstrap
+
+
+def _owner_exec_leftovers(layout: RemotePackageLayout) -> tuple[Path, Path, Path, Path]:
+    """The four paths an earlier build's owner-exec daemon occupies on a machine laid out as ``layout``."""
+    context = remote_package_context(layout)
+    return (
+        context.retired_owner_exec_unit_path,
+        context.retired_owner_exec_binary_path,
+        context.retired_owner_exec_version_stamp_path,
+        layout.retired_owner_exec_config_dir,
+    )
+
+
+def _run_owner_exec_removal(tmp_path: Path, layout: RemotePackageLayout) -> subprocess.CompletedProcess[str]:
+    """Run the removal block under ``set -e``, as the bootstrap does, with a ``systemctl`` that always fails."""
+    fake_bin = tmp_path / "failing-bin"
+    fake_bin.mkdir()
+    systemctl = fake_bin / "systemctl"
+    systemctl.write_text("#!/bin/sh\nexit 1\n")
+    systemctl.chmod(0o755)
+    script = "set -e\n" + render_owner_exec_removal_script(remote_package_context(layout))
+    return subprocess.run(
+        ["sh", "-c", script],
+        env={"PATH": os.pathsep.join((str(fake_bin), os.environ["PATH"]))},
+        capture_output=True,
+        text=True,
+        timeout=_SHELL_TIMEOUT_SECONDS,
+    )
+
+
+def test_the_owner_exec_removal_leaves_none_of_the_daemons_files_even_when_systemctl_fails(tmp_path: Path) -> None:
+    layout = rooted_layout(tmp_path / "machine")
+    unit_path, binary_path, version_stamp_path, config_dir = _owner_exec_leftovers(layout)
+    for path in (unit_path, binary_path, version_stamp_path, config_dir / "config.toml"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("left by an earlier build\n")
+    # What shares a directory with the daemon's files stays.
+    neighbour = binary_path.parent / "latchkey-curl-router"
+    neighbour.write_text("not the daemon's\n")
+
+    result = _run_owner_exec_removal(tmp_path, layout)
+
+    assert result.returncode == 0, result.stderr
+    assert [path for path in (unit_path, binary_path, version_stamp_path, config_dir) if path.exists()] == []
+    assert neighbour.is_file()
+
+
+def test_the_owner_exec_removal_changes_nothing_on_a_machine_that_never_had_the_daemon(tmp_path: Path) -> None:
+    layout = rooted_layout(tmp_path / "machine")
+    neighbour = layout.retired_owner_exec_bin_dir / "latchkey-curl-router"
+    neighbour.parent.mkdir(parents=True)
+    neighbour.write_text("not the daemon's\n")
+    entries_before = sorted(path.relative_to(tmp_path) for path in (tmp_path / "machine").rglob("*"))
+
+    result = _run_owner_exec_removal(tmp_path, layout)
+
+    assert result.returncode == 0, result.stderr
+    assert sorted(path.relative_to(tmp_path) for path in (tmp_path / "machine").rglob("*")) == entries_before
+
+
+def test_the_bootstrap_checks_the_machines_generation_before_it_installs_anything() -> None:
+    bootstrap = _code_lines(render_bootstrap_script(remote_package_context(DEFAULT_REMOTE_PACKAGE_LAYOUT), _build()))
+
+    check_index = bootstrap.index(f'_lk_generation="$(cat {MACHINE_GENERATION_FILE} ')
+    assert bootstrap.index("_lk_deb=") < check_index
+    for installing in ("dpkg -s", "apt-get", "systemctl", "curl ", "dpkg -i"):
+        assert check_index < bootstrap.index(installing), installing
+
+
+# Every program the bootstrap would install with, were it to get that far.
+_INSTALLERS = ("apt-get", "dpkg", "dpkg-query", "systemctl", "curl", "bash", "node", "npm")
+
+
+def test_the_bootstrap_installs_nothing_on_a_machine_of_a_newer_generation(tmp_path: Path) -> None:
+    """It removes the upload and reports the newer machine, having run none of its installers."""
+    layout = rooted_layout(tmp_path / "machine")
+    context = remote_package_context(layout)
+    artifact = build_remote_package(context)
+    layout.generation_file.parent.mkdir(parents=True)
+    layout.generation_file.write_text("2\n")
+    uploaded = layout.artifact_dir / artifact.filename
+    uploaded.parent.mkdir(parents=True)
+    uploaded.write_bytes(artifact.content)
+    recording_bin = tmp_path / "recording-bin"
+    recording_bin.mkdir()
+    calls = tmp_path / "installer-calls"
+    for name in _INSTALLERS:
+        installer = recording_bin / name
+        installer.write_text(f"#!/bin/sh\nprintf '%s\\n' \"{name} $*\" >> '{calls}'\n")
+        installer.chmod(0o755)
+
+    result = subprocess.run(
+        ["sh", "-c", render_bootstrap_script(context, artifact)],
+        env={"PATH": os.pathsep.join((str(recording_bin), os.environ["PATH"]))},
+        capture_output=True,
+        text=True,
+        timeout=_SHELL_TIMEOUT_SECONDS,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [OUTCOME_MACHINE_NEWER_MARKER]
+    assert not calls.exists()
+    assert not uploaded.exists()
+    assert layout.generation_file.read_text() == "2\n"
+
+
+def test_postinst_records_the_generation_of_the_software_it_installed(tmp_path: Path) -> None:
+    """Written as the last step, readable by all, over whatever an earlier install left there."""
+    vps = _provisioned_vps(tmp_path)
+    vps.hold_generation("damaged\n")
+
+    result = vps.run_postinst()
+
+    assert result.success, result.stderr
+    assert vps.recorded_generation() == f"{MACHINE_GENERATION}\n"
+    assert stat.S_IMODE(vps.layout.generation_file.stat().st_mode) == 0o644
+    assert sorted(path.name for path in vps.layout.generation_file.parent.iterdir()) == ["generation"]
+    postinst = _code_lines((_unpacked(tmp_path)[1] / "DEBIAN/postinst").read_text())
+    assert postinst.index("supervisorctl update") < postinst.index("_lk_generation_file=")
+    assert postinst.rstrip().endswith('mv -f "$_lk_generation_file.tmp.$$" "$_lk_generation_file"')
+
+
+def test_no_maintainer_script_removes_the_generation_file(tmp_path: Path) -> None:
+    """A package another has replaced can be purged long afterwards, under software of another generation."""
+    _, root = _unpacked(tmp_path)
+
+    for script in ("prerm", "postrm"):
+        assert MACHINE_GENERATION_FILE.parent.name not in _code_lines((root / "DEBIAN" / script).read_text())
 
 
 def test_the_bootstrap_survives_a_replay_after_the_artifact_was_consumed() -> None:

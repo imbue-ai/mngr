@@ -41,6 +41,10 @@ export interface InboxCard {
   /** The WORKSPACE the request belongs to, not the sibling agent that filed
    * it (see UiInboxCard). Empty when it could not be resolved. */
   workspace_agent_id: string;
+  /** Why this computer cannot answer the request, when it cannot: the dialog
+   * shows it in place of sending an Approve or a Deny the backend would
+   * refuse. Null for a request it can answer. */
+  refusal_notice: { message: string; detail: string; remedy: ErrorRemedy | null } | null;
 }
 
 export interface PermissionAccountChoice {
@@ -939,6 +943,7 @@ export class InboxModel {
    * the approval up. */
   async approve(): Promise<void> {
     if (this.selectedId === null || !this.isApproveAllowed()) return;
+    if (this.showRefusalOfSelectedRequest()) return;
     // Busy across the status read, so a second click cannot start a second
     // approval while the first is finding out whether to ask.
     this.isApproveBusy = true;
@@ -1121,9 +1126,23 @@ export class InboxModel {
     if (this.selectedId === requestId) this.isRequestGone = true;
   }
 
+  /** Show why this computer cannot answer the request on screen, when it
+   * cannot, and say whether it did. Asked before either verdict is sent: the
+   * backend refuses both, and a Deny does not wait to hear that. The request
+   * stays pending for a computer that can answer it. */
+  private showRefusalOfSelectedRequest(): boolean {
+    const notice = this.cards.find((card) => card.id === this.selectedId)?.refusal_notice ?? null;
+    if (notice === null) return false;
+    // Not a failure to report: nothing went wrong.
+    this.showApprovalFailure({ message: notice.message, details: notice.detail }, notice.remedy, false);
+    this.redraw();
+    return true;
+  }
+
   deny(): void {
     const resolvedId = this.selectedId;
     if (resolvedId === null) return;
+    if (this.showRefusalOfSelectedRequest()) return;
     this.denyingIds.add(resolvedId);
     this.announceResolved(resolvedId, "denied");
     // Fire-and-forget (keepalive) so the user never waits on the mngr

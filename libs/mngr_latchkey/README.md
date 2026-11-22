@@ -527,10 +527,9 @@ on a macOS desktop, and it is reproducible: the package version is
 `<plugin version>+<hash of the sources and context>`, so `dpkg -l mngr-latchkey`
 on a VPS says exactly which build it runs.
 
-The gateway's share of provisioning a host (`provision_remote_gateway`, which
-also provisions the owner-exec daemon on the same pass) is then five remote
+Provisioning a host (`provision_remote_gateway`) is then five remote
 operations, whatever state the machine is in: resolve the VPS's docker bridge
-address (the one the gateway binds, and the owner-exec daemon with it), upload
+address (the one the gateway binds), upload
 the `.deb`, run a short bootstrap (apt dependencies, Node.js from NodeSource,
 `dpkg -i`), read the machine, apply what it should hold. When this computer
 has no key recorded for the machine, the read also brings the machine's
@@ -540,11 +539,21 @@ given up on. The package's `postinst` installs the pinned latchkey CLI, the curl
 shims from `imbue-ai/latchkey-curl-shims` (both version-gated, the shims
 verified against sha256 sums pinned in the package) and the pinned [latchkey
 plugins](#latchkey-plugins) (each gated on the commit stamped inside it), loads the nftables policy
-(and enables the unit that re-loads it at boot) before either bridge-bound
-service can start, scrubs what the ad-hoc provisioning left on a machine it
-set up, and registers the supervisord programs. The package is installed before the owner-exec
-daemon is provisioned, for the same reason. apt is never run from a maintainer
+(and enables the unit that re-loads it at boot) before the gateway
+can start, scrubs what the ad-hoc provisioning left on a machine it
+set up, and registers the supervisord programs. apt is never run from a maintainer
 script (dpkg holds its lock), which is why the bootstrap exists.
+
+An earlier build also installed an owner-exec daemon on the machine, which ran
+commands for whoever held the owner's key and which nothing called. The
+bootstrap removes it after the package's install, on every pass: it stops and
+disables the `owner-exec-vm` unit and deletes the unit, the binary and its
+version stamp under `/usr/local/bin`, and `/etc/owner-exec/`. The removal never
+fails a pass. A desktop on a build from before this one puts the daemon back
+on its own next pass, so the package's firewall policy drops the daemon's port
+(8794) on every interface, which leaves a daemon that lingers reachable from
+nowhere. The removal, that rule, and the firewall unit's ordering ahead of
+`owner-exec-vm.service` are marked `CLEANUP:` in the code.
 
 Every exchange with a provisioned machine afterwards is one of the five
 commands, each a single remote command with a document on its stdin
@@ -600,11 +609,53 @@ clients of it. To look at a machine by hand:
 
 ```sh
 dpkg -l mngr-latchkey
+cat /etc/mngr-machine/generation
 mngr-latchkey read-state </dev/null
 ls -l /run/mngr-latchkey/devices/
 supervisorctl status latchkey-gateway latchkey-tunnel
 tail /var/log/mngr-latchkey/gateway.log
 ```
+
+### Machine generations
+
+Every build installs its own build of the package on every machine it
+provisions, which is harmless while every build drives a machine the same way.
+A **generation** is what tells builds that do not apart: a whole number the
+installed package records in `/etc/mngr-machine/generation` (root's, readable
+by all, written as the last step of the `postinst`). The package described here
+is generation 1 (`MACHINE_GENERATION` in `remote/_machine.py`), and a machine
+without the file is generation 1 too. A generation changes only when a
+machine's software stops serving what a build of the generation before sends
+it, or can no longer be replaced by that build's package; a new build of the
+package is not a new generation. The path names no package, because whatever
+replaces this package keeps writing it, and no package removes the file, on
+removal or on purge.
+
+A build leaves a machine of a newer generation alone. Every command it sends a
+machine starts with a few lines of shell that read the file
+(`machine_generation_check`): the provisioning pass's first command, the
+bootstrap script, and each of the five commands. On a newer machine the command
+runs nothing else, exits successfully and ends with
+`MNGR_LATCHKEY_OUTCOME=MACHINE_NEWER`, and the caller raises
+`MachineNewerError`. A file that does not hold a whole number reads as
+generation 1, so the next pass installs the package and rewrites it.
+
+Discovery handles that error apart from every failure of a wiring step,
+whether a provisioning pass or an announcement meets it (another of the user's
+computers can upgrade a machine while this one runs). It logs once, at `INFO`,
+that the machine is left alone until this computer is updated; it records the
+machine as newer in a `machine_newer` marker in the host's directory here, which
+the desktop app reads; and it sends the machine nothing more, not even this
+computer's announcement, until the host stops and starts, moves to another
+machine, or `mngr latchkey forward` restarts. A pass that then provisions the
+machine removes the marker. Because this computer is not announced, the machine
+routes nothing to it: permission requests go to the user's other computers.
+
+A host recorded that way has a machine of its own (`has_machine_of_its_own`),
+whether or not this computer ever provisioned it, so nothing about it is
+answered from this computer's own store. `mngr latchkey register-agent` for
+such a host registers the agent in the copy here and exits with an error that
+names the remedy: update mngr, or the app that runs it, on this computer.
 
 ## Machine stores
 
@@ -625,6 +676,8 @@ what it says is about to be shown or acted on, never trusted between times:
     proxyRules.json               its desktop egress rules, cached (owned)
     permissions-format-version    the format the policy is in, cached (owned)
     machine_encryption_key        the machine's own key           (owned)
+    machine_newer                 present when the machine runs software of a
+                                  newer generation than this build's (owned)
     config.json                   the desktop's settings, with the machine's
                                   own custom services             (owned)
     plugins/                   -> the desktop's latchkey plugins
@@ -1163,12 +1216,12 @@ name to it because the VPS provider creates every container with the matching
 `--add-host` mapping. It is the same fixed port local workspaces use on their
 own loopback. Provisioning also loads an nftables policy on the VPS (table
 `inet mngr_bridge_services`, boot-persistent through a systemd oneshot) that
-drops traffic to the gateway's port -- and the owner-exec daemon's, which binds
-the same address -- unless it arrives on the docker bridge interface or on
-loopback; without it Linux would deliver a packet for the bridge address that
-reached the public interface to the bound socket all the same. The same policy
-drops any other new connection arriving from the docker bridge, so those two
-ports are all the workspace can reach on its VPS (not its sshd, for one).
+drops traffic to the gateway's port unless it arrives on the docker bridge
+interface or on loopback; without it Linux would deliver a packet for the
+bridge address that reached the public interface to the bound socket all the
+same. The same policy
+drops any other new connection arriving from the docker bridge, so that
+port is all the workspace can reach on its VPS (not its sshd, for one).
 Third-party requests terminate there so the VPS can inject the credentials its
 own store holds. The VPS gateway loads one dedicated `desktop_gateway_proxy.mjs`
 extension for the endpoint families whose state remains on the user's

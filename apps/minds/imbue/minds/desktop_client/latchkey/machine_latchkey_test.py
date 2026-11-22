@@ -4,6 +4,7 @@ import pytest
 from pydantic import SecretStr
 
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.latchkey.machine_latchkey import WorkspaceMachineNewerError
 from imbue.minds.desktop_client.latchkey.machine_latchkey import machine_latchkey_for_host
 from imbue.minds.desktop_client.latchkey.machine_latchkey import machine_latchkey_for_workspace
 from imbue.minds.desktop_client.latchkey.machine_latchkey import services_catalog_for_machine
@@ -15,6 +16,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import write_custom_service_registration
 from imbue.mngr_latchkey.custom_services import build_custom_service_registration
 from imbue.mngr_latchkey.remote._mirror import machine_store_dir
+from imbue.mngr_latchkey.remote._mirror import record_machine_as_newer
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 
@@ -44,6 +46,26 @@ def test_a_machine_with_its_own_key_is_answered_from_its_own_store(tmp_path: Pat
     resolved = machine_latchkey_for_host(desktop, host_id)
 
     assert resolved.latchkey_directory == machine_store_dir(desktop.plugin_data_dir, host_id)
+
+
+@pytest.mark.parametrize(
+    "is_key_recorded", [False, True], ids=["never-provisioned-from-here", "provisioned-from-here"]
+)
+def test_a_machine_recorded_as_newer_is_answered_from_no_store(tmp_path: Path, is_key_recorded: bool) -> None:
+    """Above all not from this computer's, which a host with no recorded key would otherwise fall back to."""
+    desktop = _desktop_latchkey(tmp_path)
+    host_id = HostId.generate()
+    if is_key_recorded:
+        store_machine_encryption_key(desktop.plugin_data_dir, host_id, SecretStr("machine-key-6620"))
+    record_machine_as_newer(desktop.plugin_data_dir, host_id)
+
+    with pytest.raises(WorkspaceMachineNewerError, match="newer Imbue Studio"):
+        machine_latchkey_for_host(desktop, host_id)
+
+    # Nothing was materialized for a machine whose store this build cannot fill.
+    assert sorted(path.name for path in machine_store_dir(desktop.plugin_data_dir, host_id).iterdir()) == sorted(
+        ["machine_newer", *(["machine_encryption_key"] if is_key_recorded else [])]
+    )
 
 
 def test_resolving_a_machine_materializes_its_store(tmp_path: Path) -> None:

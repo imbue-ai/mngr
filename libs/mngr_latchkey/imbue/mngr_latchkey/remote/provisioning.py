@@ -9,7 +9,7 @@ agent's container reaches by the constant name ``host.docker.internal``: the
 VPS provider creates every container with the matching ``--add-host`` mapping,
 and the agent's ``LATCHKEY_GATEWAY`` names that host. Nothing bridges the two;
 the docker bridge is the route, and the nftables policy the package loads
-before either bridge-bound service starts keeps it the only route (see
+before the gateway starts keeps it the only route (see
 :mod:`imbue.mngr_latchkey.docker_bridge`).
 
 An agent whose ``LATCHKEY_GATEWAY`` names its own ``127.0.0.1`` instead still
@@ -24,14 +24,14 @@ wired for a container that resolves the outer host (see
 :func:`_does_container_need_reverse_tunnel`).
 
 Everything the machine needs, other than its data, is one Debian package
-(:mod:`imbue.mngr_latchkey.remote.package`), so the gateway's share of a
-provisioning pass is five remote operations however much it has to set right
-(the owner-exec daemon's own provisioning rides alongside): resolve the docker
-bridge address (which that daemon binds too), upload the package, run the
+(:mod:`imbue.mngr_latchkey.remote.package`), so a provisioning pass is five
+remote operations however much it has to set right: resolve the docker
+bridge address, upload the package, run the
 bootstrap that installs it (its ``postinst`` installs the pinned latchkey CLI,
-loads the policy that fences the bridge-bound ports off every other interface,
+loads the policy that fences the gateway's port off every other interface,
 registers the gateway and the reverse tunnel as ``supervisord`` programs, and
-scrubs what the ad-hoc provisioning left on a machine it set up), read what
+scrubs what the ad-hoc provisioning left on a machine it set up; the bootstrap
+then removes the owner-exec daemon an earlier build left there), read what
 the machine holds
 (``mngr-latchkey read-state``, which also inspects how the agent's container
 was created), and hand it what it should hold (``mngr-latchkey apply-state``):
@@ -89,7 +89,6 @@ from imbue.mngr_latchkey.migrations.interface import PermissionsFormatNewerError
 from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationContext
 from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationError
 from imbue.mngr_latchkey.migrations.runner import CURRENT_PERMISSIONS_FORMAT_VERSION
-from imbue.mngr_latchkey.owner_exec_vm import provision_owner_exec_vm
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 
 # Re-exported (the redundant alias marks it as such): the desktop app's host
@@ -102,6 +101,7 @@ from imbue.mngr_latchkey.remote._machine import RemoteStateRequest
 from imbue.mngr_latchkey.remote._machine import RemoteStateUpdate
 from imbue.mngr_latchkey.remote._machine import RemoteTunnelTarget
 from imbue.mngr_latchkey.remote._machine import apply_remote_state
+from imbue.mngr_latchkey.remote._machine import is_machine_newer_outcome
 from imbue.mngr_latchkey.remote._machine import read_remote_state
 from imbue.mngr_latchkey.remote._mirror import generate_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
@@ -113,6 +113,7 @@ from imbue.mngr_latchkey.remote._transfer import adopt_machine_permissions_forma
 from imbue.mngr_latchkey.remote._transfer import custom_service_registrations_of_config
 from imbue.mngr_latchkey.remote._transfer import is_policy_provisioned
 from imbue.mngr_latchkey.remote.credentials import migrate_permissions_and_push
+from imbue.mngr_latchkey.remote.errors import MachineNewerError
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 
 # Re-exported (the redundant alias marks them as such): the pins and locations
@@ -197,9 +198,9 @@ def provision_remote_gateway(
     """Stand up a VPS-resident latchkey gateway where the agent's container can reach it.
 
     Installs the package on the agent's outer host (the VPS) -- whose
-    ``postinst`` loads the nftables policy that fences the bridge-bound ports
-    off every interface but the docker bridge and loopback, before either
-    service it protects is started -- then reads the machine and hands it what
+    ``postinst`` loads the nftables policy that fences the gateway's port
+    off every interface but the docker bridge and loopback, before the
+    gateway is started -- then reads the machine and hands it what
     it should hold in one update: this machine's own
     encryption key (so it can decrypt the credentials it is given) and its own
     listen password (so it accepts the traffic of the agents on it) -- both
@@ -239,6 +240,11 @@ def provision_remote_gateway(
     on a real one). Raises :class:`RemoteGatewayError` if a step against the
     machine fails, and :class:`LatchkeyStoreError` if what was read from it
     cannot be stored here.
+
+    A machine whose software is of a newer generation than this build's
+    (:data:`~imbue.mngr_latchkey.remote._machine.MACHINE_GENERATION`) is left
+    alone: the pass's first command finds out, before anything is uploaded,
+    and the pass raises :class:`MachineNewerError` having changed nothing.
     """
     if host.is_local:
         logger.debug(
@@ -246,19 +252,9 @@ def provision_remote_gateway(
             host.get_name(),
         )
         return
-    # The VM-resident owner-exec daemon is stood up on this pass too: it is
-    # independent of the latchkey gateway (the web client configures the VM
-    # through it, including to provision latchkey), and piggybacking on this
-    # pass is how every remote provider converges on the one exec channel. A
-    # failure of either fails the whole pass, which is retried on the next
-    # discovery cycle.
     listen_host = _resolve_bridge_listen_host(host)
-    # The package first: its postinst loads the policy that keeps both
-    # bridge-bound services on the docker bridge, which has to be in place
-    # before the daemon below (or the gateway) listens.
     context = remote_package_context(package_layout)
     _install_remote_package(host, context, build_remote_package(context))
-    provision_owner_exec_vm(host, host_id, listen_host)
     latchkey_directory = latchkey.latchkey_directory
     recorded_key = _recorded_machine_encryption_key(latchkey_directory, host_id)
     # Without a recorded key, deciding one may mean trying the desktop's key
@@ -338,11 +334,15 @@ def _install_remote_package(
     re-runs its ``postinst``, which repairs whatever a previous pass left
     unfinished and re-applies the bridge-services firewall (a machine the
     policy cannot be loaded on fails the install, so nothing is started
-    unfenced). The read that follows is what makes the install verifiable: it
+    unfenced). The bootstrap then removes the owner-exec daemon an earlier
+    build left on the machine, which never fails it. The read that follows is
+    what makes the install verifiable: it
     runs the package's own command. A latchkey plugin the ``postinst`` could not
     install is no failure of the install -- the machine serves every other
     service without it -- so it is logged here as a warning instead. Raises
-    :class:`RemoteGatewayError` if the install fails.
+    :class:`RemoteGatewayError` if the install fails, and
+    :class:`MachineNewerError` if the bootstrap found the machine's software
+    of a newer generation and installed nothing.
     """
     host_name = host.get_name()
     artifact_path = context.layout.artifact_dir / artifact.filename
@@ -362,6 +362,8 @@ def _install_remote_package(
                 artifact.version, host_name, result.stderr.strip() or result.stdout.strip()
             )
         )
+    if is_machine_newer_outcome(result.stdout):
+        raise MachineNewerError(host_name)
     for skipped_plugin in _skipped_plugin_reports(result.stderr):
         logger.warning(
             "VPS {} runs without latchkey plugin {}; its services are unavailable there until a later "
@@ -388,18 +390,18 @@ def _skipped_plugin_reports(install_stderr: str) -> tuple[str, ...]:
 
 
 def _resolve_bridge_listen_host(host: OuterHostInterface) -> str:
-    """The VPS's docker bridge address, which the gateway and the owner-exec daemon bind.
+    """The VPS's docker bridge address, which the gateway binds.
 
-    Resolved once per provisioning pass for both. Raises
-    :class:`RemoteGatewayError` rather than falling back to a wildcard bind,
-    which on a VPS would put either service on the public interface.
+    Raises :class:`RemoteGatewayError` rather than falling back to a wildcard
+    bind, which on a VPS would put the gateway on the public interface.
     """
     try:
         return resolve_docker_bridge_address(host)
     except DockerBridgeAddressError as e:
         raise RemoteGatewayError(
-            "Refusing to bind the latchkey gateway and the owner-exec daemon on VPS {} to a public/wildcard "
-            "interface: {}".format(host.get_name(), e)
+            "Refusing to bind the latchkey gateway on VPS {} to a public/wildcard interface: {}".format(
+                host.get_name(), e
+            )
         ) from e
 
 

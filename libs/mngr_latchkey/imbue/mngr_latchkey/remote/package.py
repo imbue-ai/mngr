@@ -14,12 +14,14 @@ which drops one of them and withdraws it from every connected desktop (see
 :mod:`imbue.mngr_latchkey.remote._machine`).
 Its ``postinst`` installs the pinned latchkey CLI, the curl shims and the
 pinned latchkey plugins (:mod:`imbue.mngr_latchkey.service_plugins`), loads
-the nftables policy that keeps the machine's bridge-bound services on the
+the nftables policy that keeps the machine's gateway on the
 docker bridge (shipped with its boot-time systemd unit, and with a drop-in
 that starts supervisord, and so the gateway, only once the docker daemon has
 brought that bridge up), scrubs what the ad-hoc provisioning left on a machine
-it set up, and registers the programs, so installing the package is the whole
-of "set this machine up".
+it set up, registers the programs, and records the generation of the machine's
+software (:data:`~imbue.mngr_latchkey.remote._machine.MACHINE_GENERATION`) for
+a build of an older generation to recognize and leave alone, so installing the
+package is the whole of "set this machine up".
 
 The package's source is the ``debian/tree/`` directory beside this module,
 laid out exactly as the package's files land on the machine, with ``DEBIAN/``
@@ -86,7 +88,6 @@ from imbue.mngr_latchkey.docker_bridge import NFT_BINARY_PATH
 from imbue.mngr_latchkey.filed_permission_requests import FILED_REQUESTS_DIR_NAME
 from imbue.mngr_latchkey.filed_permission_requests import FILED_REQUESTS_SCHEMA_VERSION
 from imbue.mngr_latchkey.filed_permission_requests import FILED_REQUEST_FILE_SUFFIX
-from imbue.mngr_latchkey.owner_exec_vm import VM_EXEC_PORT
 from imbue.mngr_latchkey.remote._machine import ANSWER_PREFIX
 from imbue.mngr_latchkey.remote._machine import DIFFERENT_MACHINE_KEY_MESSAGE
 from imbue.mngr_latchkey.remote._machine import DIFFERENT_MACHINE_PASSWORD_MESSAGE
@@ -94,9 +95,12 @@ from imbue.mngr_latchkey.remote._machine import LEGACY_RAM_ENCRYPTION_KEY_FILENA
 from imbue.mngr_latchkey.remote._machine import LEGACY_RAM_LISTEN_PASSWORD_FILENAME
 from imbue.mngr_latchkey.remote._machine import MACHINE_ENCRYPTION_KEY_FILENAME
 from imbue.mngr_latchkey.remote._machine import MACHINE_GATEWAY_PASSWORD_FILENAME
+from imbue.mngr_latchkey.remote._machine import MACHINE_GENERATION
+from imbue.mngr_latchkey.remote._machine import MACHINE_GENERATION_FILE
 from imbue.mngr_latchkey.remote._machine import OUTCOME_DONE_MARKER
 from imbue.mngr_latchkey.remote._machine import REMOTE_LATCHKEY_DIR_NAME
 from imbue.mngr_latchkey.remote._machine import RUNTIME_DIR
+from imbue.mngr_latchkey.remote._machine import machine_generation_check
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.service_plugins import INSTALLED_COMMIT_STAMP_FILENAME
 from imbue.mngr_latchkey.service_plugins import KNOWN_SERVICE_PLUGINS
@@ -243,14 +247,26 @@ _LEGACY_EXTENSION_CANDIDATE_SUFFIX: Final[str] = ".candidate"
 _FORGET_REQUEST_TIMEOUT_SECONDS: Final[int] = 20
 
 # The ports the machine binds on its docker bridge address, which the shipped
-# nftables policy confines to that bridge (and loopback): the gateway's and the
-# owner-exec daemon's.
-_BRIDGE_SERVICE_PORTS: Final[tuple[int, ...]] = (OUTER_PORT, VM_EXEC_PORT)
+# nftables policy confines to that bridge (and loopback): the gateway's.
+_BRIDGE_SERVICE_PORTS: Final[tuple[int, ...]] = (OUTER_PORT,)
+
+# CLEANUP: drop everything named ``OWNER_EXEC`` here, with the firewall rule,
+# the unit ordering and the bootstrap's removal block that use it, when the
+# doorway's package replaces this one (phase 7 of
+# specs/web-desktop-consolidation); that package carries the same removal.
+# An earlier build installed an owner-exec daemon on the machine, listening on
+# this port of the docker bridge address. This build removes it and has the
+# policy drop its port on every interface, since a build from before this one
+# puts the daemon back on its next provisioning pass.
+RETIRED_OWNER_EXEC_PORT: Final[int] = 8794
+RETIRED_OWNER_EXEC_UNIT_NAME: Final[str] = "owner-exec-vm"
+_RETIRED_OWNER_EXEC_BINARY_FILENAME: Final[str] = "owner-exec"
+_RETIRED_OWNER_EXEC_VERSION_STAMP_FILENAME: Final[str] = ".owner-exec-version"
 
 # The package's name, and the Debian packages it depends on (declared in its
 # control file, installed by the bootstrap): supervisord for the programs, curl
 # for the fetches its postinst makes, ssh for the tunnel, nftables for the
-# policy that keeps the bridge-bound services on the docker bridge.
+# policy that keeps the gateway on the docker bridge.
 PACKAGE_NAME: Final[str] = "mngr-latchkey"
 _DEBIAN_DEPENDENCIES: Final[tuple[str, ...]] = (
     "supervisor",
@@ -269,6 +285,7 @@ _VERSION_HASH_CHARS: Final[int] = 12
 _SOURCES_PACKAGE: Final[str] = "imbue.mngr_latchkey.remote.debian"
 _TREE_DIR_NAME: Final[str] = "tree"
 _BOOTSTRAP_TEMPLATE_NAME: Final[str] = "bootstrap.j2"
+_OWNER_EXEC_REMOVAL_TEMPLATE_NAME: Final[str] = "owner-exec-removal.j2"
 _TEMPLATE_SUFFIX: Final[str] = ".j2"
 _CONTROL_DIR_NAME: Final[str] = "DEBIAN"
 # Where the tree places the package's files, which a layout's directories
@@ -286,6 +303,7 @@ _LOG_DIR_IN_TREE: Final[str] = "var/log/mngr-latchkey"
 # the control file, and files under every directory the tree places them in.
 _REQUIRED_SOURCE_PATHS: Final[tuple[str, ...]] = (
     _BOOTSTRAP_TEMPLATE_NAME,
+    _OWNER_EXEC_REMOVAL_TEMPLATE_NAME,
     f"{_TREE_DIR_NAME}/{_CONTROL_DIR_NAME}/control{_TEMPLATE_SUFFIX}",
 )
 _REQUIRED_SOURCE_DIRS_IN_TREE: Final[tuple[str, ...]] = (
@@ -349,6 +367,15 @@ class RemotePackageLayout(FrozenModel):
     sshd_confd_dir: Path = Field(description="sshd's drop-in directory the tunnel keepalive settings land in.")
     curl_install_dir: Path = Field(description="Where the curl shims are installed.")
     artifact_dir: Path = Field(description="Where the built package is uploaded to before it is installed.")
+    generation_file: Path = Field(
+        description="Where the installed package records the generation of the machine's software."
+    )
+    retired_owner_exec_bin_dir: Path = Field(
+        description="Where an earlier build installed the owner-exec daemon's binary and its version stamp."
+    )
+    retired_owner_exec_config_dir: Path = Field(
+        description="The directory an earlier build kept the owner-exec daemon's config in."
+    )
 
     @model_validator(mode="after")
     def _validate_directories_match_the_package_tree(self) -> "RemotePackageLayout":
@@ -388,6 +415,9 @@ DEFAULT_REMOTE_PACKAGE_LAYOUT: Final[RemotePackageLayout] = RemotePackageLayout(
     # Exists on every machine before anything is installed, which is what an
     # upload ahead of the install needs.
     artifact_dir=Path("/tmp"),
+    generation_file=MACHINE_GENERATION_FILE,
+    retired_owner_exec_bin_dir=Path("/usr/local/bin"),
+    retired_owner_exec_config_dir=Path("/etc/owner-exec"),
 )
 
 
@@ -395,6 +425,7 @@ class RemotePackageContext(FrozenModel):
     """Everything the package templates are rendered with: the machine as this computer wants it."""
 
     layout: RemotePackageLayout = Field(description="Where things live on the machine.")
+    machine_generation: int = Field(description="The generation of the machine software this package is.")
     latchkey_version: str = Field(description="The upstream latchkey CLI version the machine runs.")
     app_name_prefix: str = Field(description="The name prefix the gateway stamps on what it creates in a service.")
     node_major_version: str = Field(description="The Node.js major the bootstrap installs from NodeSource.")
@@ -496,6 +527,17 @@ class RemotePackageContext(FrozenModel):
     )
     docker_bridge_interface_name: str = Field(description="The docker bridge interface the policy confines to.")
     bridge_service_ports: tuple[int, ...] = Field(description="The bridge-bound ports the policy confines.")
+    retired_owner_exec_port: int = Field(
+        description="The port of the owner-exec daemon an earlier build installed, which the policy drops everywhere."
+    )
+    retired_owner_exec_unit_name: str = Field(
+        description="The systemd unit an earlier build ran the owner-exec daemon as."
+    )
+    retired_owner_exec_unit_path: Path = Field(description="That unit's file.")
+    retired_owner_exec_binary_path: Path = Field(description="The owner-exec daemon's binary.")
+    retired_owner_exec_version_stamp_path: Path = Field(
+        description="The stamp recording which owner-exec release that binary came from."
+    )
     nft_table_name: str = Field(description="The nftables table the bridge-services policy lives in.")
     nft_binary_path: str = Field(description="The nft binary the policy's unit loads it with.")
     nft_policy_path: Path = Field(description="Where the package places the policy file.")
@@ -550,6 +592,7 @@ def remote_package_context(layout: RemotePackageLayout) -> RemotePackageContext:
     """The context this build renders the package with, for a machine laid out as ``layout``."""
     return RemotePackageContext(
         layout=layout,
+        machine_generation=MACHINE_GENERATION,
         latchkey_version=LATCHKEY_VERSION,
         app_name_prefix=APP_NAME_PREFIX,
         node_major_version=NODE_MAJOR_VERSION,
@@ -608,6 +651,13 @@ def remote_package_context(layout: RemotePackageLayout) -> RemotePackageContext:
         ram_backed_filesystem_types=_RAM_BACKED_FILESYSTEM_TYPES,
         docker_bridge_interface_name=DOCKER_BRIDGE_INTERFACE_NAME,
         bridge_service_ports=_BRIDGE_SERVICE_PORTS,
+        retired_owner_exec_port=RETIRED_OWNER_EXEC_PORT,
+        retired_owner_exec_unit_name=RETIRED_OWNER_EXEC_UNIT_NAME,
+        retired_owner_exec_unit_path=layout.systemd_unit_dir / f"{RETIRED_OWNER_EXEC_UNIT_NAME}.service",
+        retired_owner_exec_binary_path=layout.retired_owner_exec_bin_dir / _RETIRED_OWNER_EXEC_BINARY_FILENAME,
+        retired_owner_exec_version_stamp_path=(
+            layout.retired_owner_exec_bin_dir / _RETIRED_OWNER_EXEC_VERSION_STAMP_FILENAME
+        ),
         nft_table_name=BRIDGE_SERVICES_NFT_TABLE,
         nft_binary_path=NFT_BINARY_PATH,
         nft_policy_path=layout.nftables_confd_dir / BRIDGE_SERVICES_NFT_POLICY_FILENAME,
@@ -678,12 +728,38 @@ def build_remote_package(context: RemotePackageContext) -> RemotePackageArtifact
 def render_bootstrap_script(context: RemotePackageContext, artifact: RemotePackageArtifact) -> str:
     """Render the POSIX ``sh`` script that installs ``artifact`` (already uploaded) on the machine.
 
+    On a machine whose software is of a newer generation than this build's the
+    script installs nothing: it removes the upload and ends with
+    :data:`~imbue.mngr_latchkey.remote._machine.OUTCOME_MACHINE_NEWER_MARKER`.
+
     Raises:
         RemoteGatewayError: when the template cannot be read or rendered.
     """
     sources = _read_package_sources()
-    variables = _template_variables(context, artifact.version, artifact.filename)
+    variables = {
+        **_template_variables(context, artifact.version, artifact.filename),
+        "machine_generation_check": machine_generation_check(context.layout.generation_file, 'rm -f "$_lk_deb"'),
+        "owner_exec_removal_script": _render_owner_exec_removal_script(sources, context),
+    }
     return _render(_BOOTSTRAP_TEMPLATE_NAME, sources[_BOOTSTRAP_TEMPLATE_NAME], variables).decode("utf-8")
+
+
+def render_owner_exec_removal_script(context: RemotePackageContext) -> str:
+    """Render the POSIX ``sh`` block that removes the owner-exec daemon an earlier build left on the machine.
+
+    The bootstrap script carries it after the package's install. It is a
+    template of its own so that it can be run without the installer around it.
+
+    Raises:
+        RemoteGatewayError: when the template cannot be read or rendered.
+    """
+    return _render_owner_exec_removal_script(_read_package_sources(), context)
+
+
+def _render_owner_exec_removal_script(sources: Mapping[str, bytes], context: RemotePackageContext) -> str:
+    return _render(
+        _OWNER_EXEC_REMOVAL_TEMPLATE_NAME, sources[_OWNER_EXEC_REMOVAL_TEMPLATE_NAME], context.model_dump()
+    ).decode("utf-8")
 
 
 def _read_package_sources() -> dict[str, bytes]:

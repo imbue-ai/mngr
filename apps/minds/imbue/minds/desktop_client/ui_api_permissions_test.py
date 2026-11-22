@@ -23,6 +23,7 @@ from imbue.minds.desktop_client.folder_sync_store import FolderSyncStore
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientNotInitializedError
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
+from imbue.minds.desktop_client.latchkey.machine_access import MACHINE_NEWER_FAILURE
 from imbue.minds.desktop_client.latchkey.machine_latchkey import machine_latchkey_for_host
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
@@ -30,10 +31,12 @@ from imbue.minds.desktop_client.latchkey.machine_operations import PERMISSIONS_F
 from imbue.minds.desktop_client.latchkey.permission_overview import SELF_SCOPE
 from imbue.minds.desktop_client.latchkey.testing import FakeAccountsLatchkey
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
+from imbue.minds.desktop_client.latchkey.testing import FixedHostBackendResolver
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.minds.desktop_client.latchkey.testing import build_permission_grant_handler
 from imbue.minds.desktop_client.latchkey.testing import seed_connector_grant
 from imbue.minds.desktop_client.mock_machine_operator_test import RecordingMachineOperator
+from imbue.minds.desktop_client.mock_machine_operator_test import build_machine_operator_over
 from imbue.minds.desktop_client.mock_machine_operator_test import build_recording_machine_operator
 from imbue.minds.desktop_client.testing import StaticPendingRequests
 from imbue.minds.desktop_client.testing import create_accounts_permission_request
@@ -45,6 +48,7 @@ from imbue.minds.desktop_client.testing import write_fake_mngr_pair_script
 from imbue.minds.desktop_client.user_facing_failure import UserFacingFailure
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_latchkey.account_scopes import account_scope_key
 from imbue.mngr_latchkey.account_scopes import build_account_grant
 from imbue.mngr_latchkey.core import Latchkey
@@ -54,6 +58,7 @@ from imbue.mngr_latchkey.custom_services import build_custom_service_scope_schem
 from imbue.mngr_latchkey.custom_services import custom_service_name
 from imbue.mngr_latchkey.desktop_egress import build_desktop_egress_grant
 from imbue.mngr_latchkey.desktop_egress import list_desktop_egress_grants
+from imbue.mngr_latchkey.remote._mirror import record_machine_as_newer
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.service_plugins import KNOWN_SERVICE_PLUGIN_SERVICE_NAMES
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
@@ -1411,6 +1416,65 @@ def test_connector_toggle_reports_a_machine_that_cannot_be_read_as_502_and_chang
     assert operator.pushed_agent_ids == []
     config = load_permissions(permissions_path_for_host(latchkey.plugin_data_dir, host_id))
     assert config.rules == ({account_scope_key("slack-api", _ACCOUNT): ["slack-chat-read"]},)
+
+
+def _client_over_a_machine_recorded_as_newer(
+    tmp_path: Path, latchkey: FakeAccountsLatchkey, agent_id: AgentId, host_id: HostId
+) -> FlaskClient:
+    """A client whose one workspace runs on a machine a newer Imbue Studio set up, read by a real operator."""
+    record_machine_as_newer(latchkey.plugin_data_dir, host_id)
+    operator = build_machine_operator_over(
+        latchkey,
+        FixedHostBackendResolver(url_by_agent_and_service={}, fixed_host_id=host_id, known_agent_ids=(agent_id,)),
+    )
+    return _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator)
+
+
+@pytest.mark.witnesses("remote-compatibility.newer-machine-permissions-unavailable")
+def test_workspace_permissions_names_the_update_for_a_machine_recorded_as_newer(tmp_path: Path) -> None:
+    """The tab says why it shows nothing and offers the update, and shows none of this computer's own connections.
+
+    This computer never provisioned the machine, so without the record it
+    would take the workspace for one whose first pass has not finished and
+    show the Slack account this computer holds as the workspace's.
+    """
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    client = _client_over_a_machine_recorded_as_newer(tmp_path, latchkey, agent_id, host_id)
+
+    with capture_loguru(level="WARNING") as warnings_logged:
+        response = client.get(f"/ui/api/workspaces/{agent_id}/permissions")
+
+    assert response.status_code == 200
+    # Leaving the machine alone is not a failure, so opening the tab logs none.
+    assert warnings_logged.getvalue() == ""
+    payload = json.loads(response.data)
+    assert payload["permissions_unavailable"] is True
+    assert payload["unavailable_notice"]["message"] == MACHINE_NEWER_FAILURE.message
+    assert payload["unavailable_notice"]["remedy"] == "UPDATE_APP"
+    assert payload["connections"] == []
+    assert _ACCOUNT not in response.get_data(as_text=True)
+
+
+@pytest.mark.parametrize("path,body", [route for route in _WRITE_ROUTES if route[0].startswith("permissions/")])
+def test_permission_writes_to_a_machine_recorded_as_newer_name_the_update_and_change_nothing(
+    tmp_path: Path, path: str, body: dict[str, object]
+) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    client = _client_over_a_machine_recorded_as_newer(tmp_path, latchkey, agent_id, host_id)
+
+    with capture_loguru(level="WARNING") as warnings_logged:
+        response = client.post(f"/ui/api/workspaces/{agent_id}/{path}", json=body)
+
+    assert response.status_code == 502
+    assert warnings_logged.getvalue() == ""
+    answer = json.loads(response.data)
+    assert answer["error"] == MACHINE_NEWER_FAILURE.message
+    assert answer["remedy"] == "UPDATE_APP"
+    # This computer's own store was not written in the workspace's name.
+    assert latchkey.auth_set_calls == []
+    assert latchkey.cleared_calls == []
 
 
 def test_workspace_permissions_is_unavailable_without_a_permission_handler(tmp_path: Path) -> None:

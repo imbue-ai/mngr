@@ -16,6 +16,8 @@ The machine store is the per-host directory this plugin already owns::
         data-format-version           the mirror's own format stamp  (owned)
         latchkey_permissions.json     canonical per-host policy      (owned)
         machine_encryption_key        the machine's own key          (owned)
+        machine_newer                 present when the machine runs software
+                                      of a newer generation          (owned)
         config.json                   the desktop's settings, with the
                                       machine's own custom services (owned)
         plugins/                   -> the desktop's latchkey plugins
@@ -131,6 +133,14 @@ _MACHINE_KEY_FILENAME: Final[str] = "machine_encryption_key"
 # RAM, recorded by that build to hand back after a reboot.
 _MACHINE_GATEWAY_PASSWORD_FILENAME: Final[str] = "machine_gateway_password"
 
+# Marks a host whose machine runs software of a newer generation than this
+# build's (see :data:`~imbue.mngr_latchkey.remote._machine.MACHINE_GENERATION`).
+# Written by the forward process's discovery when it meets such a machine and
+# removed by a provisioning pass that succeeds, so the desktop app, which
+# never runs a pass itself, knows not to answer for the host from this
+# computer's own store. Empty: its presence is the record.
+_MACHINE_NEWER_MARKER_FILENAME: Final[str] = "machine_newer"
+
 # Same 32 random bytes, URL-safe base64, that ``load_or_create_encryption_key``
 # mints for the desktop.
 _MACHINE_KEY_BYTES: Final[int] = 32
@@ -184,6 +194,51 @@ def stored_machine_gateway_password(data_dir: Path, host_id: HostId) -> str | No
         LatchkeyStoreError: when the password file exists but cannot be read.
     """
     return _read_machine_secret(machine_gateway_password_path(data_dir, host_id), "machine gateway listen password")
+
+
+def machine_newer_marker_path(data_dir: Path, host_id: HostId) -> Path:
+    """Return the path of the marker recording ``host_id``'s machine as newer than this build manages."""
+    return machine_store_dir(data_dir, host_id) / _MACHINE_NEWER_MARKER_FILENAME
+
+
+def is_machine_recorded_as_newer(data_dir: Path, host_id: HostId) -> bool:
+    """Whether ``host_id``'s machine is recorded as running software of a newer generation than this build's.
+
+    Such a machine is left alone: nothing is installed on it, none of its
+    commands is run, and nothing about its host is answered from this
+    computer's own store.
+    """
+    return machine_newer_marker_path(data_dir, host_id).is_file()
+
+
+def record_machine_as_newer(data_dir: Path, host_id: HostId) -> None:
+    """Record that ``host_id``'s machine runs software of a newer generation than this build's.
+
+    Creates the host's directory when this computer has none for it, and puts
+    nothing else there.
+
+    Raises:
+        LatchkeyStoreError: when the marker cannot be written.
+    """
+    path = machine_newer_marker_path(data_dir, host_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    except OSError as e:
+        raise LatchkeyStoreError(f"Failed to record the machine of host {host_id} as newer at {path}: {e}") from e
+
+
+def forget_machine_recorded_as_newer(data_dir: Path, host_id: HostId) -> None:
+    """Drop the record that ``host_id``'s machine is newer, once a provisioning pass has shown it is not.
+
+    Raises:
+        LatchkeyStoreError: when the marker exists but cannot be removed.
+    """
+    path = machine_newer_marker_path(data_dir, host_id)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as e:
+        raise LatchkeyStoreError(f"Failed to drop the newer-machine record of host {host_id} at {path}: {e}") from e
 
 
 def generate_machine_encryption_key() -> SecretStr:

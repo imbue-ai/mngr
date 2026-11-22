@@ -66,6 +66,7 @@ from imbue.mngr_latchkey.custom_services import build_custom_service_scope_schem
 from imbue.mngr_latchkey.custom_services import registration_credential_header
 from imbue.mngr_latchkey.desktop_egress import build_desktop_egress_route
 from imbue.mngr_latchkey.desktop_egress import desktop_egress_scope_key
+from imbue.mngr_latchkey.remote._mirror import record_machine_as_newer
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
@@ -823,6 +824,32 @@ def test_detail_payload_reports_no_capture_sign_in_for_a_registration_whose_flow
     assert detail.is_already_registered is True
     assert detail.login_url is None
     assert detail.is_capture_login is False
+
+
+def test_detail_payload_reads_nothing_of_this_computers_for_a_machine_recorded_as_newer(tmp_path: Path) -> None:
+    """What this computer's store registers says nothing about a machine this build cannot read.
+
+    The host has no key recorded here, so before the record it is answered
+    from this computer's store, which registers the service; with the record
+    no store answers, and the dialog describes the service the request names.
+    """
+    harness = _Harness(tmp_path)
+    harness.register(login_url="https://api.example.com/sso")
+    agent_id = AgentId()
+    event = _make_event(agent_id, has_login=False)
+    resolver = FixedHostBackendResolver(
+        url_by_agent_and_service={}, fixed_host_id=_HOST_ID, known_agent_ids=(agent_id,)
+    )
+    detail_before_the_record = _detail(harness, event, resolver)
+
+    record_machine_as_newer(harness.latchkey.plugin_data_dir, _HOST_ID)
+    detail = _detail(harness, event, resolver)
+
+    assert detail_before_the_record.is_already_registered is True
+    assert detail_before_the_record.login_url == "https://api.example.com/sso"
+    assert detail.is_already_registered is False
+    assert detail.login_url is None
+    assert detail.domain == _DOMAIN
 
 
 def test_detail_payload_asks_latchkey_about_a_registered_services_browser(tmp_path: Path) -> None:

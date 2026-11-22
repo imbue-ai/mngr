@@ -114,6 +114,7 @@ from imbue.minds.desktop_client.latchkey.handlers.requested_proxy import decide_
 from imbue.minds.desktop_client.latchkey.handlers.requested_proxy import format_proxy_failed_message
 from imbue.minds.desktop_client.latchkey.handlers.requested_proxy import format_route_note
 from imbue.minds.desktop_client.latchkey.handlers.resolution import resolve_request
+from imbue.minds.desktop_client.latchkey.machine_latchkey import WorkspaceMachineNewerError
 from imbue.minds.desktop_client.latchkey.machine_latchkey import machine_latchkey_for_host
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.machine_operations import describe_machine_failure
@@ -430,7 +431,10 @@ class CustomServiceGrantHandler(RequestEventHandler):
         host_id = resolve_workspace_host_id(backend_resolver, str(parsed_agent_id))
         machine_latchkey = self._machine_latchkey_for_dialog(host_id)
         service_name = custom_service_name(payload.domain, payload.scheme)
-        existing = self._existing_registration(machine_latchkey, service_name)
+        # With no store to read, the dialog describes the service the request would create.
+        existing = (
+            self._existing_registration(machine_latchkey, service_name) if machine_latchkey is not None else None
+        )
         return UiCustomServicePermissionDetail(
             request_id=permission_request.request_id,
             agent_id=permission_request.agent_id,
@@ -441,7 +445,11 @@ class CustomServiceGrantHandler(RequestEventHandler):
             base_api_url=base_api_url_for_domain(payload.domain, payload.scheme),
             login_url=_sign_in_url(existing, payload),
             is_system_browser_login_supported=_is_system_browser_sign_in(
-                machine_latchkey, service_name, existing, payload
+                # Only a registered service is asked of a store, and with no store none is registered.
+                machine_latchkey if machine_latchkey is not None else self.latchkey,
+                service_name,
+                existing,
+                payload,
             ),
             is_capture_login=_is_capture_sign_in(existing, payload),
             credential_header=_credential_header(existing, payload),
@@ -698,6 +706,8 @@ class CustomServiceGrantHandler(RequestEventHandler):
         machine_latchkey = self._machine_latchkey_for_dialog(
             resolve_workspace_host_id(get_state().backend_resolver, str(agent_id))
         )
+        if machine_latchkey is None:
+            return False
         service_name = custom_service_name(payload.domain, payload.scheme)
         existing = self._existing_registration(machine_latchkey, service_name)
         if existing is None or _sign_in_url(existing, payload) is not None:
@@ -760,18 +770,26 @@ class CustomServiceGrantHandler(RequestEventHandler):
         self,
         # The asking workspace's host, or ``None`` when it cannot be placed.
         host_id: HostId | None,
-    ) -> Latchkey:
+    ) -> Latchkey | None:
         """The store of the asking workspace's machine, or this computer's when the machine cannot be placed.
 
         The dialog says whether the service already exists where the agent
         runs; a workspace whose host is unknown or whose store cannot be opened
         is answered from here, as its accounts are, rather than refused a
         dialog -- the approval resolves the host for real.
+
+        ``None`` for a machine a newer Imbue Studio set up: it cannot be read
+        from here, and what this computer's store registers says nothing about
+        it, so no store answers. Approving or denying such a request is what
+        tells the user to update.
         """
         if host_id is None:
             return self.latchkey
         try:
             return machine_latchkey_for_host(self.latchkey, host_id)
+        except WorkspaceMachineNewerError as e:
+            logger.debug("Answering for host {} from no store: {}", host_id, e)
+            return None
         except PermissionOverviewError as e:
             logger.warning(
                 "Could not open the machine store for host {}; answering from this computer's: {}", host_id, e

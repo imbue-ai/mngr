@@ -148,10 +148,10 @@ if [ -s "$_lk_ram_password" ] && ! [ -s "$LK_LISTEN_PASSWORD_FILE" ]; then
   lk_install_file "$LK_LISTEN_PASSWORD_FILE" "$_lk_ram_password"
 fi
 
-# The policy keeping the gateway's port (and the owner-exec daemon's) on the
-# docker bridge, loaded now and at every boot by the shipped oneshot, before
-# either bridge-bound service is started: binding the bridge address alone
-# would still deliver a packet for it that arrived on the public interface.
+# The policy keeping the gateway's port on the docker bridge, loaded now and at
+# every boot by the shipped oneshot, before the gateway is started: binding the
+# bridge address alone would still deliver a packet for it that arrived on the
+# public interface.
 # "restart" re-runs the oneshot so a changed policy is applied now, not only
 # at the next boot.
 systemctl daemon-reload
@@ -229,3 +229,15 @@ supervisorctl update
 if [ "$_lk_gateway_needs_restart" = 1 ]; then
   supervisorctl restart "$LK_GATEWAY_PROGRAM" || true
 fi
+
+# The generation of the software now installed, which a build of an older
+# generation reads to leave this machine alone. Last, so the file never names
+# software whose install did not finish, and renamed into place, so a reader
+# never sees a half-written number. Readable by all: it is no secret, and the
+# check that reads it need not run as root.
+_lk_generation_file='{{ layout.generation_file }}'
+mkdir -p "$(dirname "$_lk_generation_file")"
+chmod 755 "$(dirname "$_lk_generation_file")"
+printf '%s\n' '{{ machine_generation }}' > "$_lk_generation_file.tmp.$$"
+chmod 644 "$_lk_generation_file.tmp.$$"
+mv -f "$_lk_generation_file.tmp.$$" "$_lk_generation_file"

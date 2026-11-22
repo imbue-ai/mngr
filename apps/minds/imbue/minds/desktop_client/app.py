@@ -118,10 +118,12 @@ from imbue.minds.desktop_client.kernel_security import KernelMachineAccess
 from imbue.minds.desktop_client.kernel_security import KernelProbeTransport
 from imbue.minds.desktop_client.kernel_security import kernel_machine_access_for_provider
 from imbue.minds.desktop_client.kernel_security import read_kernel_probe
+from imbue.minds.desktop_client.latchkey.failure_copy import make_failure_response
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
+from imbue.minds.desktop_client.latchkey.machine_operations import describe_machine_failure
 from imbue.minds.desktop_client.latchkey.pending_requests import PendingRequestsInterface
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.local_prerequisites import HostProbeInterface
@@ -187,6 +189,7 @@ from imbue.minds.desktop_client.ui_api import serve_spa_index
 from imbue.minds.desktop_client.ui_api_inbox import build_notification_card
 from imbue.minds.desktop_client.ui_api_inbox import displayable_among
 from imbue.minds.desktop_client.ui_api_inbox import primary_agent_ids_by_workspace_name
+from imbue.minds.desktop_client.ui_api_inbox import refusal_notice_for_request
 from imbue.minds.desktop_client.ui_api_inbox import workspace_name_for_request
 from imbue.minds.desktop_client.ui_api_updates import build_workspace_updates_message
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
@@ -2212,6 +2215,10 @@ def _handle_request_deny(
 _REQUEST_ACTION_FAILED_SENTENCE: Final[str] = (
     "Imbue Studio couldn't answer this request. Try again. If this persists, report a bug."
 )
+# An Approve whose read of the workspace's machine, which every grant starts with, did not succeed.
+_MACHINE_READ_FAILED_BEFORE_GRANT_SENTENCE: Final[str] = (
+    "Imbue Studio couldn't reach this workspace's machine, so the request is still waiting. *Try again in a moment.*"
+)
 
 
 def _dispatch_request_action(
@@ -2266,23 +2273,37 @@ def _dispatch_request_action(
             action,
             request_id,
         )
+    machine_operator = get_state().machine_operator
     if action == "grant":
-        machine_operator = get_state().machine_operator
         if machine_operator is not None:
             try:
                 machine_operator.refresh(permission_request.agent_id)
             except MachineOperationError as e:
-                logger.warning(
-                    "Could not read the machine of workspace {} before granting request {}: {}",
-                    permission_request.agent_id,
-                    request_id,
-                    e,
-                )
-                return make_json_error_response(
-                    f"Could not read that workspace's machine before applying the grant: {e}", status_code=502
+                if e.explained_failure is None:
+                    logger.warning(
+                        "Could not read the machine of workspace {} before granting request {}: {}",
+                        permission_request.agent_id,
+                        request_id,
+                        e,
+                    )
+                return make_failure_response(
+                    describe_machine_failure(e, _MACHINE_READ_FAILED_BEFORE_GRANT_SENTENCE),
+                    status_code=502,
+                    detail=str(e),
                 )
         return handler.apply_grant_request(request, permission_request)
     if action == "deny":
+        # A denial recorded here could not be carried to a machine this build leaves alone, which
+        # would go on showing the request as open to the user's other computers. So it is refused,
+        # like the approval, and the request stays pending for a computer that can answer it.
+        refusal_notice = refusal_notice_for_request(permission_request, machine_operator)
+        if refusal_notice is not None:
+            return make_json_error_response(
+                refusal_notice.message,
+                status_code=502,
+                detail=refusal_notice.detail,
+                remedy=refusal_notice.remedy,
+            )
         return handler.apply_deny_request(request, permission_request)
     return make_json_error_response(
         _REQUEST_ACTION_FAILED_SENTENCE, status_code=500, detail=f"Unsupported action '{action}'"

@@ -9,8 +9,8 @@ Description: VPS-resident latchkey gateway for remote mngr hosts
  Runs the latchkey gateway (pinned to latchkey {{ latchkey_version }}) on the
  machine's docker bridge address, and the reverse SSH tunnel into an agent's
  container that predates that route, as supervisord programs; keeps the
- gateway's port (and the owner-exec daemon's) on that bridge with an nftables
- policy; and provides the five commands the user's computer drives the machine
+ gateway's port on that bridge with an nftables policy; and provides the five
+ commands the user's computer drives the machine
  through: "mngr-latchkey read-state", "mngr-latchkey apply-state",
  "mngr-latchkey announce-device", "mngr-latchkey list-requests" and
  "mngr-latchkey forget-request".

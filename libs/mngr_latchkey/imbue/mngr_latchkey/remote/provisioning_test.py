@@ -7,6 +7,7 @@ import pytest
 from pydantic import SecretStr
 
 from imbue.imbue_common.model_update import to_update
+from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.testing import capture_loguru
@@ -27,6 +28,7 @@ from imbue.mngr_latchkey.migrations.runner import CURRENT_PERMISSIONS_FORMAT_VER
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.remote._machine import MACHINE_ENCRYPTION_KEY_FILENAME
 from imbue.mngr_latchkey.remote._machine import MACHINE_GATEWAY_PASSWORD_FILENAME
+from imbue.mngr_latchkey.remote._machine import OUTCOME_MACHINE_NEWER_MARKER
 from imbue.mngr_latchkey.remote._machine import REMOTE_COMMAND_NAME
 from imbue.mngr_latchkey.remote._machine import RemoteStateRequest
 from imbue.mngr_latchkey.remote._machine import _ANNOUNCE_DEVICE_SUBCOMMAND
@@ -38,6 +40,7 @@ from imbue.mngr_latchkey.remote._mirror import machine_gateway_password_path
 from imbue.mngr_latchkey.remote._mirror import machine_store_dir
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import stored_machine_encryption_key
+from imbue.mngr_latchkey.remote.errors import MachineNewerError
 from imbue.mngr_latchkey.remote.errors import MachineTransferError
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.remote.errors import SentToMachine
@@ -47,7 +50,10 @@ from imbue.mngr_latchkey.remote.mock_outer_host_test import OUTER_HOST_EXTRA_HOS
 from imbue.mngr_latchkey.remote.mock_outer_host_test import as_vps
 from imbue.mngr_latchkey.remote.mock_outer_host_test import fake_latchkey_binary
 from imbue.mngr_latchkey.remote.mock_outer_host_test import fake_vps
+from imbue.mngr_latchkey.remote.mock_outer_host_test import machine_command_lines
+from imbue.mngr_latchkey.remote.mock_outer_host_test import scripted_outer
 from imbue.mngr_latchkey.remote.package import CONTAINER_TUNNEL_KEY_FILENAME
+from imbue.mngr_latchkey.remote.package import DEFAULT_REMOTE_PACKAGE_LAYOUT
 from imbue.mngr_latchkey.remote.package import GATEWAY_CONF_FILENAME
 from imbue.mngr_latchkey.remote.package import GATEWAY_PROGRAM_NAME
 from imbue.mngr_latchkey.remote.package import PLUGIN_SKIPPED_MESSAGE_PREFIX
@@ -119,8 +125,8 @@ def _latchkey_directory(tmp_path: Path) -> Path:
 
 
 def _latchkey_commands(vps: FakeVps) -> list[str]:
-    """The remote commands that concern the latchkey gateway (the owner-exec daemon's and the bridge probe are not under test)."""
-    return [command for command in vps.recorded_commands() if "owner-exec" not in command and "docker0" not in command]
+    """The remote commands a pass sends after it has resolved the docker bridge address."""
+    return [command for command in vps.recorded_commands() if "docker0" not in command]
 
 
 # The whole pass.
@@ -148,14 +154,13 @@ def test_provision_remote_gateway_installs_the_package_and_wires_a_fresh_machine
     # cannot be what dpkg reads.
     assert uploaded[0].is_atomic is True
     assert len(vps.installed_versions) == 1
-    # One round trip resolves the bridge address for the owner-exec daemon and
-    # the gateway alike.
     assert len([command for command in vps.recorded_commands() if "addr show docker0" in command]) == 1
+    assert len(vps.recorded_commands()) == 4
     commands = _latchkey_commands(vps)
     assert len(commands) == 3
     assert "dpkg -i" in commands[0]
-    assert commands[1].startswith(f"{REMOTE_COMMAND_NAME} read-state")
-    assert commands[2].startswith(f"{REMOTE_COMMAND_NAME} apply-state")
+    assert machine_command_lines(commands[1])[0].startswith(f"{REMOTE_COMMAND_NAME} read-state")
+    assert machine_command_lines(commands[2])[0].startswith(f"{REMOTE_COMMAND_NAME} apply-state")
     # The machine's own secrets landed in its latchkey directory, owner-only;
     # nothing of the desktop's own beyond the password the machine is seeded
     # with (each desktop announces its own pair separately).
@@ -244,20 +249,70 @@ def test_a_container_that_needs_no_tunnel_gets_none_on_later_passes_either(tmp_p
     assert vps.supervisorctl_calls() == [f"restart {GATEWAY_PROGRAM_NAME}", f"restart {GATEWAY_PROGRAM_NAME}"]
 
 
-def test_the_package_is_installed_before_the_owner_exec_daemon_is_provisioned(tmp_path: Path) -> None:
-    """The package's postinst loads the firewall that keeps both bridge-bound services on the docker bridge.
+def test_a_pass_leaves_a_machine_of_a_newer_generation_alone(tmp_path: Path) -> None:
+    """One remote command finds out, before anything is uploaded; the pass changes nothing here or there."""
+    outer = fake_vps(tmp_path)
+    vps = as_vps(outer)
+    vps.hold_generation("2\n")
+    latchkey_directory = _latchkey_directory(tmp_path)
+    host_id = HostId.generate()
 
-    The daemon (and the gateway) must never listen unfenced, so the install
-    that loads the policy precedes the daemon's provisioning on every pass.
+    with pytest.raises(MachineNewerError):
+        _provision(outer, latchkey_directory, host_id)
+
+    assert len(vps.recorded_commands()) == 1
+    assert "addr show docker0" in vps.recorded_commands()[0]
+    assert vps.written == []
+    assert vps.installed_versions == []
+    assert vps.supervisorctl_calls() == []
+    assert vps.recorded_generation() == "2\n"
+    assert stored_machine_encryption_key(plugin_data_dir(latchkey_directory), host_id) is None
+
+
+def test_a_pass_ends_at_a_bootstrap_that_finds_the_machine_of_a_newer_generation(tmp_path: Path) -> None:
+    """A machine that became newer after the pass's first command is stopped at by the bootstrap's own check.
+
+    The pass then reads nothing from the machine and hands it nothing.
     """
+    newer_answer = CommandResult(stdout=f"{OUTCOME_MACHINE_NEWER_MARKER}\n", stderr="", success=True)
+    outer, machine = scripted_outer(result_by_substring={"dpkg -i": newer_answer})
+    latchkey_directory = _latchkey_directory(tmp_path)
+    host_id = HostId.generate()
+
+    with pytest.raises(MachineNewerError):
+        provision_remote_gateway(
+            outer,
+            host_id=host_id,
+            container_ssh_user="root",
+            container_ssh_port=2222,
+            latchkey=_desktop_latchkey(latchkey_directory),
+            desktop_gateway_password=_DESKTOP_PASSWORD,
+            package_layout=DEFAULT_REMOTE_PACKAGE_LAYOUT,
+            migration_context=MIGRATION_CONTEXT,
+        )
+
+    # The probe and the bootstrap, and no machine command after them.
+    probe, bootstrap = machine.recorded_commands()
+    assert "addr show docker0" in probe
+    assert "dpkg -i" in bootstrap
+    assert stored_machine_encryption_key(plugin_data_dir(latchkey_directory), host_id) is None
+
+
+def test_a_pass_removes_the_owner_exec_daemon_and_never_installs_or_starts_it(tmp_path: Path) -> None:
+    """The one command of a pass that names the daemon is the bootstrap, which removes it after the package's install."""
     outer = fake_vps(tmp_path)
 
     _provision(outer, _latchkey_directory(tmp_path), HostId.generate())
 
-    commands = as_vps(outer).recorded_commands()
-    install_index = next(index for index, command in enumerate(commands) if "dpkg -i" in command)
-    owner_exec_index = next(index for index, command in enumerate(commands) if "owner-exec" in command)
-    assert install_index < owner_exec_index
+    vps = as_vps(outer)
+    naming_the_daemon = [command for command in vps.recorded_commands() if "owner-exec" in command]
+    assert len(naming_the_daemon) == 1
+    bootstrap = naming_the_daemon[0]
+    assert bootstrap.index("dpkg -i") < bootstrap.index("systemctl disable --now 'owner-exec-vm'")
+    assert "enable --now owner-exec-vm" not in bootstrap
+    assert "restart owner-exec-vm" not in bootstrap
+    assert "releases/download" not in bootstrap
+    assert not any("owner-exec" in entry.path for entry in vps.written)
 
 
 def test_every_machine_command_is_kept_out_of_the_logs(tmp_path: Path) -> None:
@@ -270,7 +325,7 @@ def test_every_machine_command_is_kept_out_of_the_logs(tmp_path: Path) -> None:
 
     _provision(outer, latchkey_directory, HostId.generate())
 
-    machine_commands = [entry for entry in as_vps(outer).recorded if entry.command.startswith(REMOTE_COMMAND_NAME)]
+    machine_commands = [entry for entry in as_vps(outer).recorded if machine_command_lines(entry.command)]
     # The read (which brought the store back for the desktop key to be tried here) and the apply.
     assert len(machine_commands) == 2
     assert all(entry.is_kept_out_of_logs for entry in machine_commands)
@@ -982,7 +1037,9 @@ def test_announcing_a_desktop_records_it_in_ram_and_refreshes_the_record(tmp_pat
     assert vps.runtime_dir_entries() == []
     # The record carries the desktop's secrets, so the command that carried it stayed out of the logs.
     assert [entry.is_kept_out_of_logs for entry in vps.recorded] == [True]
-    assert vps.recorded[0].command.startswith(f"{REMOTE_COMMAND_NAME} {_ANNOUNCE_DEVICE_SUBCOMMAND}")
+    assert machine_command_lines(vps.recorded[0].command)[0].startswith(
+        f"{REMOTE_COMMAND_NAME} {_ANNOUNCE_DEVICE_SUBCOMMAND}"
+    )
 
     # An earlier announcement, and then a repeat carrying a repaired tunnel's port.
     aged_at = vps.device_record_path(record_name).stat().st_mtime - 600

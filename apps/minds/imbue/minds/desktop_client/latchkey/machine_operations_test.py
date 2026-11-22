@@ -6,12 +6,16 @@ from typing import cast
 import pytest
 from pydantic import Field
 from pydantic import SecretStr
+from pydantic import SkipValidation
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.desktop_client.latchkey.machine_access import MACHINE_NEWER_FAILURE
 from imbue.minds.desktop_client.latchkey.machine_access import MachineAccess
 from imbue.minds.desktop_client.latchkey.machine_access import MachineUnreachableError
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
+from imbue.minds.desktop_client.latchkey.machine_operations import PERMISSIONS_FORMAT_NEWER_FAILURE
+from imbue.minds.desktop_client.latchkey.machine_operations import describe_machine_failure
 from imbue.minds.desktop_client.latchkey.testing import FakeAccountsLatchkey
 from imbue.minds.desktop_client.latchkey.testing import FixedHostBackendResolver
 from imbue.minds.desktop_client.testing import device_id_for_test
@@ -19,12 +23,15 @@ from imbue.minds.desktop_client.user_facing_failure import UserFacingFailure
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.migrations.interface import PermissionsFormatNewerError
 from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationContext
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.remote.credentials import FetchedMachineState
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
+from imbue.mngr_latchkey.remote.errors import MachineNewerError
 from imbue.mngr_latchkey.remote.errors import MachineTransferError
+from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.remote.errors import SentToMachine
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
@@ -44,6 +51,9 @@ class _RecordingMachine(MachineCredentials):
     )
     store_failure: str = Field(
         default="", description="When set, the reason this computer's own copies cannot be read or written."
+    )
+    raised: SkipValidation[Exception | None] = Field(
+        default=None, description="When set, the error every exchange raises, as it reaches the operator."
     )
 
     def refresh(self, migration_context: PermissionsMigrationContext) -> FetchedMachineState:
@@ -77,6 +87,8 @@ class _RecordingMachine(MachineCredentials):
         self._note(f"grant {service_name} {account} {permissions_json} {desktop_egress_rules_json}")
 
     def _note(self, call: str) -> None:
+        if self.raised is not None:
+            raise self.raised
         if self.refusal:
             raise MachineTransferError(
                 host_id=self.host_id,
@@ -120,6 +132,7 @@ def _operator(
     refusal: str = "",
     store_failure: str = "",
     opening_refusal: str = "",
+    raised: Exception | None = None,
 ) -> tuple[MachineOperator, _RecordingMachine, str]:
     """An operator over one workspace, and the machine (if any) that workspace resolves to."""
     latchkey_directory = tmp_path / "latchkey"
@@ -143,6 +156,7 @@ def _operator(
         host_id=host_id,
         refusal=refusal,
         store_failure=store_failure,
+        raised=raised,
     )
     access = _RecordedAccess(
         latchkey=latchkey,
@@ -362,3 +376,57 @@ def test_a_workspace_this_app_does_not_know_cannot_be_carried_to(tmp_path: Path)
     operator.push_permissions(str(AgentId()))
 
     assert machine.calls == []
+
+
+def _raised_from(error: Exception, cause: Exception) -> Exception:
+    """``error`` as it looks once raised from ``cause``."""
+    error.__cause__ = cause
+    return error
+
+
+@pytest.mark.parametrize(
+    ("raised", "expected_failure"),
+    [
+        pytest.param(MachineNewerError("vps-test"), MACHINE_NEWER_FAILURE, id="the-machine-is-newer"),
+        pytest.param(
+            _raised_from(RemoteGatewayError("Could not read the machine"), MachineNewerError("vps-test")),
+            MACHINE_NEWER_FAILURE,
+            id="the-machine-is-newer-under-another-error",
+        ),
+        pytest.param(
+            _raised_from(
+                RemoteGatewayError("Could not migrate the policy"),
+                PermissionsFormatNewerError("the policy is in format 9"),
+            ),
+            PERMISSIONS_FORMAT_NEWER_FAILURE,
+            id="the-policy-format-is-newer-under-another-error",
+        ),
+    ],
+)
+def test_a_failure_is_explained_by_whichever_of_its_causes_explains_itself(
+    tmp_path: Path, raised: Exception, expected_failure: UserFacingFailure
+) -> None:
+    """A cause that explains itself is routinely wrapped on its way to the operator, so the whole chain is read."""
+    operator, _machine, agent_id = _operator(tmp_path, is_machine_of_its_own=True, raised=raised)
+
+    with pytest.raises(MachineOperationError) as failure:
+        operator.refresh(agent_id)
+
+    assert failure.value.explained_failure == expected_failure
+    assert describe_machine_failure(failure.value, "The caller's own sentence.") == expected_failure
+
+
+def test_a_failure_none_of_whose_causes_explains_itself_is_told_in_the_callers_sentence(tmp_path: Path) -> None:
+    operator, _machine, agent_id = _operator(
+        tmp_path,
+        is_machine_of_its_own=True,
+        raised=_raised_from(RemoteGatewayError("Could not read the machine"), OSError("connection reset")),
+    )
+
+    with pytest.raises(MachineOperationError) as failure:
+        operator.refresh(agent_id)
+
+    assert failure.value.explained_failure is None
+    assert describe_machine_failure(failure.value, "The caller's own sentence.") == UserFacingFailure(
+        message="The caller's own sentence.", remedy=None
+    )

@@ -24,6 +24,14 @@ made only once the machine has taken it. A local workspace has no machine of its
 own -- its agents run here, on the credentials and the permissions file this
 computer keeps -- and :meth:`MachineAccess.machine_host_for` is what says so, so
 its caller can leave the local edit as the whole change.
+
+A machine whose software a newer Imbue Studio installed is a third case. The
+forward process's discovery, which is what meets such a machine, records it as
+newer (:func:`~imbue.mngr_latchkey.remote.credentials.is_machine_recorded_as_newer`),
+and this build leaves it alone: :meth:`MachineAccess.open_machine` refuses to
+open it, without contacting it, with the sentence that tells the user to
+update. It is a machine of its own all the same, so nothing about its workspace
+is ever answered from this computer's store.
 """
 
 import threading
@@ -66,6 +74,7 @@ from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
 from imbue.mngr_latchkey.remote.credentials import has_machine_of_its_own
+from imbue.mngr_latchkey.remote.credentials import is_machine_recorded_as_newer
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 
 # Name of the thread the provider set is pre-loaded on.
@@ -91,6 +100,30 @@ class MachineUnreachableError(Exception):
     def __init__(self, message: str, failure: UserFacingFailure) -> None:
         super().__init__(message)
         self.failure = failure
+
+
+# What a workspace whose machine a newer Imbue Studio set up is told: this build leaves that machine alone.
+MACHINE_NEWER_FAILURE: Final[UserFacingFailure] = UserFacingFailure(
+    message=(
+        "This workspace's machine was set up by a newer Imbue Studio. Update Imbue Studio to manage its "
+        "permissions here."
+    ),
+    remedy=ErrorRemedy.UPDATE_APP,
+)
+
+
+class MachineRecordedAsNewerError(MachineUnreachableError):
+    """Raised when a workspace's machine is recorded as running software newer than this build manages.
+
+    Raised without contacting the machine, which this build leaves alone.
+    """
+
+    def __init__(self, host_id: HostId) -> None:
+        super().__init__(
+            f"The machine of host {host_id} is recorded as set up by a newer Imbue Studio than this one, which "
+            "leaves it alone.",
+            MACHINE_NEWER_FAILURE,
+        )
 
 
 _MACHINE_STORE_UNREADABLE: Final[UserFacingFailure] = UserFacingFailure(
@@ -196,7 +229,9 @@ class MachineAccess(MutableModel):
         ``None`` for a workspace whose credentials and policy are this
         computer's -- a local one, or a remote one whose gateway has not been
         provisioned from here yet -- which is exactly when there is nothing to
-        carry anywhere.
+        carry anywhere. A host whose machine is recorded as newer than this
+        build manages is a machine of its own, whether or not it was ever
+        provisioned from here; :meth:`open_machine` is what refuses it.
 
         Raises:
             MachineUnreachableError: when the machine store cannot be read, so
@@ -212,11 +247,25 @@ class MachineAccess(MutableModel):
                 f"Could not open the machine store of host {host_id}: {e}", _MACHINE_STORE_UNREADABLE
             ) from e
 
+    def is_machine_recorded_as_newer(self, host_id: HostId) -> bool:
+        """Whether ``host_id``'s machine is recorded as running software newer than this build manages."""
+        return is_machine_recorded_as_newer(self.latchkey.plugin_data_dir, host_id)
+
+    def is_workspace_machine_recorded_as_newer(self, workspace_agent_id: str) -> bool:
+        """Whether the machine ``workspace_agent_id`` runs on is recorded as newer than this build manages.
+
+        ``False`` for a workspace discovery has not placed on a host yet.
+        """
+        host_id = resolve_workspace_host_id(self.backend_resolver, workspace_agent_id)
+        return host_id is not None and self.is_machine_recorded_as_newer(host_id)
+
     @contextmanager
     def open_machine(self, workspace_agent_id: str, host_id: HostId) -> Generator[MachineCredentials, None, None]:
         """Open ``host_id``'s machine for the duration of one exchange.
 
         Raises:
+            MachineRecordedAsNewerError: when the machine is recorded as newer
+                than this build manages. Nothing is sent to it.
             MachineUnreachableError: when the provider set cannot be loaded, the
                 workspace's provider is unknown, or the provider has no remote
                 machine for it. Whatever opening the machine or the exchange
@@ -224,6 +273,8 @@ class MachineAccess(MutableModel):
                 :class:`~imbue.minds.desktop_client.latchkey.machine_operations.MachineOperator`
                 describes it in terms of what the user was trying to do.
         """
+        if self.is_machine_recorded_as_newer(host_id):
+            raise MachineRecordedAsNewerError(host_id)
         provider_name = self._provider_name_for(workspace_agent_id)
         try:
             provider = self._provider_for(provider_name)

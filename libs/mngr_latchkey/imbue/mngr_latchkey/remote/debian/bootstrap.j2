@@ -2,6 +2,10 @@ set -e
 export DEBIAN_FRONTEND=noninteractive
 _lk_deb='{{ artifact_path }}'
 
+# A machine whose software a newer build installed is left as it is: nothing
+# below may run on it, whatever sent this script.
+{{ machine_generation_check }}
+
 # The Debian dependencies the package declares. "dpkg -i" checks them but does
 # not resolve them, and the package's own scripts cannot run apt (dpkg holds
 # its lock while they run), so they are put in place here first.
@@ -43,3 +47,5 @@ if [ -f "$_lk_deb" ] || [ "$(dpkg-query -W -f '${Version}' '{{ package_name }}' 
   dpkg -i "$_lk_deb"
 fi
 rm -f "$_lk_deb"
+
+{{ owner_exec_removal_script }}

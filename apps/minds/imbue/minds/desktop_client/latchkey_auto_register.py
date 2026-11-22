@@ -105,6 +105,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import find_host_system_services_agent
+from imbue.minds.desktop_client.latchkey.machine_access import MACHINE_NEWER_FAILURE
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.errors import MindError
 from imbue.mngr.primitives import AgentId
@@ -426,6 +427,9 @@ class LatchkeyAutoRegister(MutableModel):
     # guarded by ``_push_lock``.
     _hosts_awaiting_machine: dict[HostId, _PendingCarry] = PrivateAttr(default_factory=dict)
     _hosts_watched_for_machine: set[HostId] = PrivateAttr(default_factory=set)
+    # Hosts already warned about in this run of the app for having a machine a
+    # newer Imbue Studio set up, to which nothing is carried. Guarded by ``_push_lock``.
+    _hosts_warned_of_newer_machine: set[HostId] = PrivateAttr(default_factory=set)
     _push_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     # Set by :meth:`stop` and, as a child of the group's shutdown event, by the group's shutdown; every machine
     # watch and every carry waiting to retry waits on it alone, so each ends with the subscription or the app
@@ -736,6 +740,9 @@ class LatchkeyAutoRegister(MutableModel):
         outlasts the retries, and a wait :meth:`stop` or the app's shutdown cuts
         short are logged as an error, with the error that ended the carry
         attached, and the change is lost (see :meth:`_push_until_settled`).
+        A machine a newer Imbue Studio set up, which this build leaves alone,
+        is the exception: nothing is carried, and that is a warning said once
+        per host (:meth:`_note_carry_left_with_newer_machine`).
 
         Before each retry, a carry scheduled for the host during the wait is
         folded into this one as the newer of the two, so the retry carries
@@ -761,6 +768,9 @@ class LatchkeyAutoRegister(MutableModel):
                             return
                     self._read_pin_and_push(host_id, pending)
         except (MachineOperationError, _CarryStoppedError) as e:
+            if isinstance(e, MachineOperationError) and e.explained_failure == MACHINE_NEWER_FAILURE:
+                self._note_carry_left_with_newer_machine(host_id, pending)
+                return
             logger.opt(exception=e).error(
                 "Failed to carry the latchkey permissions of host {} to its machine (addressed by agent {}); the "
                 "change to the registered agents will be lost when the machine is next read [discovery reports "
@@ -769,6 +779,27 @@ class LatchkeyAutoRegister(MutableModel):
                 pending.address_agent_id,
                 self.backend_resolver.get_host_state(host_id),
             )
+
+    def _note_carry_left_with_newer_machine(self, host_id: HostId, pending: _PendingCarry) -> None:
+        """Say that a carry was not made because ``host_id``'s machine is one this build leaves alone.
+
+        Nobody is waiting on a reconcile to be told, and nothing here can fix
+        it, so it is a warning rather than an error: once per host in each run
+        of the app, and at debug level after that, since every later reconcile
+        of the host ends the same way until Imbue Studio is updated here.
+        """
+        with self._push_lock:
+            is_first = host_id not in self._hosts_warned_of_newer_machine
+            self._hosts_warned_of_newer_machine.add(host_id)
+        message = (
+            "Did not carry the registered agents of host {} to its machine (addressed by agent {}): the machine "
+            "was set up by a newer Imbue Studio, which this one leaves alone. An agent added to this workspace "
+            "from this computer is not registered on its machine until Imbue Studio is updated here."
+        )
+        if is_first:
+            logger.warning(message, host_id, pending.address_agent_id)
+        else:
+            logger.debug(message, host_id, pending.address_agent_id)
 
     def _wait_to_retry(self, seconds: float) -> None:
         """A carry's tenacity sleep: wait ``seconds`` before the retry, unless :meth:`stop` or the app's shutdown

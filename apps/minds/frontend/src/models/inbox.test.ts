@@ -26,6 +26,7 @@ const CARD_A = {
   display_name: "Slack",
   accent: "#123456",
   workspace_agent_id: "agent-alpha",
+  refusal_notice: null,
 };
 const CARD_B = {
   id: "evt-b",
@@ -34,6 +35,7 @@ const CARD_B = {
   display_name: "Gmail",
   accent: "#654321",
   workspace_agent_id: "agent-beta",
+  refusal_notice: null,
 };
 
 
@@ -1025,6 +1027,90 @@ describe("InboxModel", () => {
     expect(model.denyingIds.has("evt-a")).toBe(true);
     const denyCall = calls.find((call) => call.url.includes("/deny"));
     expect(denyCall?.init?.keepalive).toBe(true);
+  });
+
+  describe("a request this computer cannot answer", () => {
+    // What the backend sends with the card of a request whose workspace runs
+    // on a machine a newer Imbue Studio set up.
+    const REFUSED_CARD = {
+      ...CARD_A,
+      refusal_notice: {
+        message: "This workspace's machine was set up by a newer Imbue Studio.",
+        detail: "The machine of workspace agent-alpha is recorded as newer.",
+        remedy: "UPDATE_APP" as const,
+      },
+    };
+
+    function refusedModel(onClose: () => void, onResolved: (resolved: ResolvedRequest) => void): InboxModel {
+      // No route answers: a verdict that reached the backend would throw.
+      const model = makeModel({}, onClose, onResolved);
+      model.cards = [REFUSED_CARD, CARD_B];
+      model.isListLoaded = true;
+      model.selectedId = "evt-a";
+      model.detail = PREDEFINED_DETAIL;
+      model.checkedPermissions = new Set(["slack-read-all"]);
+      model.selectedAccount = PREDEFINED_DETAIL.selected_account_value;
+      return model;
+    }
+
+    it("shows why on Deny, sends nothing, and leaves the request pending", () => {
+      let closed = false;
+      const resolved: ResolvedRequest[] = [];
+      const model = refusedModel(
+        () => {
+          closed = true;
+        },
+        (entry) => resolved.push(entry),
+      );
+
+      model.deny();
+
+      expect(calls).toEqual([]);
+      expect(closed).toBe(false);
+      expect(resolved).toEqual([]);
+      expect(model.denyingIds.has("evt-a")).toBe(false);
+      expect(model.approvalError).toEqual({
+        message: REFUSED_CARD.refusal_notice.message,
+        details: REFUSED_CARD.refusal_notice.detail,
+      });
+      expect(model.approvalRemedy).toBe("UPDATE_APP");
+      // Nothing went wrong, so there is no bug to report.
+      expect(model.isApprovalErrorReportable).toBe(false);
+    });
+
+    it("shows why on Approve, sends nothing, and leaves the request pending", async () => {
+      let closed = false;
+      const resolved: ResolvedRequest[] = [];
+      const model = refusedModel(
+        () => {
+          closed = true;
+        },
+        (entry) => resolved.push(entry),
+      );
+
+      await model.approve();
+
+      expect(calls).toEqual([]);
+      expect(closed).toBe(false);
+      expect(resolved).toEqual([]);
+      expect(model.approvalError?.message).toBe(REFUSED_CARD.refusal_notice.message);
+      expect(model.approvalRemedy).toBe("UPDATE_APP");
+    });
+
+    it("answers the next request, which this computer can", () => {
+      let closed = false;
+      const model = makeModel({ "POST /requests/evt-b/deny": () => jsonResponse({ outcome: "DENIED" }) }, () => {
+        closed = true;
+      });
+      model.cards = [REFUSED_CARD, CARD_B];
+      model.isListLoaded = true;
+      model.selectedId = "evt-b";
+
+      model.deny();
+
+      expect(closed).toBe(true);
+      expect(calls.some((call) => call.url.includes("/requests/evt-b/deny"))).toBe(true);
+    });
   });
 
   it("closes once per resolution, however many times the news arrives", async () => {

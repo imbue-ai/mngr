@@ -21,9 +21,12 @@ from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import CHAT_ID_LABEL
 from imbue.minds.desktop_client.data_types import NotificationDestination
+from imbue.minds.desktop_client.latchkey.failure_copy import build_failure_notice
 from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
+from imbue.minds.desktop_client.latchkey.machine_access import MACHINE_NEWER_FAILURE
+from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
 from imbue.minds.desktop_client.latchkey.pending_requests import PendingRequestsInterface
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.notification_feed import AgentMessageCard
@@ -34,6 +37,7 @@ from imbue.minds.desktop_client.request_handler import find_handler_for_event
 from imbue.minds.desktop_client.responses import make_json_error_response
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
+from imbue.minds.desktop_client.ui_models import UiFailureNotice
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.mngr.primitives import AgentId
 
@@ -53,6 +57,13 @@ class UiInboxCard(FrozenModel):
             "latchkey requests are filed by the workspace's system-services sibling agent, so the two "
             "never match. Empty when the workspace could not be resolved."
         )
+    )
+    refusal_notice: UiFailureNotice | None = Field(
+        default=None,
+        description=(
+            "Why this computer cannot answer the request, when it cannot: approving or denying it here is "
+            "refused, so the dialog shows this in place of sending either. None for a request it can answer."
+        ),
     )
 
 
@@ -163,6 +174,7 @@ def _build_inbox_card(
     handler: RequestEventHandler | None,
     backend_resolver: BackendResolverInterface,
     primary_agent_id_by_ws_name: dict[str, str],
+    machine_operator: MachineOperator | None,
 ) -> UiInboxCard:
     if handler is not None:
         kind_label = handler.kind_label()
@@ -189,6 +201,26 @@ def _build_inbox_card(
         display_name=display_name,
         accent=accent,
         workspace_agent_id=primary_agent_id_str or "",
+        refusal_notice=refusal_notice_for_request(req, machine_operator),
+    )
+
+
+def refusal_notice_for_request(
+    req: StreamedPermissionRequest, machine_operator: MachineOperator | None
+) -> UiFailureNotice | None:
+    """Why a verdict on ``req`` given here would be refused, or None when one would be taken.
+
+    A request of a workspace whose machine a newer Imbue Studio set up cannot
+    be answered from this build, which leaves that machine alone. The dialog
+    learns it with the card, so that Deny, which does not wait for the
+    backend's answer, can say so too; the route that takes a denial refuses
+    with the same notice.
+    """
+    if machine_operator is None or not machine_operator.access.is_workspace_machine_recorded_as_newer(req.agent_id):
+        return None
+    return build_failure_notice(
+        MACHINE_NEWER_FAILURE,
+        f"The machine of workspace {req.agent_id} is recorded as newer than this build manages.",
     )
 
 
@@ -261,7 +293,8 @@ def build_notification_card(
     render, so a notification entry always matches the inbox card it mirrors.
     """
     handler = find_handler_for_event(handlers, req)
-    card = _build_inbox_card(req, handler, backend_resolver, primary_agent_id_by_ws_name)
+    # A feed row is not where a request is answered, so it carries no refusal notice.
+    card = _build_inbox_card(req, handler, backend_resolver, primary_agent_id_by_ws_name, machine_operator=None)
     return PendingNotificationCard(
         request_id=card.id,
         requested_at=None if req.created_at is None else req.created_at.isoformat(),
@@ -341,7 +374,13 @@ def _handle_inbox_list() -> Response:
     pending = displayable_pending_requests(state.pending_requests, backend_resolver)
     primary_agent_id_by_ws_name = primary_agent_ids_by_workspace_name(backend_resolver)
     cards = tuple(
-        _build_inbox_card(req, find_handler_for_event(handlers, req), backend_resolver, primary_agent_id_by_ws_name)
+        _build_inbox_card(
+            req,
+            find_handler_for_event(handlers, req),
+            backend_resolver,
+            primary_agent_id_by_ws_name,
+            state.machine_operator,
+        )
         for req in pending
     )
     return _json_response(UiInboxListResponse(cards=cards))

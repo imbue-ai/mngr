@@ -37,6 +37,12 @@ directory itself, and a read answers with it the same base64 way as with
 everything else. Nothing of this computer's own key material ever travels to
 the machine: a store read back is re-encrypted here, not there.
 
+Every one of the five commands is preceded by a check of the machine's
+generation (:func:`machine_generation_check`), so none of them runs on a
+machine whose software a newer build installed and this one does not drive;
+the command raises :class:`~imbue.mngr_latchkey.remote.errors.MachineNewerError`
+instead.
+
 A policy crosses the wire in the machine's projection of it, in both
 directions (:mod:`imbue.mngr_latchkey.remote._machine_policy`): what an update
 carries is projected as its document is built, and what a read answers with is
@@ -71,6 +77,7 @@ from imbue.mngr_latchkey.filed_permission_requests import parse_filed_permission
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.remote._machine_policy import project_policy_for_machine
 from imbue.mngr_latchkey.remote._machine_policy import restore_policy_from_machine
+from imbue.mngr_latchkey.remote.errors import MachineNewerError
 from imbue.mngr_latchkey.remote.errors import MachineTransferError
 from imbue.mngr_latchkey.remote.errors import ReceivedFromMachine
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
@@ -119,6 +126,20 @@ _DOCUMENT_END_MARKER: Final[str] = "MNGR_LATCHKEY_DOCUMENT_END"
 # without running to its end (a shell that died mid-way) is told apart from one
 # that applied everything.
 OUTCOME_DONE_MARKER: Final[str] = "MNGR_LATCHKEY_OUTCOME=DONE"
+
+# The generation of the machine software this build installs and drives. A
+# generation changes only when a machine's software stops serving what a build
+# of the generation before sends it, or can no longer be replaced by that
+# build's package; a new build of the package is not a new generation. The
+# installed package records its generation in the file below, and a machine
+# without the file is generation 1. The path names no package, because whatever
+# replaces this package keeps writing it.
+MACHINE_GENERATION: Final[int] = 1
+MACHINE_GENERATION_FILE: Final[Path] = Path("/etc/mngr-machine/generation")
+
+# The last stdout line of a command that found the machine's generation newer
+# than this build's and so did nothing.
+OUTCOME_MACHINE_NEWER_MARKER: Final[str] = "MNGR_LATCHKEY_OUTCOME=MACHINE_NEWER"
 
 # Prefix of every answer a read prints, one per line, each holding a base64
 # payload. Prefixed rather than positional because anything else the script
@@ -459,6 +480,7 @@ def announce_device(host: OuterHostInterface, record: DeviceRecord, host_id: Hos
     """Record this computer as connected to ``host_id``'s machine (or refresh the record), in one round trip.
 
     Raises:
+        MachineNewerError: when the machine's software is of a newer generation than this build's.
         MachineTransferError: when the command fails.
     """
     _run_remote_command(host, host_id, _ANNOUNCE_DEVICE_SUBCOMMAND, _announcement_document(record))
@@ -471,6 +493,7 @@ def forget_permission_request(host: OuterHostInterface, request_id: str, host_id
     not be reached syncs the request away itself when it next connects.
 
     Raises:
+        MachineNewerError: when the machine's software is of a newer generation than this build's.
         MachineTransferError: when the command fails.
     """
     _run_remote_command(host, host_id, _FORGET_REQUEST_SUBCOMMAND, {_ENTRY_REQUEST_ID: request_id.encode("utf-8")})
@@ -480,6 +503,7 @@ def read_filed_permission_requests(host: OuterHostInterface, host_id: HostId) ->
     """The permission requests ``host_id``'s machine keeps for the user's desktops, in one round trip.
 
     Raises:
+        MachineNewerError: when the machine's software is of a newer generation than this build's.
         MachineTransferError: when the command fails, or answers with
             something this build cannot read.
     """
@@ -495,6 +519,7 @@ def read_remote_state(host: OuterHostInterface, request: RemoteStateRequest, hos
     """Ask ``host_id``'s machine what it holds, in one round trip.
 
     Raises:
+        MachineNewerError: when the machine's software is of a newer generation than this build's.
         MachineTransferError: when the command fails, or answers with
             something this build cannot read.
     """
@@ -510,6 +535,7 @@ def apply_remote_state(host: OuterHostInterface, update: RemoteStateUpdate, host
     """Make ``host_id``'s machine hold ``update``, in one round trip.
 
     Raises:
+        MachineNewerError: when the machine's software is of a newer generation than this build's.
         MachineTransferError: when the update does not fit one command, or the
             command fails.
     """
@@ -591,11 +617,52 @@ def _announcement_document(record: DeviceRecord) -> dict[str, bytes]:
 
 
 @pure
+def machine_generation_check(
+    generation_file: Path,
+    # What a command that stops at a newer machine runs before it exits, or ``None`` for nothing.
+    command_before_exit: str | None,
+) -> str:
+    """The POSIX ``sh`` lines that stop a command on a machine whose software is of a newer generation than this build's.
+
+    Put at the front of a remote command, so the check costs no round trip. On
+    a newer machine the command exits successfully with
+    :data:`OUTCOME_MACHINE_NEWER_MARKER` as its last line, having run nothing
+    else. A machine with no generation file, an empty one, or one that does not
+    hold a whole number is of generation 1.
+    """
+    return "\n".join(
+        (
+            f'_lk_generation="$(cat {shlex.quote(str(generation_file))} 2>/dev/null || true)"',
+            'case "$_lk_generation" in',
+            "  ''|*[!0-9]*) _lk_generation=1 ;;",
+            "esac",
+            f'if [ "$_lk_generation" -gt {MACHINE_GENERATION} ]; then',
+            *((f"  {command_before_exit}",) if command_before_exit is not None else ()),
+            f"  printf '%s\\n' '{OUTCOME_MACHINE_NEWER_MARKER}'",
+            "  exit 0",
+            "fi",
+        )
+    )
+
+
+@pure
+def is_machine_newer_outcome(stdout: str) -> bool:
+    """Whether a command's output says it stopped at a machine of a newer generation (see :func:`machine_generation_check`)."""
+    lines = stdout.strip().splitlines()
+    return bool(lines) and lines[-1] == OUTCOME_MACHINE_NEWER_MARKER
+
+
+@pure
 def _remote_command(subcommand: str, document: Mapping[str, bytes]) -> str:
-    """The one command string that runs ``subcommand`` on the machine with ``document`` on its stdin."""
+    """The one command string that runs ``subcommand`` on the machine with ``document`` on its stdin.
+
+    The generation check goes first, so the subcommand is never run on a
+    machine whose software this build does not drive.
+    """
     lines = [f"{key} {base64.b64encode(value).decode('ascii')}" for key, value in document.items()]
     return "\n".join(
         (
+            machine_generation_check(MACHINE_GENERATION_FILE, None),
             f"{REMOTE_COMMAND_NAME} {shlex.quote(subcommand)} <<'{_DOCUMENT_END_MARKER}'",
             *lines,
             _DOCUMENT_END_MARKER,
@@ -613,6 +680,8 @@ def _run_remote_command(
     stand-in naming the kind of command and its size instead.
 
     Raises:
+        MachineNewerError: when the machine's software is of a newer
+            generation than this build's, so the command did not run.
         MachineTransferError: when the command does not fit one remote
             command, never reaches the machine or loses it midway, is refused
             or failed by the machine, or finishes without reporting an outcome
@@ -660,6 +729,8 @@ def _run_remote_command(
     if not result.success:
         detail = result.stderr.strip() or "\n".join(diagnostic_lines)
         raise parts.failure(host, host_id, summarize_latchkey_failure(detail, "the command reported no reason"))
+    if is_machine_newer_outcome(result.stdout):
+        raise MachineNewerError(host.get_name())
     stdout_lines = result.stdout.strip().splitlines()
     last_line = stdout_lines[-1] if stdout_lines else ""
     if last_line != OUTCOME_DONE_MARKER:

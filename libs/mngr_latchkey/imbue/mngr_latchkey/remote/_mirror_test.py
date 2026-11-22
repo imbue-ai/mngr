@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 from pydantic import JsonValue
+from pydantic import SecretStr
 
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import BROWSER_STATE_FILENAME
@@ -18,11 +19,17 @@ from imbue.mngr_latchkey.encryption_key import ENCRYPTION_KEY_FILENAME
 from imbue.mngr_latchkey.encryption_key import encryption_key_path
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 from imbue.mngr_latchkey.remote._mirror import clear_machine_credentials
+from imbue.mngr_latchkey.remote._mirror import forget_machine_recorded_as_newer
+from imbue.mngr_latchkey.remote._mirror import is_machine_recorded_as_newer
 from imbue.mngr_latchkey.remote._mirror import machine_credentials_path
 from imbue.mngr_latchkey.remote._mirror import machine_store_dir
 from imbue.mngr_latchkey.remote._mirror import materialize_machine_store
+from imbue.mngr_latchkey.remote._mirror import record_machine_as_newer
+from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
+from imbue.mngr_latchkey.remote._mirror import stored_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import write_machine_credentials
 from imbue.mngr_latchkey.remote._mirror import write_machine_store_config
+from imbue.mngr_latchkey.remote.credentials import has_machine_of_its_own
 from imbue.mngr_latchkey.service_plugins import PLUGINS_DIR_NAME
 from imbue.mngr_latchkey.service_plugins import plugins_dir
 from imbue.mngr_latchkey.store import LatchkeyStoreError
@@ -337,3 +344,42 @@ def test_materialize_shares_the_desktops_plugins_and_creates_them_so_the_link_ne
     assert stat.S_IMODE(plugins_dir(latchkey_directory).stat().st_mode) == stat.S_IRWXU
     (plugins_dir(latchkey_directory) / "spotify").mkdir()
     assert (link / "spotify").is_dir()
+
+
+def test_a_machine_recorded_as_newer_stays_so_until_the_record_is_dropped(tmp_path: Path) -> None:
+    """The record is the one file in a directory made for it; recording and dropping are both repeatable."""
+    data_dir = plugin_data_dir(tmp_path)
+    host_id = HostId.generate()
+    other_host_id = HostId.generate()
+
+    is_recorded_before = is_machine_recorded_as_newer(data_dir, host_id)
+    record_machine_as_newer(data_dir, host_id)
+    record_machine_as_newer(data_dir, host_id)
+    entries_while_recorded = sorted(path.name for path in machine_store_dir(data_dir, host_id).iterdir())
+    is_recorded = is_machine_recorded_as_newer(data_dir, host_id)
+    is_other_host_recorded = is_machine_recorded_as_newer(data_dir, other_host_id)
+    forget_machine_recorded_as_newer(data_dir, host_id)
+    forget_machine_recorded_as_newer(data_dir, host_id)
+
+    assert not is_recorded_before
+    assert is_recorded
+    assert entries_while_recorded == ["machine_newer"]
+    assert not is_other_host_recorded
+    assert not is_machine_recorded_as_newer(data_dir, host_id)
+
+
+def test_a_host_whose_machine_is_recorded_as_newer_has_a_machine_of_its_own(tmp_path: Path) -> None:
+    """Whether or not this computer ever provisioned it: its credentials and policy are never this computer's."""
+    data_dir = plugin_data_dir(tmp_path)
+    never_provisioned_host_id = HostId.generate()
+    provisioned_host_id = HostId.generate()
+    local_host_id = HostId.generate()
+    store_machine_encryption_key(data_dir, provisioned_host_id, SecretStr("machine-key-3391"))
+
+    record_machine_as_newer(data_dir, never_provisioned_host_id)
+    record_machine_as_newer(data_dir, provisioned_host_id)
+
+    assert has_machine_of_its_own(data_dir, never_provisioned_host_id)
+    assert stored_machine_encryption_key(data_dir, never_provisioned_host_id) is None
+    assert has_machine_of_its_own(data_dir, provisioned_host_id)
+    assert not has_machine_of_its_own(data_dir, local_host_id)

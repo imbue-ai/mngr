@@ -10,6 +10,33 @@ class RemoteGatewayError(LatchkeyError, RuntimeError):
     """Raised when an exchange with a remote machine's latchkey gateway fails."""
 
 
+class MachineNewerError(RemoteGatewayError):
+    """Raised when a machine's software is of a newer generation than this build manages.
+
+    A build leaves such a machine alone: it installs nothing there and runs
+    none of its commands. Nothing a retry fixes, and nothing wrong with the
+    machine: the remedy is a newer build on this computer.
+    """
+
+    def __init__(self, machine_name: str) -> None:
+        self.machine_name = machine_name
+        super().__init__(
+            f"Machine {machine_name} was set up by a newer version of mngr than this one, which leaves it alone: "
+            "update mngr, or the app that runs it, on this computer to manage the machine from here"
+        )
+
+
+@pure
+def is_caused_by_newer_machine(error: BaseException) -> bool:
+    """Whether ``error``, or any error it was explicitly raised from, is a :class:`MachineNewerError`."""
+    link: BaseException | None = error
+    while link is not None:
+        if isinstance(link, MachineNewerError):
+            return True
+        link = link.__cause__
+    return False
+
+
 class SentToMachine(UpperCaseStrEnum):
     """A part of what one machine command hands the machine to hold or act on."""
 

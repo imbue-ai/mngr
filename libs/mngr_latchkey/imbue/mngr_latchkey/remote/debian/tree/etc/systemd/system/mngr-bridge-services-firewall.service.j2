@@ -1,7 +1,11 @@
 [Unit]
-Description=Keep mngr's bridge-bound services (latchkey gateway, owner-exec) on the docker bridge
+Description=Keep the latchkey gateway on the docker bridge
 After=nftables.service
-Before=docker.service owner-exec-vm.service supervisor.service
+# CLEANUP: drop {{ retired_owner_exec_unit_name }}.service from this ordering when the doorway's
+# package replaces this one (phase 7 of specs/web-desktop-consolidation). An
+# owner-exec daemon whose removal failed starts again at boot, and must not
+# listen before the policy that drops its port is loaded.
+Before=docker.service {{ retired_owner_exec_unit_name }}.service supervisor.service
 
 [Service]
 Type=oneshot

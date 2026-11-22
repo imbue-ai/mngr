@@ -46,6 +46,7 @@ from imbue.mngr_latchkey.remote.mock_outer_host_test import MACHINE_KEY
 from imbue.mngr_latchkey.remote.mock_outer_host_test import as_vps
 from imbue.mngr_latchkey.remote.mock_outer_host_test import desktop_latchkey
 from imbue.mngr_latchkey.remote.mock_outer_host_test import fake_vps
+from imbue.mngr_latchkey.remote.mock_outer_host_test import machine_command_lines
 from imbue.mngr_latchkey.remote.mock_outer_host_test import store_accounts
 from imbue.mngr_latchkey.remote.mock_outer_host_test import store_document
 from imbue.mngr_latchkey.remote.package import REMOTE_EXTENSIONS_DIR_NAME
@@ -1070,7 +1071,7 @@ def test_a_push_carries_its_secrets_only_in_the_document(tmp_path: Path) -> None
 
     command = as_vps(outer).recorded[0].command
     assert MACHINE_KEY not in command
-    first_line, *document_lines, last_line = command.splitlines()
+    first_line, *document_lines, last_line = machine_command_lines(command)
     assert first_line == "mngr-latchkey apply-state <<'MNGR_LATCHKEY_DOCUMENT_END'"
     assert last_line == "MNGR_LATCHKEY_DOCUMENT_END"
     assert all(len(line.split(" ")) == 2 for line in document_lines)

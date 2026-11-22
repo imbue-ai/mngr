@@ -25,6 +25,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import SYSTEM_SERVICES_AGENT_NAME
+from imbue.minds.desktop_client.latchkey.machine_access import MACHINE_NEWER_FAILURE
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.testing import leave_copies_on_this_computer_as_they_are
 from imbue.minds.desktop_client.latchkey.testing import leave_permissions_on_this_computer
@@ -820,6 +821,56 @@ def _errors_logged() -> Generator[list[BaseException | None], None, None]:
         yield errors
     finally:
         logger.remove(sink_id)
+
+
+@contextmanager
+def _warnings_and_errors_logged() -> Generator[list[tuple[str, str]], None, None]:
+    """The ``(level name, message)`` of each WARNING or ERROR logged inside the block, in order."""
+    records: list[tuple[str, str]] = []
+    sink_id = logger.add(
+        lambda message: records.append((message.record["level"].name, message.record["message"])), level="WARNING"
+    )
+    try:
+        yield records
+    finally:
+        logger.remove(sink_id)
+
+
+def test_a_carry_to_a_machine_a_newer_studio_set_up_is_left_with_one_warning_per_host(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """This build leaves such a machine alone, so nothing is carried, and that is said once, not as an error.
+
+    Every later reconcile of the host ends the same way until Imbue Studio is
+    updated here, so only the first one warns.
+    """
+    host_id = HostId.generate()
+    first_agent = AgentId.generate()
+    second_agent = AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
+    _provision_machine(latchkey, host_id)
+    machine = _machine_seeded_from_this_computer(latchkey, host_id)
+    machine.read_failures.extend(
+        MachineOperationError(f"the machine of host {host_id} is newer", MACHINE_NEWER_FAILURE) for _ in range(2)
+    )
+    _push_agents(resolver, _make_discovered(host_id, first_agent))
+    auto_register = _build_auto_register_carrying_to(build_latchkey_auto_register, resolver, latchkey, machine)
+
+    with _warnings_and_errors_logged() as records:
+        auto_register.start()
+        _wait_for_reads(machine, 1)
+        _wait_until_pushes_settle(auto_register)
+        _push_agents(resolver, _make_discovered(host_id, first_agent), _make_discovered(host_id, second_agent))
+        _wait_for_reads(machine, 2)
+        _wait_until_pushes_settle(auto_register)
+
+    assert machine.pushed_count() == 0
+    assert [level for level, _ in records] == ["WARNING"]
+    assert str(host_id) in records[0][1]
+    assert "newer Imbue Studio" in records[0][1]
 
 
 # Retries without waiting, so the tests about the transient retry do not sleep out the production backoff.

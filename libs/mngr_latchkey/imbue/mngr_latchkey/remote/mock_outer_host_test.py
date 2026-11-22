@@ -15,7 +15,9 @@ fake container home), ``ssh-keygen``
 and downloads only what a test serves) and the one ``stat`` probe that says
 whether the runtime directory is RAM-backed.
 The install itself (apt, dpkg) is faked too: the bootstrap command unpacks
-whatever ``.deb`` was last uploaded. The package's ``postinst`` is not part of
+whatever ``.deb`` was last uploaded. The file recording the generation of the
+machine's software lives under the machine's root like everything else: a
+command that names it at its real path reads the fake machine's. The package's ``postinst`` is not part of
 that, but ``run_postinst`` runs it for real on the fake machine, where
 ``node``, ``npm``, ``systemctl``, ``sshd`` and ``uname`` are faked for it as on
 a machine that already has Node.js and the pinned latchkey CLI.
@@ -66,10 +68,12 @@ from imbue.mngr_latchkey.filed_permission_requests import FILED_REQUEST_FILE_SUF
 from imbue.mngr_latchkey.remote._machine import ANSWER_PREFIX
 from imbue.mngr_latchkey.remote._machine import MACHINE_ENCRYPTION_KEY_FILENAME
 from imbue.mngr_latchkey.remote._machine import MACHINE_GATEWAY_PASSWORD_FILENAME
+from imbue.mngr_latchkey.remote._machine import MACHINE_GENERATION_FILE
 from imbue.mngr_latchkey.remote._machine import OUTCOME_DONE_MARKER
 from imbue.mngr_latchkey.remote._machine import REMOTE_COMMAND_NAME
 from imbue.mngr_latchkey.remote._machine import REMOTE_LATCHKEY_DIR_NAME
 from imbue.mngr_latchkey.remote._machine import _ANNOUNCE_DEVICE_SUBCOMMAND
+from imbue.mngr_latchkey.remote._machine import _ANSWER_CONTAINER_EXTRA_HOSTS
 from imbue.mngr_latchkey.remote._machine import _ANSWER_FILED_PERMISSION_REQUESTS
 from imbue.mngr_latchkey.remote._machine import _ANSWER_HAS_CONTAINER_TUNNEL_KEY
 from imbue.mngr_latchkey.remote._machine import _ANSWER_HAS_CREDENTIAL_STORE
@@ -79,6 +83,7 @@ from imbue.mngr_latchkey.remote._machine import _APPLY_STATE_SUBCOMMAND
 from imbue.mngr_latchkey.remote._machine import _FORGET_REQUEST_SUBCOMMAND
 from imbue.mngr_latchkey.remote._machine import _LIST_REQUESTS_SUBCOMMAND
 from imbue.mngr_latchkey.remote._machine import _READ_STATE_SUBCOMMAND
+from imbue.mngr_latchkey.remote._machine import machine_generation_check
 from imbue.mngr_latchkey.remote._mirror import machine_store_dir
 from imbue.mngr_latchkey.remote._mirror import materialize_machine_store
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
@@ -109,7 +114,7 @@ from imbue.mngr_latchkey.testing import read_deb_tar
 MACHINE_KEY = "machine-key-5518"
 
 # The docker bridge address a fake machine resolves by default: where its
-# owner-exec daemon and latchkey gateway bind.
+# latchkey gateway binds.
 DEFAULT_DOCKER_BRIDGE_ADDRESS = "172.17.0.1"
 
 # The ``--add-host`` mapping the VPS provider creates every container with, as
@@ -145,6 +150,18 @@ class WrittenFile(MutableModel):
     content: bytes = Field(description="Bytes written")
     mode: str | None = Field(default=None, description="chmod mode requested (if any)")
     is_atomic: bool = Field(default=True, description="Whether the write was requested atomically (tmp + rename)")
+
+
+def machine_command_lines(command: str) -> list[str]:
+    """The lines of a machine command from the one that runs the package's command on; empty for any other command.
+
+    What precedes that line is the generation check every machine command carries.
+    """
+    lines = command.splitlines()
+    command_line_idx = next(
+        (idx for idx, line in enumerate(lines) if line.startswith(f"{REMOTE_COMMAND_NAME} ")), None
+    )
+    return lines[command_line_idx:] if command_line_idx is not None else []
 
 
 def rooted_layout(root: Path) -> RemotePackageLayout:
@@ -256,6 +273,15 @@ class FakeVps(MutableModel):
 
     def run_under_key(self, key: str) -> None:
         self.run_under(MACHINE_ENCRYPTION_KEY_FILENAME, key)
+
+    def hold_generation(self, content: str) -> None:
+        """Leave the machine's generation file holding ``content``, as the package installed on it last wrote it."""
+        self.layout.generation_file.parent.mkdir(parents=True, exist_ok=True)
+        self.layout.generation_file.write_text(content)
+
+    def recorded_generation(self) -> str | None:
+        """What the machine's generation file holds, or ``None`` when it has none."""
+        return self.layout.generation_file.read_text() if self.layout.generation_file.is_file() else None
 
     def lose_key(self) -> None:
         """Leave the machine without its own key, as one whose latchkey directory lost it."""
@@ -443,9 +469,9 @@ class FakeVps(MutableModel):
         """Every document a machine command carried, entry by entry and decoded."""
         documents: list[dict[str, bytes]] = []
         for command in self.recorded_commands():
-            first_line, *document_lines = command.splitlines()
-            if first_line.startswith(REMOTE_COMMAND_NAME):
-                entries = (line.split(" ", 1) for line in document_lines[:-1])
+            lines = machine_command_lines(command)
+            if lines:
+                entries = (line.split(" ", 1) for line in lines[1:-1])
                 documents.append({name: base64.b64decode(value) for name, value in entries})
         return documents
 
@@ -464,17 +490,22 @@ class FakeVps(MutableModel):
                 command=command, timeout_seconds=timeout_seconds, is_kept_out_of_logs=is_command_logging_suppressed()
             )
         )
-        # The owner-exec vm daemon's install and start (which curl a release and
-        # drive systemd) and its docker-bridge probe are answered rather than
-        # run; the package bootstrap (apt, dpkg) is acted out by unpacking the
-        # uploaded package; everything else runs on the fake machine.
-        if "owner-exec" in command:
-            return CommandResult(stdout="", stderr="", success=True)
+        # The docker-bridge probe is answered rather than run, behind the
+        # generation check it carries; the package bootstrap (apt, dpkg) is
+        # acted out by unpacking the uploaded package; everything else runs on
+        # the fake machine, whose generation file is the one under its root.
         if "addr show docker0" in command:
-            return CommandResult(stdout=f"{self.docker_bridge_address}\n", stderr="", success=True)
+            return self._run_shell(
+                "\n".join(
+                    (
+                        machine_generation_check(self.layout.generation_file, None),
+                        f"printf '%s\\n' '{self.docker_bridge_address}'",
+                    )
+                )
+            )
         if "dpkg -i" in command:
             return self._install_uploaded_package()
-        return self._run_shell(command)
+        return self._run_shell(command.replace(str(MACHINE_GENERATION_FILE), str(self.layout.generation_file)))
 
     def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = True) -> None:
         self.written.append(WrittenFile(path=str(path), content=content, mode=mode, is_atomic=is_atomic))
@@ -636,14 +667,22 @@ class ScriptedOuter(MutableModel):
     """An outer host that runs nothing: it answers by command substring and logs commands and writes in order.
 
     A ``read-state`` is answered as a machine holding nothing whose home is
-    ``home``, an ``apply-state`` as applied, and any other command with an
-    empty success -- unless ``result_by_substring`` names it (first match
-    wins). Implements only the subset of ``OuterHostInterface`` the code under
-    test touches.
+    ``home`` (saying how its container was created only when
+    ``container_extra_hosts`` is set), an ``apply-state`` as applied, and any
+    other command with an empty success -- unless ``result_by_substring`` names
+    it (first match wins). Implements only the subset of ``OuterHostInterface``
+    the code under test touches.
     """
 
     name: str = Field(default="vps-test", description="Display name returned by get_name")
     home: Path = Field(default=Path("/root"), description="The home a read-state answers with.")
+    container_extra_hosts: tuple[str, ...] | None = Field(
+        default=None,
+        description=(
+            "The ``--add-host`` mappings a read-state says the container was created with; ``None`` for a "
+            "read-state that does not say how the container was created."
+        ),
+    )
     docker_bridge_address: str = Field(
         default=DEFAULT_DOCKER_BRIDGE_ADDRESS, description="What the docker-bridge probe is answered with."
     )
@@ -680,7 +719,7 @@ class ScriptedOuter(MutableModel):
                 return result
         if "addr show docker0" in command:
             return CommandResult(stdout=f"{self.docker_bridge_address}\n", stderr="", success=True)
-        canned = canned_machine_answer(command, self.home)
+        canned = canned_machine_answer(command, self.home, self.container_extra_hosts)
         return canned if canned is not None else CommandResult(stdout="", stderr="", success=True)
 
     def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = True) -> None:
@@ -704,9 +743,14 @@ def scripted_outer(**kwargs: object) -> tuple[OuterHostInterface, ScriptedOuter]
     return cast(OuterHostInterface, stub), stub
 
 
-def canned_machine_answer(command: str, home: Path) -> CommandResult | None:
+def canned_machine_answer(
+    command: str,
+    home: Path,
+    # The ``--add-host`` mappings a read says the container was created with, or ``None`` for a read that does not say.
+    container_extra_hosts: tuple[str, ...] | None,
+) -> CommandResult | None:
     """What a machine holding nothing answers one of the package's commands with; ``None`` for any other command."""
-    first_line = command.split("\n", 1)[0]
+    first_line = next(iter(machine_command_lines(command)), "")
     if first_line.startswith(f"{REMOTE_COMMAND_NAME} {_READ_STATE_SUBCOMMAND}"):
         answers = {
             _ANSWER_PACKAGE_VERSION: b"0+test",
@@ -714,6 +758,8 @@ def canned_machine_answer(command: str, home: Path) -> CommandResult | None:
             _ANSWER_HAS_CREDENTIAL_STORE: b"0",
             _ANSWER_HAS_CONTAINER_TUNNEL_KEY: b"0",
         }
+        if container_extra_hosts is not None:
+            answers[_ANSWER_CONTAINER_EXTRA_HOSTS] = json.dumps(list(container_extra_hosts)).encode("utf-8")
         lines = [f"{ANSWER_PREFIX}{name}={base64.b64encode(value).decode('ascii')}" for name, value in answers.items()]
         return CommandResult(stdout="\n".join((*lines, OUTCOME_DONE_MARKER)) + "\n", stderr="", success=True)
     if first_line.startswith(f"{REMOTE_COMMAND_NAME} {_LIST_REQUESTS_SUBCOMMAND}"):

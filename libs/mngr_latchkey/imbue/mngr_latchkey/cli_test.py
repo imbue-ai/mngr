@@ -61,6 +61,7 @@ from imbue.mngr_latchkey.migrations.runner import CURRENT_PERMISSIONS_FORMAT_VER
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.remote._mirror import generate_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import machine_key_path
+from imbue.mngr_latchkey.remote._mirror import record_machine_as_newer
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.store import LatchkeyForwardOwner
 from imbue.mngr_latchkey.store import acquire_forward_lock
@@ -772,6 +773,41 @@ def test_register_agent_fails_loudly_when_the_host_has_a_machine_it_cannot_reach
 
     assert result.exit_code != 0
     assert "Registered locally" in result.output
+    assert _registered_agent_ids(latchkey_root, _HOST_ID_ONE) == {str(agent_id)}
+
+
+def test_register_agent_registers_locally_and_says_so_when_the_hosts_machine_is_recorded_as_newer(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    latchkey_root: Path,
+    fake_latchkey_binary: Path,
+    clean_latchkey_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A machine this build leaves alone is not handed the registration, and the exit names the remedy.
+
+    The host has no recorded key: without the record that its machine is
+    newer, it would be taken for a host with no machine of its own and the
+    command would report success.
+    """
+    del clean_latchkey_env
+    monkeypatch.setenv(ENV_LATCHKEY_DIRECTORY, str(latchkey_root))
+    monkeypatch.setenv(ENV_LATCHKEY_BINARY, str(fake_latchkey_binary))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    record_machine_as_newer(plugin_data_dir(latchkey_root), _HOST_ID_ONE)
+    agent_id = AgentId.generate()
+
+    result = cli_runner.invoke(
+        latchkey,
+        ["register-agent", "--host-id", str(_HOST_ID_ONE), "--agent-id", str(agent_id)],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code != 0
+    assert "Registered locally, but the machine of host" in result.output
+    assert "Update mngr" in result.output
     assert _registered_agent_ids(latchkey_root, _HOST_ID_ONE) == {str(agent_id)}
 
 

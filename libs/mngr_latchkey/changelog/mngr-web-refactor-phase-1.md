@@ -1,0 +1,9 @@
+- A provisioning pass no longer installs an owner-exec daemon on a remote host's machine, and removes the one an earlier build left there: the `owner-exec-vm` unit, the binary and version stamp under `/usr/local/bin`, and `/etc/owner-exec/`. The daemon ran any command for whoever held the owner's key, and nothing called it. The removal runs from the bootstrap script on every pass and never fails one. `owner_exec_vm.py` and its version pin are gone.
+
+- The machine's firewall policy accepts only the gateway's port (1989) from the docker bridge, and drops port 8794, the daemon's, on every interface. A build from before this one puts the daemon back on its own next pass, so the port stays named until every such build is gone.
+
+- The `mngr-latchkey` package records a generation, a whole number, in `/etc/mngr-machine/generation` on the machine. This package is generation 1, and a machine without the file is generation 1.
+
+- A build leaves a machine of a newer generation alone. Every command sent to a machine starts with a check of that file: the pass's first command, the bootstrap script, and each of the five `mngr-latchkey` commands. On a newer machine the command runs nothing and the caller raises `MachineNewerError`. `mngr latchkey forward` logs once, at `INFO`, that the machine is left alone until this computer is updated, records it in a `machine_newer` marker in the host's directory, and sends the machine no further pass or announcement until the host stops, moves, or the forward restarts. A pass that provisions the machine removes the marker.
+
+- `has_machine_of_its_own` answers yes for a host whose machine is recorded as newer, with or without a recorded key. `mngr latchkey register-agent` for such a host registers the agent locally and exits with an error that says to update.

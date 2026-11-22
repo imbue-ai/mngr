@@ -29,8 +29,11 @@ from imbue.minds.desktop_client.testing import device_id_for_test
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_latchkey.devices import DesktopDeviceId
 from imbue.mngr_latchkey.filed_permission_requests import FiledPermissionRequest
+from imbue.mngr_latchkey.remote._mirror import forget_machine_recorded_as_newer
+from imbue.mngr_latchkey.remote._mirror import record_machine_as_newer
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
@@ -304,6 +307,56 @@ def test_a_workspace_without_a_machine_of_its_own_is_never_synced(tmp_path: Path
 
     assert scenario.access.opened == []
     assert scenario.gateway_client.filed_elsewhere == {}
+
+
+@pytest.mark.parametrize("is_machine_of_its_own", [True, False], ids=["provisioned-from-here", "never-provisioned"])
+def test_a_machine_recorded_as_newer_is_never_synced(tmp_path: Path, is_machine_of_its_own: bool) -> None:
+    """This build sends such a machine no command, so what it keeps and what this desktop holds are both left."""
+    scenario = _sync(
+        tmp_path,
+        filed=(_filed("kept-by-the-machine"),),
+        pending_for_host=(("pending-here", timedelta(minutes=10)),),
+        is_machine_of_its_own=is_machine_of_its_own,
+    )
+    record_machine_as_newer(scenario.access.latchkey.plugin_data_dir, scenario.host_id)
+
+    scenario.sync.sync_every_machine()
+
+    assert scenario.access.opened == []
+    assert scenario.gateway_client.filed_elsewhere == {}
+    assert scenario.gateway_client.deleted_request_ids == ()
+
+
+def test_skipping_a_machine_recorded_as_newer_is_said_once_for_as_long_as_it_stays_newer(tmp_path: Path) -> None:
+    """The machines are listed on every wake of the sync, so a skip said each time would log while nothing happens."""
+    scenario = _sync(tmp_path, filed=())
+    data_dir = scenario.access.latchkey.plugin_data_dir
+    skip_message = "Skipping the permission request sync"
+
+    with capture_loguru(level="DEBUG") as log_output:
+        record_machine_as_newer(data_dir, scenario.host_id)
+        scenario.sync.sync_every_machine()
+        scenario.sync.sync_every_machine()
+        skips_said_while_newer = log_output.getvalue().count(skip_message)
+        forget_machine_recorded_as_newer(data_dir, scenario.host_id)
+        scenario.sync.sync_every_machine()
+        record_machine_as_newer(data_dir, scenario.host_id)
+        scenario.sync.sync_every_machine()
+
+    assert skips_said_while_newer == 1
+    assert log_output.getvalue().count(skip_message) == 2
+    assert scenario.access.opened == [(str(scenario.agent_id), scenario.host_id)]
+
+
+def test_a_verdict_is_not_carried_to_a_machine_recorded_as_newer(tmp_path: Path) -> None:
+    scenario = _sync(tmp_path, filed=())
+    record_machine_as_newer(scenario.access.latchkey.plugin_data_dir, scenario.host_id)
+
+    with scenario.access.concurrency_group:
+        scenario.sync.forget_in_background("answered-now", scenario.agent_id)
+
+    assert scenario.machine.forgotten == []
+    assert scenario.access.opened == []
 
 
 def test_a_machine_that_cannot_be_read_is_left_for_the_next_pass(tmp_path: Path) -> None:

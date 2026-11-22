@@ -40,3 +40,30 @@ Feature: Remote-compatibility invariants
   @absent-fields-preserved-on-push
   Rule: A record field absent from a push keeps its stored value
     The server merges record pushes preserve-on-absent: a field the pushing client never named keeps its stored value, while an explicitly sent null clears it, so an older client's push cannot reset a field it does not know about.
+
+  @newer-machine-left-alone
+  Rule: A workspace machine newer than this client is left alone, and its workspace stays usable
+    The client installs none of its own software on the machine and sends it no command, so the software a newer client installed there keeps running untouched.
+    The workspace still opens, and its agents keep reaching third-party services through the machine.
+    Every operation that reads or changes what the machine holds is refused on this client with a message telling the user to update the app, and nothing about the workspace is answered from this client's own credential store.
+    Rationale: this client can neither read that machine's state nor put its own software back without breaking what the newer client set up.
+
+    @newer-machine-permissions-unavailable
+    Example: The permissions of a workspace on a newer machine name the update
+      Given a remote workspace whose machine is newer than this client
+      And a service connected on this computer
+      When the user opens the workspace's permissions
+      Then the permissions are reported as unavailable with a message telling the user to update the app
+      And the service connected on this computer is not shown as the workspace's
+
+    @newer-machine-request-stays-pending
+    Scenario Outline: A permission request of a workspace on a newer machine cannot be answered here
+      Given a permission request pending for a remote workspace whose machine is newer than this client
+      When the user answers the request with "<verdict>"
+      Then the answer is refused with a message telling the user to update the app
+      And the request stays pending
+
+      Examples:
+        | verdict |
+        | approve |
+        | deny    |

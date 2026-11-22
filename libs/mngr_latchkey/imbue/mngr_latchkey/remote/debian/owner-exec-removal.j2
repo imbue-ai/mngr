@@ -1,0 +1,16 @@
+# CLEANUP: drop this block when the doorway's package replaces this one (phase
+# 7 of specs/web-desktop-consolidation); that package carries the same removal.
+# An earlier build ran an owner-exec daemon on this machine, which nothing
+# calls. Removed on every pass, since a build from before this one puts it
+# back. Nothing here may fail the script: the firewall policy the package has
+# just loaded is what keeps a daemon that lingers unreachable. The unit is
+# deleted rather than masked, because such a build writes its unit by renaming
+# a file onto this path, which replaces a mask as it replaces nothing.
+if [ -e '{{ retired_owner_exec_unit_path }}' ] || [ -e '{{ retired_owner_exec_binary_path }}' ] \
+  || [ -e '{{ retired_owner_exec_version_stamp_path }}' ] || [ -e '{{ layout.retired_owner_exec_config_dir }}' ]; then
+  systemctl disable --now '{{ retired_owner_exec_unit_name }}' >/dev/null 2>&1 || true
+  rm -f '{{ retired_owner_exec_unit_path }}' '{{ retired_owner_exec_binary_path }}' \
+    '{{ retired_owner_exec_version_stamp_path }}' || true
+  rm -rf '{{ layout.retired_owner_exec_config_dir }}' || true
+  systemctl daemon-reload >/dev/null 2>&1 || true
+fi

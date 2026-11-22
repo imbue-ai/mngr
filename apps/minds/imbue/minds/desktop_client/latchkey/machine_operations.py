@@ -37,6 +37,12 @@ stood would erase on the machine whatever it never knew about.
 A local workspace has no machine of its own -- its agents run here, on the
 credentials and the permissions file this computer keeps -- so for those every
 method is a no-op and the local edit is the whole change.
+
+A workspace whose machine a newer Imbue Studio set up has one this build leaves
+alone. Every method fails for it, with the sentence that tells the user to
+update (:data:`~imbue.minds.desktop_client.latchkey.machine_access.MACHINE_NEWER_FAILURE`):
+at once and without a remote command when the machine is recorded as newer,
+and from the machine's own answer when it is not recorded yet.
 """
 
 from collections.abc import Generator
@@ -49,7 +55,9 @@ from pydantic import Field
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.latchkey.machine_access import MACHINE_EXCHANGE_FAILURES
+from imbue.minds.desktop_client.latchkey.machine_access import MACHINE_NEWER_FAILURE
 from imbue.minds.desktop_client.latchkey.machine_access import MachineAccess
+from imbue.minds.desktop_client.latchkey.machine_access import MachineRecordedAsNewerError
 from imbue.minds.desktop_client.latchkey.machine_access import MachineUnreachableError
 from imbue.minds.desktop_client.ui_models import ErrorRemedy
 from imbue.minds.desktop_client.user_facing_failure import UserFacingFailure
@@ -60,7 +68,9 @@ from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationContext
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
 from imbue.mngr_latchkey.remote.credentials import read_host_desktop_egress_rules
 from imbue.mngr_latchkey.remote.credentials import read_host_permissions
+from imbue.mngr_latchkey.remote.errors import MachineNewerError
 from imbue.mngr_latchkey.remote.errors import MachineTransferError
+from imbue.mngr_latchkey.remote.errors import is_caused_by_newer_machine
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 
 # What a workspace whose permissions a newer Imbue Studio wrote is told: only a newer one can read them.
@@ -80,7 +90,8 @@ class MachineOperationError(Exception):
     so whatever was asked for has not happened on the machine and the caller
     has to say so. The message is the technical account; ``explained_failure``
     is the sentence for a cause that explains itself to the user (the machine
-    could not be located, its permissions are in a newer format), and None when
+    could not be located, its permissions are in a newer format, the machine
+    itself was set up by a newer Imbue Studio), and None when
     the caller's own sentence for the action it attempted is the right one.
     """
 
@@ -102,10 +113,21 @@ class MachineOperationError(Exception):
 
 
 def _explained_failure(cause: Exception) -> UserFacingFailure | None:
-    if isinstance(cause, MachineUnreachableError):
-        return cause.failure
-    if isinstance(cause, PermissionsFormatNewerError):
-        return PERMISSIONS_FORMAT_NEWER_FAILURE
+    """The sentence for a failure that explains itself, looked for in ``cause`` and in every error that caused it.
+
+    A cause that explains itself is routinely wrapped on its way here (a
+    machine command's failure, in the error of the transfer it was part of),
+    so the first one found along the chain is what the user is told.
+    """
+    link: BaseException | None = cause
+    while link is not None:
+        if isinstance(link, MachineUnreachableError):
+            return link.failure
+        if isinstance(link, PermissionsFormatNewerError):
+            return PERMISSIONS_FORMAT_NEWER_FAILURE
+        if isinstance(link, MachineNewerError):
+            return MACHINE_NEWER_FAILURE
+        link = link.__cause__
     return None
 
 
@@ -325,5 +347,9 @@ class MachineOperator(MutableModel):
             with self.access.open_machine(workspace_agent_id, host_id) as machine:
                 yield machine
         except MACHINE_EXCHANGE_FAILURES as e:
-            logger.warning("Failed a machine operation for workspace {}: {}", workspace_agent_id, e)
+            if is_caused_by_newer_machine(e) or isinstance(e, MachineRecordedAsNewerError):
+                # Nothing went wrong: this build leaves that machine alone, and the caller says so.
+                logger.debug("Left the newer machine of workspace {} alone: {}", workspace_agent_id, e)
+            else:
+                logger.warning("Failed a machine operation for workspace {}: {}", workspace_agent_id, e)
             raise MachineOperationError(str(e), _explained_failure(e)) from e

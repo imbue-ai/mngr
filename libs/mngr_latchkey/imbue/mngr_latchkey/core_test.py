@@ -42,6 +42,7 @@ from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import LocalFileDescriptorsExhaustedError
 from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentId
@@ -110,10 +111,15 @@ from imbue.mngr_latchkey.discovery import _describe_connect_errors
 from imbue.mngr_latchkey.discovery import _describe_provider
 from imbue.mngr_latchkey.discovery import is_transient_remote_wiring_error
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
+from imbue.mngr_latchkey.remote._machine import OUTCOME_MACHINE_NEWER_MARKER
 from imbue.mngr_latchkey.remote._machine import REMOTE_COMMAND_NAME
 from imbue.mngr_latchkey.remote._machine import _ANNOUNCE_DEVICE_SUBCOMMAND
+from imbue.mngr_latchkey.remote._mirror import is_machine_recorded_as_newer
+from imbue.mngr_latchkey.remote.errors import MachineNewerError
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
+from imbue.mngr_latchkey.remote.mock_outer_host_test import OUTER_HOST_EXTRA_HOST
 from imbue.mngr_latchkey.remote.mock_outer_host_test import ScriptedOuter
+from imbue.mngr_latchkey.remote.mock_outer_host_test import machine_command_lines
 from imbue.mngr_latchkey.service_plugins import plugins_dir
 from imbue.mngr_latchkey.store import admin_permissions_path
 from imbue.mngr_latchkey.store import default_permissions_path
@@ -2273,7 +2279,7 @@ def test_an_announcement_the_machine_refuses_is_reported_and_retried_next_cycle(
 
 
 def _announcement_document(command: str) -> dict[str, bytes]:
-    first_line, *lines = command.splitlines()
+    first_line, *lines = machine_command_lines(command)
     assert first_line.startswith(f"{REMOTE_COMMAND_NAME} {_ANNOUNCE_DEVICE_SUBCOMMAND}")
     return {name: base64.b64decode(value) for name, value in (line.split(" ", 1) for line in lines[:-1])}
 
@@ -3303,6 +3309,191 @@ def test_non_transient_provisioning_failure_still_escapes_the_worker(
     assert provisioning_hosts == set()
     assert pending == set()
     assert streaks == {}
+
+
+def _newer_machine_notices(captured: list[tuple[str, str]], host_id: HostId) -> list[str]:
+    return [
+        message
+        for level, message in captured
+        if level == "INFO" and str(host_id) in message and "Leaving the machine" in message
+    ]
+
+
+def test_a_pass_that_meets_a_newer_machine_records_it_and_is_not_run_again(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A machine of a newer generation is no failure: it is recorded for the app, said once, and left alone.
+
+    Nothing a retry fixes, so no wiring failure is recorded and no later cycle
+    runs the pass; the host stopping and starting is what looks again.
+    """
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    agent_id = AgentId()
+    host_id = HostId()
+    ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=2222, key_path=tmp_path / "k")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _ProvisionFailureHandler(
+            latchkey=manager,
+            tunnel_manager=_RecordingTunnelManager(),
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
+        )
+        handler._error_to_raise = MachineNewerError("vps.example.test")
+        with _captured_log_records() as captured:
+            _mark_provisioning_in_flight(handler, agent_id, host_id)
+            handler._run_remote_gateway_provisioning(agent_id, host_id, ssh_info, "imbue_cloud", _ASSIGNED_DEVICE_PORT)
+            is_dispatched_next_cycle = handler._maybe_dispatch_remote_gateway_provisioning(
+                agent_id, host_id, ssh_info, "imbue_cloud", _ASSIGNED_DEVICE_PORT
+            )
+        with handler._remote_hosts_lock:
+            provisioning_hosts = set(handler._provisioning_hosts)
+            streaks = dict(handler._transient_failure_streak_by_key)
+        with handler._pending_lock:
+            pending = set(handler._pending_remote_agents)
+        is_provisioned = handler._is_provisioned(host_id)
+        # The host stops and starts, which is what makes a pass look again.
+        handler._error_to_raise = None
+        handler._tear_down_stopped_agent(agent_id, host_id)
+        is_dispatched_after_a_restart = handler._maybe_dispatch_remote_gateway_provisioning(
+            agent_id, host_id, ssh_info, "imbue_cloud", _ASSIGNED_DEVICE_PORT
+        )
+        _wait_for_provisioning_passes(handler, 1)
+
+    assert is_machine_recorded_as_newer(manager.plugin_data_dir, host_id)
+    assert len(_newer_machine_notices(captured, host_id)) == 1
+    assert _error_messages_mentioning(captured, host_id) == []
+    assert not any(level == "WARNING" for level, _ in captured)
+    assert streaks == {}
+    assert provisioning_hosts == set()
+    assert pending == set()
+    # Not provisioned, so no cycle announces this computer to the machine.
+    assert not is_provisioned
+    assert handler._announcements == []
+    assert not is_dispatched_next_cycle
+    assert is_dispatched_after_a_restart
+    assert handler._provisioned == [(agent_id, host_id)]
+
+
+def test_an_announcement_that_meets_a_newer_machine_stops_announcing_to_it(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A machine another of the user's computers upgraded while this one runs is found by the next announcement.
+
+    It is handled as a pass that meets one is: recorded, said once, no wiring
+    failure, and no longer counted as provisioned, which is what stops the
+    announcements every later cycle would send.
+    """
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    agent_id = AgentId()
+    host_id = HostId()
+    ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=2222, key_path=tmp_path / "k")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _AnnouncementRecordingHandler(
+            latchkey=manager,
+            tunnel_manager=_RecordingTunnelManager(),
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
+            provider=_StubProvider(outer_ssh_info=_VPS_OUTER_SSH_INFO),
+        )
+        with handler._remote_hosts_lock:
+            handler._provisioned_hosts.add(str(host_id))
+        handler._announcement_error = MachineNewerError("vps.example.test")
+        with _captured_log_records() as captured:
+            handler._announce_device_if_due(host_id, "imbue_cloud", _ASSIGNED_DEVICE_PORT)
+        with handler._remote_hosts_lock:
+            is_announcing = str(host_id) in handler._announcing_hosts
+            streaks = dict(handler._transient_failure_streak_by_key)
+        is_provisioned = handler._is_provisioned(host_id)
+        is_dispatched_next_cycle = handler._maybe_dispatch_remote_gateway_provisioning(
+            agent_id, host_id, ssh_info, "imbue_cloud", _ASSIGNED_DEVICE_PORT
+        )
+
+    assert is_machine_recorded_as_newer(manager.plugin_data_dir, host_id)
+    assert len(_newer_machine_notices(captured, host_id)) == 1
+    assert _error_messages_mentioning(captured, host_id) == []
+    assert streaks == {}
+    assert not is_announcing
+    assert handler._announced == []
+    assert not is_provisioned
+    assert not is_dispatched_next_cycle
+    assert handler._provisioned == []
+
+
+class _ScriptedMachineProvider(MutableModel):
+    """Provider stub whose one host's machine is a scripted outer host, for a pass that runs for real."""
+
+    outer: ScriptedOuter = Field(description="The machine every host lookup opens")
+
+    @contextmanager
+    def outer_host_for(self, host_id: HostId) -> Generator[OuterHostInterface | None, None, None]:
+        del host_id
+        yield cast(OuterHostInterface, self.outer)
+
+    def get_container_loopback_ssh_port(self, host_id: HostId) -> int | None:
+        del host_id
+        return None
+
+
+class _ScriptedMachineHandler(LatchkeyDiscoveryHandler):
+    """Handler whose provisioning passes run for real, against a scripted outer host."""
+
+    provider: _ScriptedMachineProvider = Field(description="The stub provider every lookup returns")
+
+    def _provider_for_route(self, provider_name: str) -> ProviderInstanceInterface:
+        del provider_name
+        return cast(ProviderInstanceInterface, self.provider)
+
+
+def test_a_pass_that_provisions_a_machine_drops_the_record_that_it_was_newer(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A machine taken back to this build's generation returns to normal with the next pass that reaches it."""
+    latchkey_directory = tmp_path / "desktop-latchkey"
+    latchkey_directory.mkdir()
+    manager = Latchkey(
+        latchkey_directory=latchkey_directory, latchkey_binary=str(_make_fake_latchkey_binary(tmp_path))
+    )
+    newer_answer = CommandResult(stdout=f"{OUTCOME_MACHINE_NEWER_MARKER}\n", stderr="", success=True)
+    machine = ScriptedOuter(
+        result_by_substring={"addr show docker0": newer_answer}, container_extra_hosts=(OUTER_HOST_EXTRA_HOST,)
+    )
+    agent_id = AgentId()
+    host_id = HostId()
+    ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=2222, key_path=tmp_path / "k")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _ScriptedMachineHandler(
+            latchkey=manager,
+            tunnel_manager=_RecordingTunnelManager(),
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
+            provider=_ScriptedMachineProvider(outer=machine),
+        )
+        _mark_provisioning_in_flight(handler, agent_id, host_id)
+        handler._run_remote_gateway_provisioning(agent_id, host_id, ssh_info, "imbue_cloud", None)
+        is_recorded_while_newer = is_machine_recorded_as_newer(manager.plugin_data_dir, host_id)
+        commands_while_newer = list(machine.recorded_commands())
+        uploads_while_newer = list(machine.written)
+        is_provisioned_while_newer = handler._is_provisioned(host_id)
+
+        # The machine is taken back to this build's generation, and its host stops and starts.
+        machine.result_by_substring = {}
+        handler._tear_down_stopped_agent(agent_id, host_id)
+        _mark_provisioning_in_flight(handler, agent_id, host_id)
+        handler._run_remote_gateway_provisioning(agent_id, host_id, ssh_info, "imbue_cloud", None)
+
+    assert is_recorded_while_newer
+    # The one command that found out, and nothing uploaded.
+    assert len(commands_while_newer) == 1
+    assert uploads_while_newer == []
+    assert not is_provisioned_while_newer
+    assert not is_machine_recorded_as_newer(manager.plugin_data_dir, host_id)
+    assert any("apply-state" in command for command in machine.recorded_commands())
+    assert handler._is_provisioned(host_id)
 
 
 def test_provisioning_pass_logs_how_many_hosts_are_provisioning_concurrently(

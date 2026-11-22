@@ -80,6 +80,7 @@ from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationError
 from imbue.mngr_latchkey.migrations.runner import migrate_permissions
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
 from imbue.mngr_latchkey.remote.credentials import has_machine_of_its_own
+from imbue.mngr_latchkey.remote.credentials import is_machine_recorded_as_newer
 from imbue.mngr_latchkey.remote.credentials import read_host_permissions
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.sentry import setup_forward_sentry
@@ -473,7 +474,9 @@ def _register_agent_command(ctx: click.Context, **kwargs: Any) -> None:
     the agent is registered on that fresh copy, and the result is handed back
     to the machine, since its gateway enforces its own copy. A machine that
     cannot be read still gets the agent registered in the copy here, which
-    the desktop gateway's own per-agent gate reads, and the exit says so.
+    the desktop gateway's own per-agent gate reads, and the exit says so. So
+    does a machine recorded as running software of a newer generation than
+    this build's, which is not contacted at all.
     """
     del kwargs
     mngr_ctx, _output_opts, opts = setup_command_context(
@@ -504,6 +507,13 @@ def _register_agent_command(ctx: click.Context, **kwargs: Any) -> None:
     if not is_machine_to_update:
         _register_agent_locally(latchkey, host_id, agent_id)
         return
+    if is_machine_recorded_as_newer(latchkey.plugin_data_dir, host_id):
+        _register_agent_locally(latchkey, host_id, agent_id)
+        raise click.ClickException(
+            f"Registered locally, but the machine of host {host_id} was set up by a newer version of mngr than "
+            "this one, which leaves it alone: the agent is not registered there. Update mngr, or the app that runs "
+            "it, on this computer and register the agent again."
+        )
 
     try:
         with _machine_of_host(mngr_ctx, latchkey, host_id, agent_id) as machine:

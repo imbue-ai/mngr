@@ -1,6 +1,8 @@
+from collections.abc import Callable
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Final
 from typing import cast
 
 import pytest
@@ -10,12 +12,18 @@ from pydantic import SkipValidation
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.desktop_client.latchkey.machine_access import MACHINE_NEWER_FAILURE
 from imbue.minds.desktop_client.latchkey.machine_access import MachineAccess
+from imbue.minds.desktop_client.latchkey.machine_access import MachineRecordedAsNewerError
 from imbue.minds.desktop_client.latchkey.machine_access import MachineUnreachableError
 from imbue.minds.desktop_client.latchkey.machine_access import _load_provider_context
+from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
+from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
+from imbue.minds.desktop_client.latchkey.machine_operations import describe_machine_failure
 from imbue.minds.desktop_client.latchkey.testing import FakeAccountsLatchkey
 from imbue.minds.desktop_client.latchkey.testing import FixedHostBackendResolver
 from imbue.minds.desktop_client.testing import device_id_for_test
+from imbue.minds.desktop_client.ui_models import ErrorRemedy
 from imbue.mngr.api.providers import reset_provider_instances
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.pre_readers import get_user_config_path
@@ -26,6 +34,7 @@ from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_latchkey.remote._mirror import record_machine_as_newer
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 
 
@@ -258,3 +267,93 @@ def test_settings_that_will_not_load_keep_the_provider_set_already_loaded(tmp_pa
 
         assert access._provider_context() is loaded_ctx
         assert not loaded_ctx.suspension_watchdog._shutdown_event.is_set()
+
+
+def test_a_machine_recorded_as_newer_is_not_opened_and_names_the_update(tmp_path: Path) -> None:
+    """The provider is never asked for the machine: this build sends it nothing."""
+    provider = _StubProvider(outer=cast(OuterHostInterface, _RemoteOuter()))
+    access, host_id, agent_id = _access(tmp_path, provider)
+    record_machine_as_newer(access.latchkey.plugin_data_dir, host_id)
+
+    with pytest.raises(MachineRecordedAsNewerError) as refused:
+        with access.open_machine(agent_id, host_id):
+            pass
+
+    assert refused.value.failure == MACHINE_NEWER_FAILURE
+    assert MACHINE_NEWER_FAILURE.remedy is ErrorRemedy.UPDATE_APP
+    # A lookup would have refreshed the stale listing.
+    assert provider.reset_count == 0
+    assert access.is_workspace_machine_recorded_as_newer(agent_id)
+    assert not access.is_workspace_machine_recorded_as_newer(str(AgentId()))
+
+
+def test_a_host_never_provisioned_from_here_whose_machine_is_newer_still_has_a_machine_of_its_own(
+    tmp_path: Path,
+) -> None:
+    """Without the record it would read as a host whose first pass has not finished, and be answered from here."""
+    latchkey_directory = tmp_path / "latchkey"
+    latchkey_directory.mkdir()
+    latchkey = FakeAccountsLatchkey(latchkey_directory=latchkey_directory, latchkey_binary="/nonexistent")
+    agent_id = AgentId()
+    host_id = HostId.generate()
+    access = MachineAccess(
+        latchkey=latchkey,
+        device_id=device_id_for_test("machine-access"),
+        concurrency_group=ConcurrencyGroup(name="machine-access-test"),
+        backend_resolver=FixedHostBackendResolver(
+            url_by_agent_and_service={}, fixed_host_id=host_id, known_agent_ids=(agent_id,)
+        ),
+    )
+    host_before_the_record = access.machine_host_for(str(agent_id))
+
+    record_machine_as_newer(latchkey.plugin_data_dir, host_id)
+
+    assert host_before_the_record is None
+    assert access.machine_host_for(str(agent_id)) == host_id
+
+
+_MACHINE_OPERATIONS: Final[tuple[tuple[str, Callable[[MachineOperator, str], None]], ...]] = (
+    ("refresh", lambda operator, agent_id: operator.refresh(agent_id)),
+    ("connect_service", lambda operator, agent_id: operator.connect_service(agent_id, "slack", "a@example.com")),
+    (
+        "disconnect_account",
+        lambda operator, agent_id: operator.disconnect_account(agent_id, "slack", "a@example.com", False),
+    ),
+    (
+        "connect_service_with_permissions",
+        lambda operator, agent_id: operator.connect_service_with_permissions(agent_id, "slack", "a@example.com"),
+    ),
+    (
+        "connect_service_with_permissions_and_desktop_egress_rules",
+        lambda operator, agent_id: operator.connect_service_with_permissions_and_desktop_egress_rules(
+            agent_id, "slack", "a@example.com"
+        ),
+    ),
+    ("push_permissions", lambda operator, agent_id: operator.push_permissions(agent_id)),
+    (
+        "push_permissions_and_desktop_egress_rules",
+        lambda operator, agent_id: operator.push_permissions_and_desktop_egress_rules(agent_id),
+    ),
+)
+
+
+@pytest.mark.witnesses(
+    "remote-compatibility.newer-machine-left-alone",
+    partial="covers the app's machine operations; the provisioning pass and discovery are tested in mngr_latchkey",
+)
+@pytest.mark.parametrize(
+    "operation", [operation for _, operation in _MACHINE_OPERATIONS], ids=[name for name, _ in _MACHINE_OPERATIONS]
+)
+def test_every_machine_operation_on_a_machine_recorded_as_newer_fails_at_once_with_the_update_sentence(
+    tmp_path: Path, operation: Callable[[MachineOperator, str], None]
+) -> None:
+    provider = _StubProvider(outer=cast(OuterHostInterface, _RemoteOuter()))
+    access, host_id, agent_id = _access(tmp_path, provider)
+    record_machine_as_newer(access.latchkey.plugin_data_dir, host_id)
+
+    with pytest.raises(MachineOperationError) as failure:
+        operation(MachineOperator(access=access), agent_id)
+
+    assert failure.value.explained_failure == MACHINE_NEWER_FAILURE
+    assert describe_machine_failure(failure.value, "The caller's own sentence.") == MACHINE_NEWER_FAILURE
+    assert provider.reset_count == 0

@@ -16,7 +16,7 @@ closes both:
   syncs the request away itself.
 * A desktop that was **offline or asleep** while requests were filed or
   answered catches up by syncing (:meth:`MachineRequestSync.start`): for every
-  machine this desktop knows, the requests the machine keeps for this desktop
+  machine this desktop manages, the requests the machine keeps for this desktop
   and does not have here are filed on this desktop's gateway under the ids the
   machine gave them, and the ones this desktop has that the machine no longer
   keeps are dropped, since another desktop answered them. A request this
@@ -188,6 +188,10 @@ class MachineRequestSync(MutableModel):
     _wake_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _thread: ObservableThread | None = PrivateAttr(default=None)
     _attempted_host_ids: set[HostId] = PrivateAttr(default_factory=set)
+    # Hosts a pass has already said it skips for having a machine newer than
+    # this build manages. Every wake lists the machines, so saying it each time
+    # would log while nothing happens.
+    _skipped_newer_host_ids: set[HostId] = PrivateAttr(default_factory=set)
 
     def start(self) -> None:
         """Start the background sync: every known machine now, each new one as it appears, and all of them periodically."""
@@ -217,6 +221,8 @@ class MachineRequestSync(MutableModel):
 
         Nothing for a request whose agent runs on this computer, or on a machine
         this computer has not provisioned: neither went through a machine.
+        Nothing either for a machine recorded as newer than this build manages,
+        which is sent no command.
         """
         try:
             host_id = self.access.machine_host_for(str(filing_agent_id))
@@ -224,6 +230,13 @@ class MachineRequestSync(MutableModel):
             logger.warning("Could not tell which machine filed permission request {}: {}", request_id, e)
             return
         if host_id is None:
+            return
+        if self.access.is_machine_recorded_as_newer(host_id):
+            logger.debug(
+                "Left permission request {} with the machine of host {}, which is newer than this build manages",
+                request_id,
+                host_id,
+            )
             return
         start_mngr_thread(
             self.concurrency_group,
@@ -267,7 +280,12 @@ class MachineRequestSync(MutableModel):
                 self._sync_machine(workspace_agent_id, host_id)
 
     def _workspace_agent_id_by_machine_host_id(self) -> dict[HostId, str]:
-        """Every machine this desktop knows, each with one workspace it can be opened through."""
+        """Every machine this desktop manages, each with one workspace it can be opened through.
+
+        A machine recorded as newer than this build manages is left out: it is
+        sent no command, and it keeps no request for this desktop, which does
+        not announce itself to it.
+        """
         workspace_agent_id_by_host_id: dict[HostId, str] = {}
         for workspace_agent_id in self.access.backend_resolver.list_active_workspace_ids():
             try:
@@ -277,8 +295,19 @@ class MachineRequestSync(MutableModel):
                     "Could not tell whether workspace {} has a machine of its own: {}", workspace_agent_id, e
                 )
                 continue
-            if host_id is not None and host_id not in workspace_agent_id_by_host_id:
-                workspace_agent_id_by_host_id[host_id] = str(workspace_agent_id)
+            if host_id is None or host_id in workspace_agent_id_by_host_id:
+                continue
+            if self.access.is_machine_recorded_as_newer(host_id):
+                if host_id not in self._skipped_newer_host_ids:
+                    self._skipped_newer_host_ids.add(host_id)
+                    logger.debug(
+                        "Skipping the permission request sync of host {} while its machine is newer than this "
+                        "build manages",
+                        host_id,
+                    )
+                continue
+            self._skipped_newer_host_ids.discard(host_id)
+            workspace_agent_id_by_host_id[host_id] = str(workspace_agent_id)
         return workspace_agent_id_by_host_id
 
     def _sync_machine(self, workspace_agent_id: str, host_id: HostId) -> None:

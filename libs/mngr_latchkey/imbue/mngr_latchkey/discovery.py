@@ -95,8 +95,12 @@ from imbue.mngr_latchkey.devices import DesktopDeviceIdentity
 from imbue.mngr_latchkey.devices import DeviceRecord
 from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationContext
 from imbue.mngr_latchkey.remote._machine import announce_device
+from imbue.mngr_latchkey.remote._mirror import forget_machine_recorded_as_newer
+from imbue.mngr_latchkey.remote._mirror import record_machine_as_newer
+from imbue.mngr_latchkey.remote.errors import MachineNewerError
 from imbue.mngr_latchkey.remote.provisioning import DEFAULT_REMOTE_PACKAGE_LAYOUT
 from imbue.mngr_latchkey.remote.provisioning import provision_remote_gateway
+from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
 # How many consecutive discovery cycles a wiring step may fail with transient errors
@@ -369,6 +373,12 @@ class LatchkeyDiscoveryHandler(MutableModel):
     across all agents). A ``None`` host state is treated as unknown and stays
     on the normal path.
 
+    A host whose machine runs software of a newer generation than this build's
+    is left alone: a pass or an announcement that meets one records the machine
+    as newer for the desktop app to read, and nothing more is sent to it until
+    the host stops, moves, or this process restarts (see
+    ``_leave_newer_machine_alone``).
+
     ``UNAUTHENTICATED`` is handled separately: the host is up and its container
     is probably serving the workspace fine, but the outer sshd rejected our key,
     so provisioning has no usable door. That is also skipped, but with a warning
@@ -406,6 +416,11 @@ class LatchkeyDiscoveryHandler(MutableModel):
     # to new coordinates. A failed pass is *not* recorded here, so it retries on
     # the next cycle.
     _provisioned_hosts: set[str] = PrivateAttr(default_factory=set)
+    # host_ids whose machine a pass or an announcement found running software
+    # of a newer generation than this build's. No pass and no announcement is
+    # sent to one; the host stopping or moving to new coordinates drops it from
+    # here, so one pass looks again. Guarded by ``_remote_hosts_lock``.
+    _newer_machine_hosts: set[str] = PrivateAttr(default_factory=set)
     _remote_hosts_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     # Successful route resolutions are reused on every discovery cycle for as
     # long as discovery keeps reporting the container endpoint they were
@@ -629,7 +644,8 @@ class LatchkeyDiscoveryHandler(MutableModel):
         health-check loop stops re-dialing a dead address, and the provisioned
         marker is forgotten because the VM may have been recreated without
         what an earlier pass left on it, so one fresh idempotent provisioning
-        pass is needed.
+        pass is needed. That pass is also what looks again at a machine an
+        earlier one found newer than this build manages.
         """
         host_id_str = str(host_id)
         current_endpoint = _ContainerEndpoint.from_ssh_info(ssh_info)
@@ -646,6 +662,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
             if is_winner:
                 del self._gateway_route_by_host_id[host_id_str]
                 self._provisioned_hosts.discard(host_id_str)
+                self._newer_machine_hosts.discard(host_id_str)
                 self._last_announcement_at_by_host_id.pop(host_id_str, None)
         if not is_winner:
             # The worker that retired the route also removed its tunnel; doing
@@ -715,7 +732,9 @@ class LatchkeyDiscoveryHandler(MutableModel):
         health-check loop from indefinitely re-dialing a dead endpoint.
         Forgetting the host's ``_provisioned_hosts`` marker means a later restart
         re-runs the idempotent VPS-resident gateway provisioning, since a stopped
-        container may be recreated before it comes back. The host's
+        container may be recreated before it comes back; a machine an earlier
+        pass found newer than this build manages is looked at again the same
+        way. The host's
         transient-failure streaks are forgotten too: they count consecutive
         cycles while the host reports as running, and a stop ends that run.
         So are its steps' last-success times, which describe that same run.
@@ -727,6 +746,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
             logger.debug("Removed {} reverse tunnel(s) for stopped agent {}", removed_tunnel_count, agent_id)
         with self._remote_hosts_lock:
             self._provisioned_hosts.discard(str(host_id))
+            self._newer_machine_hosts.discard(str(host_id))
             self._last_announcement_at_by_host_id.pop(str(host_id), None)
             for key in [key for key in self._transient_failure_streak_by_key if key.host_id == host_id]:
                 del self._transient_failure_streak_by_key[key]
@@ -860,10 +880,14 @@ class LatchkeyDiscoveryHandler(MutableModel):
         An announcement is its own wiring step: one that fails right after a
         provisioning pass must not fail the pass (which would re-provision the
         machine on the next cycle), only be retried by the next cycle's
-        announcement.
+        announcement. A machine that has become newer than this build manages
+        since it was provisioned is no failure at all: it is left alone from
+        here on (see ``_leave_newer_machine_alone``).
         """
         try:
             self._announce_device(outer, host_id, device_port)
+        except MachineNewerError as e:
+            self._leave_newer_machine_alone(host_id, e)
         except (MngrError, LatchkeyError, OSError, paramiko.SSHException, EOFError) as e:
             self._record_wiring_step_failure(
                 host_id,
@@ -901,6 +925,49 @@ class LatchkeyDiscoveryHandler(MutableModel):
             self._last_announcement_at_by_host_id[host_id_str] = time.monotonic()
         self._record_wiring_step_success(host_id, _RemoteWiringStep.DEVICE_ANNOUNCEMENT)
         logger.debug("Announced this computer to the machine of host {} on port {}", host_id, device_port)
+
+    def _leave_newer_machine_alone(self, host_id: HostId, error: MachineNewerError) -> None:
+        """Record that a host's machine runs software of a newer generation than this build's, and stop wiring it.
+
+        Nothing is wrong that a retry or a bug report would fix, so this is
+        neither a failure of a wiring step nor an error: it is said once per
+        host, and the machine is recorded as newer where the desktop app reads
+        it (so the app tells the user to update, and never answers for the
+        host from this computer's own store). No pass and no announcement is
+        sent to the machine again until the host stops and starts, moves, or
+        this process restarts, each of which runs one pass that looks again.
+        Not announcing is what keeps the machine from routing anything to this
+        computer.
+        """
+        host_id_str = str(host_id)
+        with self._remote_hosts_lock:
+            is_first = host_id_str not in self._newer_machine_hosts
+            self._newer_machine_hosts.add(host_id_str)
+            self._provisioned_hosts.discard(host_id_str)
+            self._last_announcement_at_by_host_id.pop(host_id_str, None)
+        try:
+            record_machine_as_newer(self.latchkey.plugin_data_dir, host_id)
+        except LatchkeyStoreError as e:
+            logger.warning(
+                "Could not record the machine of host {} as newer than this build manages; the desktop app "
+                "will not know to say so: {}",
+                host_id,
+                e,
+            )
+        if is_first:
+            logger.info("Leaving the machine of host {} alone until this computer is updated: {}", host_id, error)
+
+    def _forget_newer_machine_record(self, host_id: HostId) -> None:
+        """Drop the record that a host's machine is newer, a provisioning pass having just shown it is not."""
+        try:
+            forget_machine_recorded_as_newer(self.latchkey.plugin_data_dir, host_id)
+        except LatchkeyStoreError as e:
+            logger.warning(
+                "Could not drop the record of host {}'s machine as newer than this build manages; the desktop "
+                "app will keep saying so: {}",
+                host_id,
+                e,
+            )
 
     def _record_wiring_step_success(self, host_id: HostId, step: _RemoteWiringStep) -> None:
         """Forget a host's transient-failure streak for a step that just succeeded, and note when it did."""
@@ -1015,6 +1082,14 @@ class LatchkeyDiscoveryHandler(MutableModel):
         """
         host_id_str = str(host_id)
         with self._remote_hosts_lock:
+            if host_id_str in self._newer_machine_hosts:
+                logger.trace(
+                    "The machine of host {} runs a newer generation of software than this build manages; "
+                    "not provisioning it for agent {}",
+                    host_id,
+                    agent_id,
+                )
+                return False
             if host_id_str in self._provisioned_hosts:
                 # Already provisioned this host this supervisor lifetime; skip the
                 # expensive idempotent re-run that every discovery cycle would
@@ -1311,7 +1386,8 @@ class LatchkeyDiscoveryHandler(MutableModel):
         """Fire-and-forget worker: stand up the VPS-resident gateway for a remote agent.
 
         Opens the agent's outer host and runs the full provisioning sequence on
-        it. A transient failure is logged via
+        it. A machine of a newer generation than this build manages is left
+        alone (``_leave_newer_machine_alone``). A transient failure is logged via
         ``_record_wiring_step_failure`` (the next discovery cycle retries, and a
         long streak is escalated there); any other exception propagates out of
         the thread target so the CG's ObservableThread logs it at error level
@@ -1332,6 +1408,8 @@ class LatchkeyDiscoveryHandler(MutableModel):
         )
         try:
             self._provision_remote_gateway_for_agent(agent_id, host_id, ssh_info, provider_name, device_port)
+        except MachineNewerError as e:
+            self._leave_newer_machine_alone(host_id, e)
         except (MngrError, LatchkeyError, OSError, paramiko.SSHException, EOFError) as e:
             if not is_transient_remote_wiring_error(e):
                 raise
@@ -1360,7 +1438,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
         device_port: int | None,
     ) -> None:
         """Open the agent's outer host, provision its gateway, announce this computer to it, and record the host as provisioned."""
-        provider = get_provider_instance(ProviderInstanceName(provider_name), self.mngr_ctx)
+        provider = self._provider_for_route(provider_name)
         with provider.outer_host_for(host_id) as outer:
             if outer is None:
                 # Raced: the outer host vanished between the cheap check and now.
@@ -1398,6 +1476,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 package_layout=DEFAULT_REMOTE_PACKAGE_LAYOUT,
                 migration_context=PermissionsMigrationContext(device_id=self.device.device_id),
             )
+            self._forget_newer_machine_record(host_id)
             # The machine has the command now, and this computer's tunnel is
             # up: tell it which port is this computer's before the next cycle
             # would, so the desktop-owned routes work as soon as the gateway does.
@@ -1406,9 +1485,12 @@ class LatchkeyDiscoveryHandler(MutableModel):
         logger.info("Provisioned VPS-resident Latchkey gateway for agent {} on host {}", agent_id, host_id)
         # Record success so later discovery cycles skip the expensive re-run.
         # Only reached when provisioning completed without raising (a failure
-        # propagates past here, leaving the host eligible for retry).
+        # propagates past here, leaving the host eligible for retry). A machine
+        # the announcement just found newer is not provisioned as far as the
+        # next cycle is concerned: it must not be announced to again.
         with self._remote_hosts_lock:
-            self._provisioned_hosts.add(str(host_id))
+            if str(host_id) not in self._newer_machine_hosts:
+                self._provisioned_hosts.add(str(host_id))
         self._record_wiring_step_success(host_id, _RemoteWiringStep.VPS_GATEWAY_PROVISIONING)
 
 

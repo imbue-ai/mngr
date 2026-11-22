@@ -4,6 +4,10 @@
 # connected desktops' records, the extension copy, the logs, and the loaded
 # nftables table. The latchkey directory itself (the machine's credentials,
 # the key they are kept under, and its policy) is the user's and is kept.
+# The generation file is kept too, on removal and on purge alike: a package
+# that another has replaced can be purged long afterwards, and removing the
+# file then would make the machine read as generation 1 under the software
+# that replaced it. The package installed next writes its own over it.
 set -eu
 
 case "${1:-}" in

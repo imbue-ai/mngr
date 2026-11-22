@@ -102,6 +102,7 @@ from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissio
 from imbue.minds.desktop_client.latchkey.gateway_client import WorkspaceRequestPayload
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.remote_execution import is_agent_command_execution_allowed
+from imbue.minds.desktop_client.latchkey.machine_access import MACHINE_NEWER_FAILURE
 from imbue.minds.desktop_client.latchkey.machine_latchkey import is_machine_store_of_its_own
 from imbue.minds.desktop_client.latchkey.machine_latchkey import machine_latchkey_for_host
 from imbue.minds.desktop_client.latchkey.machine_latchkey import machine_latchkey_for_workspace
@@ -499,7 +500,9 @@ def _load_permissions_payload(agent_id: str) -> UiWorkspacePermissions:
     try:
         _read_machine_state(agent_id)
     except MachineOperationError as e:
-        logger.warning("Could not read the machine state of workspace {}: {}", agent_id, e)
+        # A machine this build leaves alone is no failure of the read: the notice tells the user to update.
+        if e.explained_failure != MACHINE_NEWER_FAILURE:
+            logger.warning("Could not read the machine state of workspace {}: {}", agent_id, e)
         return _unavailable_permissions_payload(
             build_failure_notice(describe_machine_failure(e, _MACHINE_READ_FAILED_SENTENCE), str(e))
         )
@@ -599,7 +602,8 @@ def _write_prelude(agent_id: str) -> Response | tuple[dict[str, Any], LatchkeyPe
     try:
         _read_machine_state(agent_id)
     except MachineOperationError as e:
-        logger.warning("Could not read the machine of workspace {} before a permission change: {}", agent_id, e)
+        if e.explained_failure != MACHINE_NEWER_FAILURE:
+            logger.warning("Could not read the machine of workspace {} before a permission change: {}", agent_id, e)
         return _change_failure_response(agent_id, e)
     return body, handler
 
@@ -661,7 +665,8 @@ def _change_failure_response(agent_id: str, error: Exception) -> Response:
             detail,
         )
     if isinstance(error, MachineOperationError):
-        logger.warning("Could not apply the permission change on the machine of {}: {}", agent_id, error)
+        if error.explained_failure != MACHINE_NEWER_FAILURE:
+            logger.warning("Could not apply the permission change on the machine of {}: {}", agent_id, error)
         return make_failure_response(describe_machine_failure(error, _MACHINE_CHANGE_FAILED_SENTENCE), 502, detail)
     if isinstance(error, LatchkeyError):
         logger.warning("Could not apply the permission change for {} through latchkey: {}", agent_id, error)

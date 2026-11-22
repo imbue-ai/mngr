@@ -1273,6 +1273,36 @@ instead of being left open. Provisioning seeds it too, before any of this: the
 pass that stands the gateway up writes the host's policy (or the deny-all
 default) alongside it rather than waiting for someone to open the tab.
 
+### A machine set up by a newer Imbue Studio
+
+A user can run Imbue Studio on two computers at different versions, and the
+newer one may install software on a workspace's machine that the older one
+cannot drive (a newer *generation*; see "Machine generations" in
+`libs/mngr_latchkey/README.md`).
+The older Imbue Studio recognises such a machine and leaves it alone: it
+installs nothing there and sends it no command. The workspace still opens, its
+chats work, and its agents keep reaching third-party services through the
+machine. What stops on that computer is managing the machine:
+
+* **The Permissions tab** shows "This workspace's machine was set up by a newer
+  Imbue Studio. Update Imbue Studio to manage its permissions here." with the
+  button that updates the app, and none of this computer's own connections. A
+  change made from the tab is refused with the same sentence.
+* **A permission request** that was already waiting on this computer when the
+  machine became newer stays pending. Approving or denying it shows the same
+  sentence and sends nothing; the request is answered from a computer that has
+  been updated. Its dialog offers no account of this computer's, because the
+  machine's accounts cannot be read from here.
+* **New permission requests** from that workspace do not reach this computer,
+  which the machine no longer counts among the connected ones, and this
+  computer's [device features](#desktops) are not offered to the workspace.
+* **A new agent** added to the workspace from this computer is not registered
+  on the machine. That is logged as a warning, once.
+
+Updating Imbue Studio on that computer puts everything back: the next time it
+starts, it provisions the machine and the record that the machine was newer is
+dropped.
+
 ## Permissions tab (per workspace)
 
 A workspace's **Permissions** tab is a page of Settings: open Settings from

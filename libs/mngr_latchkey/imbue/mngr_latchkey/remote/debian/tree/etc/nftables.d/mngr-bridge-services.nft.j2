@@ -1,17 +1,22 @@
 #!{{ nft_binary_path }} -f
 # Shipped by the mngr-latchkey package.
-# The services the VPS binds on its docker bridge address (the latchkey gateway
-# and the owner-exec daemon) answer only the agent's container and the VPS's
-# own processes: a packet for their ports arriving on any other interface (the
-# public one, a user-defined docker network) drops here, before the bound
-# socket ever receives it. And the container reaches only those services: a new
-# connection arriving from the bridge for any other port on this host drops too.
+# The latchkey gateway, which the VPS binds on its docker bridge address,
+# answers only the agent's container and the VPS's own processes: a packet for
+# its port arriving on any other interface (the public one, a user-defined
+# docker network) drops here, before the bound socket ever receives it. And the
+# container reaches only the gateway: a new connection arriving from the bridge
+# for any other port on this host drops too.
 # Its own table, added-deleted-added so re-loading the file converges.
 add table inet {{ nft_table_name }}
 delete table inet {{ nft_table_name }}
 add table inet {{ nft_table_name }} {
     chain input {
         type filter hook input priority filter; policy accept;
+        # CLEANUP: drop this rule when the doorway's package replaces this one
+        # (phase 7 of specs/web-desktop-consolidation). An owner-exec daemon
+        # that an earlier build left on this machine, or put back, listens on
+        # this port of the bridge address, and is reachable from nowhere.
+        tcp dport {{ retired_owner_exec_port }} counter drop
         iifname != "{{ docker_bridge_interface_name }}" iifname != "lo" tcp dport { {{ bridge_service_ports | join(', ') }} } counter drop
         iifname "{{ docker_bridge_interface_name }}" tcp dport { {{ bridge_service_ports | join(', ') }} } accept
         iifname "{{ docker_bridge_interface_name }}" ct state new counter drop

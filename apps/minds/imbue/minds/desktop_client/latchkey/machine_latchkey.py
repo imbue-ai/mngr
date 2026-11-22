@@ -23,6 +23,12 @@ desktop's store, which is exactly right: their agents *run* on this computer.
 A remote host whose first provisioning pass has not finished yet resolves there
 too, and moves to its own store once it has one -- the same answer the desktop
 gave before any of this existed.
+
+The one remote host that never resolves to the desktop's store, key or no key,
+is one whose machine is recorded as set up by a newer Imbue Studio. This build
+cannot read that machine, and showing or changing this computer's own
+credentials as though they were the workspace's would be wrong, so asking for
+its store raises :class:`WorkspaceMachineNewerError` instead.
 """
 
 from loguru import logger
@@ -34,10 +40,15 @@ from imbue.minds.desktop_client.latchkey.permission_overview import WorkspaceHos
 from imbue.minds.desktop_client.latchkey.permission_overview import resolve_workspace_host_id
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.remote.credentials import is_machine_recorded_as_newer
 from imbue.mngr_latchkey.remote.credentials import latchkey_for_machine
 from imbue.mngr_latchkey.remote.credentials import stored_machine_encryption_key
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import LatchkeyStoreError
+
+
+class WorkspaceMachineNewerError(PermissionOverviewError):
+    """Raised when a store is asked for on behalf of a machine a newer Imbue Studio set up, which has none here."""
 
 
 def machine_latchkey_for_host(desktop_latchkey: Latchkey, host_id: HostId) -> Latchkey:
@@ -48,9 +59,15 @@ def machine_latchkey_for_host(desktop_latchkey: Latchkey, host_id: HostId) -> La
     credentials belong to.
 
     Raises:
+        WorkspaceMachineNewerError: when the machine is recorded as newer than
+            this build manages, so no store here answers for it.
         PermissionOverviewError: when the machine's store cannot be prepared.
     """
     data_dir = desktop_latchkey.plugin_data_dir
+    if is_machine_recorded_as_newer(data_dir, host_id):
+        raise WorkspaceMachineNewerError(
+            f"The machine of host '{host_id}' was set up by a newer Imbue Studio; its credentials cannot be read here."
+        )
     try:
         if stored_machine_encryption_key(data_dir, host_id) is None:
             return desktop_latchkey

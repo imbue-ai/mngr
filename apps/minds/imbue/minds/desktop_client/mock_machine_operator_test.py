@@ -2,6 +2,7 @@ from pydantic import ConfigDict
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.latchkey.machine_access import MachineAccess
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
@@ -58,4 +59,20 @@ def build_recording_machine_operator(
         ),
         push_refusal=push_refusal,
         refresh_refusal=refresh_refusal,
+    )
+
+
+def build_machine_operator_over(latchkey: Latchkey, backend_resolver: BackendResolverInterface) -> MachineOperator:
+    """A real operator that places workspaces through ``backend_resolver``.
+
+    For tests of what an operator decides before it opens a machine: whether a
+    workspace has one, and whether this build leaves that machine alone.
+    """
+    return MachineOperator(
+        access=MachineAccess(
+            latchkey=latchkey,
+            device_id=device_id_for_test("permissions"),
+            concurrency_group=ConcurrencyGroup(name="test-machine-access"),
+            backend_resolver=backend_resolver,
+        )
     )

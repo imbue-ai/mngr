@@ -98,6 +98,7 @@ from imbue.minds.desktop_client.latchkey.handlers.requested_proxy import format_
 from imbue.minds.desktop_client.latchkey.handlers.requested_proxy import format_route_note
 from imbue.minds.desktop_client.latchkey.handlers.requested_proxy import put_this_computer_first_on_route
 from imbue.minds.desktop_client.latchkey.handlers.resolution import resolve_request
+from imbue.minds.desktop_client.latchkey.machine_latchkey import WorkspaceMachineNewerError
 from imbue.minds.desktop_client.latchkey.machine_latchkey import machine_latchkey_for_host
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.machine_operations import describe_machine_failure
@@ -1276,10 +1277,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         ws_name = resolve_workspace_display_name(backend_resolver, parsed_id, fallback=permission_request.agent_id)
         host_id = _resolve_host_id(backend_resolver, parsed_id)
 
-        # The accounts the dialog offers are the asking machine's own; a host
-        # discovery has not placed yet can only be answered for from here.
-        machine_latchkey = self.latchkey if host_id is None else machine_latchkey_for_host(self.latchkey, host_id)
-        latchkey_service_info = _services_info_or_assumed(machine_latchkey, service_info.name)
+        machine_latchkey, latchkey_service_info = self._store_and_service_info_for_dialog(host_id, service_info.name)
         account_choices, selected_account = _build_account_choices(
             latchkey_service_info.accounts,
             payload.account,
@@ -1500,6 +1498,32 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         return latchkey_service_info is not None and all(
             _needs_account_credential_setup(entry.credential_status) for entry in latchkey_service_info.accounts
         )
+
+    def _store_and_service_info_for_dialog(
+        self, host_id: HostId | None, service_name: str
+    ) -> tuple[Latchkey, LatchkeyServiceInfo]:
+        """The store the dialog reads the service's form from, and what it says of the service and its accounts.
+
+        The accounts the dialog offers are the asking machine's own; a host
+        discovery has not placed yet can only be answered for from here. A
+        machine a newer Imbue Studio set up cannot be read from here at all,
+        and its accounts are not this computer's, so none are offered for it:
+        only how the service connects, which is the same on every machine, is
+        read from this computer's store. Approving or denying such a request
+        is what tells the user to update.
+        """
+        if host_id is None:
+            return self.latchkey, _services_info_or_assumed(self.latchkey, service_name)
+        try:
+            machine_latchkey = machine_latchkey_for_host(self.latchkey, host_id)
+        except WorkspaceMachineNewerError as e:
+            logger.debug("Offering no accounts for {} on host {}: {}", service_name, host_id, e)
+            here = _services_info_or_assumed(self.latchkey, service_name)
+            return self.latchkey, here.model_copy_update(
+                to_update(here.field_ref().accounts, ()),
+                to_update(here.field_ref().credential_status, CredentialStatus.MISSING),
+            )
+        return machine_latchkey, _services_info_or_assumed(machine_latchkey, service_name)
 
     def _open_machine_latchkey(self, agent_id: AgentId, host_id: HostId | None) -> Latchkey | None:
         """The asking machine's store, or ``None`` when it cannot be opened."""
