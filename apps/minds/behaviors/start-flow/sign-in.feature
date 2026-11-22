@@ -1,5 +1,5 @@
 Feature: Signing in on the first run
-  The page shows one line, "Reimagine your personal computer", a Sign in button, a "Help improve Imbue Studio" checkbox, and a "Use without an account" link.
+  The page shows one line, "Reimagine your personal computer", a Sign in button, a "Help improve Studio" checkbox, and a "Use without an account" link.
   Signing in is done in the browser; the page moves on as soon as an account lands.
 
   @sign-in-in-browser
@@ -9,7 +9,7 @@ Feature: Signing in on the first run
 
   @reporting-answer
   Scenario Outline: The error-reporting checkbox is recorded when the user moves on
-    Given the "Help improve Imbue Studio" checkbox, which starts checked, is <state>
+    Given the "Help improve Studio" checkbox, which starts checked, is <state>
     When the user presses "<way on>"
     Then error reporting is recorded as <recorded>
 
@@ -21,10 +21,15 @@ Feature: Signing in on the first run
       | unchecked | Use without an account | refused  |
 
   @reporting-explained
-  Scenario: The checkbox's label says what it means without changing the answer
-    When the user presses the label "Help improve Imbue Studio"
+  Scenario: The checkbox says what it means on hover or focus, and its label toggles it
+    When the user hovers over or focuses the "Help improve Studio" checkbox
     Then what error reports contain, how long they are kept, and a link to the privacy policy are shown
-    And the checkbox is as it was
+    And pressing the label "Help improve Studio" toggles the checkbox
+
+  @without-account-explained
+  Scenario: The way past sign-in says what an account adds
+    When the user hovers over or focuses "Use without an account"
+    Then the page says the workspace runs on this computer and that an account is needed to share it or use it from a phone
 
   @sign-in-closed
   Scenario: Closing the sign-in without an account returns to the page

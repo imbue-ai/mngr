@@ -36,9 +36,9 @@
  *
  * --- Text colors (Stage 1: text) ---
  * Regular text contrasts the current surface; inverse text contrasts an
- * inverted surface. Both are pure black / pure white at three alpha steps
- * (primary 100%, secondary, tertiary) -- no hue. Regular and inverse mirror
- * each other and swap black<->white between light and dark.
+ * inverted surface, each at three alpha steps (primary 100%, secondary,
+ * tertiary). Light mode draws regular text in its ink (the deep brown) and
+ * inverse text in white; dark mode in white and black.
  */
 /* Light is the default (:root); ``.light`` re-asserts it so a subtree can be
  * forced light even under a ``.dark`` ancestor (and vice versa) -- useful for
@@ -48,29 +48,55 @@
   /* Tell the UA to render native controls (form fields, scrollbars, autofill,
      caret) in the matching scheme; without this they stay light in dark mode. */
   color-scheme: light;
-  /* regular text (on the default surface) -- black in light mode */
-  --c-text-primary: #000000;
-  --c-text-secondary: rgb(0 0 0 / 0.65);
-  --c-text-tertiary: rgb(0 0 0 / 0.45);
+  /* the light theme's ink, which every text, border, fill and inverse-surface
+     value below is drawn in: the first run's deep brown on the app's cream
+     ground, black on a white surface (below) */
+  --c-ink: var(--first-run-ink);
+  /* how strongly secondary and tertiary text show the ink: brown reads
+     lighter than black at the same alpha, so on cream they sit higher */
+  --c-ink-secondary-alpha: 0.8;
+  --c-ink-tertiary-alpha: 0.65;
   /* inverse text (on an inverted surface) -- white in light mode */
   --c-text-inverse-primary: #ffffff;
   --c-text-inverse-secondary: rgb(255 255 255 / 0.7);
   --c-text-inverse-tertiary: rgb(255 255 255 / 0.5);
-  /* borders -- black at four alpha steps in light mode (10 / 17 / 25 / 40%;
-     default nudged up from Figma's 16% for a touch more definition; stronger is
-     the input-hover cue -- a darker edge in place of a fill tint) */
-  --c-border-subtle: rgb(0 0 0 / 0.1);
-  --c-border-default: rgb(0 0 0 / 0.17);
-  --c-border-strong: rgb(0 0 0 / 0.25);
-  --c-border-stronger: rgb(0 0 0 / 0.4);
-  /* surfaces -- solid backgrounds; primary and inverse are exact mirrors */
+  /* surfaces -- solid backgrounds */
   --c-surface-primary: #ffffff;
-  --c-surface-inverse: #000000;
-  --c-surface-overlay: rgb(0 0 0 / 0.2);
+  /* the app's outer ground: the window behind every page, the neutral title
+     bar and the home page; the first run's cream in light mode */
+  --c-surface-app: var(--first-run-ground);
+}
+/* A white surface in light mode (cards, modals, menus, tooltips) is drawn in black ink. Two kinds keep their own
+   tokens: a surface a component draws dark on purpose (the switcher menus, `dark` on the element or an ancestor),
+   and one that takes its contrast from its own color (`titlebar-surface`: the workspace cards, status chips). */
+:root:not(.dark) :is(.bg-surface-primary, .bg-white, .minds-card):not(.dark, .dark *, .titlebar-surface) {
+  --c-ink: #000000;
+  --c-ink-secondary-alpha: 0.65;
+  --c-ink-tertiary-alpha: 0.45;
+}
+/* The ink-drawn tokens, declared wherever the ink is set: a custom property
+   that names another is resolved where it is declared, so a surface that
+   changes the ink re-derives them from its own. */
+:root,
+.light,
+:root:not(.dark) :is(.bg-surface-primary, .bg-white, .minds-card):not(.dark, .dark *, .titlebar-surface) {
+  /* regular text (on the surface) -- the ink at three alpha steps */
+  --c-text-primary: var(--c-ink);
+  --c-text-secondary: rgb(from var(--c-ink) r g b / var(--c-ink-secondary-alpha));
+  --c-text-tertiary: rgb(from var(--c-ink) r g b / var(--c-ink-tertiary-alpha));
+  /* borders -- the ink at four alpha steps (10 / 17 / 25 / 40%; default
+     nudged up from Figma's 16% for a touch more definition; stronger is the
+     input-hover cue -- a darker edge in place of a fill tint) */
+  --c-border-subtle: rgb(from var(--c-ink) r g b / 0.1);
+  --c-border-default: rgb(from var(--c-ink) r g b / 0.17);
+  --c-border-strong: rgb(from var(--c-ink) r g b / 0.25);
+  --c-border-stronger: rgb(from var(--c-ink) r g b / 0.4);
+  --c-surface-inverse: var(--c-ink);
+  --c-surface-overlay: rgb(from var(--c-ink) r g b / 0.2);
   /* fills -- translucent resting / state tints over a surface (Figma 4/6/10%) */
-  --c-fill-subtle: rgb(0 0 0 / 0.04);
-  --c-fill-hover: rgb(0 0 0 / 0.06);
-  --c-fill-active: rgb(0 0 0 / 0.1);
+  --c-fill-subtle: rgb(from var(--c-ink) r g b / 0.04);
+  --c-fill-hover: rgb(from var(--c-ink) r g b / 0.06);
+  --c-fill-active: rgb(from var(--c-ink) r g b / 0.1);
 }
 .dark {
   color-scheme: dark;
@@ -90,6 +116,7 @@
   /* surfaces -- pure black base in dark; inverse + overlay mirror to white */
   --c-surface-primary: #000000;
   --c-surface-inverse: #ffffff;
+  --c-surface-app: #000000;
   --c-surface-overlay: rgb(255 255 255 / 0.2);
   /* fills -- white at slightly higher alpha in dark (Figma 6/10/14%) */
   --c-fill-subtle: rgb(255 255 255 / 0.06);
@@ -110,6 +137,7 @@
   --color-stronger: var(--c-border-stronger);
   /* surfaces: bg-surface-primary / -inverse / -overlay */
   --color-surface-primary: var(--c-surface-primary);
+  --color-surface-app: var(--c-surface-app);
   --color-surface-inverse: var(--c-surface-inverse);
   --color-surface-overlay: var(--c-surface-overlay);
   /* fills: bg-fill-subtle / -hover / -active */
@@ -341,14 +369,15 @@ body {
 /*
  * The whole app background takes the per-workspace accent (--titlebar-bg, set
  * on the document root while a workspace is displayed; falls back to the
- * neutral surface on hub pages). This mirrors ChromeShell.jinja's _body_style
+ * app's ground, --c-surface-app, on hub pages). This mirrors ChromeShell.jinja's _body_style
  * in the legacy renderer, which the SPA port had dropped -- so the accent
  * fills the page and bleeds around the inset content card / workspace frame
  * rather than being confined to the titlebar strip. The titlebar paints the
  * same variable on top, so the field reads as continuous.
  */
 body {
-  background: var(--titlebar-bg, var(--c-surface-primary));
+  background: var(--titlebar-bg, var(--c-surface-app));
+  color: var(--c-text-primary);
 }
 /*
  * Scrollbars are left NATIVE (no ``::-webkit-scrollbar`` styling): the OS draws
@@ -1176,32 +1205,64 @@ html.typing-hides-cursor * {
 
 /*
  * The first run's pages (views/pages/StartPage.ts, the creation page's welcome):
- * a warm cream ground in the brand's brown, the headline in a serif. The
- * prototype sets it in Caslon Ionic, which Studio does not ship; the stack
- * falls back to the closest system serifs.
+ * a warm cream ground in the brand's brown, the headline in Besley Medium
+ * (SIL Open Font License, bundled from @fontsource/besley in index.ts).
  */
-.first-run {
+:root {
   --first-run-ground: #fff8e9;
   --first-run-ink: #492222;
   --first-run-ink-muted: #7a5a52;
   --first-run-line: #e8d9c4;
+}
+.first-run {
   background: var(--first-run-ground);
   color: var(--first-run-ink);
 }
+/*
+ * While a first-run page is on screen, or a new workspace's provider page
+ * covers it (models/firstRunChrome.ts), the window's chrome takes its ground,
+ * even over a workspace accent or in dark mode, so the titlebar and the page
+ * read as one field. Declared on body, it outranks the accent paintAccent
+ * sets inline on the root.
+ */
+body:has(.first-run),
+body.first-run-chrome {
+  --titlebar-bg: var(--first-run-ground);
+}
+body:has(.first-run) #minds-titlebar,
+body.first-run-chrome #minds-titlebar {
+  --c-text-primary: var(--first-run-ink);
+  --c-text-secondary: rgb(from var(--first-run-ink) r g b / 0.65);
+  --c-text-tertiary: rgb(from var(--first-run-ink) r g b / 0.45);
+  --c-fill-hover: rgb(from var(--first-run-ink) r g b / 0.06);
+  --c-fill-active: rgb(from var(--first-run-ink) r g b / 0.1);
+}
 .first-run-headline {
-  font-family: "Caslon Ionic", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
-  font-weight: 400;
+  font-family: "Besley", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  font-weight: 500;
   letter-spacing: -0.01em;
-  line-height: 1.05;
+  line-height: 1.15;
 }
 .first-run-button {
+  padding: 16px 28px;
+  border-radius: 9999px;
   background: var(--first-run-ink);
   color: var(--first-run-ground);
   cursor: pointer;
   transition: background-color 120ms ease-out;
 }
+/* A lesser action beside the page's main one: smaller, and outlined in the ink rather than filled with it. */
+.first-run-button--secondary {
+  padding: 9px 19px;
+  border: 1px solid var(--first-run-ink);
+  background: transparent;
+  color: var(--first-run-ink);
+}
 .first-run-button:hover:not(:disabled) {
   background: color-mix(in srgb, var(--first-run-ink) 80%, var(--first-run-ground));
+}
+.first-run-button--secondary:hover:not(:disabled) {
+  background: rgb(from var(--first-run-ink) r g b / 0.06);
 }
 .first-run-button:focus-visible,
 .first-run-link:focus-visible,
@@ -1223,24 +1284,19 @@ html.typing-hides-cursor * {
 .first-run-link:hover {
   color: var(--first-run-ink);
 }
+/* The sign-in page's quiet links at its foot: no underline, only the ink on hover. */
+.first-run-link--plain {
+  text-decoration: none;
+}
 .first-run-checkbox {
   width: 17px;
   height: 17px;
   cursor: pointer;
   accent-color: var(--first-run-ink);
 }
-/* What a first-run control means, on the page's own ground, lifted a little off it. */
-.first-run-popover {
-  padding: 14px 18px;
-  border: 1px solid var(--first-run-line);
-  border-radius: 12px;
-  background: var(--first-run-ground);
-  color: var(--first-run-ink);
-  box-shadow: 0 10px 30px rgba(73, 34, 34, 0.18);
-  font-size: 13.5px;
-  line-height: 1.45;
-  text-align: left;
-  outline: none;
+/* A modal over a first-run page fades the page into its cream rather than dimming it. */
+.modal-backdrop-wash {
+  background-color: rgb(from var(--first-run-ground) r g b / 0.9);
 }
 .first-run-bar {
   background: var(--first-run-line);

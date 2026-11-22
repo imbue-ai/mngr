@@ -4,6 +4,9 @@ import { splitAttrs } from "./attrs";
 
 export type ModalSize = "sm" | "md" | "lg" | "xl";
 
+/** What the modal does to the page behind it: ``dim`` darkens it; ``wash`` fades it into the first run's cream. */
+export type ModalBackdrop = "dim" | "wash";
+
 // The card's ONLY max-w-* class, picked here rather than passed in cardExtra:
 // two competing max-w-* utilities are decided by their order in the generated
 // stylesheet (where .max-w-sm follows .max-w-md, so the narrower one wins),
@@ -20,6 +23,7 @@ interface ModalAttrs extends m.Attributes {
   onClose?: () => void;
   size?: ModalSize;
   cardExtra?: string;
+  backdrop?: ModalBackdrop;
 }
 
 /**
@@ -47,7 +51,7 @@ export function Modal(): m.Component<ModalAttrs> {
   let isPressEndedOnBackdrop = false;
   return {
     view(vnode) {
-      const { isOpen, onClose, size = "sm", cardExtra = "" } = vnode.attrs;
+      const { isOpen, onClose, size = "sm", cardExtra = "", backdrop = "dim" } = vnode.attrs;
       if (!isOpen) {
         return null;
       }
@@ -55,7 +59,8 @@ export function Modal(): m.Component<ModalAttrs> {
         "div",
         {
           class:
-            "modal-viewport fixed inset-0 z-[110] flex items-center justify-center bg-surface-overlay",
+            "modal-viewport fixed inset-0 z-[110] flex items-center justify-center " +
+            (backdrop === "wash" ? "modal-backdrop-wash" : "bg-surface-overlay"),
           onmousedown: (event: MouseEvent) => {
             isPressStartedOnBackdrop = event.target === event.currentTarget;
           },
@@ -80,13 +85,15 @@ export function Modal(): m.Component<ModalAttrs> {
             "onClose",
             "size",
             "cardExtra",
+            "backdrop",
           ]),
         },
         m(
           "div",
           {
             class:
-              "bg-surface-primary rounded-lg shadow-overlay border border-default w-full mx-4 overflow-hidden " +
+              "bg-surface-primary rounded-lg shadow-overlay w-full mx-4 overflow-hidden " +
+              (backdrop === "wash" ? "" : "border border-default ") +
               MODAL_SIZES[size] +
               " flex max-h-full flex-col " +
               cardExtra,

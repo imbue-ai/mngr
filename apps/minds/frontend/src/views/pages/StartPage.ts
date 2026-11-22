@@ -37,7 +37,6 @@ import {
 } from "../../models/firstRun";
 import { REPORTING_DETAIL_BODY } from "../../models/manifesto";
 import {
-  REPORTING_CONSENT_QUESTION,
   fetchSigninLanding,
   markOnboardingComplete,
   recordErrorReportingConsent,
@@ -48,13 +47,31 @@ import { createFormModal } from "./CreatePage";
 import { CreateFormModel, createSubmitRefusal } from "./create/form-model";
 
 export const SIGN_IN_LINE_LEAD = "Reimagine";
-export const SIGN_IN_LINE_REST = " your personal computer";
+export const SIGN_IN_LINE_REST = " your ";
+export const SIGN_IN_LINE_SECOND = "personal computer";
 export const SIGN_IN_LABEL = "Sign in";
 export const WITHOUT_ACCOUNT_LABEL = "Use without an account";
-export const REPORTING_LABEL = "Help improve Imbue Studio";
+/**
+ * What a first-run control means, on hover or keyboard focus of its group: a white card like the page's popups,
+ * above the control after a short delay. The bridge under it keeps the pointer's way from the control to the tip
+ * hovered, so a link in the tip can be reached.
+ */
+const FIRST_RUN_TIP_CLASS =
+  "invisible absolute bottom-full z-[110] mb-2 rounded-2xl bg-white px-4 py-3 text-left " +
+  "type-body text-primary opacity-0 shadow-overlay transition-[opacity,visibility] duration-100 " +
+  "after:absolute after:inset-x-0 after:top-full after:h-2 after:content-[''] " +
+  "group-hover:visible group-hover:opacity-100 group-hover:delay-150 " +
+  "group-has-[:focus-visible]:visible group-has-[:focus-visible]:opacity-100 group-has-[:focus-visible]:delay-150";
+
+export const WITHOUT_ACCOUNT_TIP =
+  "Your workspace runs on this computer. You\u2019ll need an account to share it or use it from your phone.";
+export const REPORTING_LABEL = "Help improve Studio";
+export const REPORTING_TIP_HEADING = "Report data to help improve Studio";
 const PRIVACY_POLICY_URL = "https://imbue.com/privacy/";
 export const SIGN_IN_MESSAGE = "Sign in to Imbue Studio, or create an account.";
 export const SETTING_UP_LINE = "Just a sec, we're setting up your workspace";
+/** The setting-up line once the build is known to take minutes, when "just a sec" would not be true. */
+export const SETTING_UP_LONG_LINE = "We're setting up your workspace";
 export const VERIFY_LINE = "Check your email";
 export const TRY_AGAIN_LABEL = "Try again";
 
@@ -124,7 +141,6 @@ export const StartPage: m.ClosureComponent = () => {
   let isCheckingVerification = false;
   let isRemoved = false;
   let isReportingAllowed = true;
-  let isReportingDetailOpen = false;
 
   function setStage(next: FirstRunStage): void {
     stage = next;
@@ -306,30 +322,32 @@ export const StartPage: m.ClosureComponent = () => {
   function signInView(): m.Children {
     const isBusy = stage.kind === "signing-in";
     return [
-      m("h1", { id: "start-line", class: "first-run-headline text-center text-[clamp(44px,6.4vw,88px)]" }, [
+      m("h1", { id: "start-line", class: "first-run-headline text-center text-[clamp(56px,5.5cqw,88px)]" }, [
         m("span", { class: "first-run-reimagine" }, SIGN_IN_LINE_LEAD),
         SIGN_IN_LINE_REST,
+        m("span", { class: "block" }, SIGN_IN_LINE_SECOND),
       ]),
       m(
         "button",
         {
           id: "start-sign-in",
           type: "button",
-          class: "first-run-button mt-14 rounded-full px-8 py-3.5 text-[18px] font-semibold",
+          class: "first-run-button mt-14 type-heading",
           disabled: isBusy,
           onclick: signIn,
         },
         SIGN_IN_LABEL,
       ),
-      // The page's quieter choices, together at its foot.
-      m("div", { class: "absolute bottom-8 flex flex-col items-center gap-4" }, [
-        reportingChoice(),
+      // The page's quieter choices at its foot: the reporting answer centred, the way past sign-in at the right.
+      m("div", { class: "absolute bottom-8" }, reportingChoice()),
+      m("div", { class: "group absolute bottom-8 right-8" }, [
         m(
           "button",
           {
             id: "start-without-account",
             type: "button",
-            class: "first-run-link text-[16px]",
+            class: "first-run-link first-run-link--plain type-body",
+            "aria-describedby": "start-without-account-tip",
             onclick: () => {
               saveReportingAnswer();
               isFormOpen = true;
@@ -337,84 +355,45 @@ export const StartPage: m.ClosureComponent = () => {
           },
           WITHOUT_ACCOUNT_LABEL,
         ),
+        m(
+          "div",
+          { id: "start-without-account-tip", role: "tooltip", class: `${FIRST_RUN_TIP_CLASS} right-0 w-[300px]` },
+          WITHOUT_ACCOUNT_TIP,
+        ),
       ]),
     ];
   }
 
-  function closeReportingDetailOnOutsidePress(event: Event): void {
-    const target = event.target;
-    if (!(target instanceof Element)) return;
-    // The label toggles it itself, and a press inside it (the privacy link) leaves it up.
-    if (target.closest("#start-reporting-detail, #start-reporting-label") !== null) return;
-    isReportingDetailOpen = false;
-    m.redraw();
-  }
-
   /**
-   * The error-reporting answer, at the page's foot: a checkbox that starts checked, and its label, which opens what
-   * the answer means rather than toggling it, so reading about it never changes it.
+   * The error-reporting answer, at the page's foot: a checkbox that starts checked and its label, which toggles it;
+   * what the answer means shows on hover or focus, with the privacy policy a click away.
    */
   function reportingChoice(): m.Children {
-    return m("div", { class: "relative flex items-center justify-center gap-2.5" }, [
+    return m("div", { class: "group relative flex items-center justify-center gap-2.5" }, [
       m("input", {
         id: "start-reporting-checkbox",
         type: "checkbox",
         class: "first-run-checkbox",
-        "aria-label": REPORTING_LABEL,
+        "aria-describedby": "start-reporting-tip",
         checked: isReportingAllowed,
         onchange: (event: Event) => {
           isReportingAllowed = (event.target as HTMLInputElement).checked;
         },
       }),
       m(
-        "button",
-        {
-          id: "start-reporting-label",
-          type: "button",
-          class: "first-run-link text-[15px]",
-          "aria-expanded": isReportingDetailOpen ? "true" : "false",
-          "aria-controls": "start-reporting-detail",
-          onclick: () => {
-            isReportingDetailOpen = !isReportingDetailOpen;
-          },
-        },
+        "label",
+        { id: "start-reporting-label", for: "start-reporting-checkbox", class: "first-run-link first-run-link--plain type-body" },
         REPORTING_LABEL,
       ),
-      isReportingDetailOpen
-        ? [
-            m(
-              "div",
-              {
-                id: "start-reporting-detail",
-                role: "dialog",
-                "aria-label": REPORTING_LABEL,
-                class: "first-run-popover absolute bottom-full left-1/2 z-20 mb-3 w-[min(720px,92vw)] -translate-x-1/2",
-                // A press anywhere else closes it without being swallowed, so Sign in still signs in.
-                oncreate: (vnode: m.VnodeDOM) => {
-                  (vnode.dom as HTMLElement).focus();
-                  document.addEventListener("pointerdown", closeReportingDetailOnOutsidePress, true);
-                },
-                onremove: () => document.removeEventListener("pointerdown", closeReportingDetailOnOutsidePress, true),
-                tabindex: -1,
-                onkeydown: (event: KeyboardEvent) => {
-                  if (event.key === "Escape") isReportingDetailOpen = false;
-                },
-              },
-              [
-                m("p", `${REPORTING_CONSENT_QUESTION} ${REPORTING_DETAIL_BODY}`),
-                m("p", { class: "mt-3" }, [
-                  "Our privacy policy is ",
-                  m(
-                    "a",
-                    { class: "underline", href: PRIVACY_POLICY_URL, target: "_blank", rel: "noopener" },
-                    "here",
-                  ),
-                  ".",
-                ]),
-              ],
-            ),
-          ]
-        : null,
+      m("div", { id: "start-reporting-tip", role: "tooltip", class: `${FIRST_RUN_TIP_CLASS} left-1/2 w-[400px] -translate-x-1/2` }, [
+        m("p", { class: "type-label" }, REPORTING_TIP_HEADING),
+        m("p", { class: "mt-3" }, REPORTING_DETAIL_BODY),
+        m("p", { class: "mt-3" }, [
+          "Our privacy policy is ",
+          m("a", { class: "underline", href: PRIVACY_POLICY_URL, target: "_blank", rel: "noopener" }, "here"),
+          ".",
+        ]),
+      ]),
     ]);
   }
 
@@ -422,40 +401,40 @@ export const StartPage: m.ClosureComponent = () => {
   function signedInView(account: FirstRunAccount): m.Children {
     const heading = m(
       "h1",
-      { id: "start-welcome", class: "first-run-headline text-center text-[clamp(40px,4.6vw,64px)]" },
+      { id: "start-welcome", class: "first-run-headline text-center text-[40px]" },
       welcomeHeading(firstNameOf(account)),
     );
     if (stage.kind === "verify") {
       return [
         heading,
-        m("p", { id: "start-verify", class: "mt-6 text-center text-[18px] font-semibold" }, VERIFY_LINE),
+        m("p", { id: "start-verify", class: "mt-6 text-center type-heading" }, VERIFY_LINE),
         m(
           "p",
-          { class: "mt-2 max-w-[480px] text-center text-[16px]" },
+          { class: "mt-2 max-w-[480px] text-center type-heading" },
           `Open the link we sent to ${account.email} and your workspace will start.`,
         ),
         stage.lastResend === null
           ? null
           : m(
               "p",
-              { id: "start-verify-note", class: "mt-3 text-center text-[14px] text-[color:var(--first-run-ink-muted)]" },
+              { id: "start-verify-note", class: "mt-3 text-center type-body text-[color:var(--first-run-ink-muted)]" },
               verificationEmailSentNote(account.email, stage.lastResend),
             ),
-        m("button", { id: "start-resend", type: "button", class: "first-run-link mt-6 text-[15px]", onclick: resend }, RESEND_EMAIL_LABEL),
+        m("button", { id: "start-resend", type: "button", class: "first-run-button first-run-button--secondary mt-6 type-label", onclick: resend }, RESEND_EMAIL_LABEL),
       ];
     }
     if (stage.kind === "refused") {
       return [
         heading,
-        m("p", { id: "start-refused", class: "mt-6 max-w-[520px] text-center text-[16px]" }, stage.message),
+        m("p", { id: "start-refused", class: "mt-6 max-w-[520px] text-center type-heading" }, stage.message),
         m(
           "button",
-          { id: "start-retry", type: "button", class: "first-run-button mt-6 rounded-full px-6 py-2.5 text-[16px] font-semibold", onclick: retry },
+          { id: "start-retry", type: "button", class: "first-run-button mt-6 type-heading", onclick: retry },
           TRY_AGAIN_LABEL,
         ),
       ];
     }
-    return [heading, m("p", { id: "start-setting-up", class: "mt-6 text-center text-[16px]" }, SETTING_UP_LINE)];
+    return [heading, m("p", { id: "start-setting-up", class: "mt-6 text-center type-heading" }, SETTING_UP_LINE)];
   }
 
   return {
@@ -476,7 +455,7 @@ export const StartPage: m.ClosureComponent = () => {
         {
           id: "start-flow",
           "data-stage": stage.kind,
-          class: "first-run relative flex min-h-full w-full flex-col items-center justify-center px-6 py-16",
+          class: "first-run relative flex min-h-full w-full flex-col [container-type:inline-size] items-center justify-center px-6 py-16",
         },
         [
           m(
@@ -492,6 +471,7 @@ export const StartPage: m.ClosureComponent = () => {
                   isFormOpen = false;
                 },
                 initialPreset: "local",
+                backdrop: "wash",
                 isOnboardingDrivenByAgent: true,
                 onSubmitted: (operationId: string) => {
                   isFormOpen = false;

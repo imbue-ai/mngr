@@ -8,6 +8,7 @@ function progress(overrides: Partial<OperationProgress>): OperationProgress {
     percent_cap: 0,
     percent_per_second: 0,
     remaining_text: "",
+    is_over_a_minute_left: false,
     current_label: "",
     steps: [],
     ...overrides,
@@ -15,6 +16,15 @@ function progress(overrides: Partial<OperationProgress>): OperationProgress {
 }
 
 describe("ProgressDisplay", () => {
+  it("says whether minutes are left as the latest poll does, and nothing before one", () => {
+    const display = new ProgressDisplay();
+    expect(display.isOverAMinuteLeft()).toBe(false);
+    display.apply(progress({ remaining_text: "4 minutes left", is_over_a_minute_left: true }), 1000);
+    expect(display.isOverAMinuteLeft()).toBe(true);
+    display.apply(progress({ remaining_text: "Almost there...", is_over_a_minute_left: false }), 2000);
+    expect(display.isOverAMinuteLeft()).toBe(false);
+  });
+
   it("draws nothing before the first poll and 100 once done", () => {
     const display = new ProgressDisplay();
     expect(display.percentAt(5000, false)).toBe(0);
@@ -51,9 +61,9 @@ describe("ProgressDisplay", () => {
     const display = new ProgressDisplay();
     expect(display.labelOr("Working...")).toBe("Working...");
     expect(display.remainingText()).toBe("");
-    display.apply(progress({ current_label: "Building the image", remaining_text: "About a minute remaining" }), 0);
+    display.apply(progress({ current_label: "Building the image", remaining_text: "1 minute left" }), 0);
     expect(display.labelOr("Working...")).toBe("Building the image");
-    expect(display.remainingText()).toBe("About a minute remaining");
+    expect(display.remainingText()).toBe("1 minute left");
   });
 });
 

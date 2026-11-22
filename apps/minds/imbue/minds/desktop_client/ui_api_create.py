@@ -100,7 +100,7 @@ from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.ui_models import AccountPanelState
 from imbue.minds.desktop_client.welcome_chat import WelcomeChatRequest
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
-from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
+from imbue.minds.desktop_client.workspace_color import pick_create_color
 from imbue.minds.desktop_client.workspace_create import CONNECTION_ONLY_LAUNCH_MODES
 from imbue.minds.desktop_client.workspace_create import CloudAccountOption
 from imbue.minds.desktop_client.workspace_create import available_cloud_account_options
@@ -385,12 +385,12 @@ def _json_response(model: FrozenModel, status: int = 200) -> Response:
 
 
 def _suggested_create_color(backend_resolver: BackendResolverInterface) -> str:
-    """First unused palette entry, counting label-less workspaces as the default color."""
-    used = set()
+    """The palette's least-worn entry, counting label-less workspaces as the default color."""
+    workspace_colors = []
     for agent_id in backend_resolver.list_active_workspace_ids():
         stored = backend_resolver.get_workspace_color(agent_id)
-        used.add(stored if stored is not None else DEFAULT_WORKSPACE_COLOR)
-    return pick_unused_create_color(used)
+        workspace_colors.append(stored if stored is not None else DEFAULT_WORKSPACE_COLOR)
+    return pick_create_color(workspace_colors)
 
 
 def _region_form_context() -> tuple[dict[str, tuple[str, ...]], dict[str, str]]:

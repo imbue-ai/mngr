@@ -28,7 +28,7 @@ import { FormLabel, Select, TextInput, Textarea } from "../components/FormContro
 import { Link } from "../components/Link";
 import { PageNarrowContainer } from "../components/Layout";
 import { MachineSizeInput } from "../components/MachineSizeInput";
-import { DialogCloseButton, Modal } from "../components/Modal";
+import { DialogCloseButton, Modal, type ModalBackdrop } from "../components/Modal";
 import { ErrorNotice, restartAppActions } from "../components/ErrorDisplay";
 import { InlineError } from "../components/errorDesign";
 import { variantBesideErrors } from "../components/variantBesideErrors";
@@ -89,12 +89,13 @@ export function createFormModal(
     key: string;
     id: string;
     onClose: () => void;
+    backdrop?: ModalBackdrop;
   },
 ): m.Children {
-  const { key, id, onClose, ...form } = attrs;
+  const { key, id, onClose, backdrop, ...form } = attrs;
   return m(
     Modal,
-    { key, id, isOpen: true, size: "xl", onClose, cardExtra: "relative" },
+    { key, id, isOpen: true, size: "xl", onClose, cardExtra: "relative", backdrop },
     [
       m(DialogCloseButton, { onClose }),
       m("h2", { class: "type-heading mb-4 pr-8" }, "Create a workspace"),

@@ -9,7 +9,7 @@ import { webLogin } from "../../models/webLogin";
 import { Button, ButtonLink } from "./Button";
 import { ErrorNotice } from "./ErrorDisplay";
 import { Icon16 } from "./Icon";
-import { Modal } from "./Modal";
+import { Modal, type ModalBackdrop } from "./Modal";
 import { Spinner } from "./Spinner";
 
 const COPY_FLASH_MS = 1200;
@@ -107,19 +107,24 @@ function errorBody(): m.Children {
   });
 }
 
-export function WebLoginModal(): m.Component {
+export interface WebLoginModalAttrs {
+  /** What the modal does to the page behind it; the first run's sign-in page washes it into its cream. */
+  backdrop: ModalBackdrop;
+}
+
+export function WebLoginModal(): m.Component<WebLoginModalAttrs> {
   const local: WebLoginModalLocalState = { isCopyConfirmed: false, copyFlashTimer: null };
   return {
     onremove() {
       if (local.copyFlashTimer !== null) window.clearTimeout(local.copyFlashTimer);
     },
-    view() {
+    view(vnode) {
       if (!webLogin.isOpen) return null;
       const isDone = webLogin.state === "done";
       return m(
         Modal,
         // lg, not the default sm: the sign-in URL is long.
-        { isOpen: true, size: "lg", onClose: () => webLogin.dismiss() },
+        { isOpen: true, size: "lg", onClose: () => webLogin.dismiss(), backdrop: vnode.attrs.backdrop },
         m("h2", { class: "type-heading mb-2" }, isDone ? "You're signed in" : "Sign in to Imbue"),
         webLogin.message && !isDone
           ? m("p", { class: "type-body text-secondary mb-4" }, webLogin.message)

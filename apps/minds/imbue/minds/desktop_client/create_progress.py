@@ -90,6 +90,9 @@ class OperationProgressSnapshot(FrozenModel):
         description="How fast the percent is expected to grow right now, for extrapolation between polls"
     )
     remaining_text: str = Field(description="The remaining time, said coarsely; empty while nothing is known")
+    is_over_a_minute_left: bool = Field(
+        description="Whether remaining_text says two minutes or more, rather than a minute or less"
+    )
     current_label: str = Field(description="The caption of the innermost running step; empty before the first")
     steps: tuple[ProgressStepSnapshot, ...] = Field(description="The top-level steps, in order")
 
@@ -137,10 +140,14 @@ def _text_for_bucket(bucket: int) -> str:
     if bucket == 0:
         return "Almost there..."
     if bucket == 1:
-        return "Less than a minute remaining"
+        return "Less than a minute left"
     if bucket == 2:
-        return "About a minute remaining"
-    return f"About {bucket - 1} minutes remaining"
+        return "1 minute left"
+    return f"{bucket - 1} minutes left"
+
+
+# The first bucket whose wording is over a minute ("2 minutes left").
+_FIRST_MINUTES_BUCKET: Final[int] = 3
 
 
 @pure
@@ -321,6 +328,7 @@ class OperationProgressTracker(MutableModel):
                 percent_cap=self._highest_percent,
                 percent_per_second=0.0,
                 remaining_text="",
+                is_over_a_minute_left=False,
                 current_label="",
                 steps=(),
             )
@@ -331,11 +339,13 @@ class OperationProgressTracker(MutableModel):
         leaf, leaf_share = self._running_leaf_and_share()
         rate, cap = self._rate_and_cap(leaf, leaf_share, now)
         remaining = sum(self._remaining(root, now) for root in self._roots)
+        shown_bucket = None if is_done else self._shown_eta_bucket_with_hysteresis(remaining, now)
         return OperationProgressSnapshot(
             percent=self._highest_percent,
             percent_cap=max(self._highest_percent, cap),
             percent_per_second=rate,
-            remaining_text="" if is_done else self._remaining_text_with_hysteresis(remaining, now),
+            remaining_text="" if shown_bucket is None else _text_for_bucket(shown_bucket),
+            is_over_a_minute_left=shown_bucket is not None and shown_bucket >= _FIRST_MINUTES_BUCKET,
             current_label=leaf.label if leaf is not None else "",
             steps=tuple(
                 ProgressStepSnapshot(step_id=root.step_id, label=root.label, status=root.status)
@@ -422,7 +432,7 @@ class OperationProgressTracker(MutableModel):
         cap = self._highest_percent + 100.0 * leaf_share * (_LINEAR_FRACTION - elapsed / expected)
         return rate, min(cap, _MAX_RUNNING_FRACTION * 100.0)
 
-    def _remaining_text_with_hysteresis(self, remaining_seconds: float, now: float) -> str:
+    def _shown_eta_bucket_with_hysteresis(self, remaining_seconds: float, now: float) -> int:
         bucket = _eta_bucket(remaining_seconds)
         if self._shown_eta_bucket is None or bucket >= self._shown_eta_bucket:
             self._shown_eta_bucket = bucket
@@ -435,7 +445,7 @@ class OperationProgressTracker(MutableModel):
         else:
             # The shorter estimate has not persisted long enough to be said yet.
             pass
-        return _text_for_bucket(self._shown_eta_bucket)
+        return self._shown_eta_bucket
 
     def _parent_node(self, parent_id: str) -> _StepNode:
         parent = self._node_by_id.get(parent_id)

@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@fontsource/besley':
+        specifier: ^5.3.0
+        version: 5.3.0
       '@tanstack/query-core':
         specifier: ^5.103.2
         version: 5.103.2
@@ -321,6 +324,9 @@ packages:
     peerDependenciesMeta:
       '@noble/hashes':
         optional: true
+
+  '@fontsource/besley@5.3.0':
+    resolution: {integrity: sha512-PPbFdjy6oGeLEutwtf+Bsdj8ghHQEnTOtByu6BSL+R8N0Q5rfHtiShYffzB+GcQvxon89nu9yfoUqRTwA6LFmA==}
 
   '@humanfs/core@0.19.2':
     resolution: {integrity: sha512-UhXNm+CFMWcbChXywFwkmhqjs3PRCmcSa/hfBgLIb7oQ5HNb1wS0icWsGtSAUNgefHeI+eBrA8I1fxmbHsGdvA==}
@@ -1597,6 +1603,8 @@ snapshots:
       levn: 0.4.1
 
   '@exodus/bytes@1.15.1': {}
+
+  '@fontsource/besley@5.3.0': {}
 
   '@humanfs/core@0.19.2':
     dependencies:

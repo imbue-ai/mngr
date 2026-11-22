@@ -45,6 +45,7 @@ import type {
   WorkspaceLinkPromises,
   WorkspaceWindowDragRequest,
 } from "../../electron-bridge";
+import { firstRunChrome } from "../../models/firstRunChrome";
 import { welcomeChatArrival } from "../../models/welcomeChatArrival";
 import type { WorkspaceReporting } from "../../models/welcomeChatArrival";
 
@@ -66,6 +67,8 @@ interface EmbedContractModule {
   WORKSPACE_READY: string;
   CHAT_ON_SCREEN: string;
   PROVIDER_CHOOSER_ON_SCREEN: string;
+  FIRST_RUN_PROVIDER_STEP: string;
+  FIRST_RUN_EXIT_COVER_MS: number;
   POP_OUT_WINDOW: string;
   WINDOW_DRAG_STARTED: string;
   WINDOW_DRAG_ENDED: string;
@@ -166,6 +169,8 @@ export interface EmbedHandlerDeps {
   onChatOnScreen: (chatId: string) => void;
   /** The AI-provider chooser is drawn in a window the user can see. */
   onProviderChooserOnScreen: () => void;
+  /** The first run's provider page went up over the workspace (true), or ended (false). */
+  onFirstRunProviderStep: (isPending: boolean) => void;
   /** Open an external link the workspace handed over outside the app (minds:open-external); null in a chrome that
    * cannot, which then says so in its capabilities and the workspace opens the link itself. */
   openExternalLink: ((url: string) => void) | null;
@@ -215,6 +220,7 @@ export function buildEmbedHandlers(
     onReportingKnown,
     onChatOnScreen,
     onProviderChooserOnScreen,
+    onFirstRunProviderStep,
   } = deps;
   const handlers: Record<string, (message: Record<string, unknown>) => void> =
     {};
@@ -312,12 +318,15 @@ export function buildEmbedHandlers(
       immersive: deps.immersive !== null,
       opensCustomSchemeLinks: deps.openExternalLink !== null,
       opensLocalFiles: !isShared,
+      washesFirstRunExit: !isShared,
     });
   };
   handlers[contract.CHAT_ON_SCREEN] = (message) =>
     onChatOnScreen(String(message.chatId));
   handlers[contract.PROVIDER_CHOOSER_ON_SCREEN] = () =>
     onProviderChooserOnScreen();
+  handlers[contract.FIRST_RUN_PROVIDER_STEP] = (message) =>
+    onFirstRunProviderStep(message.isPending === true);
   const immersive = deps.immersive;
   if (immersive !== null) {
     handlers[contract.IMMERSIVE_REQUEST] = (message) =>
@@ -677,6 +686,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
     // the share itself (specs/shared-with-me, 4.8).
     if (armedWorkspaceAnyId !== null && armedWorkspaceAnyId !== workspaceAnyId) {
       shell.stores.workspaces.forgetSharedLoadUrl(armedWorkspaceAnyId);
+      firstRunChrome.release(shell.stores.workspaces.toAgentScopedId(armedWorkspaceAnyId));
     }
     armedWorkspaceAnyId = workspaceAnyId;
     armedSoloWindowId = soloWindowId;
@@ -859,6 +869,18 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           onChatOnScreen: (chatId) => welcomeChatArrival.noteChatOnScreen(chatId),
           onProviderChooserOnScreen: () =>
             welcomeChatArrival.noteProviderChooserOnScreen(),
+          onFirstRunProviderStep: (isPending) => {
+            // The provider page is the owner's; someone else's workspace never holds this chrome.
+            const mounted = shell.stores.workspaces.entryByAnyId(mountedAnyId());
+            if (mounted !== null && isSharedEntry(mounted)) return;
+            const agentId = shell.stores.workspaces.toAgentScopedId(mountedAnyId());
+            if (isPending) {
+              firstRunChrome.hold(agentId);
+            } else {
+              const accent = shell.stores.workspaces.accentEntry(agentId)?.accent ?? null;
+              firstRunChrome.exit(agentId, accent, loaded.FIRST_RUN_EXIT_COVER_MS);
+            }
+          },
           openExternalLink: electronBridge.opensExternalLinks
             ? (url) => electronBridge.openExternalLink(url)
             : null,
@@ -1009,6 +1031,10 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
     },
     onremove(vnode) {
       isRemoved = true;
+      // Leaving the workspace while its provider page is up leaves the chrome to the page it goes to.
+      firstRunChrome.release(
+        vnode.attrs.shell.stores.workspaces.toAgentScopedId(armedWorkspaceAnyId ?? vnode.attrs.workspaceAnyId),
+      );
       if (activeCloseActiveTabForwarder === closeActiveTabForwarder) {
         activeCloseActiveTabForwarder = null;
       }

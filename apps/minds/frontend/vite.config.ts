@@ -8,6 +8,9 @@ import path from "path";
 // .vite/manifest.json, which the Flask index route reads to resolve the
 // hashed entry filenames.
 export default defineConfig({
+  // Flask serves the bundle under /_static/ui/, so asset URLs the build writes (the headline font's files) are
+  // rooted there.
+  base: "/_static/ui/",
   plugins: [tailwindcss()],
   build: {
     outDir: path.resolve(__dirname, "../imbue/minds/desktop_client/static/ui"),

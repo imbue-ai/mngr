@@ -218,13 +218,36 @@ def test_rate_and_cap_let_a_client_extrapolate_only_through_the_running_step() -
     assert counted.percent_cap == counted.percent
 
 
+def test_snapshot_says_whether_minutes_or_seconds_are_left() -> None:
+    clock = _FakeClock()
+    tracker = _tracker(clock, rebuild=300.0, ready=20.0)
+    tracker.announce_plan(_plan(("rebuild", "Rebuilding"), ("ready", "Waiting")), None)
+    tracker.start_step("rebuild", "Rebuilding", None, None)
+
+    long_wait = tracker.snapshot()
+    assert long_wait.remaining_text.endswith("minutes left")
+    assert long_wait.is_over_a_minute_left is True
+
+    tracker.complete_step("rebuild")
+    tracker.start_step("ready", "Waiting", None, None)
+    # The shorter wording is only said once it has held for a while.
+    tracker.snapshot()
+    clock.now += ETA_SHORTEN_HOLD_SECONDS
+    short_wait = tracker.snapshot()
+    assert short_wait.remaining_text == "Almost there..."
+    assert short_wait.is_over_a_minute_left is False
+
+    tracker.complete_step("ready")
+    assert tracker.snapshot().is_over_a_minute_left is False
+
+
 def test_remaining_text_buckets_round_up() -> None:
     assert remaining_text_for(5) == "Almost there..."
-    assert remaining_text_for(30) == "Less than a minute remaining"
-    assert remaining_text_for(70) == "About a minute remaining"
-    assert remaining_text_for(80) == "About 2 minutes remaining"
-    assert remaining_text_for(130) == "About 3 minutes remaining"
-    assert remaining_text_for(600) == "About 10 minutes remaining"
+    assert remaining_text_for(30) == "Less than a minute left"
+    assert remaining_text_for(70) == "1 minute left"
+    assert remaining_text_for(80) == "2 minutes left"
+    assert remaining_text_for(130) == "3 minutes left"
+    assert remaining_text_for(600) == "10 minutes left"
 
 
 def test_remaining_text_lengthens_at_once_but_shortens_only_after_a_hold() -> None:
@@ -232,18 +255,18 @@ def test_remaining_text_lengthens_at_once_but_shortens_only_after_a_hold() -> No
     tracker = _tracker(clock, slow=200.0)
     tracker.announce_plan(_plan(("slow", "Slow")), None)
     tracker.start_step("slow", "Slow", None, None)
-    assert tracker.snapshot().remaining_text == "About 4 minutes remaining"
+    assert tracker.snapshot().remaining_text == "4 minutes left"
 
     # 100s in, the estimate is 100s, but the shorter wording waits for the
     # estimate to persist.
     clock.now += 100
-    assert tracker.snapshot().remaining_text == "About 4 minutes remaining"
+    assert tracker.snapshot().remaining_text == "4 minutes left"
     clock.now += ETA_SHORTEN_HOLD_SECONDS
-    assert tracker.snapshot().remaining_text == "About 2 minutes remaining"
+    assert tracker.snapshot().remaining_text == "2 minutes left"
 
     # The step restarts, so the live estimate jumps back up, and the text says so at once.
     tracker.start_step("slow", "Slow", None, None)
-    assert tracker.snapshot().remaining_text == "About 4 minutes remaining"
+    assert tracker.snapshot().remaining_text == "4 minutes left"
 
 
 def test_a_step_that_overruns_its_expectation_is_read_as_needing_half_again_what_it_took() -> None:
@@ -256,7 +279,7 @@ def test_a_step_that_overruns_its_expectation_is_read_as_needing_half_again_what
     snapshot = tracker.snapshot()
 
     # 400s into a 30s expectation: at least 200s more, not "almost there".
-    assert snapshot.remaining_text == "About 4 minutes remaining"
+    assert snapshot.remaining_text == "4 minutes left"
     assert snapshot.percent == pytest.approx(66.7, abs=0.1)
 
 
@@ -270,7 +293,7 @@ def test_a_counted_step_is_never_read_as_faster_than_its_observed_pace() -> None
     clock.now += 120
     tracker.advance_step("build", 12, 36)
 
-    assert tracker.snapshot().remaining_text == "About 4 minutes remaining"
+    assert tracker.snapshot().remaining_text == "4 minutes left"
 
 
 def test_a_parent_whose_children_are_all_done_but_still_runs_lengthens_the_estimate() -> None:
@@ -287,7 +310,7 @@ def test_a_parent_whose_children_are_all_done_but_still_runs_lengthens_the_estim
     # Work that no child counts runs on past the build's expectation, and the
     # estimate lengthens with the overrun instead of ending.
     clock.now += 200
-    assert tracker.snapshot().remaining_text == "About 2 minutes remaining"
+    assert tracker.snapshot().remaining_text == "2 minutes left"
     assert tracker.snapshot().percent < 100.0
 
 
@@ -319,7 +342,7 @@ def test_a_running_child_decides_its_parents_estimate() -> None:
 
     # The build is 100s past its own expectation, but its running child says
     # 10s (plus the 90s of the build its known children do not account for).
-    assert tracker.snapshot().remaining_text == "About 2 minutes remaining"
+    assert tracker.snapshot().remaining_text == "2 minutes left"
 
 
 def test_complete_all_finishes_every_step_and_drains_durations_once() -> None:

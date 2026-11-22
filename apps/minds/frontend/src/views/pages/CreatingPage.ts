@@ -60,7 +60,7 @@ import {
   REPORTING_MORE_DETAIL,
   REPORTING_MORE_LABEL,
 } from "../../models/manifesto";
-import { wash } from "../../models/wash";
+import { isReducedMotion, wash } from "../../models/wash";
 import {
   firstRunWelcomeChatBody,
   postWelcomeChat,
@@ -77,8 +77,8 @@ import { ImageLightbox } from "../components/ImageLightbox";
 import { PageContainer } from "../components/Layout";
 import { Spinner } from "../components/Spinner";
 import { createFormModal } from "./CreatePage";
-import { firstRunWelcome } from "./create/FirstRunWelcome";
-import { SETTING_UP_LINE } from "./StartPage";
+import { firstRunWelcome, settingUpStatus } from "./create/FirstRunWelcome";
+import { SETTING_UP_LINE, SETTING_UP_LONG_LINE } from "./StartPage";
 import { TRANSCRIPT_COLUMN_CLASS, agentTurn, disclosureList, scrollAnchor, userTurn } from "./start/transcript";
 
 /** How often a running discard is checked on. */
@@ -155,13 +155,6 @@ export function enterWorkspaceFromRedirect(redirectUrl: string): void {
   } else {
     window.location.href = redirectUrl;
   }
-}
-
-function isReducedMotion(): boolean {
-  return (
-    typeof window.matchMedia === "function" &&
-    window.matchMedia("(prefers-reduced-motion: reduce)").matches
-  );
 }
 
 /**
@@ -849,31 +842,28 @@ export const CreatingPage: m.ClosureComponent = () => {
     const request = state.detail?.live?.request ?? null;
     const workspaceName = state.detail?.live?.workspace_name ?? "";
     if (state.isFailed && state.failure !== null) {
-      return m("div", { class: "mt-12 w-full max-w-[720px] text-primary" }, failureTurns(workspaceName, state.failure, request, state.logLines));
+      return m("div", { class: "mt-[60px] w-full max-w-[720px] text-primary" }, failureTurns(workspaceName, state.failure, request, state.logLines));
     }
     const percent = state.progress.percentAt(Date.now(), state.isDone);
-    return m("div", { class: "mt-14 flex w-full max-w-[420px] flex-col items-center" }, [
-      m("p", { id: "creating-setting-up", class: "text-[17px]" }, SETTING_UP_LINE),
-      m(
-        "div",
-        { class: "first-run-bar mt-4 h-1 w-full overflow-hidden rounded-full" },
-        m("div", {
-          id: "creating-welcome-bar",
-          class: "h-full rounded-full transition-[width] duration-300 ease-out",
-          style: `width: ${percent.toFixed(1)}%`,
-        }),
-      ),
-      m(
-        "button",
-        {
-          type: "button",
-          class: "first-run-link mt-4 text-[14px] no-underline hover:underline",
-          onclick: () => {
-            state.isLogOpen = !state.isLogOpen;
+    // A wait of minutes is not "just a sec": the line says so plainly and the estimate stands under the bar.
+    const isLongWait = !state.isDone && state.progress.isOverAMinuteLeft();
+    return settingUpStatus(isLongWait ? SETTING_UP_LONG_LINE : SETTING_UP_LINE, percent, [
+      m("div", { class: "mt-4 flex items-center gap-6 type-body" }, [
+        isLongWait
+          ? m("span", { id: "creating-remaining", class: "text-[color:var(--first-run-ink-muted)]" }, state.progress.remainingText())
+          : null,
+        m(
+          "button",
+          {
+            type: "button",
+            class: "first-run-link first-run-link--plain",
+            onclick: () => {
+              state.isLogOpen = !state.isLogOpen;
+            },
           },
-        },
-        state.isLogOpen ? "Hide details" : "Show details",
-      ),
+          state.isLogOpen ? "Hide details" : "Show details",
+        ),
+      ]),
       state.isLogOpen
         ? m(
             "pre",

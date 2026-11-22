@@ -4,16 +4,18 @@ import { clearAppContextForTests, registerAppContext } from "../../app-context";
 import type { AppContext } from "../../app-context";
 import { firstRun } from "../../models/firstRun";
 import { REPORTING_DETAIL_BODY } from "../../models/manifesto";
-import { REPORTING_CONSENT_QUESTION } from "../../models/onboarding";
 import { webLogin } from "../../models/webLogin";
 import type { AnyVnode } from "../../testing";
 import { allText, attrsOf, byId, collectText, createFormDefaults, jsonResponse, renderDeep } from "../../testing";
 import {
   SIGN_IN_LINE_LEAD,
   SIGN_IN_LINE_REST,
+  SIGN_IN_LINE_SECOND,
   SIGN_IN_MESSAGE,
   StartPage,
   WITHOUT_ACCOUNT_LABEL,
+  WITHOUT_ACCOUNT_TIP,
+  REPORTING_TIP_HEADING,
   areDefaultsStale,
   cloudCreateBody,
   cloudCreateRefusal,
@@ -168,7 +170,7 @@ describe("StartPage", () => {
   it("signs in through the browser and starts a new account's first cloud workspace at once", async () => {
     const { page, render, routes, adopted, posted, starts, landSignIn } = mountPage(0);
     const signInPage = render();
-    expect(collectText(byId(signInPage, "start-line")).join("")).toBe(`${SIGN_IN_LINE_LEAD}${SIGN_IN_LINE_REST}`);
+    expect(collectText(byId(signInPage, "start-line")).join("")).toBe(`${SIGN_IN_LINE_LEAD}${SIGN_IN_LINE_REST}${SIGN_IN_LINE_SECOND}`);
     expect(allText(byId(signInPage, "start-without-account"))).toBe(WITHOUT_ACCOUNT_LABEL);
     press(signInPage, "start-sign-in");
     expect(starts).toEqual([SIGN_IN_MESSAGE]);
@@ -198,19 +200,16 @@ describe("StartPage", () => {
     (declined.page.onremove as () => void).call(declined.page);
   });
 
-  it("opens what the checkbox means from its label, without changing the answer", () => {
+  it("labels the checkbox with its toggle, and explains it and the way past sign-in in tips the controls point at", () => {
     const { page, render } = mountPage(0);
-    expect(byId(render(), "start-reporting-detail")).toBeUndefined();
-
-    press(render(), "start-reporting-label");
-
-    const open = render();
-    const detail = allText(byId(open, "start-reporting-detail"));
-    expect(detail.startsWith(`${REPORTING_CONSENT_QUESTION} ${REPORTING_DETAIL_BODY}`)).toBe(true);
-    expect(detail).not.toContain("We want you to know");
-    expect(attrsOf(byId(open, "start-reporting-checkbox") as AnyVnode).checked).toBe(true);
-    press(open, "start-reporting-label");
-    expect(byId(render(), "start-reporting-detail")).toBeUndefined();
+    const view = render();
+    expect(attrsOf(byId(view, "start-reporting-label") as AnyVnode).for).toBe("start-reporting-checkbox");
+    expect(attrsOf(byId(view, "start-reporting-checkbox") as AnyVnode)["aria-describedby"]).toBe("start-reporting-tip");
+    const reportingTip = allText(byId(view, "start-reporting-tip"));
+    expect(reportingTip.startsWith(`${REPORTING_TIP_HEADING} ${REPORTING_DETAIL_BODY}`)).toBe(true);
+    expect(reportingTip).toContain("Our privacy policy is");
+    expect(attrsOf(byId(view, "start-without-account") as AnyVnode)["aria-describedby"]).toBe("start-without-account-tip");
+    expect(allText(byId(view, "start-without-account-tip"))).toBe(WITHOUT_ACCOUNT_TIP);
     (page.onremove as () => void).call(page);
   });
 

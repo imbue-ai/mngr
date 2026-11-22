@@ -6,15 +6,16 @@ from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR_NAME
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
-from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
+from imbue.minds.desktop_client.workspace_color import pick_create_color
 
 # Order is significant: it drives the picker's render order and
-# pick_unused_create_color's preference walk. ``confusion`` (the
-# default) leads; pure black and pure white are intentionally absent
-# (the neutral system-theme chrome would collide with them).
+# pick_create_color's preference walk. ``courage`` (a new
+# workspace's first suggestion) leads; pure black and pure white are
+# intentionally absent (the neutral system-theme chrome would collide with
+# them).
 _EXPECTED_PALETTE: Final[dict[str, str]] = {
-    "confusion": "#0b292b",
     "courage": "#492222",
+    "confusion": "#0b292b",
     "envy": "#3c3d06",
     "peace": "#9fbbd3",
     "belonging": "#e8a7a8",
@@ -30,7 +31,7 @@ def test_workspace_palette_matches_expected_entries() -> None:
     # Pinning the exact entries *and their order* here so a stray edit to
     # workspace_color.py (rename / typo / dropped entry / reorder) fails
     # loudly -- order drives both the picker's render order and
-    # pick_unused_create_color's preference walk, so an order-insensitive
+    # pick_create_color's preference walk, so an order-insensitive
     # dict comparison would let a reorder slip through.
     assert list(WORKSPACE_PALETTE.items()) == list(_EXPECTED_PALETTE.items())
 
@@ -43,11 +44,10 @@ def test_workspace_palette_excludes_pure_black_and_white() -> None:
     values = set(WORKSPACE_PALETTE.values())
     assert "#000000" not in values
     assert "#ffffff" not in values
-    # ``confusion`` (the default) still leads the palette.
-    assert list(WORKSPACE_PALETTE.keys())[0] == "confusion"
 
 
 def test_default_workspace_color_is_confusion() -> None:
+    # The fallback for workspaces with no color label keeps the color they always rendered as.
     assert DEFAULT_WORKSPACE_COLOR_NAME == "confusion"
     assert DEFAULT_WORKSPACE_COLOR == WORKSPACE_PALETTE["confusion"]
     assert DEFAULT_WORKSPACE_COLOR == "#0b292b"
@@ -91,46 +91,43 @@ def test_normalize_workspace_color_rejects_malformed_inputs(value: str) -> None:
     assert normalize_workspace_color(value) is None
 
 
-# -- pick_unused_create_color --------------------------------------------
+# -- pick_create_color ---------------------------------------------------
 #
-# The create form preselects the first palette color not already used by
-# an existing workspace, falling back to confusion when nothing is in use
-# yet or every palette entry is taken.
+# The create form preselects the palette color the fewest existing
+# workspaces wear, ties going to palette order: the palette in order, then
+# around it again.
 
 _PALETTE_HEXES: Final[tuple[str, ...]] = tuple(WORKSPACE_PALETTE.values())
+_COURAGE = WORKSPACE_PALETTE["courage"]
 _CONFUSION = WORKSPACE_PALETTE["confusion"]
 
 
-def test_pick_unused_create_color_defaults_to_confusion_when_none_used() -> None:
-    # No workspaces yet -> the named default (confusion, which also leads
-    # the palette).
-    assert pick_unused_create_color(set()) == _CONFUSION
+def test_pick_create_color_suggests_courage_for_the_first_workspace() -> None:
+    assert pick_create_color([]) == _COURAGE
 
 
-def test_pick_unused_create_color_returns_confusion_when_all_used() -> None:
-    assert pick_unused_create_color(set(_PALETTE_HEXES)) == _CONFUSION
+def test_pick_create_color_walks_the_palette_in_order() -> None:
+    assert pick_create_color([_COURAGE]) == _CONFUSION
+    assert pick_create_color([_COURAGE, _CONFUSION]) == WORKSPACE_PALETTE["envy"]
 
 
-def test_pick_unused_create_color_returns_first_unused_in_palette_order() -> None:
-    # Confusion is used (e.g. one label-less workspace renders as confusion);
-    # the first unused palette entry in order is courage (confusion leads
-    # the chromatic block, so the next one is courage -- not a neutral).
-    assert pick_unused_create_color({_CONFUSION}) == WORKSPACE_PALETTE["courage"]
+def test_pick_create_color_goes_around_the_palette_again_once_every_color_is_worn() -> None:
+    every_color_once = list(_PALETTE_HEXES)
+    assert pick_create_color(every_color_once) == _COURAGE
+    assert pick_create_color([*every_color_once, _COURAGE]) == _CONFUSION
+    assert pick_create_color([*every_color_once, *every_color_once]) == _COURAGE
 
 
-def test_pick_unused_create_color_skips_to_next_unused() -> None:
-    # confusion + courage taken -> next chromatic palette entry is envy.
-    assert pick_unused_create_color({_CONFUSION, WORKSPACE_PALETTE["courage"]}) == WORKSPACE_PALETTE["envy"]
+def test_pick_create_color_brings_back_the_color_a_deleted_workspace_wore() -> None:
+    # Every color but envy is worn: envy, freed by a deletion, comes back first.
+    worn = [hex_value for hex_value in _PALETTE_HEXES if hex_value != WORKSPACE_PALETTE["envy"]]
+    assert pick_create_color(worn) == WORKSPACE_PALETTE["envy"]
 
 
-def test_pick_unused_create_color_ignores_custom_colors() -> None:
-    # A custom (non-palette) color in use doesn't block any palette pick;
-    # with a custom color the set is non-empty so the first palette entry
-    # (confusion) is returned.
-    assert pick_unused_create_color({"#123456"}) == _CONFUSION
+def test_pick_create_color_ignores_custom_colors() -> None:
+    # A custom (non-palette) color in use doesn't count for any palette entry.
+    assert pick_create_color(["#123456"]) == _COURAGE
 
 
-def test_pick_unused_create_color_is_case_insensitive() -> None:
-    # Uppercased used colors still match palette entries.
-    used = {_CONFUSION.upper()}
-    assert pick_unused_create_color(used) == WORKSPACE_PALETTE["courage"]
+def test_pick_create_color_is_case_insensitive() -> None:
+    assert pick_create_color([_COURAGE.upper()]) == _CONFUSION

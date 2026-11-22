@@ -5,8 +5,8 @@ Figma source at node 356:4113), plus the WCAG luminance contrast picker
 and the lenient hex normalizer the picker UI needs.
 
 Pure black (``#000000``) and pure white (``#ffffff``) are intentionally
-*not* in the palette: non-workspace Imbue Studio screens now paint themselves
-pure white (or pure black in dark mode) per the system theme, so a
+*not* in the palette: non-workspace Imbue Studio screens paint white
+surfaces (on a cream ground) in light mode and black in dark mode, so a
 workspace whose accent was black or white would be indistinguishable
 from the neutral, workspace-less chrome. Users who really want one can
 still type it into the settings hex input; only the preset swatches and
@@ -27,7 +27,8 @@ here -- the chrome derives it from the workspace color in pure CSS; see
 """
 
 import re
-from collections.abc import Collection
+from collections import Counter
+from collections.abc import Iterable
 from collections.abc import Mapping
 from typing import Final
 
@@ -40,12 +41,13 @@ from imbue.imbue_common.pure import pure
 # the swatches' screen-reader labels (the ColorSwatch aria-label).
 #
 # Order matters: the picker renders swatches in this order and
-# ``pick_unused_create_color`` walks it to find the first free color.
-# ``confusion`` (the default) leads. The achromatic neutrals (pure black
-# and pure white) were removed deliberately -- see the module docstring.
+# ``pick_create_color`` walks it to find the least-used color.
+# ``courage`` (the first run's brown, a new workspace's first suggestion)
+# leads. The achromatic neutrals (pure black and pure white) were removed
+# deliberately -- see the module docstring.
 WORKSPACE_PALETTE: Final[Mapping[str, str]] = {
-    "confusion": "#0b292b",
     "courage": "#492222",
+    "confusion": "#0b292b",
     "envy": "#3c3d06",
     "peace": "#9fbbd3",
     "belonging": "#e8a7a8",
@@ -56,11 +58,10 @@ WORKSPACE_PALETTE: Final[Mapping[str, str]] = {
     "clarity": "#fcefd4",
 }
 
-# Default workspace color: preselected on the create form when no other
-# palette entry is suggested, and used as the renderer-side fallback for
-# primary agents that have no ``color`` label on disk (pre-picker
-# workspaces keep rendering as this until the user picks; nothing
-# proactively writes the label).
+# The renderer-side fallback for primary agents that have no ``color``
+# label on disk: pre-picker workspaces keep rendering as this until the
+# user picks (nothing proactively writes the label), so it stays the color
+# they always had.
 DEFAULT_WORKSPACE_COLOR_NAME: Final[str] = "confusion"
 DEFAULT_WORKSPACE_COLOR: Final[str] = WORKSPACE_PALETTE[DEFAULT_WORKSPACE_COLOR_NAME]
 
@@ -68,27 +69,16 @@ _HEX_PATTERN: Final[re.Pattern[str]] = re.compile(r"^#?([0-9a-fA-F]{3}|[0-9a-fA-
 
 
 @pure
-def pick_unused_create_color(used_colors: Collection[str]) -> str:
-    """Pick the color to preselect in the create form.
+def pick_create_color(workspace_colors: Iterable[str]) -> str:
+    """Pick the color to preselect in the create form: the palette entry the fewest workspaces wear.
 
-    Returns ``DEFAULT_WORKSPACE_COLOR`` (confusion) when nothing is in
-    use yet (no workspaces) or when every palette entry is already
-    taken; otherwise returns the first palette entry (in palette order)
-    not present in ``used_colors``. Custom (non-palette) colors in
-    ``used_colors`` simply don't match any palette entry, so they never
-    block a palette pick.
-
-    ``used_colors`` should hold normalized ``#rrggbb`` lowercase hexes
-    (the form the resolver + ``normalize_workspace_color`` emit); the
-    comparison is case-insensitive regardless.
+    Ties go to palette order, so the suggestions run through the palette from ``courage`` and, once every entry
+    is worn, around it again; a deleted workspace's color is the first to come back. ``workspace_colors`` holds
+    every active workspace's color, repeats included. Custom (non-palette) colors match no entry and count for
+    none. The comparison is case-insensitive.
     """
-    normalized_used = {c.lower() for c in used_colors}
-    if not normalized_used:
-        return DEFAULT_WORKSPACE_COLOR
-    for hex_value in WORKSPACE_PALETTE.values():
-        if hex_value not in normalized_used:
-            return hex_value
-    return DEFAULT_WORKSPACE_COLOR
+    worn = Counter(color.lower() for color in workspace_colors)
+    return min(WORKSPACE_PALETTE.values(), key=lambda hex_value: worn[hex_value])
 
 
 @pure

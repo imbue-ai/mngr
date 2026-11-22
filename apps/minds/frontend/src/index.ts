@@ -2,6 +2,7 @@
 // wire the Electron bridge, and mount the router.
 
 import m from "mithril";
+import "@fontsource/besley/500.css";
 import "./style.css";
 import { registerAppContext } from "./app-context";
 import { UiChannelClient } from "./channel/client";
