@@ -28,6 +28,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: A wiring-step failure that retrying cannot fix now names the step and when it last succeeded for the host.
 - Changed: Discovery reports a wiring step that failed from file-descriptor exhaustion as an error at once instead of after 10 transient cycles.
 - Changed: Remote machine commands (`read-state`, `apply-state`, `announce-device`, `forget-request`, `list-requests`) raise `MachineTransferError` (a `RemoteGatewayError`) with typed `sent`/`expected` parts and take the host id instead of `failure_description`; failing to store a read machine state locally is now a `LatchkeyStoreError`.
+- Changed: A remote machine keeps its latchkey encryption key and gateway password on disk in `~/.latchkey/` instead of only in RAM, so its gateway returns after a VPS reboot without reprovisioning (except over the legacy reverse tunnel), and a disk snapshot can now read them; `postinst` migrates existing machines; desktop reads and sign-outs no longer send the machine's key, and the desktop no longer records its gateway password.
 
 ### Removed
 

@@ -4,6 +4,16 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-21
+
+- A remote host's machine now keeps its own latchkey secrets on its disk, in its latchkey directory (`~/.latchkey/machine_encryption_key`, the key its credential store is encrypted with, and `~/.latchkey/machine_gateway_password`, its gateway's listen password), instead of only in RAM under `/run/mngr-latchkey/`. Its gateway therefore comes back after a reboot of the VPS without any of the user's computers provisioning it again. An agent in a container that still reaches the gateway over the legacy reverse tunnel is the exception: the tunnel is started only by a provisioning pass, so it has no route until the next one. The directory is root's and is not mounted into the agent's container, but whoever can read the VPS's disk (a provider's snapshot, a stopped machine's image) can now read the credentials on it. The connected desktops' records stay in RAM.
+
+- The remote package starts supervisord, and so the gateway, only after the docker daemon at boot (a systemd drop-in), since the gateway binds the docker bridge address.
+
+- A machine set up by an earlier build is carried over: the package's `postinst` copies the secrets its gateway runs under into the latchkey directory, the gateway wrapper keeps a copy where a desktop on such a build reads them, and a machine that lost its password to a reboot is still handed back the one such a build recorded on the desktop.
+
+- On the desktop, reads and sign-outs no longer carry the machine's key to hand back, nor need one recorded for the machine, and the machine's gateway password is no longer recorded. A machine that lost its key fails a read of its store or a sign-out until the next provisioning pass gives it one: the key recorded on the desktop when there is one, which keeps its store readable, and otherwise a fresh key, with a credential store that no key at hand opens given up.
+
 ## 2026-11-20
 
 Custom services: `is_capture_login_flow` and `is_capture_login_registration` say whether a login flow, or a registered service's, signs in by capturing the cookie or token the service's own website ends up holding (`cookie-capture` and `token-capture`, as opposed to `mcp`). Imbue Studio uses them to note on a permission request that such a connection may rely on an unofficial API.

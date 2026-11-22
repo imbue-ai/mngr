@@ -29,6 +29,13 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: The bundled latchkey moves to 3.25.0.
 - Changed: When the background carry of a remote workspace's registered agents gives up, it logs one error with the failure attached (type, cause chain, the failed machine command), so Sentry groups it by failure.
 - Changed: Backup failure reasons (`OperationFailureReason`, `BackupProgramFailureReason`) join the generated wire contract (`UiWireSchema`), and the app words them from a table keyed by the generated types.
+- Changed: The first run is a sign-in page ("Reimagine your personal computer", Sign in, "Use without an account", a "Help improve Studio" checkbox) instead of the start chat; a new account's first Imbue Cloud workspace starts on sign-in, and while it builds the creation page asks "What type of studio do you want to make?" and passes the picks to the workspace.
+- Changed: In light mode the app's outer ground is cream with deep-brown text, and the first run uses the bundled Besley Medium headline font (SIL OFL).
+- Changed: The wash into a new workspace starts as the create finishes and is faster; with a template on embed contract v16 (`minds:provider-chooser-on-screen`) it lifts once the provider chooser is on screen instead of waiting for the welcome chat, and with v17 (`minds:first-run-provider-step`) the title bar stays cream while the first-run provider page covers the workspace.
+- Changed: The welcome chat is seeded via `mngr forward` to the chat app's `POST /api/chats/seed`, falling back to `mngr exec` for older templates.
+- Changed: The once-a-minute background sync waits while a workspace is being created (up to 2 minutes).
+- Changed: A remote workspace's latchkey gateway comes back after a VM reboot without reprovisioning; its secrets are now stored on the VM's disk (`/root/.latchkey/`).
+- Changed: Progress bars show time left as "6 minutes left" / "Less than a minute left", and a new workspace's suggested color cycles through the palette starting at deep brown.
 
 ### Removed
 

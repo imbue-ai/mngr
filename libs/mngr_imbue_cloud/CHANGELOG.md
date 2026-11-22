@@ -30,6 +30,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: The batched listing collects work leases, so agents can report `RUNNING_BACKGROUND`, and publishes them as the agent's `background_tasks`.
 - Changed: `connector/session_store.py`'s `_decode_jwt_exp` is now public as `decode_jwt_exp` and returns None instead of raising for an unreadable payload or `exp`.
 - Changed: The page after `auth login` for an unverified account links to the account page to resend the verification email, and `auth resend-verification` reports `already_verified` when nothing was sent.
+- Changed: Fast-path creation makes fewer remote calls: published endpoints come from the lease response, and the host env file and pre-baked agent's `data.json` are kept in memory during the create instead of being read back.
 
 ### Removed
 

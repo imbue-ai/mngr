@@ -4,6 +4,60 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-21
+
+The microphone's denial toast now shows where to change the decision, and takes you there. Its body reads "Blocked on this computer. Change it under Permissions > Client permissions.", where before the toast's two-line limit cut the body off at "Change this...". The words "Permissions > Client permissions" are drawn as a link, and clicking the toast opens the workspace's Permissions tab at its Client permissions section.
+
+The smoke suite's accounts and downloads no longer count in product analytics. The connector's `POST /admin/test-signup`, which mints the suite's persistent and throwaway accounts, now marks each one as a smoke test account, and the analytics lake leaves those accounts and the download probe's `imbue-studio-smoke-test/`-labelled download out of its metrics. `docs/testing-overview.md` (section 1.10) says so, and `docs/deploy/next_deploy.md` carries a check that each tier's existing persistent smoke account, which predates the mark, was marked by the connector's migration, with the statement that marks it by hand where the migration could not find it.
+
+In light mode the app's outer color is now the first run's cream instead of white: the window around every page, the title bar outside a workspace, and the home page's ground. Text, borders and fills on that cream are drawn in the first run's deep brown, with secondary and tertiary text a step stronger than on white, and stay black on white surfaces (cards, modals, menus, tooltips). Inside a workspace the title bar keeps the workspace's color, except while a first-run page is on screen, where it stays cream. Dark mode is unchanged.
+
+- The first run's headlines are set in Besley Medium, now bundled with the app (SIL Open Font License), at a 1.15 line height. The sign-in headline sizes to the page (5.5% of its width, 56px to 88px) and breaks after "your"; the welcome is 40px, with "What type of studio do you want to make?" under it in the heading style.
+
+- "Help improve Studio" sits centered at the sign-in page's foot and its label toggles the checkbox; what it means, with the privacy policy link, shows in a tooltip on hover or keyboard focus. "Use without an account" moves to the bottom-right corner with a tooltip saying what an account adds. Neither link is underlined.
+
+- The browser sign-in dialog and the create form opened from the sign-in page fade the page into cream instead of dimming it.
+
+- The first run's buttons (Sign in, Continue, Try again) share one shape and size, and "Send the email again" is a smaller outlined button. The first run's text uses the app's type styles.
+
+- A new workspace's suggested color starts at the deep brown instead of the dark green, then runs through the palette, the color the fewest of your workspaces wear first; once every color is worn it goes around again (it used to stay on the first color). Workspaces with no saved color still show the dark green.
+
+- The home page's Workspaces and Apps tabs have a little more space between them.
+
+- While a new workspace's first-run provider page ("Your own cloud computer, any AI") covers it, the title bar stays cream; when the owner connects a provider or skips, the workspace's color grows from the window's center over the window and lifts off the workspace. This needs a workspace template that reports the page (embed contract v17, `minds:first-run-provider-step`); an older one keeps today's behavior.
+
+- While the first workspace is being built, the welcome says "We're setting up your workspace" with the time left under the bar ("6 minutes left") when the wait is two minutes or more, and "Just a sec, we're setting up your workspace" otherwise. The bar is as wide as its line.
+
+- Every progress bar says the time left more briefly: "6 minutes left", "1 minute left", "Less than a minute left" (was "About 6 minutes remaining" and so on).
+
+- A remote workspace's latchkey gateway now comes back after its VM reboots without the desktop app having to provision it again: the VM keeps the gateway's secrets on its disk (`/root/.latchkey/`) instead of only in RAM. A workspace whose agent still reaches its gateway over the legacy reverse tunnel is the exception: only provisioning starts that tunnel, so it waits for the desktop app as before.
+
+- The security boundaries note says what this exposes: a stopped workspace's artifact, and a provider's snapshot of a VPS in the user's own account, now hold the key to the workspace's latchkey credential store beside the store.
+
+After a create, the new workspace shows up sooner, and with a template that supports it, the AI-provider chooser appears without waiting for the welcome chat.
+
+- The wash into the workspace starts as soon as the create is done, with "You're all set." streaming underneath it, rather than after the line has finished. The wash also covers the window faster (500 ms rather than 864 ms), and the workspace starts loading under it at 560 ms rather than 950 ms. Under reduced motion the cover is instant, as before.
+
+- Embed contract v16: a new workspace-to-embedder message, `minds:provider-chooser-on-screen`, and a `reportsProviderChooserOnScreen` field on `minds:workspace-ready`. `minds:focus-chat` can now be sent without a `chatId`, which asks the workspace to show its chat root window.
+
+- When a new workspace's template announces `reportsProviderChooserOnScreen`, the creation hand-off asks it to show its chat window as soon as it is ready. The wash then lifts once the provider chooser is on screen, without waiting for the welcome chat's seed, and the welcome chat is still brought forward once it exists. `minds.log` records this case as `PROVIDER_CHOOSER_ON_SCREEN` at debug level. With an older template nothing changes: the wash waits for the welcome chat, still with the 45-second limit.
+
+- The end-to-end runner's provider-chooser sign-in (`sign_in_via_provider_chooser`, used by the launch-to-message run and the snapshot-resume test) finds the chooser in the chat list that frames the welcome chat, where the paired template opens it, as well as in the chat's own page, where older templates open it.
+
+- The once-a-minute background sync (workspace records, connections, account settings) no longer runs while a workspace is being created. A pass that falls due during a create waits until the create finishes plus 15 seconds, which covers the welcome-chat seed and the workspace page load, so its `mngr imbue_cloud` subprocesses no longer compete for CPU with the create. A pass is held for at most 2 minutes. Passes requested by a user action (sign-in, sign-out, unlock, password or settings changes, sharing) still run immediately.
+
+The first run is now a sign-in page instead of the start chat: "Reimagine your personal computer", a Sign in button that signs in through the browser, and "Use without an account", which opens the create form on running the workspace on this computer. An account with workspaces goes to its home page; a new account's first Imbue Cloud workspace starts the moment it signs in (after email verification, as before).
+
+- While that workspace is built, the creation page welcomes the user by name and asks "What type of studio do you want to make?" with pills to pick from (three at most) and a field for their own words. The picks go to the new workspace for the agent. When the create is done the workspace loads under the same welcome, and Continue appears only once the workspace has its provider page up, so pressing it lands there at once.
+
+- The start chat's honest-software exchange, its error-reporting question, its where-to-run question, its "Change answer" controls and the title bar's "Already set up? Log in" are gone. A new install answers the error-reporting question on the sign-in page: a "Help improve Imbue Studio" checkbox at the foot of the page, checked to start, whose label opens what it means. The answer is recorded when Sign in or "Use without an account" is pressed.
+
+- A dev launch on a local template worktree (`just minds-start`) creates the first workspace on this computer instead of Imbue Cloud, which cannot clone a local path.
+
+- For developers: `MINDS_DEV_FORCE_FIRST_RUN=1` makes every sign-in on the first-run page land as an account with no workspaces, so the first run can be replayed with an account that has some. `MINDS_DEV_FIRST_RUN_ON_CLOUD=1` sends that first workspace to Imbue Cloud instead, for a pool with a slice baked from the worktree.
+
+The welcome chat of a new workspace is now seeded by posting the conversation straight to the chat app's `POST /api/chats/seed` at its own origin (`chat.<workspace-id>.localhost`) through `mngr forward`, retried every quarter second while the forward cannot route it yet or the chat app answers 503, instead of starting `mngr exec` to run the template's seeding script (a cold mngr start, SSH, and 1-second retries, about 6 s on a real create). When the forward cannot deliver it within 30 s, or answers the way only an unreachable route does (a redirect, an auth refusal, a missing route on an older template), the seed falls back to the `mngr exec` path, so older templates still get their welcome chat. The seed's start, duration, and outcome lines in `minds.log` are unchanged; a fallback adds one line naming why.
+
 ## 2026-11-20
 
 The backup-update and restore gates no longer call a chat running when mngr could not read its state. `mngr list` reports a chat as UNKNOWN when a read times out on a loaded workspace, and a stopped chat can only ever read STOPPED or UNKNOWN; the gates counted UNKNOWN as running, so "Stop all chats and retry" could stop a chat and then answer blocked naming that same chat (MIND-723). The gates now keep unreadable chats apart from running ones, read them again for a bounded window (the listing after a stop is that window's first read), answer blocked only for chats that definitely run, and fail closed, naming the chats, when a state stays unreadable, since stopping a chat cannot make its state readable. The gate probe reports `unreadable_chats` as its own field, and the desktop logs them instead of ending the operation as blocked.
