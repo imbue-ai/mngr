@@ -82,17 +82,17 @@ Key concepts in the Imbue Studio system:
   (Forwarding reconciliation happens on the Imbue Studio side, via the `mngr forward` plumbing -- not in the watcher.)
 
 - **to publish**: to make a workspace reachable in a browser at its share URL through the self-hosted relay, for as long as it stays published.
-  Publishing is workspace-level and is started from the desktop client's Share tab by a signed-in account associated with the workspace: it provisions the relay materials and certificate that the share-gateway runs the share stack from, and unpublishing drops the tunnel, cutting off anyone connected.
+  Publishing is workspace-level and is started from the desktop client's Sharing pages (in Settings, under Workspace & apps) by a signed-in account associated with the workspace: it provisions the relay materials and certificate that the share-gateway runs the share stack from, and unpublishing drops the tunnel, cutting off anyone connected.
   Who may enter a published workspace is decided by its grants; the URL alone admits nobody.
   The code and older docs say "share" for this; the verb is "publish" from here on, and "share" survives only inside existing names such as share URL, share panel, and share-gateway.
 
 - **grant**: an entry in a workspace's grants document (`data/.secrets/share_grants.toml`) that admits a party to one app of the workspace while it is published.
-  The system interface is an app like the others, with one difference: a grant on it admits the entire workspace, every app included, which the Share tab calls the whole workspace. A grant on any other app admits that app alone, system apps included; an internal service (the terminal's pty, the exec channels) is never a grant's app and is reached only through the whole workspace.
+  The system interface is an app like the others, with one difference: a grant on it admits the entire workspace, every app included, which the Sharing pages call the full workspace. A grant on any other app admits that app alone, system apps included; an internal service (the terminal's pty, the exec channels) is never a grant's app and is reached only through the whole workspace.
   The party is named by an account id, an email address, or a domain. The share-gateway re-reads the document on every request, so removing a grant takes effect immediately.
   A grant names who may enter and nothing more: it does not notify anyone, and it does not make someone a visitor until they visit.
 
 - **system app**: an app that is part of the workspace itself rather than built on it -- the chat, terminal, browser, and Getting Started -- and so is not meant to be shared on its own by default.
-  An app is one when its manifest declares `system = true`. The Share tab lists system apps after the other apps, under a System group that stays closed unless one is selected or already granted, and a grant on one admits it like any other app's.
+  An app is one when its manifest declares `system = true`. The Sharing pages list system apps after the other apps, under a "System apps" label, and a grant on one admits it like any other app's.
   Not to be confused with the system interface, the shell whose grant admits the whole workspace.
 
 - **visitor**: a person who opens someone else's published workspace in a browser through its share URL.
@@ -119,7 +119,7 @@ Key concepts in the Imbue Studio system:
 - **registered address**: an email address that is the verified email of an imbue account; *unregistered* otherwise.
   Registration is what invitation routing checks, whatever the grant's kind says; it says nothing about whether Imbue Studio is installed.
 
-- **share panel**: the granter's surface for creating grants and inviting: the "Share <name>" panel in the desktop client's workspace options.
+- **share panel**: the granter's surface for creating grants and inviting: the "Share <name>" pages under Sharing in the desktop client's Settings (Workspace & apps), one per target.
 
 - **joined**: a grantee's first authorized visit to the workspace, as recorded by the share broker's visit log. The visitor's own action, not a delivery outcome.
 

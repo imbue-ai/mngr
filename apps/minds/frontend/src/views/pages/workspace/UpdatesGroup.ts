@@ -58,6 +58,7 @@ import { variantBesideErrors } from "../../components/variantBesideErrors";
 import type { ErrorAction } from "../../../models/errors";
 import { AskAgentModel } from "../../../models/assistChat";
 import { recoveryRoute } from "../../../models/create";
+import { rememberSettingsPlace } from "../settings/settings-route";
 import { renderUpdateWindowPicker } from "../../components/UpdateWindowPicker";
 import { settingsFailureLine } from "../../components/SettingsFailureLine";
 
@@ -1103,11 +1104,7 @@ function automaticUpdatesSection(
       id: "ws-auto-update-change",
       class:
         "text-primary underline underline-offset-2 hover:opacity-80 cursor-pointer",
-      onclick: () =>
-        m.route.set("/settings", {
-          ...shell.overlayQuery(),
-          section: "updates",
-        }),
+      onclick: () => rememberSettingsPlace({ tab: "studio", section: "updates" }),
     },
     "Change",
   );

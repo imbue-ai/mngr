@@ -16,6 +16,7 @@ parses those into typed pydantic objects.
 import json as _json
 import os
 import tempfile
+import threading
 import time
 from collections.abc import Callable
 from collections.abc import Mapping
@@ -28,6 +29,7 @@ from typing import Final
 from loguru import logger
 from pydantic import AnyUrl
 from pydantic import Field
+from pydantic import PrivateAttr
 from pydantic import SecretStr
 from pydantic import TypeAdapter
 from pydantic import ValidationError
@@ -37,6 +39,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.profiling import get_profiler
 from imbue.imbue_common.pure import pure
+from imbue.minds.desktop_client.host_keyed_ttl_cache import CachedLookup
 from imbue.minds.desktop_client.host_keyed_ttl_cache import HostKeyedTtlCache
 from imbue.minds.errors import MindError
 from imbue.minds.utils.mngr_caller import MngrCallResult
@@ -580,6 +583,33 @@ class ActiveShareCache(HostKeyedTtlCache[ShareCliInfo | None]):
     )
 
 
+class KnownShareDomains(MutableModel):
+    """The domain of each workspace's active share as Imbue Cloud last said it, for as long as this app runs.
+
+    A share's links are built from its domain, and only the connector can say
+    what that is: the copy inside the workspace is the workspace's to rewrite,
+    so it is never what a link shown to the user is built from. Remembering the
+    connector's last answer lets the share panel draw a link before the
+    connector has answered again. None is remembered for a workspace the
+    connector said has no active share.
+    """
+
+    _domain_by_host_id: dict[str, str | None] = PrivateAttr(default_factory=dict)
+    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+
+    def remember(self, host_id: str, share: ShareCliInfo | None) -> None:
+        domain = share.workspace_domain if share is not None and share.state == "active" else None
+        with self._lock:
+            self._domain_by_host_id[host_id] = domain
+
+    def lookup(self, host_id: str) -> CachedLookup[str | None] | None:
+        """What the connector last said of ``host_id``'s share, or None when it has not been asked in this run."""
+        with self._lock:
+            if host_id not in self._domain_by_host_id:
+                return None
+            return CachedLookup[str | None](value=self._domain_by_host_id[host_id])
+
+
 class SyncRecordsPullResult(FrozenModel):
     """What `mngr imbue_cloud sync records pull` reports: the account's records and which of its workspaces are shared."""
 
@@ -688,6 +718,11 @@ class ImbueCloudCli(MutableModel):
             "login page on the origin where Google OAuth and session cookies actually work. None "
             "on tiers without a dedicated accounts domain (the connector host serves the pages)."
         ),
+    )
+    known_share_domains: KnownShareDomains = Field(
+        default_factory=KnownShareDomains,
+        frozen=True,
+        description="Each workspace's share domain as the connector last answered it through this CLI",
     )
 
     def _run(
@@ -1175,7 +1210,9 @@ class ImbueCloudCli(MutableModel):
             # message that reaches logs and the sharing UI.
             shape = _describe_body_shape(body)
             raise ImbueCloudCliError(f"Malformed shares create output: expected a share object, got {shape}")
-        return ShareCliInfo.model_validate({"state": "active", **body})
+        share = ShareCliInfo.model_validate({"state": "active", **body})
+        self.known_share_domains.remember(host_id, share)
+        return share
 
     def delete_share(self, *, account: str, host_id: str) -> None:
         result = self._run(
@@ -1183,6 +1220,7 @@ class ImbueCloudCli(MutableModel):
             cg_name="imbue-cloud-shares-delete",
         )
         self._expect_success(result, "shares delete")
+        self.known_share_domains.remember(host_id, None)
 
     def get_share_status(self, *, account: str, host_id: str) -> ShareCliInfo | None:
         """The share's status document, or None when this workspace has never been shared."""
@@ -1191,9 +1229,13 @@ class ImbueCloudCli(MutableModel):
             cg_name="imbue-cloud-shares-status",
         )
         body = self._expect_success(result, "shares status")
-        if not isinstance(body, dict) or body.get("state") in (None, "", "none"):
-            return None
-        return ShareCliInfo.model_validate(body)
+        share = (
+            None
+            if not isinstance(body, dict) or body.get("state") in (None, "", "none")
+            else ShareCliInfo.model_validate(body)
+        )
+        self.known_share_domains.remember(host_id, share)
+        return share
 
     def list_shares(self, *, account: str) -> list[ShareCliInfo]:
         """Every share record of the account (active and inactive)."""
@@ -1254,7 +1296,11 @@ class ImbueCloudCli(MutableModel):
         body = self._expect_success(result, "shares push-grants")
         if not isinstance(body, dict):
             raise ImbueCloudCliError("Malformed shares push-grants output: expected an object")
-        return ShareGrantsPushCliResult.model_validate(body)
+        pushed = ShareGrantsPushCliResult.model_validate(body)
+        # An older connector answers no share with the push: nothing new is known then.
+        if pushed.share is not None:
+            self.known_share_domains.remember(host_id, pushed.share)
+        return pushed
 
     def invite_grantee(
         self,
@@ -1290,11 +1336,11 @@ class ImbueCloudCli(MutableModel):
         return InvitationCliResult.model_validate(parsed)
 
     def send_mobile_access_link(
-        self, *, account: str, host_id: str, link: str | None, workspace_name: str | None
+        self, *, account: str, host_id: str, link: str | None, workspace_name: str | None, app_name: str | None
     ) -> MobileAccessLinkCliResult:
-        """Have the connector email the account its own workspace's link; raises on the connector's 409 codes."""
+        """Have the connector email the account its own workspace's link, or the link of the one app ``app_name`` names; raises on the connector's 409 codes."""
         args = ["shares", "mobile-access-link", host_id, "--account", account]
-        for option, value in (("--link", link), ("--workspace-name", workspace_name)):
+        for option, value in (("--link", link), ("--workspace-name", workspace_name), ("--app-name", app_name)):
             if value:
                 args.extend([option, value])
         result = self._run(args, cg_name="imbue-cloud-shares-mobile-access-link")

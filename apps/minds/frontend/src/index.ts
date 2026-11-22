@@ -6,7 +6,7 @@ import "@fontsource/besley/500.css";
 import "./style.css";
 import { registerAppContext } from "./app-context";
 import { UiChannelClient } from "./channel/client";
-import { electronBridge } from "./electron-bridge";
+import { electronBridge, isBrowserSwitcherChord } from "./electron-bridge";
 import { installCursorHidingWhileTyping } from "./hide-cursor-while-typing";
 import { bootFromBootstrap, createEmptyStores } from "./models/boot";
 import { onboardingProgress } from "./models/onboarding";
@@ -274,6 +274,13 @@ function main(): void {
   document.addEventListener(
     "keydown",
     (event: KeyboardEvent) => {
+      // The switcher's shortcut in a plain browser, where no main process catches it: the platform default,
+      // and only while focus is on this document (the workspace's key presses never reach it).
+      if (!electronBridge.canConfigureShortcuts && isBrowserSwitcherChord(event)) {
+        event.preventDefault();
+        shell.toggleWorkspaceSwitcher();
+        return;
+      }
       if (event.key !== "Escape") return;
       if (!shell.handleEscape()) return;
       event.stopPropagation();
@@ -281,6 +288,9 @@ function main(): void {
     },
     true,
   );
+  // The switcher's shortcut in the desktop app: main matches the binding on every key press, wherever focus
+  // is, and asks the window it was pressed in.
+  electronBridge.onToggleWorkspaceSwitcher(() => shell.toggleWorkspaceSwitcher());
   // The same Escape, forwarded by Electron main, which forwards EVERY one. It
   // is needed only for the case the listener above cannot see -- focus inside a
   // cross-origin iframe, whose key events never reach this document -- so it is

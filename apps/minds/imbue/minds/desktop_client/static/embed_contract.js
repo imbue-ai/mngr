@@ -48,9 +48,9 @@ export const OPEN_AI_KEYS_PAGE = "minds:open-ai-keys-page";
 // shell to bring the app window back to the front. A no-op in plain-browser
 // chrome (there is no window to raise). Payload: {}.
 export const BRING_APP_TO_FRONT = "minds:bring-app-to-front";
-// workspace -> embedder: open the shell's workspace-options panel on its
-// Share tab, focused on that app, or on the whole workspace when no app is
-// named. Payload: { serviceName? }.
+// workspace -> embedder: open the shell's Settings on the workspace's Sharing,
+// at that app's page, or at the whole workspace's when no app is named.
+// Payload: { serviceName? }.
 export const OPEN_SHARE_SETTINGS = "minds:open-share-settings";
 // workspace -> embedder: this document's endpoint is listening, so anything
 // the embedder held for it can be sent now. Payload: { opensLinks?,
@@ -133,8 +133,8 @@ export const DETACHED_WINDOWS = "minds:detached-windows";
 // (and, for a custom-scheme link, `opensCustomSchemeLinks`) or for an external
 // link that embedder handed over with OPEN_LINK.
 export const OPEN_EXTERNAL = "minds:open-external";
-// workspace -> embedder: open the shell's workspace-options panel on its
-// Permissions tab at the Local files section, where the user shares files and
+// workspace -> embedder: open the shell's Settings on the workspace's
+// Permissions at the Local files section, where the user shares files and
 // folders from this computer and turns syncing on. Payload: {}. Sent only to
 // an embedder that said `opensLocalFiles` with EMBEDDER_CAPABILITIES.
 export const OPEN_LOCAL_FILES = "minds:open-local-files";
@@ -236,7 +236,8 @@ export const OPEN_LINK = "minds:open-link";
 export const IMMERSIVE_CHANGED = "minds:immersive-changed";
 
 // The chrome controls a workspace may ask to have ringed (HIGHLIGHT_CHROME):
-// the workspace switcher, the three workspace tabs, and the help button.
+// the workspace switcher, the Settings gear (for both `permissions` and
+// `settings`), Share, and the help button.
 export const CHROME_ANCHORS = ['workspace-switcher', 'permissions', 'settings', 'share', 'help'];
 
 // Upper bound on entries per message, bounding the work it can demand; the

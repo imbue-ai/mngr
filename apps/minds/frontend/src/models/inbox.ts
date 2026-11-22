@@ -13,7 +13,7 @@
 // the review they asked for is over when that request has a verdict, and
 // swapping the next pending one in under the click that finished it would
 // answer a question nobody had asked yet. The list they picked from is where
-// closing takes them (see returnToPanelAfterRequest).
+// closing takes them (see returnToSettingsAfterRequest).
 
 import type { ErrorRemedy, FolderSyncConflict, UiPermissionGrantGroup, UiWorkspaceDesktop } from "../generated/ui";
 import {

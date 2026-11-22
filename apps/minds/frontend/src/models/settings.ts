@@ -92,6 +92,7 @@ export interface SignInBrowserOption {
 export type SettingsSection =
   | "notifications"
   | "display"
+  | "keyboard-shortcuts"
   | "browser-import"
   | "error-reporting"
   | "updates"
@@ -106,6 +107,7 @@ export const SETTINGS_SECTIONS: {
 }[] = [
   { name: "notifications", label: "Notifications", group: "Other" },
   { name: "display", label: "Display", group: "Other" },
+  { name: "keyboard-shortcuts", label: "Keyboard shortcuts", group: "Other" },
   { name: "browser-import", label: "Browser cookies", group: "Other" },
   { name: "error-reporting", label: "Error reporting", group: "Other" },
   { name: "updates", label: "Updates", group: "Other" },
@@ -892,9 +894,11 @@ export class SettingsModel {
     this.redraw();
   }
 
-  /** The nav entries this build can actually service. */
+  /** The sections this build offers. Rebinding a shortcut needs the desktop app's main process. */
   get visibleSections(): typeof SETTINGS_SECTIONS {
-    return SETTINGS_SECTIONS;
+    return SETTINGS_SECTIONS.filter(
+      (section) => section.name !== "keyboard-shortcuts" || electronBridge.canConfigureShortcuts,
+    );
   }
 
   async loadUpdateState(): Promise<void> {

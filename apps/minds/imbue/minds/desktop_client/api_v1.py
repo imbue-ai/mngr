@@ -32,6 +32,7 @@ import json
 import os
 import queue
 import threading
+import time
 from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
@@ -133,6 +134,7 @@ from imbue.minds.desktop_client.api_models import MachineSizeChangeRequest
 from imbue.minds.desktop_client.api_models import MachineSizeChangeResponse
 from imbue.minds.desktop_client.api_models import MediaEndpointCandidate
 from imbue.minds.desktop_client.api_models import MediaEndpointsResponse
+from imbue.minds.desktop_client.api_models import MobileAccessLinkRequest
 from imbue.minds.desktop_client.api_models import MobileAccessLinkResponse
 from imbue.minds.desktop_client.api_models import OkResponse
 from imbue.minds.desktop_client.api_models import OperationHandleResponse
@@ -268,6 +270,7 @@ from imbue.minds.desktop_client.sharing_handler import SharingError
 from imbue.minds.desktop_client.sharing_handler import SharingFailureReason
 from imbue.minds.desktop_client.sharing_handler import get_active_share
 from imbue.minds.desktop_client.sharing_handler import get_active_share_cached
+from imbue.minds.desktop_client.sharing_handler import get_local_sharing
 from imbue.minds.desktop_client.sharing_handler import get_share_gateway_status_cached
 from imbue.minds.desktop_client.sharing_handler import get_sharing
 from imbue.minds.desktop_client.sharing_handler import invite_grantee_for_workspace
@@ -3999,6 +4002,7 @@ def _sharing_document_to_response(document: dict[str, object]) -> MachineSharing
         migrated_domain_from=_optional_str(document, "migrated_domain_from"),
         publication_unknown_reason=_optional_str(document, "publication_unknown_reason"),
         invitation_outcomes=_invitation_outcomes(document),
+        is_connector_pending=document.get("is_connector_pending") is True,
     )
 
 
@@ -4071,6 +4075,25 @@ def _handle_workspace_sharing_get(workspace_id: str) -> MachineSharingResponse |
     if host_id is None:
         return _unknown_sharing_workspace_response(workspace_id)
     return _machine_sharing_get_core(host_id)
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(MachineSharingResponse))
+def _handle_workspace_sharing_local_get(workspace_id: str) -> MachineSharingResponse | Response:
+    """Return the workspace's sharing document as far as it can be told without Imbue Cloud.
+
+    What the share panel draws from while the full read, which waits on the
+    connector, is still out.
+    """
+    host_id = _sharing_host_for_workspace(workspace_id)
+    if host_id is None:
+        return _unknown_sharing_workspace_response(workspace_id)
+    state = get_state()
+    return _sharing_document_to_response(
+        get_local_sharing(
+            host_id, state.backend_resolver, state.imbue_cloud_cli, state.session_store, state.identity_cache
+        )
+    )
 
 
 @require_api_or_cookie_auth
@@ -4165,16 +4188,17 @@ def _handle_workspace_sharing_invitation_outcomes(workspace_id: str) -> Invitati
 
 
 @require_api_or_cookie_auth
-@API_SPEC.validate(resp=json_response_model(MobileAccessLinkResponse))
+@API_SPEC.validate(json=MobileAccessLinkRequest, resp=json_response_model(MobileAccessLinkResponse))
 def _handle_workspace_sharing_mobile_access_link(workspace_id: str) -> MobileAccessLinkResponse | Response:
-    """Email the signed-in account the link to its own published workspace; answers how the request ended."""
+    """Email the signed-in account the link to its own published workspace, or to one app of it; answers how the request ended."""
     host_id = _sharing_host_for_workspace(workspace_id)
     if host_id is None:
         return _unknown_sharing_workspace_response(workspace_id)
+    body = MobileAccessLinkRequest.model_validate(request.get_json(silent=True, force=True) or {})
     state = get_state()
     try:
         with state.machine_sharing_locks.get_lock(host_id):
-            result = send_mobile_access_link_for_workspace(host_id, state.backend_resolver)
+            result = send_mobile_access_link_for_workspace(host_id, body.app, state.backend_resolver)
     except ImbueCloudShareRefusedCliError as exc:
         return _json_response({"error": exc.code, "message": str(exc)}, status_code=409)
     except ImbueCloudEmailNotVerifiedCliError as exc:
@@ -4357,7 +4381,13 @@ def _machine_sharing_get_core(host_id: str) -> MachineSharingResponse | Response
     try:
         # Serialized with the writes: a read that repairs a stale-domain share
         # rotates the relay token and rewrites share.env exactly like an enable.
+        lock_asked_at = time.monotonic()
         with state.machine_sharing_locks.get_lock(host_id):
+            logger.debug(
+                "Waited {:.1f}s for the sharing lock of {} before reading its sharing document",
+                time.monotonic() - lock_asked_at,
+                host_id,
+            )
             document = get_sharing(
                 host_id,
                 state.backend_resolver,
@@ -6051,6 +6081,11 @@ def create_api_v1_blueprint() -> Blueprint:
         "/workspace-sharing/<workspace_id>",
         view_func=_handle_workspace_sharing_get,
         endpoint="workspace_sharing_get",
+        methods=["GET"],
+    )
+    blueprint.add_url_rule(
+        "/workspace-sharing/<workspace_id>/local",
+        view_func=_handle_workspace_sharing_local_get,
         methods=["GET"],
     )
     blueprint.add_url_rule(

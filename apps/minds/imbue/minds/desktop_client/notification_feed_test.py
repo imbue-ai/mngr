@@ -892,7 +892,7 @@ def test_native_banner_event_carries_the_feed_entry_for_the_shared_open_action(
     (event,) = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
 
     assert event["entry"] == entry.model_dump(mode="json")
-    assert event["url"] == "/accounts"
+    assert event["url"] == "/settings?tab=accounts"
 
 
 def test_a_workspace_system_event_dispatches_a_link_to_its_backups_page() -> None:
@@ -935,21 +935,21 @@ def test_an_account_level_system_event_titles_itself_with_the_account_and_links_
     )
 
     # The entry names its account, so only that account's windows hear it, and the
-    # banner opens the accounts page as that account's overlay.
+    # banner opens Settings' Accounts tab as that account's overlay.
     assert entry.account_id == "user-me"
     (request,) = dispatcher.dispatched
     assert request.title == "me@example.com"
-    assert request.url == "/accounts?account=user-me"
+    assert request.url == "/settings?tab=accounts&account=user-me"
 
 
-def test_an_account_level_system_event_naming_no_account_links_to_the_bare_accounts_page() -> None:
+def test_an_account_level_system_event_naming_no_account_links_to_the_accounts_tab_alone() -> None:
     dispatcher = _make_recording_dispatcher()
     feed = _make_feed(dispatcher=dispatcher)
 
     feed.append_system_event(_system_event(workspace_agent_id="", title="Backup cleanup finished"))
 
     (request,) = dispatcher.dispatched
-    assert request.url == "/accounts"
+    assert request.url == "/settings?tab=accounts"
 
 
 def test_an_agent_message_is_not_silenced_as_startup_backfill() -> None:

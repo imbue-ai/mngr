@@ -34,7 +34,7 @@ import type {
   WorkspaceFrameHandle,
   WorkspaceMessageSender,
 } from "./shell-state";
-import { isAppOverlayPath } from "./classify";
+import { SETTINGS_PATH, isAppOverlayPath } from "./classify";
 import { isHostOfShare, isSharedEntry } from "../../models/sharedWithMe";
 import type { SharedEntry } from "../../models/sharedWithMe";
 import { requestWallpaperRefresh } from "../../models/workspaceAssets";
@@ -269,25 +269,23 @@ export function buildEmbedHandlers(
   };
   handlers[contract.OPEN_SHARE_SETTINGS] = (message) => {
     if (isSharedWorkspace()) return;
-    // Float the options panel's sharing pane over this machine (kept mounted),
-    // focused on the asking app, or on the whole workspace when the message names
-    // none (contract v13). A name the pane does not recognize falls back to the
+    // Float Settings over this machine (kept mounted), at Sharing: the asking
+    // app's page, or the whole workspace's when the message names none
+    // (contract v13). A name Sharing does not recognize falls back to the
     // whole workspace too (SharePanelModel.selectTarget).
     const serviceName =
       typeof message.serviceName === "string" ? message.serviceName : null;
-    navigate(
-      `/workspace/${workspaceAgentId()}/options`,
-      serviceName === null
-        ? { tab: "share" }
-        : { tab: "share", target: serviceName },
-    );
+    const place = { workspace: workspaceAgentId(), tab: "workspace", group: "sharing" };
+    navigate(SETTINGS_PATH, serviceName === null ? place : { ...place, share_target: serviceName });
   };
   handlers[contract.OPEN_LOCAL_FILES] = () => {
     if (isSharedWorkspace()) return;
-    // Float the options panel's Permissions pane over this machine, at Local files.
-    navigate(`/workspace/${workspaceAgentId()}/options`, {
-      tab: "permissions",
-      section: LOCAL_FILES_SECTION,
+    // Float Settings over this machine, at Permissions' Local files.
+    navigate(SETTINGS_PATH, {
+      workspace: workspaceAgentId(),
+      tab: "workspace",
+      group: "permissions",
+      perm_section: LOCAL_FILES_SECTION,
     });
   };
   handlers[contract.BRING_APP_TO_FRONT] = () => bringAppToFront();
@@ -307,7 +305,7 @@ export function buildEmbedHandlers(
     // What this chrome can do, so the workspace's pull-out gesture turns on
     // only where a desktop window can be made, and it hands over the
     // external links it does not open itself only where main opens them.
-    // Every chrome that runs these handlers has the options panel, so each
+    // Every chrome that runs these handlers has Settings, so each
     // takes OPEN_LOCAL_FILES. Someone else's workspace (specs/shared-with-me,
     // S12) gets neither: its windows are not this device's to pull out, and
     // its local files are its owner's.

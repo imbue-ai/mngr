@@ -239,7 +239,7 @@ describe("class builders keep the legacy recipes", () => {
 
   it("titlebarButtonClass renders control geometry for window controls", () => {
     expect(titlebarButtonClass("control", "danger", "")).toContain(
-      "w-9 h-[38px]",
+      "w-9 h-(--titlebar-height)",
     );
     expect(titlebarButtonClass("control", "danger", "")).toContain(
       "titlebar-btn-danger",

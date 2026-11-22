@@ -244,7 +244,7 @@ def test_run_web_login_subprocess_notifies_once_the_new_account_is_listed(tmp_pa
     """The open windows' accounts frame is re-derived only on a notify, so it must come after the mirror.
 
     The notify is what lists a newly signed-in account in both the bottom-left
-    launcher and Manage Accounts.
+    launcher and Settings' Accounts tab.
     """
     email = f"user-{uuid4().hex}@example.com"
     cli = make_fake_imbue_cloud_cli()

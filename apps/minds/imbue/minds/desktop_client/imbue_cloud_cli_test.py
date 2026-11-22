@@ -299,6 +299,66 @@ def test_get_share_status_parses_the_per_relay_login_stamps() -> None:
     ]
 
 
+_KNOWN_SHARE_BODY: dict[str, object] = {
+    "host_id": "host-abc",
+    "workspace_domain": "host-abc.owner1234.us1.shares.example",
+    "region": "us1",
+    "state": "active",
+}
+
+
+def test_a_share_status_read_remembers_the_domain_the_connector_named() -> None:
+    cli, _caller = _cli_with_result(MngrCallResult(returncode=0, stdout=json.dumps(_KNOWN_SHARE_BODY)))
+    assert cli.known_share_domains.lookup("host-abc") is None
+
+    cli.get_share_status(account="owner@example.com", host_id="host-abc")
+
+    remembered = cli.known_share_domains.lookup("host-abc")
+    assert remembered is not None
+    assert remembered.value == "host-abc.owner1234.us1.shares.example"
+
+
+@pytest.mark.parametrize("body", [{"state": "none"}, {**_KNOWN_SHARE_BODY, "state": "revoked"}])
+def test_a_share_status_read_remembers_that_there_is_no_active_share(body: dict[str, object]) -> None:
+    cli, _caller = _cli_with_result(MngrCallResult(returncode=0, stdout=json.dumps(body)))
+
+    cli.get_share_status(account="owner@example.com", host_id="host-abc")
+
+    remembered = cli.known_share_domains.lookup("host-abc")
+    assert remembered is not None
+    assert remembered.value is None
+
+
+def test_creating_a_share_remembers_its_domain_and_deleting_it_forgets_the_domain() -> None:
+    cli, caller = _cli_with_result(
+        MngrCallResult(returncode=0, stdout=json.dumps({**_KNOWN_SHARE_BODY, "relay_token": "token-1"}))
+    )
+
+    cli.create_share(account="owner@example.com", host_id="host-abc")
+    created = cli.known_share_domains.lookup("host-abc")
+    caller.result = MngrCallResult(returncode=0, stdout=json.dumps({"deleted": True}))
+    cli.delete_share(account="owner@example.com", host_id="host-abc")
+    deleted = cli.known_share_domains.lookup("host-abc")
+
+    assert created is not None and created.value == "host-abc.owner1234.us1.shares.example"
+    assert deleted is not None and deleted.value is None
+
+
+def test_a_grants_push_remembers_the_share_it_answered_with_and_nothing_when_it_answered_none() -> None:
+    cli, caller = _cli_with_result(
+        MngrCallResult(returncode=0, stdout=json.dumps({"appended": 0, "share": _KNOWN_SHARE_BODY}))
+    )
+
+    cli.push_share_grants(account="owner@example.com", host_id="host-abc", document={})
+    caller.result = MngrCallResult(returncode=0, stdout=json.dumps({"appended": 0}))
+    cli.push_share_grants(account="owner@example.com", host_id="host-other", document={})
+
+    remembered = cli.known_share_domains.lookup("host-abc")
+    assert remembered is not None and remembered.value == "host-abc.owner1234.us1.shares.example"
+    # A connector that answers no share with the push has said nothing about it.
+    assert cli.known_share_domains.lookup("host-other") is None
+
+
 def test_create_share_malformed_output_error_omits_the_relay_token() -> None:
     """A malformed shares-create payload (a body with a relay token but no
     workspace_domain) must not leak the relay token into the exception
@@ -753,6 +813,34 @@ def test_invite_parses_the_outcome_and_outcomes_parse_each_entry() -> None:
     assert result.invited_at == "2026-09-30T12:00:00+00:00"
     assert [entry.outcome for entry in outcomes] == ["invited", None]
     assert caller.calls[1][:4] == ["imbue_cloud", "shares", "invitation-outcomes", "host-1"]
+
+
+def test_send_mobile_access_link_names_the_app_only_when_asked_for_one() -> None:
+    app_link = "https://notes-x.host-1.owner.us1.shares.example/"
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(
+            returncode=0,
+            stdout=json.dumps(
+                {"outcome": "sent", "recipient_email": "owner@example.com", "sent_at": "2026-09-30T12:00:00+00:00"}
+            ),
+        )
+    )
+    cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
+
+    for_app = cli.send_mobile_access_link(
+        account="owner@example.com", host_id="host-1", link=app_link, workspace_name="alpha", app_name="Notes"
+    )
+    cli.send_mobile_access_link(
+        account="owner@example.com", host_id="host-1", link=None, workspace_name=None, app_name=None
+    )
+
+    assert for_app.outcome == "sent"
+    assert for_app.recipient_email == "owner@example.com"
+    command = ["imbue_cloud", "shares", "mobile-access-link", "host-1", "--account", "owner@example.com"]
+    assert caller.calls == [
+        [*command, "--link", app_link, "--workspace-name", "alpha", "--app-name", "Notes"],
+        command,
+    ]
 
 
 def test_notification_preferences_round_trip_through_the_plugin() -> None:

@@ -16,6 +16,7 @@ import { ErrorNotice, restartAppActions } from "../components/ErrorDisplay";
 import { FormLabel, Textarea } from "../components/FormControls";
 import { Spinner } from "../components/Spinner";
 import { variantBesideErrors } from "../components/variantBesideErrors";
+import { ownerSectionQuery } from "./settings/settings-route";
 
 /** The minted-key form: the success body once the workspace's owning account
  * has resolved. Extracted so the view keeps the load / error / ready branches
@@ -140,10 +141,7 @@ function unlinkedWorkspaceActions(context: AiKeysContext): ErrorAction[] {
       onclick: () => {
         const { shell, stores } = getAppContext();
         const agentId = stores.workspaces.toAgentScopedId(context.workspace_id);
-        shell.routeTo(`/workspace/${agentId}/options`, {
-          tab: "settings",
-          group: "account",
-        });
+        shell.openSettings(ownerSectionQuery(agentId));
       },
     },
   ];

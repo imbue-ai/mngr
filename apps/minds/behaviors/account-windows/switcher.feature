@@ -2,7 +2,7 @@ Feature: The account switcher
   The titlebar control that names the window's account and moves the window between accounts.
 
   @names-the-account
-  Scenario Outline: The switcher names the window's account
+  Scenario Outline: The switcher names the window's account, a signed-in one by its email
     Given a window for <account>
     Then the switcher shows <label>
 
@@ -10,18 +10,27 @@ Feature: The account switcher
       | account                                                                  | label                   |
       | the device                                                               | "This device"           |
       | the signed-in account "alice@example.com" with no display name           | "alice@example.com"     |
-      | the signed-in account "alice@example.com" with the display name "Alice"  | "Alice"                 |
+      | the signed-in account "alice@example.com" with the display name "Alice"  | "alice@example.com"     |
 
   @lists-every-account
-  Scenario: The switcher lists every account the window could move to
+  Scenario: The switcher lists every account the window could show, its own marked
     Given the accounts "alice@example.com" and "bob@example.com" are signed in
     And the account "carol@example.com" is signed out but has workspaces on this installation
     And the account "dave@example.com" is signed out and has no workspace on this installation
     When the user opens the switcher in a window for Alice
-    Then it lists Alice, marked as the window's own account and not actionable
-    And it lists Bob, Carol marked as signed out, and the device
+    Then it lists Alice and Bob by their emails, Carol by hers marked "Signed out" with a "Sign in" control, and the device as "This device"
+    And Alice's row carries a check at its right and a tint fainter than the highlight's, and no other row is marked
+    And each account's row starts with a person icon, dimmed on Carol's, and the device's with a monitor icon, all in one column
     And it does not list Dave
-    And it offers "Add account", which starts the browser sign-in
+    And straight after those rows, with no rule between, it offers "New account", which starts the browser sign-in and leaves the window on Alice
+    And it ends, under a rule, with "Manage accounts", which opens Settings on its Accounts tab, at Alice's entry
+
+  @choosing-own-account
+  Scenario: Choosing the window's own account only closes the switcher
+    Given the switcher's menu is open in a window for the account "alice@example.com"
+    When the user chooses Alice's row
+    Then the menu closes
+    And the window keeps what it shows
 
   @switch-lands-on-a-free-recent-workspace
   Scenario: Switching lands on the account's most recently opened workspace that no other window shows
@@ -78,5 +87,5 @@ Feature: The account switcher
   @workspace-move-leaves-the-window
   Scenario: Moving a workspace to another account sends the window to its own account's home page
     Given a window for the account "alice@example.com" shows one of her workspaces
-    When the user associates that workspace with the account "bob@example.com" from the workspace's options
+    When the user associates that workspace with the account "bob@example.com" from the workspace's settings
     Then the window shows Alice's home page

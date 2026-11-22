@@ -185,6 +185,14 @@ contextBridge.exposeInMainWorld('mindsNative', {
   getDisplayZoom: () => ipcRenderer.invoke('get-display-zoom'),
   setDisplayZoom: (percent) => ipcRenderer.invoke('set-display-zoom', percent),
 
+  // Keyboard shortcuts (Settings > Studio > Keyboard shortcuts). Desktop-only:
+  // main sees the chord wherever focus is, the workspace iframe included, and
+  // records a new one by taking the window's next key-down itself.
+  getKeyboardShortcuts: () => ipcRenderer.invoke('get-keyboard-shortcuts'),
+  setWorkspaceSwitcherShortcut: (value) => ipcRenderer.invoke('set-workspace-switcher-shortcut', value),
+  captureShortcutChord: () => ipcRenderer.invoke('capture-shortcut-chord'),
+  cancelShortcutCapture: () => ipcRenderer.invoke('cancel-shortcut-capture'),
+
   // Whether this is the first launch into a new app version (the auto-update
   // prompt's first trigger); recorded by main once at startup.
   getLaunchVersionChange: () => ipcRenderer.invoke('get-launch-version-change'),
@@ -223,6 +231,14 @@ contextBridge.exposeInMainWorld('mindsNative', {
   // chrome page's own listeners.
   onEscapePressed: (callback) => {
     ipcRenderer.on('escape-pressed', () => callback());
+  },
+  // The workspace switcher's shortcut was pressed in this window.
+  onToggleWorkspaceSwitcher: (callback) => {
+    ipcRenderer.on('toggle-workspace-switcher', () => callback());
+  },
+  // The shortcut was changed, in this window or another.
+  onKeyboardShortcutsChanged: (callback) => {
+    ipcRenderer.on('keyboard-shortcuts-changed', (_event, shortcuts) => callback(shortcuts));
   },
   // This window's own focus and blur, as main sees them: the page cannot see
   // them itself while keyboard focus sits inside the workspace iframe.

@@ -87,9 +87,12 @@ function primaryLabels(node: unknown): string[] {
     .map((vnode) => allText(vnode.children).trim());
 }
 
-/** The badge's press landed on the row's Updates tab, flagged to flash. */
+/** The badge's press opened Settings on the row's Updates, flagged to flash, without entering the workspace:
+ * the row is picked, and the home page stays behind. */
 function expectUpdatesTabOpened(routeSet: Harness["routeSet"]): void {
-  expect(routeSet).toHaveBeenCalledWith(`/workspace/${ALPHA}/options`, { tab: "settings", group: "updates" });
+  expect(routeSet.mock.calls).toEqual([
+    ["/settings", { tab: "workspace", group: "updates", settings_workspace: ALPHA, account: "local" }, undefined],
+  ]);
   expect(getAppContext().shell.takeUpdatesTabArrival(ALPHA)).not.toBeNull();
 }
 

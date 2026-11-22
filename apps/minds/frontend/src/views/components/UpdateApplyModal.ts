@@ -18,7 +18,7 @@ export function UpdateApplyModal(): m.Component<UpdateApplyModalAttrs> {
         "div#update-apply-modal-backdrop",
         {
           class:
-            "fixed left-0 right-0 top-[38px] bottom-0 z-[120] bg-black/20 " +
+            "fixed left-0 right-0 top-(--titlebar-height) bottom-0 z-[120] bg-black/20 " +
             "flex items-start justify-center p-4 pt-10",
         },
         m(

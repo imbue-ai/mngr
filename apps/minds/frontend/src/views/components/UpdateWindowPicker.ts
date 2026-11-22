@@ -20,7 +20,7 @@ function hourSelect(
     "select",
     {
       id,
-      class: "h-[34px] px-2 rounded-md type-body bg-fill-subtle text-primary",
+      class: "select-chevron h-[34px] pl-2 rounded-md type-body bg-fill-subtle text-primary",
       value: String(value),
       onchange: (event: Event) =>
         onchange(Number((event.target as HTMLSelectElement).value)),

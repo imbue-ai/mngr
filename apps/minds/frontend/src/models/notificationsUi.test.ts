@@ -353,7 +353,7 @@ describe("NotificationsUiController toast set", () => {
     expect(controller.liveToastItems([])).toEqual([]);
   });
 
-  it("carries a transient message's link, which opens the Permissions pane at Client permissions", () => {
+  it("carries a transient message's link, which opens Settings over the workspace at Permissions' Client permissions", () => {
     const routeSet = vi
       .spyOn(m.route, "set")
       .mockImplementation(() => undefined);
@@ -376,10 +376,19 @@ describe("NotificationsUiController toast set", () => {
     ]);
 
     controller.openToastLink(link);
-    expect(routeSet).toHaveBeenCalledWith("/workspace/agent-aa11/options", {
-      tab: "permissions",
-      section: "client-permissions",
-    });
+    // The workspace by its agent id, which is what keeps it mounted behind Settings.
+    expect(routeSet.mock.calls).toEqual([
+      [
+        "/settings",
+        {
+          workspace: "agent-aa11",
+          tab: "workspace",
+          group: "permissions",
+          perm_section: "client-permissions",
+          account: "user-1",
+        },
+      ],
+    ]);
   });
 });
 
@@ -568,11 +577,11 @@ describe("NotificationsUiController feed actions", () => {
     expect(sendWorkspaceMessage).not.toHaveBeenCalled();
   });
 
-  it("reads a system event and lands on the backups page, or the accounts page for an account-level one", () => {
+  it("reads a system event and lands on the backups page, or Settings' Accounts tab for an account-level one", () => {
     const routeSet = vi
       .spyOn(m.route, "set")
       .mockImplementation(() => undefined);
-    const { controller, posted } = seeded();
+    const { controller, posted } = seeded({ gestures: new NotificationGestures(gestureContext()) });
     controller.openEntry(systemEvent("s1"));
     controller.openEntry(systemEvent("s2", { workspace_agent_id: "" }));
     expect(posted).toEqual([
@@ -583,7 +592,7 @@ describe("NotificationsUiController feed actions", () => {
       1,
       "/workspace/agent-aa11/backups",
     );
-    expect(routeSet).toHaveBeenNthCalledWith(2, "/accounts", undefined);
+    expect(routeSet).toHaveBeenNthCalledWith(2, "/settings", { tab: "accounts", account: "user-1" });
   });
 
   it("clears one entry (retiring its flash) and clears everything", () => {
@@ -841,7 +850,7 @@ describe("NotificationGestures.openChat and .openSystemEvent", () => {
     expect(routeSet).not.toHaveBeenCalled();
   });
 
-  it("lands a workspace event on its backups page and an account event on the accounts page", () => {
+  it("lands a workspace event on its backups page and an account event on Settings' Accounts tab", () => {
     const gestures = new NotificationGestures(
       gestureContext({ toAgentScopedId: () => "agent-aa11" }),
     );
@@ -854,10 +863,55 @@ describe("NotificationGestures.openChat and .openSystemEvent", () => {
       1,
       "/workspace/agent-aa11/backups",
     );
-    // The accounts page floats over this window, so it carries the window's account.
-    expect(routeSet).toHaveBeenNthCalledWith(2, "/accounts", {
+    // Settings floats over this window, so it carries the window's account.
+    expect(routeSet).toHaveBeenNthCalledWith(2, "/settings", {
+      tab: "accounts",
       account: "user-1",
     });
+  });
+
+  it("still names the place in Settings when constructed bare, before the shell's wiring ran", () => {
+    // Bare gestures fall back to navigation alone: no account to carry and no
+    // id to translate, but the click must still land where it says it does.
+    const gestures = new NotificationGestures();
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    gestures.openSystemEvent("");
+    gestures.openClientPermissions("agent-aa11");
+
+    expect(routeSet.mock.calls).toEqual([
+      ["/settings", { tab: "accounts" }],
+      [
+        "/settings",
+        { workspace: "agent-aa11", tab: "workspace", group: "permissions", perm_section: "client-permissions" },
+      ],
+    ]);
+  });
+
+  it("opens Client permissions over the workspace the link names, by its agent id, on this window's account", () => {
+    const gestures = new NotificationGestures(
+      gestureContext({ toAgentScopedId: () => "agent-aa11" }),
+    );
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    gestures.openClientPermissions("host-bb22");
+
+    expect(routeSet.mock.calls).toEqual([
+      [
+        "/settings",
+        {
+          workspace: "agent-aa11",
+          tab: "workspace",
+          group: "permissions",
+          perm_section: "client-permissions",
+          account: "user-1",
+        },
+      ],
+    ]);
   });
 
   it("lands an event that names its own route there", () => {

@@ -886,7 +886,11 @@ describe("CreatingPage across a route change", () => {
       expect([...offered.keys()]).toEqual(["Update Imbue Studio", "Run on this computer", "Dismiss"]);
       offered.get("Update Imbue Studio")?.onclick();
     });
-    expect(routed).toHaveBeenCalledWith("/settings", { section: "updates", account: "user-cd34" });
+    expect(routed).toHaveBeenCalledWith(
+      "/settings",
+      { tab: "studio", section: "updates", account: "user-cd34" },
+      undefined,
+    );
   });
 
   it("holds Retry on a failed attempt that can't be retried, saying why instead of asking for a retry", async () => {

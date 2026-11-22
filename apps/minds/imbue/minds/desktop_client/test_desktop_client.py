@@ -371,7 +371,7 @@ def test_post_login_redirects_to_create_when_no_workspaces(tmp_path: Path) -> No
 
 @pytest.mark.witnesses("home-page.default-destination")
 def test_post_login_redirects_to_accounts_when_workspaces_exist(tmp_path: Path) -> None:
-    """With consent answered and at least one workspace, post-login lands on the account-management page."""
+    """With consent answered and at least one workspace, post-login lands on Settings' Accounts tab."""
     consented_config = MindsConfig(data_dir=tmp_path)
     consented_config.set_error_reporting_consent_given(True)
     agent_id = AgentId()
@@ -385,7 +385,7 @@ def test_post_login_redirects_to_accounts_when_workspaces_exist(tmp_path: Path) 
 
     response = client.get("/post-login", follow_redirects=False)
     assert response.status_code == 302
-    assert response.headers["location"] == "/accounts"
+    assert response.headers["location"] == "/settings?tab=accounts"
 
 
 def test_post_login_redirects_to_login_when_unauthenticated(tmp_path: Path) -> None:
@@ -1647,12 +1647,12 @@ def test_error_reporting_settings_endpoint_requires_auth(tmp_path: Path) -> None
     assert MindsConfig(data_dir=tmp_path).get_report_unexpected_errors() is True
 
 
-def test_sharing_urls_redirect_to_the_options_panels_share_panel(tmp_path: Path) -> None:
-    """Legacy /sharing/<id> URLs land on the share panel, not a 404.
+def test_sharing_urls_redirect_to_settings_sharing_page(tmp_path: Path) -> None:
+    """Legacy /sharing/<id> URLs land on Settings' Sharing page, not a 404.
 
-    The standalone sharing editor is gone -- the workspace options panel's
-    share panel is the one sharing surface -- but its URLs were handed out, so
-    they redirect. A service segment picks that share target.
+    The standalone sharing editor is gone -- Sharing in Settings is the one
+    sharing surface -- but its URLs were handed out, so they redirect. A
+    service segment picks that share target's page.
     """
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
@@ -1660,18 +1660,24 @@ def test_sharing_urls_redirect_to_the_options_panels_share_panel(tmp_path: Path)
 
     response = client.get(f"/sharing/{agent_id}")
     assert response.status_code == 302
-    assert response.headers["Location"] == f"/workspace/{agent_id}/options?tab=share"
+    assert response.headers["Location"] == f"/settings?workspace={agent_id}&tab=workspace&group=sharing"
 
     service_response = client.get(f"/sharing/{agent_id}/frontend")
     assert service_response.status_code == 302
-    assert service_response.headers["Location"] == f"/workspace/{agent_id}/options?tab=share&target=frontend"
+    assert (
+        service_response.headers["Location"]
+        == f"/settings?workspace={agent_id}&tab=workspace&group=sharing&share_target=frontend"
+    )
 
     modal_response = client.get(f"/sharing/{agent_id}/frontend/modal")
     assert modal_response.status_code == 302
-    assert modal_response.headers["Location"] == f"/workspace/{agent_id}/options?tab=share&target=frontend"
+    assert (
+        modal_response.headers["Location"]
+        == f"/settings?workspace={agent_id}&tab=workspace&group=sharing&share_target=frontend"
+    )
 
 
-# Workspace options panel routes
+# Workspace options routes
 
 
 def test_old_requests_panel_route_removed(tmp_path: Path) -> None:

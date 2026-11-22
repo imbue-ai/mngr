@@ -4,24 +4,20 @@
 // - Local page: content scrolls inside #local-page-scroll, the inset card
 //   on the app's ground below the fixed titlebar (accent bleeds around it).
 // - Agent content surface (/workspace/<id>): the page IS the fixed iframe
-//   surface; no scroll container. The options route (/workspace/<id>/options)
-//   keeps the frame mounted and renders the routed content as its own overlay
-//   layer over it -- a docked panel hanging from the titlebar's icon-tabs (the
-//   SPA heir of the legacy docked WorkspaceOptionsModal), which self-chromes,
-//   so the Shell just floats it over the still-mounted surface.
-// - App-level modals (/settings, /accounts, /help, /inbox): the routed content
-//   floats in a centered AppOverlay card over the surface it was opened from --
-//   the live workspace (Get help and the request popup forward ?workspace=) or
-//   Home -- which stays mounted behind the dim backdrop, restoring the legacy
-//   overlay-layer modals. The options panel, when a modal was opened over it,
-//   stays mounted too: it holds the same vtree slot either way.
+//   surface; no scroll container.
+// - Floating routes (/settings, /help, /inbox, the AI-keys dialog): the routed
+//   content floats over the surface it was opened from -- the live workspace
+//   (they forward ?workspace=) or Home -- which stays mounted behind the dim
+//   backdrop. Settings and Get help hang from their bar buttons; the others
+//   are centered cards. Settings has a slot of its own, so it stays mounted
+//   (hidden) behind a request popup opened from it.
 
 import m from "mithril";
 import type { ShellState } from "./shell-state";
 import {
+  SETTINGS_PATH,
   hubPagePath,
   isAppOverlayPath,
-  isWorkspaceOverlayPath,
   overlayBehindWorkspaceId,
   popoutFromPath,
   recoveryWorkspaceIdFromPath,
@@ -33,7 +29,7 @@ import { NoticeBand } from "./NoticeBand";
 import { NotificationsPage } from "../pages/NotificationsPage";
 import type { OverlayShellAttrs } from "./OverlayShell";
 import { ANCHORED_CARD_CLASS, OverlayShell } from "./OverlayShell";
-import { SidebarMenu } from "./SidebarMenu";
+import { WorkspaceSwitcherMenu } from "./WorkspaceSwitcher";
 import { AccountSwitcherMenu } from "./AccountSwitcher";
 import { Titlebar } from "./Titlebar";
 import { ToastLayer } from "./ToastLayer";
@@ -60,21 +56,17 @@ import { ClientPermissionPrompt } from "./ClientPermissionPrompt";
 import { clientPermissionPrompt } from "../../models/clientPermissions";
 import { electronBridge } from "../../electron-bridge";
 
-/** The request popup's overlay attrs: the docked options panel's own window,
- * showing a request -- same rect, same raised strip, same key tab filled and
- * joined to the card. `animatesBox` is what sets it apart: the card grows out
- * of the panel it was opened over and resizes as the request loads (the
- * lifecycle lives in OverlayShell). */
+/** The request popup's overlay attrs: a centered card that resizes as the
+ * request loads and its Adjust editor opens (`animatesBox`; the lifecycle
+ * lives in OverlayShell). */
 function requestOverlayAttrs(
   shell: ShellState,
   bodyClass: string,
 ): OverlayShellAttrs {
   return {
     shell,
-    placement: "docked",
-    // Reviewing a permission request is a Permissions surface, so the popup
-    // hangs from the same key the docked Permissions pane does.
-    selected: "permissions",
+    placement: "centered",
+    selected: null,
     animatesBox: true,
     panelId: "app-overlay-panel",
     backdropId: "app-overlay-backdrop",
@@ -87,6 +79,25 @@ function requestOverlayAttrs(
     // so `shrink-0` here would refuse to shrink in HEIGHT, and the body's own
     // overflow scroller would never engage.
     bodyClass: bodyClass + " w-[600px] max-w-full",
+    onDismiss: () => shell.dismissAppOverlay(),
+  };
+}
+
+/** Settings' overlay attrs: a flyout hung from the gear, at one size whatever
+ * it shows -- its columns scroll within it, and a card that resized itself
+ * per section would move the section list out from under the cursor. */
+function settingsOverlayAttrs(shell: ShellState): OverlayShellAttrs {
+  return {
+    shell,
+    placement: "anchored",
+    selected: "settings",
+    panelId: "settings-panel",
+    backdropId: "settings-backdrop",
+    cardClass: "w-[880px] h-[min(660px,calc(100%-var(--titlebar-height)-4px))]",
+    // A height-bounded column, not a scroller: the two-column pane inside
+    // scrolls its own columns, and a scroller here would take its section
+    // list down with the panel.
+    bodyClass: "flex-1 min-h-0 flex flex-col px-6 py-5",
     onDismiss: () => shell.dismissAppOverlay(),
   };
 }
@@ -106,6 +117,8 @@ function anchoredOverlayAttrs(
     shell,
     placement: "anchored",
     selected: id,
+    // Both right-align to the bug button, so the box does not move when you click the other one.
+    alignTo: "help",
     panelId: isFeed ? "notifications-panel" : "help-panel",
     backdropId: isFeed ? "notifications-backdrop" : "help-backdrop",
     // One width, so the box does not change when you click the other icon.
@@ -125,29 +138,13 @@ function anchoredOverlayAttrs(
   };
 }
 
-/** Per-route sizing for a CENTERED app modal. Imbue Studio settings takes a definite
- * height -- its two columns scroll within it, and a card that resized itself
- * per section would move the section list out from under the cursor -- capped
- * to the window by the same min() the others' max uses. Accounts is a short
- * list and the AI-keys mint dialog a compact form, so those grow to their
- * content. The placed surfaces (the request popup, the feed, Get help) name
+/** A centered app modal's card: a compact form that grows to its content. The
+ * placed surfaces (Settings, the request popup, the feed, Get help) name
  * their own box where they are rendered. */
-function appOverlayCardClass(path: string): string {
-  if (path === "/settings") return "w-[880px] h-[min(660px,calc(100%-64px))]";
-  if (path === "/accounts") return "w-[520px] min-h-0";
-  return "w-[460px] min-h-0";
-}
+const APP_OVERLAY_CARD_CLASS = "w-[460px] min-h-0";
 
-/** How the card holds its body. Imbue Studio settings is a two-column pane that
- * scrolls its own columns -- a scroller here would take its section list down
- * with the panel -- so it gets a height-bounded column instead, the same shape
- * the docked options card gives its panes. Every other overlay is a single
- * column of prose or fields and scrolls as a whole, which is the default a new
- * route falls through to. */
-function appOverlayBodyClass(path: string): string {
-  if (path === "/settings") return "flex-1 min-h-0 flex flex-col px-6 py-5";
-  return "min-h-0 overflow-y-auto px-6 py-5";
-}
+/** How a centered card holds its body: a single column of prose or fields that scrolls as a whole. */
+const APP_OVERLAY_BODY_CLASS = "min-h-0 overflow-y-auto px-6 py-5";
 
 export interface ShellAttrs {
   shell: ShellState;
@@ -163,11 +160,11 @@ export interface ShellAttrs {
   // ?workspace= names); null when no modal floats over such a page. The router
   // owns which pages those are.
   behindContent: m.Children;
-  // The workspace-options panel to keep painted behind an app-level modal that
-  // was opened over it; null when no modal floats over the panel. Same page as
-  // the routed `content` on the options route, so the slot below holds one
-  // component instance across the modal opening and closing.
-  optionsContent: m.Children;
+  // Settings, kept mounted behind the request popup that was opened from it;
+  // null when no popup floats over Settings. Same page as the routed `content`
+  // on the Settings route, so the slot below holds one component instance
+  // across the popup opening and closing.
+  settingsContent: m.Children;
 }
 
 export function Shell(): m.Component<ShellAttrs> {
@@ -200,7 +197,7 @@ export function Shell(): m.Component<ShellAttrs> {
         content,
         homeContent,
         behindContent,
-        optionsContent,
+        settingsContent,
       } = vnode.attrs;
       // The visual-diff harness captures with ?visual-diff=1 and no live
       // channel; suppress the indicator so screenshots stay deterministic.
@@ -279,32 +276,28 @@ export function Shell(): m.Component<ShellAttrs> {
               ],
             );
 
-      // The options panel is its own docked overlay layer (backdrop + tab strip
-      // + card): the Shell just floats it over the mounted surface, from the
-      // route while it IS the route and from the router's remembered copy while
-      // a modal floats over it. Not while the feed is open, though: the feed
-      // only ever opens over the LIVE panel route in the beat between a strip
-      // switch and its dismissal navigation landing, and rendering the panel
-      // under it for that beat would double the backdrop -- the flash the one
-      // overlay slot below exists to prevent.
-      const optionsLayer =
-        isWorkspaceOverlayPath(routePath) && !shell.isNotificationsOpen
-          ? content
-          : optionsContent;
-      // The request popup does not float OVER the options panel, it takes that
-      // window over: it hangs from the same key and resizes out of the panel's
-      // box. So the panel is hidden while it is up -- left visible, the two
-      // cards overlap almost exactly for the length of the resize, each with
-      // its own close X, which is what made one window read as two. Hidden
-      // rather than unmounted: the panel keeps its scroll, its section and its
-      // in-flight edits for the return trip, and `visibility` (unlike
-      // `display`) leaves it laid out, so the popup can still measure the box
-      // it is resizing out of.
-      const isPanelTakenOver = routePath === "/inbox" && optionsLayer !== null;
+      // Settings is its own overlay layer: the Shell floats it over the
+      // mounted surface, from the route while it IS the route and from the
+      // router's remembered copy while a request popup floats over it. Not
+      // while the feed is open, though: the feed only ever opens over the LIVE
+      // Settings route in the beat between a strip switch and its dismissal
+      // navigation landing, and rendering Settings under it for that beat
+      // would double the backdrop -- the flash the one overlay slot below
+      // exists to prevent.
+      const isSettingsRoute = routePath === SETTINGS_PATH;
+      const settingsLayerContent = isSettingsRoute && !shell.isNotificationsOpen ? content : settingsContent;
+      const settingsLayer =
+        settingsLayerContent === null || settingsLayerContent === undefined
+          ? null
+          : m(OverlayShell, settingsOverlayAttrs(shell), settingsLayerContent);
+      // Hidden while the request popup opened from it is up, rather than
+      // unmounted: Settings keeps its scroll, its section and its in-flight
+      // edits for the return trip.
+      const isSettingsCovered = routePath === "/inbox" && settingsLayer !== null;
 
       // THE ONE OVERLAY SLOT: whichever of the Shell's floating surfaces is up
       // -- the bell's feed, the request popup, Get help, a centered app modal,
-      // the template stepper -- renders as ONE OverlayShell at this one vtree
+      // the template stepper; all but Settings -- renders as ONE OverlayShell at this one vtree
       // position. One position means one component instance across a strip
       // switch, so the backdrop, the raised strip, and the card are the SAME
       // DOM nodes on both sides of it: switching from Get help to the feed
@@ -316,23 +309,21 @@ export function Shell(): m.Component<ShellAttrs> {
       // the beat between a strip switch and the dismissal navigation landing
       // (switchToNotifications arms it across exactly that arrival) -- so
       // while both the feed and a popup route are up, the feed is the surface
-      // being switched TO, and the one the slot must show. (The options panel
-      // is the one floating surface with a slot of its own, above: it must
-      // stay mounted -- models, scroll, edits -- behind a request popup that
-      // takes its window over, which means panel and popup genuinely coexist.)
+      // being switched TO, and the one the slot must show. (Settings is the
+      // one floating surface with a slot of its own, above: it must stay
+      // mounted -- models, scroll, edits -- behind a request popup, which
+      // means the two genuinely coexist.)
       let overlayAttrs: OverlayShellAttrs | null = null;
       let overlayContent: m.Children = null;
       if (shell.isNotificationsOpen) {
         overlayAttrs = anchoredOverlayAttrs(shell, "notifications");
         overlayContent = m(NotificationsPage);
-      } else if (isAppOverlay) {
-        const bodyClass = appOverlayBodyClass(routePath);
-        // The request popup hangs from the titlebar's key tab, Get help hangs
-        // from the right-hand icon pair; every other app modal is a centered
-        // card.
+      } else if (isAppOverlay && !isSettingsRoute) {
+        // Get help hangs from the bug button; the request popup and every
+        // other app modal is a centered card.
         overlayAttrs =
           routePath === "/inbox"
-            ? requestOverlayAttrs(shell, bodyClass)
+            ? requestOverlayAttrs(shell, APP_OVERLAY_BODY_CLASS)
             : routePath === "/help"
               ? anchoredOverlayAttrs(shell, "help")
               : {
@@ -341,8 +332,8 @@ export function Shell(): m.Component<ShellAttrs> {
                   selected: null,
                   panelId: "app-overlay-panel",
                   backdropId: "app-overlay-backdrop",
-                  cardClass: appOverlayCardClass(routePath),
-                  bodyClass,
+                  cardClass: APP_OVERLAY_CARD_CLASS,
+                  bodyClass: APP_OVERLAY_BODY_CLASS,
                   onDismiss: () => shell.dismissAppOverlay(),
                 };
         overlayContent = content;
@@ -356,7 +347,7 @@ export function Shell(): m.Component<ShellAttrs> {
           panelId: "app-overlay-panel",
           backdropId: "app-overlay-backdrop",
           cardClass: "w-[600px] min-h-0 max-w-full",
-          bodyClass: appOverlayBodyClass(routePath),
+          bodyClass: APP_OVERLAY_BODY_CLASS,
           onDismiss: () => shell.dismissAppOverlay(),
         };
         overlayContent = content;
@@ -381,9 +372,9 @@ export function Shell(): m.Component<ShellAttrs> {
           : shell.stores.workspaces.toAgentScopedId(surfaceWorkspaceId);
       const band = surfaceNoticeBand(shell, surfaceWorkspaceId);
       // The card is a modal of its own, so it is raised only where it can sit
-      // on top: the machine's own route. It out-z-indexes the docked options
-      // overlay there, but an app-level modal shares its z and is emitted after
-      // it, so a card raised behind one would be dimmed and unclickable. A
+      // on top: the machine's own route. A floating route shares its z and is
+      // emitted after it, so a card raised behind one would be dimmed and
+      // unclickable. A
       // machine behind an app modal keeps its band and gets its card back on
       // the way out.
       const isRecoveryOpen =
@@ -401,9 +392,9 @@ export function Shell(): m.Component<ShellAttrs> {
       // any of the Shell's own modals rather than stacking on one.
       const isAutoUpdatePromptPlaceable =
         popout === null &&
-        (hubPagePath(routePath) === "/" ||
-          (workspaceParam !== null && !isWorkspaceOverlayPath(routePath))) &&
+        (hubPagePath(routePath) === "/" || workspaceParam !== null) &&
         overlay === null &&
+        settingsLayer === null &&
         !isRecoveryOpen &&
         !isApplyCovering;
       const autoUpdatePromptTrigger = isAutoUpdatePromptPlaceable
@@ -425,7 +416,7 @@ export function Shell(): m.Component<ShellAttrs> {
         popout === null
           ? m(Titlebar, { shell, routePath })
           : m(PopoutChrome, { shell, workspaceAnyId: popout.workspaceAnyId, windowId: popout.windowId }),
-        popout === null ? m(SidebarMenu, { shell }) : null,
+        popout === null ? m(WorkspaceSwitcherMenu, { shell }) : null,
         popout === null ? m(AccountSwitcherMenu, { shell }) : null,
         // The open recovery card says what such a band says, and the band's
         // own button would only open it.
@@ -473,7 +464,7 @@ export function Shell(): m.Component<ShellAttrs> {
               "div",
               {
                 class:
-                  "fixed top-[42px] right-2 z-[150] type-helper text-secondary bg-surface-primary border border-subtle rounded-md px-2 py-1 shadow-raised",
+                  "fixed top-[calc(var(--titlebar-height)+4px)] right-2 z-[150] type-helper text-secondary bg-surface-primary border border-subtle rounded-md px-2 py-1 shadow-raised",
               },
               "Reconnecting…",
             )
@@ -523,15 +514,13 @@ export function Shell(): m.Component<ShellAttrs> {
         m("div#local-page-root", { style: "display: contents" }, [
           base,
           m(
-            "div#ws-options-layer",
+            "div#settings-layer",
             {
-              // Always present so the panel keeps one vtree slot (and so one
+              // Always present so Settings keeps one vtree slot (and so one
               // component instance) whether or not the popup is over it.
-              style: isPanelTakenOver
-                ? "display: contents; visibility: hidden"
-                : "display: contents",
+              style: isSettingsCovered ? "display: contents; visibility: hidden" : "display: contents",
             },
-            optionsLayer,
+            settingsLayer,
           ),
           // The one overlay slot (see above). Emitted after RecoveryModal
           // (both share z-[110]; later DOM siblings paint on top) so the feed
@@ -542,7 +531,7 @@ export function Shell(): m.Component<ShellAttrs> {
         ]),
         // The browser sign-in modal, raised through the shared webLogin model.
         // After the overlay slot, which shares its z-[110], so it paints over
-        // an app modal (Manage Accounts) that opened it.
+        // the Settings that opened it.
         m(WebLoginModal, { backdrop: routePath === "/start" ? "wash" : "dim" }),
         // Main's question about the workspace underneath (may its pages use
         // the microphone?), whose request waits on the answer. Last of the

@@ -1,6 +1,6 @@
 """Per-workspace toggle view and editing of latchkey permissions.
 
-Backs the workspace options panel's "Permissions" tab: one screen, scoped to a
+Backs a workspace's Permissions page in Settings: one screen, scoped to a
 single workspace's host, where every grantable permission renders as a toggle.
 Flipping a toggle recomputes the *complete* permission set for the affected
 rule from the new toggle states and writes it back through the gateway's

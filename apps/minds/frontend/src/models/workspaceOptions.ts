@@ -1,6 +1,6 @@
-// Model for the workspace options panel + settings page: the options-data
-// load, the Workspace settings actions (rename / color / account / lifecycle),
-// and the share panel's own model, which this load constructs.
+// Model for a workspace's pages in Settings: the options-data load, the
+// workspace's own settings actions (rename / color / account / lifecycle),
+// and the Sharing pages' model, which this load constructs.
 
 import m from "mithril";
 import type { ErrorRemedy } from "../generated/ui";
@@ -288,6 +288,11 @@ export interface MachineSharingResponse {
    * next save or load sends it again), null while the workspace is
    * unpublished, absent from desktops that predate invitations. */
   grants_synced?: boolean | null;
+  /** True on the document the local read answers, built without asking Imbue
+   * Cloud: `enabled` then says only that the workspace holds share materials,
+   * `url` is present only when Imbue Cloud named the share's domain earlier,
+   * and the outcomes and `grants_synced` are not known yet. */
+  is_connector_pending?: boolean;
   /** Set when the share status could not be told apart from "not shared":
    * UNREADABLE (Imbue Cloud or the accounts could not be read) or
    * OWNER_SIGNED_OUT. `enabled` is then false but not known. */
@@ -377,18 +382,6 @@ export interface SharingReadinessResponse {
   gateway_next_retry_at?: string | null;
 }
 
-/** The options panel's tabs, in the order the tab strip shows them. */
-export const OPTIONS_TABS = ["permissions", "settings", "share"] as const;
-export type OptionsTab = (typeof OPTIONS_TABS)[number];
-
-/** The single ?tab parse. The options page and the titlebar's tab highlight
- * both resolve through it, so a tab the titlebar can open is never one the
- * page reads as something else. */
-export function toOptionsTab(raw: string | null | undefined): OptionsTab {
-  return OPTIONS_TABS.find((tab) => tab === raw) ?? "share";
-}
-
-export type SettingsGroup = "general" | "account" | "backup" | "updates";
 export type ShareLoadStatus = "idle" | "loading" | "load_failed" | "ready";
 export interface FetchJson {
   (url: string, init?: RequestInit): Promise<RequestResult>;

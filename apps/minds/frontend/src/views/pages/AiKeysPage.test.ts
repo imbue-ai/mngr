@@ -50,10 +50,17 @@ describe("AiKeysPage on a workspace with no Imbue account", () => {
     vi.restoreAllMocks();
   });
 
-  it("opens the workspace's Account settings, where the account is linked", async () => {
+  it("opens Settings on the workspace's General page at its Owner section, where the account is linked", async () => {
     const shell = new ShellState(createEmptyStores());
     shell.stores.workspaces.applyWorkspacesMessage(workspacesMessage());
     registerAppContext({ stores: shell.stores, shell });
+    // The dialog floats over the workspace that opened it, named by its host id.
+    vi.stubGlobal("document", {
+      documentElement: { style: { setProperty: () => undefined, removeProperty: () => undefined } },
+      getElementById: () => null,
+    });
+    vi.spyOn(m.route, "get").mockReturnValue("/settings/ai-keys?workspace=host-bb22");
+    shell.handleRouteChanged("/settings/ai-keys", "workspace=host-bb22");
     const setRoute = vi
       .spyOn(m.route, "set")
       .mockImplementation(() => undefined);
@@ -66,10 +73,22 @@ describe("AiKeysPage on a workspace with no Imbue account", () => {
     });
     expect(allText(render())).not.toContain("Report a bug");
     press(render(), "Open workspace settings");
-    expect(setRoute).toHaveBeenCalledWith("/workspace/agent-aa11/options", {
-      tab: "settings",
-      group: "account",
-    });
+    // The workspace by its agent id, both as the one Settings shows and as the
+    // one it keeps floating over; `focus` scrolls General to the Owner section.
+    expect(setRoute.mock.calls).toEqual([
+      [
+        "/settings",
+        {
+          tab: "workspace",
+          group: "general",
+          settings_workspace: "agent-aa11",
+          focus: "owner",
+          workspace: "agent-aa11",
+          account: "local",
+        },
+        undefined,
+      ],
+    ]);
   });
 
   it("offers no settings to open when it was opened without a workspace", async () => {

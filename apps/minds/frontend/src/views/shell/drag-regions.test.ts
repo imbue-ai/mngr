@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 // Electron unions the window's drag regions, so an overlay painted ABOVE the
 // titlebar does not become clickable just by winning the z-order -- it has to
 // subtract the titlebar's drag region itself. A backdrop that forgets to
-// leaves everything it draws in the top 38px dead on macOS: the raised icon
+// leaves everything it draws in the bar's strip dead on macOS: the raised icon
 // strip paints, it hovers, and the click drags the window instead. Nothing in
 // a browser-based test can see that, which is exactly how it shipped once.
 

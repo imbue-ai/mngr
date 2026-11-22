@@ -134,6 +134,20 @@ describe("a live workspace card", () => {
     expect(badgesOf(card)).toEqual([]);
   });
 
+  it("opens Settings on the card's workspace from its menu, without entering the workspace", () => {
+    const { shell, view, routeSet } = initPage();
+    const enter = vi.spyOn(shell, "enterWorkspaceOrRecover").mockImplementation(() => true);
+    const card = required(withAttr(view(), "data-row-kind")[0]);
+
+    menuItem(card, "Workspace settings").onSelect();
+
+    // The workspace is picked (`settings_workspace`), not floated over (`workspace`): Home stays behind Settings.
+    expect(routeSet.mock.calls).toEqual([
+      ["/settings", { tab: "workspace", settings_workspace: "agent-aa11", account: shell.accountId }, undefined],
+    ]);
+    expect(enter).not.toHaveBeenCalled();
+  });
+
   it("opens on Enter or Space pressed on the card itself, never on a key bubbling up from a button it holds", () => {
     const { shell, view } = initPage();
     const enter = vi.spyOn(shell, "enterWorkspaceOrRecover").mockImplementation(() => true);

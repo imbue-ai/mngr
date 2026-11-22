@@ -79,6 +79,7 @@ from imbue.minds.desktop_client.data_types import NotificationDestination
 from imbue.minds.desktop_client.minds_config import NotificationStyle
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
+from imbue.minds.desktop_client.ui_account_scope import ACCOUNTS_SETTINGS_ROUTE
 from imbue.minds.desktop_client.ui_account_scope import ACCOUNT_QUERY_PARAMETER
 from imbue.minds.desktop_client.ui_models import NotificationKind
 from imbue.minds.desktop_client.ui_models import NotificationOutcome
@@ -682,8 +683,10 @@ _REOPENABLE_OUTCOMES: Final[frozenset[NotificationOutcome]] = frozenset(
 
 
 def account_level_entry_route(account_id: str) -> str:
-    """Where an account-level event lands: the accounts page, on the account's own window when the entry names it."""
-    return f"/accounts?{ACCOUNT_QUERY_PARAMETER}={account_id}" if account_id else "/accounts"
+    """Where an account-level event lands: Settings' Accounts tab, on the account's own window when the entry names it."""
+    return (
+        f"{ACCOUNTS_SETTINGS_ROUTE}&{ACCOUNT_QUERY_PARAMETER}={account_id}" if account_id else ACCOUNTS_SETTINGS_ROUTE
+    )
 
 
 def _agent_message_url(entry: UiNotificationEntry) -> str | None:

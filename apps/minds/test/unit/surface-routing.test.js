@@ -92,9 +92,20 @@ test('parseOverlayBehindWorkspaceId names the workspace an app overlay keeps mou
   assert.equal(parseOverlayBehindWorkspaceId(`${BASE}/help?workspace=${AGENT}`), AGENT);
   assert.equal(parseOverlayBehindWorkspaceId(`${BASE}/inbox?selected=evt-1&workspace=${AGENT}`), AGENT);
   assert.equal(parseOverlayBehindWorkspaceId(`${BASE}/settings/ai-keys?workspace=${HOST}`), HOST);
+  // Settings opened from a workspace, wherever inside Settings it is.
+  assert.equal(parseOverlayBehindWorkspaceId(`${BASE}/settings?workspace=${AGENT}`), AGENT);
+  assert.equal(
+    parseOverlayBehindWorkspaceId(`${BASE}/settings?tab=workspace&group=sharing&workspace=${AGENT}`),
+    AGENT,
+  );
+  assert.equal(parseOverlayBehindWorkspaceId(`${BASE}/settings?tab=studio&workspace=${HOST}`), HOST);
   assert.equal(parseOverlayBehindWorkspaceId(`${BASE}/help?workspace=shared-0f3a9c`), 'shared-0f3a9c');
   // Opened over Home, or a route that never floats over a workspace.
   assert.equal(parseOverlayBehindWorkspaceId(`${BASE}/help`), null);
+  assert.equal(parseOverlayBehindWorkspaceId(`${BASE}/settings`), null);
+  assert.equal(parseOverlayBehindWorkspaceId(`${BASE}/settings?section=updates`), null);
+  // The workspace Settings is showing is not the one it floats over.
+  assert.equal(parseOverlayBehindWorkspaceId(`${BASE}/settings?settings_workspace=${AGENT}`), null);
   assert.equal(parseOverlayBehindWorkspaceId(`${BASE}/accounts?workspace=${AGENT}`), null);
   assert.equal(parseOverlayBehindWorkspaceId(`${BASE}/help?workspace=not-an-id`), null);
 });

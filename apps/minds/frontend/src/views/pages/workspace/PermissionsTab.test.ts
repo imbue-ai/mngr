@@ -16,13 +16,10 @@ import {
 import type { UiClientPermissions, UiWorkspacePermissions } from "../../../generated/ui";
 import type { RequestResult } from "../../../models/errors";
 import { clientPermissionsView, microphoneRow } from "../../../models/clientPermissions.testing";
-import { OPTIONS_TABS, WorkspaceOptionsModel, defaultFetchJson, toOptionsTab } from "../../../models/workspaceOptions";
+import { defaultFetchJson } from "../../../models/workspaceOptions";
 import { ADD_SHARED_PATH_ROW_KEY, PermissionsModel, isPathSyncOn } from "../../../models/workspacePermissions";
 import type { ErrorDialogRequest } from "../../../models/errorDialog";
-import { classifyRoute } from "../../shell/classify";
-import { PermissionsTab } from "./PermissionsTab";
-import { OptionsPanel } from "./OptionsPanel";
-import { TITLEBAR_POPUP_ICONS } from "../../shell/RaisedTitlebarIcons";
+import { PermissionsTab, permissionsNav } from "./PermissionsTab";
 import { forgetFailedServiceMarks } from "../../components/ServiceMark";
 import { panelIdFor } from "../../components/Collapsible";
 import {
@@ -117,6 +114,10 @@ interface RenderResult {
   root: m.Vnode;
   /** Draw the tab again, for a step that changed what it should show. */
   rerender: () => m.Vnode;
+  /** Draw the same tab instance with another section asked for, the way a click in Settings' rail reaches it. */
+  rerenderAt: (section: string | null) => m.Vnode;
+  /** The rail entries Settings nests under its Permissions entry, for the section last asked for. */
+  nav: () => unknown;
   /** Draw the same tab instance over another workspace's model, the way a
    * navigation between two workspaces' panes hands it new attrs. */
   rerenderFor: (other: PermissionsModel) => m.Vnode;
@@ -227,19 +228,29 @@ async function render(
     onReviewRequest: (requestId: string) => reviewedRequests.push(requestId),
   };
   const instance = PermissionsTab() as unknown as m.Component;
-  const vnode = m(instance, attrs as unknown as m.Attributes) as m.Vnode;
-  (instance.oninit as unknown as (v: m.Vnode) => void).call(instance, vnode);
-  await settle();
-  const rerender = (): m.Vnode => (instance.view as unknown as (v: m.Vnode) => m.Vnode).call(instance, vnode);
-  const rerenderFor = (other: PermissionsModel): m.Vnode =>
+  const draw = (drawn: typeof attrs): m.Vnode =>
     (instance.view as unknown as (v: m.Vnode) => m.Vnode).call(
       instance,
-      m(instance, { ...attrs, model: other } as unknown as m.Attributes) as m.Vnode,
+      m(instance, drawn as unknown as m.Attributes) as m.Vnode,
     );
+  (instance.oninit as unknown as (v: m.Vnode) => void).call(
+    instance,
+    m(instance, attrs as unknown as m.Attributes) as m.Vnode,
+  );
+  await settle();
+  const rerender = (): m.Vnode => draw(attrs);
+  const rerenderAt = (section: string | null): m.Vnode => {
+    attrs.requestedSection = section;
+    return draw(attrs);
+  };
+  const rerenderFor = (other: PermissionsModel): m.Vnode => draw({ ...attrs, model: other });
+  const nav = (): unknown => permissionsNav(model, attrs.requestedSection, attrs.onSelectSection);
   const remove = (): void => (instance.onremove as unknown as () => void).call(instance);
   return {
     root: rerender(),
     rerender,
+    rerenderAt,
+    nav,
     rerenderFor,
     remove,
     model,
@@ -339,19 +350,23 @@ describe("PermissionsTab loading", () => {
     expect(requests).toHaveLength(2);
   });
 
-  it("names the workspace in the heading and the intro", async () => {
+  it("draws the selected section's page alone, leaving the title and the list of sections to Settings", async () => {
     const { root } = await render(permissionsView(), { workspaceName: "alpha" });
-    const text = allText(root);
-    expect(text).toContain("Permissions:");
-    expect(text).toContain("alpha");
-    expect(text).toContain("They can never reach beyond the permissions you grant them.");
+    expect(withAttr(root, "data-perm-panel").map((panel) => attrsOf(panel)["data-perm-panel"])).toEqual([
+      "conn:slack:",
+    ]);
+    expect(withAttr(root, "data-perm-nav")).toHaveLength(0);
+    expect(collectVnodes(root).filter((vnode) => vnode.tag === "h1")).toHaveLength(0);
+    expect(allText(root)).not.toContain("Permissions:");
   });
 
-  it("drops the name from the copy when the options load has not landed", async () => {
-    const { root } = await render(permissionsView(), { workspaceName: "" });
-    const text = allText(root);
-    expect(text).toContain("What agents in this workspace can access.");
-    expect(text).not.toContain("Permissions:");
+  it("calls the workspace 'this workspace' when the options load has not landed", async () => {
+    // Permissions does not wait behind the workspace's options, so it can be drawn before, or without, a name.
+    const { root, rerender } = await render(permissionsView(), { workspaceName: "" });
+    expect(allText(root)).toContain("this workspace shares one sign-in with every other workspace on this computer");
+
+    (attrsOf(withAttr(root, "data-perm-disconnect")[0]).onclick as () => void)();
+    expect(disconnectDialogText(rerender())).toContain("from every workspace on this computer, including this workspace");
   });
 });
 
@@ -412,14 +427,45 @@ describe("PermissionsTab waiting strip", () => {
   });
 });
 
-describe("PermissionsTab left nav", () => {
+describe("permissionsNav", () => {
+  const sectionsOf = (nav: unknown): unknown[] =>
+    withAttr(nav, "data-perm-nav").map((node) => attrsOf(node)["data-perm-nav"]);
+
+  it("lists nothing until the read has landed, or when it failed", async () => {
+    const answers: ((result: RequestResult) => void)[] = [];
+    const pending = await render(permissionsView(), {
+      respond: () => new Promise<RequestResult>((resolve) => answers.push(resolve)),
+    });
+    expect(pending.nav()).toBeNull();
+
+    answers[0]({ ok: true, status: 200, body: permissionsView() });
+    await settle();
+    expect(sectionsOf(pending.nav())).toContain("conn:slack:");
+
+    const refused = await render(null, { isReadRefused: true });
+    expect(refused.nav()).toBeNull();
+  });
+
+  it("leads with Waiting on you, and its count, only while something is waiting", async () => {
+    const waiting = { id: "evt-1", title: "Request 1", reason: "because", service_name: "slack" };
+    const asked = await render(permissionsView({ waiting_requests: [waiting, { ...waiting, id: "evt-2" }] }));
+    const entries = withAttr(asked.nav(), "data-perm-nav");
+    expect(attrsOf(entries[0])["data-perm-nav"]).toBe("waiting");
+    expect(attrsOf(entries[0])["aria-pressed"]).toBe("true");
+    expect(allText(entries[0])).toContain("Waiting on you");
+    expect(collectVnodes(entries[0]).map((vnode) => attrsOf(vnode).count)).toContain(2);
+
+    const quiet = await render(permissionsView());
+    expect(sectionsOf(quiet.nav())).not.toContain("waiting");
+  });
+
   it("lists the connections, Add connection, the three self families, and Client permissions last", async () => {
-    const { root } = await render(
+    const { nav } = await render(
       permissionsView({
         connections: [slackConnection(), slackConnection({ service_name: "notion", display_name: "Notion", account: "n@x.com" })],
       }),
     );
-    const navSections = withAttr(root, "data-perm-nav").map((node) => attrsOf(node)["data-perm-nav"]);
+    const navSections = sectionsOf(nav());
     expect(navSections).toEqual([
       "conn:slack:",
       "conn:notion:n@x.com",
@@ -429,7 +475,7 @@ describe("PermissionsTab left nav", () => {
       "this-computer",
       "client-permissions",
     ]);
-    expect(allText(withAttr(root, "data-perm-nav").at(-1))).toBe("Client permissions");
+    expect(allText(withAttr(nav(), "data-perm-nav").at(-1))).toBe("Client permissions");
   });
 
   it("shows the account label under a connection only when it disambiguates", async () => {
@@ -437,7 +483,7 @@ describe("PermissionsTab left nav", () => {
       permissionsView({ connections: [slackConnection({ show_account_label: true, account_label: "work@example.com" })] }),
     );
     const hidden = await render(permissionsView());
-    const nav = (result: RenderResult) => allText(withAttr(result.root, "data-perm-nav"));
+    const nav = (result: RenderResult) => allText(withAttr(result.nav(), "data-perm-nav"));
     expect(nav(shown)).toContain("work@example.com");
     expect(nav(hidden)).not.toContain("Default account");
   });
@@ -449,20 +495,117 @@ describe("PermissionsTab left nav", () => {
     const first = await render(view);
     const requested = await render(view, { requestedSection: "conn:notion:" });
     const pressed = (result: RenderResult) =>
-      withAttr(result.root, "data-perm-nav")
+      withAttr(result.nav(), "data-perm-nav")
         .filter((node) => attrsOf(node)["aria-pressed"] === "true")
         .map((node) => attrsOf(node)["data-perm-nav"]);
+    const shown = (result: RenderResult) =>
+      withAttr(result.root, "data-perm-panel").map((node) => attrsOf(node)["data-perm-panel"]);
     expect(pressed(first)).toEqual(["conn:slack:"]);
     expect(pressed(requested)).toEqual(["conn:notion:"]);
+    // The rail and the page resolve the same section, so the pressed entry is the page on screen.
+    expect(shown(first)).toEqual(["conn:slack:"]);
+    expect(shown(requested)).toEqual(["conn:notion:"]);
+  });
+
+  it("falls back to the first section when the one asked for is not there", async () => {
+    const { root, nav } = await render(permissionsView(), { requestedSection: "conn:gone:" });
+    const pressed = withAttr(nav(), "data-perm-nav")
+      .filter((node) => attrsOf(node)["aria-pressed"] === "true")
+      .map((node) => attrsOf(node)["data-perm-nav"]);
+    expect(pressed).toEqual(["conn:slack:"]);
+    expect(attrsOf(withAttr(root, "data-perm-panel")[0])["data-perm-panel"]).toBe("conn:slack:");
   });
 
   it("reports a nav click as a section change for the URL to remember", async () => {
-    const { root, selectedSections } = await render(permissionsView());
-    const localFiles = withAttr(root, "data-perm-nav").find(
+    const { nav, selectedSections } = await render(permissionsView());
+    const localFiles = withAttr(nav(), "data-perm-nav").find(
       (node) => attrsOf(node)["data-perm-nav"] === "local-files",
     );
     (attrsOf(localFiles as AnyVnode).onclick as () => void)();
     expect(selectedSections).toEqual(["local-files"]);
+  });
+});
+
+describe("PermissionsTab leaving a section", () => {
+  const TWO_CONNECTIONS = permissionsView({
+    connections: [slackConnection(), slackConnection({ service_name: "notion", display_name: "Notion" })],
+  });
+  const revokeButton = (node: unknown): AnyVnode => withAttr(node, "data-perm-revoke-all")[0];
+
+  it("disarms a Revoke all when the rail moves to another section", async () => {
+    const { root, rerender, rerenderAt, remove, requests } = await render(TWO_CONNECTIONS);
+
+    (attrsOf(revokeButton(root)).onclick as () => void)();
+    expect(allText(revokeButton(rerender()))).toContain("Really revoke all?");
+
+    rerenderAt("local-files");
+    const back = rerenderAt("conn:slack:");
+    expect(allText(revokeButton(back))).toBe("Revoke all");
+    // One click on the way back arms it again rather than firing the revoke.
+    (attrsOf(revokeButton(back)).onclick as () => void)();
+    await settle();
+    expect(allText(revokeButton(rerender()))).toContain("Really revoke all?");
+    expect(requests).toHaveLength(1);
+    remove();
+  });
+
+  it("closes an open disconnect dialog when the rail moves to another section", async () => {
+    const { root, rerender, rerenderAt } = await render(TWO_CONNECTIONS);
+
+    (attrsOf(withAttr(root, "data-perm-disconnect")[0]).onclick as () => void)();
+    expect(withAttr(rerender(), "data-perm-disconnect-confirm")).toHaveLength(1);
+
+    expect(withAttr(rerenderAt("conn:notion:"), "data-perm-disconnect-confirm")).toHaveLength(0);
+    expect(withAttr(rerenderAt("conn:slack:"), "data-perm-disconnect-confirm")).toHaveLength(0);
+  });
+
+  it("drops a refused change's notice when the rail moves to another section", async () => {
+    const { root, rerender, rerenderAt, model } = await render(TWO_CONNECTIONS, {
+      respond: (url) =>
+        url.endsWith("/connector-toggle")
+          ? Promise.resolve({ ok: false, status: 502, body: { error: "gateway refused" } })
+          : null,
+    });
+
+    (attrsOf(switches(root)[0]).onclick as () => void)();
+    await settle();
+    expect(errorNotices(rerender()).has("ws-perm-error")).toBe(true);
+
+    expect(errorNotices(rerenderAt("local-files")).has("ws-perm-error")).toBe(false);
+    expect(model.writeError).toBeNull();
+  });
+
+  it("drops a refused client permission's message when the rail moves to another section", async () => {
+    const { root, rerender, rerenderAt } = await render(permissionsView(), {
+      requestedSection: "client-permissions",
+      respondClientPermissions: (_url, init) =>
+        init?.method === "PUT"
+          ? Promise.resolve({ ok: false, status: 409, body: { error: "saved by a newer version" } })
+          : null,
+    });
+    const granted = withAttr(root, "data-client-permission-choice").find(
+      (vnode) => attrsOf(vnode)["data-client-permission-choice"] === "granted",
+    );
+    (attrsOf(collectVnodes(granted).find((vnode) => vnode.tag === "input") as AnyVnode).onchange as () => void)();
+    await settle();
+    expect(byId(rerender(), "client-permissions-error")).toBeDefined();
+
+    rerenderAt("local-files");
+    expect(byId(rerenderAt("client-permissions"), "client-permissions-error")).toBeUndefined();
+  });
+
+  it("keeps what is half-done while the section asked for stays the same", async () => {
+    // Every redraw runs the same comparison, so only a change of section may reset anything.
+    const { root, rerender, remove } = await render(TWO_CONNECTIONS, { requestedSection: "conn:slack:" });
+
+    (attrsOf(revokeButton(root)).onclick as () => void)();
+    rerender();
+    expect(allText(revokeButton(rerender()))).toContain("Really revoke all?");
+
+    (attrsOf(withAttr(rerender(), "data-perm-disconnect")[0]).onclick as () => void)();
+    rerender();
+    expect(withAttr(rerender(), "data-perm-disconnect-confirm")).toHaveLength(1);
+    remove();
   });
 });
 
@@ -722,14 +865,15 @@ describe("PermissionsTab connection panel", () => {
     );
   });
 
-  it("discards a desktop egress draft when another section is selected", async () => {
-    const { root, rerender, requests } = await render(egressView(["host-here", "host-office", "self"]));
+  it("discards a desktop egress draft when the rail moves to another section", async () => {
+    const { root, rerender, rerenderAt, requests } = await render(egressView(["host-here", "host-office", "self"]));
 
     clickEgress(root, "data-desktop-egress-adjust");
     clickEgress(rerender(), "data-desktop-egress-remove", "host-office");
-    (attrsOf(withAttr(rerender(), "data-perm-nav")[0]).onclick as () => void)();
+    expect(withAttr(egressRow(rerender()), "data-desktop-egress-editor")).toHaveLength(1);
+    rerenderAt("local-files");
 
-    expect(withAttr(egressRow(rerender()), "data-desktop-egress-editor")).toHaveLength(0);
+    expect(withAttr(egressRow(rerenderAt("conn:slack:")), "data-desktop-egress-editor")).toHaveLength(0);
     expect(requests).toHaveLength(1);
     clickEgress(rerender(), "data-desktop-egress-adjust");
     expect(editorHops(rerender())).toEqual([
@@ -737,6 +881,30 @@ describe("PermissionsTab connection panel", () => {
       "2. host-office",
       "3. The workspace's own machine",
     ]);
+  });
+
+  it("discards a desktop egress draft when the page itself reports a change of section", async () => {
+    // A disconnect that leaves the account's grants behind lands on the section it started from, so nothing
+    // arrives from the rail: the page has to drop the draft before it reports the section.
+    const leftover = permissionsView({
+      desktops: DESKTOPS,
+      connections: [
+        slackConnection({ is_connected: false, desktop_egress: desktopEgress(["host-here", "host-office", "self"]) }),
+      ],
+    });
+    const { root, rerender, selectedSections } = await render(egressView(["host-here", "host-office", "self"]), {
+      viewAfterDisconnect: leftover,
+    });
+
+    clickEgress(root, "data-desktop-egress-adjust");
+    (attrsOf(withAttr(rerender(), "data-perm-disconnect")[0]).onclick as () => void)();
+    const asked = rerender();
+    expect(withAttr(egressRow(asked), "data-desktop-egress-editor")).toHaveLength(1);
+    (attrsOf(withAttr(asked, "data-perm-disconnect-confirm")[0]).onclick as () => void)();
+    await settleConnect();
+
+    expect(selectedSections).toEqual(["conn:slack:"]);
+    expect(withAttr(egressRow(rerender()), "data-desktop-egress-editor")).toHaveLength(0);
   });
 
   it("shows a desktop egress draft only on the workspace it was opened for", async () => {
@@ -1569,14 +1737,14 @@ describe("PermissionsTab experimental connectors", () => {
 });
 
 describe("PermissionsTab service marks", () => {
-  const navMark = (root: unknown): AnyVnode => marks(withAttr(root, "data-perm-nav")[0])[0];
-  const headingMark = (root: unknown): AnyVnode => marks(withAttr(root, "data-perm-panel")[0])[0];
+  const navMark = (result: RenderResult): AnyVnode => marks(withAttr(result.nav(), "data-perm-nav")[0])[0];
+  const headingMark = (result: RenderResult): AnyVnode => marks(withAttr(result.root, "data-perm-panel")[0])[0];
 
   it("draws a connected service's own logo, as an image", async () => {
     // An <img> and not a masked box: a mask keeps only the artwork's alpha, so
     // it could never show a full-color logo.
-    const { root } = await render(permissionsView());
-    for (const mark of [navMark(root), headingMark(root)]) {
+    const result = await render(permissionsView());
+    for (const mark of [navMark(result), headingMark(result)]) {
       expect(markSources(mark)).toEqual(["/_static/service_icons/slack.svg"]);
       expect(hasClass(mark, "service-mark-muted")).toBe(false);
     }
@@ -1587,10 +1755,10 @@ describe("PermissionsTab service marks", () => {
     // so the vendor's own white variant ships beside it and CSS picks between
     // the two. A brand that reads on both keeps a single image, since the
     // alternative would be recoloring artwork we are not allowed to alter.
-    const { root } = await render(
+    const github = await render(
       permissionsView({ connections: [slackConnection({ service_name: "github", display_name: "GitHub" })] }),
     );
-    const images = markImages(navMark(root));
+    const images = markImages(navMark(github));
     expect(images.map((img) => String(attrsOf(img).src))).toEqual([
       "/_static/service_icons/github.svg",
       "/_static/service_icons/github-on-dark.svg",
@@ -1601,14 +1769,14 @@ describe("PermissionsTab service marks", () => {
     const legible = await render(
       permissionsView({ connections: [slackConnection({ service_name: "gitlab", display_name: "GitLab" })] }),
     );
-    expect(markSources(navMark(legible.root))).toEqual(["/_static/service_icons/gitlab.svg"]);
+    expect(markSources(navMark(legible))).toEqual(["/_static/service_icons/gitlab.svg"]);
   });
 
   it("drains the same logo once the account is not connected", async () => {
     // The mark stays the service's own artwork -- only the wrapper changes, and
     // the CSS behind it greys and dims what is already there.
-    const { root } = await render(permissionsView({ connections: [slackConnection({ is_connected: false })] }));
-    for (const mark of [navMark(root), headingMark(root)]) {
+    const result = await render(permissionsView({ connections: [slackConnection({ is_connected: false })] }));
+    for (const mark of [navMark(result), headingMark(result)]) {
       expect(hasClass(mark, "service-mark-muted")).toBe(true);
       expect(markSources(mark)).toEqual(["/_static/service_icons/slack.svg"]);
     }
@@ -1634,12 +1802,12 @@ describe("PermissionsTab service marks", () => {
   it("draws the fallback glyph once a service's mark 404s", async () => {
     // The visible image is its own load probe now, so the mask's separate
     // hidden <img> is gone.
-    const { root, rerender } = await render(permissionsView());
-    const probe = markImages(navMark(root))[0];
+    const result = await render(permissionsView());
+    const probe = markImages(navMark(result))[0];
     expect(attrsOf(probe).src).toBe("/_static/service_icons/slack.svg");
 
     (attrsOf(probe).onerror as () => void)();
-    const nav = withAttr(rerender(), "data-perm-nav")[0];
+    const nav = withAttr(result.nav(), "data-perm-nav")[0];
 
     expect(marks(nav)).toHaveLength(0);
     // A globe, not the box "Local files" draws further down the same nav: a
@@ -1670,12 +1838,13 @@ describe("PermissionsTab client permissions", () => {
     (attrsOf(radios(label)[0]).onchange as () => void)();
   }
 
-  it("is a ?section the pane honours", async () => {
-    const { root } = await render(permissionsView(), { requestedSection: SECTION });
-    const pressed = withAttr(root, "data-perm-nav")
+  it("is a ?section the pane and the rail honour", async () => {
+    const { root, nav } = await render(permissionsView(), { requestedSection: SECTION });
+    const pressed = withAttr(nav(), "data-perm-nav")
       .filter((node) => attrsOf(node)["aria-pressed"] === "true")
       .map((node) => attrsOf(node)["data-perm-nav"]);
     expect(pressed).toEqual([SECTION]);
+    expect(withAttr(root, "data-perm-panel").map((node) => attrsOf(node)["data-perm-panel"])).toEqual([SECTION]);
   });
 
   it("says the answers stay on this computer and draws a row per permission", async () => {
@@ -1799,7 +1968,7 @@ describe("PermissionsTab client permissions", () => {
   it("renders when the gateway behind the other sections cannot be reached", async () => {
     const unavailable = permissionsView({ connections: [], available_connections: [], permissions_unavailable: true });
     const clientSection = await render(unavailable, { requestedSection: SECTION });
-    expect(allText(withAttr(clientSection.root, "data-perm-nav"))).toContain("Client permissions");
+    expect(allText(withAttr(clientSection.nav(), "data-perm-nav"))).toContain("Client permissions");
     expect(withAttr(clientSection.root, "data-client-permission")).toHaveLength(1);
     expect(radios(clientSection.root)).toHaveLength(4);
     expect(errorNotices(clientSection.root).has("ws-perm-unavailable")).toBe(false);
@@ -1809,64 +1978,6 @@ describe("PermissionsTab client permissions", () => {
       "Permissions can't be loaded right now. Try again in a moment.",
     );
     expect(radios(localFiles.root)).toHaveLength(0);
-  });
-});
-
-describe("permissions tab registration", () => {
-  it("keeps the raised icon strip, the ?tab parse, and the titlebar in agreement", () => {
-    // The machine tabs lead the strip, in the ?tab order, with the three
-    // window-wide icons after them.
-    expect(TITLEBAR_POPUP_ICONS.map((icon) => icon.id)).toEqual([
-      ...OPTIONS_TABS,
-      "account",
-      "notifications",
-      "help",
-    ]);
-    expect(TITLEBAR_POPUP_ICONS[0]).toEqual({
-      id: "permissions",
-      buttonId: "ws-tab-permissions",
-      icon: "key",
-      label: "Permissions",
-    });
-    for (const tab of OPTIONS_TABS) {
-      expect(toOptionsTab(tab)).toBe(tab);
-      expect(classifyRoute("/workspace/agent-ab12/options", `tab=${tab}`).activeTab).toBe(tab);
-    }
-    expect(toOptionsTab("nonsense")).toBe("share");
-    expect(classifyRoute("/workspace/agent-ab12/options").activeTab).toBe("share");
-  });
-
-  it("renders Permissions even when the shared options load failed", async () => {
-    const optionsModel = new WorkspaceOptionsModel(AGENT_ID, {
-      fetchJson: () => Promise.resolve({ ok: false, status: 500, body: { error: "options are gone" } }),
-      redraw: () => undefined,
-    });
-    await optionsModel.load();
-    const permissions = new PermissionsModel(AGENT_ID, {
-      fetchJson: () => Promise.resolve({ ok: true, status: 200, body: permissionsView() }),
-      redraw: () => undefined,
-    });
-
-    const panel = OptionsPanel() as unknown as m.Component;
-    const attrs = {
-      model: optionsModel,
-      permissions,
-      tab: "permissions",
-      group: "general",
-      section: null,
-      onSelectGroup: () => undefined,
-      onSelectSection: () => undefined,
-      onReviewRequest: () => undefined,
-    };
-    const vnode = m(panel, attrs as unknown as m.Attributes) as m.Vnode;
-    const root = (panel.view as unknown as (v: m.Vnode) => m.Vnode).call(panel, vnode);
-
-    // The Permissions pane is what the body dispatches to -- not the shared
-    // options-load failure, which only the other two tabs wait behind.
-    expect(allText(root)).not.toContain("Could not load this workspace's options");
-    const permissionsPane = collectVnodes(root).find((node) => node.tag === PermissionsTab);
-    expect(permissionsPane).toBeDefined();
-    expect(attrsOf(permissionsPane as AnyVnode).workspaceName).toBe("");
   });
 });
 

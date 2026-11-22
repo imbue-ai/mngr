@@ -1394,17 +1394,21 @@ class ImbueCloudConnectorClient(MutableModel):
         host_id: str,
         link: str | None,
         workspace_name: str | None,
+        app_name: str | None,
     ) -> MobileAccessLinkResult:
-        """Have the connector email the caller their own workspace's link; raises ImbueCloudShareRefusedError on a 409.
+        """Have the connector email the caller their own workspace's link, or one app's; raises ImbueCloudShareRefusedError on a 409.
 
         The recipient is the caller's own account address, which the connector
-        reads from the session rather than from this request.
+        reads from the session rather than from this request. ``app_name`` makes
+        the message about that one app, whose own address ``link`` then is.
         """
         body: dict[str, str] = {}
         if link:
             body["link"] = link
         if workspace_name:
             body["workspace_name"] = workspace_name
+        if app_name:
+            body["app_name"] = app_name
         response = self._send(
             "POST",
             self._url(f"/shares/{host_id}/mobile-access-link"),

@@ -946,6 +946,7 @@ mngr imbue_cloud shares mobile-access-link [OPTIONS] HOST_ID
 | ---- | ---- | ----------- | ------- |
 | `--link` | text | The workspace's share URL; the shell's entry origin when omitted | None |
 | `--workspace-name` | text | The workspace's display name, as the message should say it | None |
+| `--app-name` | text | The display name of the one app the link opens; the message is about the whole workspace when omitted | None |
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 

@@ -1,4 +1,4 @@
-// Accounts page model: each account's asynchronously-loaded plan/usage
+// Settings' Accounts tab's model: each account's asynchronously-loaded plan/usage
 // section and notification preferences (the connector round trips that must
 // never block first paint) and the account actions. The account list itself
 // is the accounts store's, kept current by the channel. While a backup trim

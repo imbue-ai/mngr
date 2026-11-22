@@ -412,7 +412,7 @@ the app's own choice for where this machine's workspaces run; a run therefore
 fails when that region is out of pool capacity, which is a true thing to
 report about the tier. The form shares a workspace on an account as it is
 created unless its sharing switch is turned off; the journey turns it off, so
-that its share step publishes the workspace from the Share tab.
+that its share step publishes the workspace from its Sharing page in Settings.
 
 A fresh workspace boots with no AI credentials. A user gives it the account's
 own through the chat's provider chooser: its "Sign in with Imbue" lane floats

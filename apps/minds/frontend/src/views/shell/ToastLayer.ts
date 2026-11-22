@@ -402,7 +402,9 @@ export function ToastLayer(): m.Component<ToastLayerAttrs> {
         if (!toasts.some((toast) => toast.id === id)) heightsById.delete(id);
       }
       // Below the Reconnecting chip when it is showing, else at its spot.
-      const topClass = isReconnecting ? "top-[74px]" : "top-[42px]";
+      const topClass = isReconnecting
+        ? "top-[calc(var(--titlebar-height)+36px)]"
+        : "top-[calc(var(--titlebar-height)+4px)]";
       const layerClass =
         "pointer-events-none fixed right-2 " + topClass + " z-[250] w-[320px]";
       const isReducedMotion =

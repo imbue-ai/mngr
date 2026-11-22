@@ -19,7 +19,7 @@ import {
   resetNotificationPrefsForTests,
   type NotificationPrefs,
 } from "./notificationsUi";
-import { SettingsModel, type SettingsOverview } from "./settings";
+import { SETTINGS_SECTIONS, SettingsModel, type SettingsOverview } from "./settings";
 
 const BASE_OVERVIEW: SettingsOverview = settingsOverview();
 
@@ -1038,6 +1038,25 @@ describe("SettingsModel release channels", () => {
           (s) => s.name,
         ),
       ).toContain("updates");
+    });
+  });
+
+  it("lists Keyboard shortcuts, after Display, only where the main process can rebind them", async () => {
+    const names = (): string[] =>
+      new SettingsModel(undefined, () => {}).visibleSections.map((section) => section.name);
+
+    // A plain browser has no main process to catch the key.
+    await withMindsNative(null, async () => {
+      expect(names()).not.toContain("keyboard-shortcuts");
+    });
+    // Nor does a desktop preload from before the setting shipped.
+    await withMindsNative({}, async () => {
+      expect(names()).not.toContain("keyboard-shortcuts");
+    });
+    await withMindsNative({ getKeyboardShortcuts: async () => null }, async () => {
+      expect(names().indexOf("keyboard-shortcuts")).toBe(names().indexOf("display") + 1);
+      // Every other section is offered either way.
+      expect(names()).toHaveLength(SETTINGS_SECTIONS.length);
     });
   });
 });

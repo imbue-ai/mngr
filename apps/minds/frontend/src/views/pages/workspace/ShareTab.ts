@@ -1,5 +1,8 @@
-// The share panel: one switch publishes the whole workspace, and each target
-// shows the link it opens and the people it admits. Nothing here waits on a
+// Sharing: one page per target (the whole workspace, or one app), each showing
+// the link it opens, the people and agents it admits, and what they reach
+// through it. One switch, on the whole workspace's page, publishes the
+// workspace. Settings' Workspace & apps tab lists the targets in its rail
+// (sharingNav) and draws the selected one's page here. Nothing here waits on a
 // write: every control stays live while the model saves behind it.
 
 import m from "mithril";
@@ -18,7 +21,7 @@ import { webLogin } from "../../../models/webLogin";
 import { shareTargetIconMarkup } from "../../components/appIcon";
 import { Button } from "../../components/Button";
 import { Collapsible } from "../../components/Collapsible";
-import { FormLabel, Select, TextInput } from "../../components/FormControls";
+import { Select, TextInput } from "../../components/FormControls";
 import { Icon16 } from "../../components/Icon";
 import { ErrorNotice } from "../../components/ErrorDisplay";
 import {
@@ -52,7 +55,13 @@ import { formatRelativeAgo } from "../../../models/backups";
 import { RESEND_EMAIL_LABEL } from "../../../models/emailVerification";
 import type { ResendOutcome } from "../../../models/emailVerification";
 import { monogramLetters } from "../../../models/monogram";
-import { navEntryClass, splitPane } from "../../components/SplitPane";
+import { navEntryClass } from "../../components/SplitPane";
+import { QR_CODE_ROW_MIN_HEIGHT_CLASS, QrCode } from "../../components/QrCode";
+import { serviceMark } from "../../components/ServiceMark";
+import type { UiPermissionConnection } from "../../../generated/ui";
+import { connectionSectionId } from "../../../models/workspacePermissions";
+import { workspaceSwatch } from "../../shell/trail";
+import { ownerSectionQuery } from "../settings/settings-route";
 import {
   renderSwitch,
   renderSwitchPlaceholder,
@@ -82,17 +91,18 @@ const CONFIRM_BODY =
   "you only grant access to an app, they will be able to access all data " +
   "that app provides to them.";
 
-const OFF_NOTICE_WORKSPACE =
-  "This workspace cannot be accessed while sharing is off. " +
-  "Your list of permissions is preserved but inactive.";
-
-const OFF_NOTICE_APP =
-  "This app cannot be accessed while sharing is off. " +
-  "Your list of permissions is preserved but inactive.";
-
 const WHOLE_SCOPE_LINE =
-  "Permissions below apply to every app in this workspace, and also grant " +
-  "access to files, agent chats and terminal.";
+  "People you invite here can open every app in this workspace, and its " +
+  "files, agent chats and terminal.";
+
+const SHARING_OFF_LINE = "Sharing is off for this workspace.";
+const NO_LINK_YET_TOOLTIP = "No link yet: this app gets one when it first starts.";
+const TURN_ON_SHARING_LABEL = "Turn on sharing…";
+const LINK_OFF_LINE = "The link appears here when sharing is on.";
+const SECURE_LINK_LINE = "This is a secure link: only people you've granted access can open it.";
+const WORKSPACE_CONNECTIONS_HEADING = "Invited users will have access to your connections";
+const APP_CONNECTIONS_HEADING = "Invited users will have access to any of these connections that are used in the app:";
+const APPS_HEADING = "Invited users will have access to these apps";
 
 const SAVING_LABEL = "Securely granting access";
 
@@ -102,22 +112,23 @@ const ADD_UNKNOWN_TOOLTIP =
   "Permissions cannot be granted until the sharing status has loaded";
 
 const STATUS_UNCHECKED_TOOLTIP = "Sharing status couldn't be checked.";
+const STATUS_CHECKING_LINE = "Checking whether sharing is enabled";
 
 const LIST_UNREAD_LINE = "The list of who has access couldn't be read.";
 
-// The control is drawn only on the whole workspace's pane, because the message
-// carries that link and no app's. It is drawn whether or not sharing is on, so
-// a reader learns the feature exists and what switch turns it on.
+// Drawn on every target's page, whether or not sharing is on, so a reader
+// learns the feature exists and what switch turns it on. The message carries
+// the link of the target the page is on.
 const MOBILE_LINK_LABEL = "Email me a Mobile Access Link";
 
-const VISITING_AGENTS_HEADING = "Visiting agents";
+const VISITING_AGENTS_HEADING = "Invite an agent";
 const VISITING_AGENTS_WORKSPACE_SENTENCE =
   "Invite a coding agent running somewhere else (on your computer, in a cloud " +
   "agent product, on a collaborator's machine) to work in this workspace with " +
   "exactly this workspace's access, and nothing more.";
 const VISITING_AGENTS_APP_SENTENCE =
   "Invite a coding agent running somewhere else to use only this app.";
-const VISITING_AGENT_INVITE_LABEL = "Invite an agent";
+const VISITING_AGENT_INVITE_LABEL = "Create invite";
 const VISITING_AGENT_COPY_LABEL = "Copy the instructions";
 const VISITING_AGENT_DONE_LABEL = "Done";
 const VISITING_AGENT_REVOKE_LABEL = "Revoke";
@@ -127,6 +138,8 @@ const VISITING_AGENT_INSTRUCTIONS_LEAD =
 
 const MOBILE_LINK_OFF_TOOLTIP =
   "Enable sharing and web access to access this link on mobile";
+const MOBILE_LINK_NO_APP_LINK_TOOLTIP =
+  "This app gets its link the first time it starts.";
 
 const SYNC_PENDING_NOTICE =
   "The permissions have not reached Imbue Cloud yet, so nobody can be " +
@@ -137,8 +150,8 @@ const ADD_KIND_TEXT: Record<
   GrantAddKind,
   { readonly label: string; readonly placeholder: string }
 > = {
-  email: { label: "one person by email", placeholder: "name@example.com" },
-  email_domain: { label: "everyone at a domain", placeholder: "example.com" },
+  email: { label: "One person by email", placeholder: "name@example.com" },
+  email_domain: { label: "Everyone at a domain", placeholder: "example.com" },
 };
 
 // The same box CopyField draws, for the wait that stands in its place: the
@@ -185,6 +198,13 @@ const ROW_LEAD_CLASS =
 export interface ShareTabAttrs {
   share: SharePanelModel;
   workspaceName: string;
+  /** The workspace's colour, for the whole workspace's title. */
+  accent: string | null;
+  /** The workspace's connections, which everyone invited reaches through what is shared; null while they are not
+   * known (still loading, or unavailable), which leaves the reminder out. */
+  connections: readonly UiPermissionConnection[] | null;
+  /** Open a connection's own page (Permissions). */
+  onOpenConnection: (sectionId: string) => void;
 }
 
 interface ShareTabLocalState {
@@ -192,11 +212,10 @@ interface ShareTabLocalState {
   /** Each "Ask the agent to fix it" button's state, by the id of the notice
    * it sits on, made on first use. */
   askAgentByNotice: Map<string, AskAgentModel>;
-  /** Whether the app pane's inherited-permissions group is expanded. */
+  /** Whether the app page's inherited-permissions group is expanded. */
   isInheritedOpen: boolean;
-  /** Whether the nav's System group is expanded; null until the reader toggles
-   * it, while it follows `isSystemGroupNeeded`. */
-  isSystemOpen: boolean | null;
+  /** The target whose list of who has access is unfolded; null while every one is folded, as each starts. */
+  accessOpenTarget: string | null;
   copied: CopiedLink | null;
   copyFlashHandle: ScheduleHandle | null;
 }
@@ -211,12 +230,32 @@ interface CopiedLink {
 
 type ScheduleHandle = ReturnType<SharePanelModel["schedule"]>;
 
+/** The rail entries of Sharing: the whole workspace, each app, then the system apps under a label of their own. */
+export function sharingNav(share: SharePanelModel): m.Children {
+  return [
+    renderNavEntry(
+      share,
+      share.wholeService,
+      "Full workspace",
+      m(Icon16, { name: "panels-top-left", extra: "shrink-0" }),
+    ),
+    ...share.appTargets.map((target) => renderAppNavEntry(share, target)),
+    ...(share.systemTargets.length === 0
+      ? []
+      : [
+          m("div", { class: "px-2 pt-2 pb-0.5 type-helper text-tertiary" }, "System apps"),
+          ...share.systemTargets.map((target) => renderAppNavEntry(share, target)),
+        ]),
+  ];
+}
+
+/** The selected target's Sharing page. */
 export function ShareTab(): m.Component<ShareTabAttrs> {
   const local: ShareTabLocalState = {
     isConfirmOpen: false,
     askAgentByNotice: new Map(),
     isInheritedOpen: false,
-    isSystemOpen: null,
+    accessOpenTarget: null,
     copied: null,
     copyFlashHandle: null,
   };
@@ -228,25 +267,41 @@ export function ShareTab(): m.Component<ShareTabAttrs> {
     },
     view(vnode) {
       const { share } = vnode.attrs;
-      return m("div", { class: "mt-6 flex flex-1 min-h-0 flex-col gap-6" }, [
-        renderPublishWidget(share, local),
-        m("hr", { class: "border-t border-default" }),
-        splitPane({
-          navLabel: "Share targets",
-          nav: renderTargetNav(share, local),
-          content: renderTargetPane(share, local),
-          contentExtra: "flex flex-col",
-        }),
+      return m("div", { class: "flex flex-1 min-h-0 flex-col" }, [
+        renderTargetPage(share, local, vnode.attrs),
         renderConfirmDialog(share, local),
       ]);
     },
   };
 }
 
-function renderPublishWidget(
-  share: SharePanelModel,
-  local: ShareTabLocalState,
-): m.Children {
+/** What the page says and offers while sharing is off: the one line, and the way to turn it on from here. */
+function renderOffBanner(share: SharePanelModel, local: ShareTabLocalState): m.Children {
+  if (!share.isPublicationKnown || share.isPublished) return null;
+  return m(
+    "div",
+    { id: "ws-share-off-notice", class: "mb-6 shrink-0" },
+    m(Notice, { variant: "warn" }, [
+      m("p", { class: "m-0" }, SHARING_OFF_LINE),
+      m(
+        Button,
+        {
+          id: "ws-share-turn-on",
+          variant: "secondary",
+          extra: "mt-2",
+          onclick: () => {
+            local.isConfirmOpen = true;
+          },
+        },
+        TURN_ON_SHARING_LABEL,
+      ),
+    ]),
+  );
+}
+
+/** What sharing is doing or could not do, above the page: the wait for a link, a failed publish or read, and the
+ * note that the address moved. */
+function renderShareNotices(share: SharePanelModel, local: ShareTabLocalState): m.Children {
   const publishWrite = share.publishWrite;
   const publishFailure =
     publishWrite.state === "failed" ? publishWrite.failure : null;
@@ -254,12 +309,37 @@ function renderPublishWidget(
   // behind it, for one reason: the publish failure says so alone.
   const loadFailure =
     publishFailure?.isWorkspaceUnreachable === true ? null : share.loadFailure;
+  const notices: m.Children[] = [
+    share.isLinkBeingSetUp ? renderProvisioning(share, local) : null,
+    publishFailure === null
+      ? null
+      : renderShareFailure(share, local, "ws-share-publish-error", publishFailure),
+    loadFailure === null
+      ? null
+      : renderShareFailure(share, local, "ws-share-load-error", loadFailure),
+    share.migratedDomainFrom === null
+      ? null
+      : m(
+          Notice,
+          { variant: "info" },
+          "Sharing moved to a new address. Links you shared before no longer work.",
+        ),
+  ].filter((notice) => notice !== null);
+  return notices.length === 0 ? null : m("div", { class: "mb-6 flex shrink-0 flex-col gap-2" }, notices);
+}
+
+/** The switch that publishes the workspace: last on the whole workspace's page, and the one place sharing is
+ * turned off. */
+function renderPublishWidget(
+  share: SharePanelModel,
+  local: ShareTabLocalState,
+): m.Children {
   return m(
     "section",
     { id: "ws-share-publish", class: "shrink-0 flex flex-col gap-2" },
     [
       m("div", { class: "flex items-center justify-between gap-4" }, [
-        m("h2", { class: "type-heading text-primary" }, ENABLE_SHARING_LABEL),
+        m("h2", { class: "type-label text-primary" }, ENABLE_SHARING_LABEL),
         m("span", { class: "flex shrink-0 items-center gap-2" }, [
           share.isPublicationKnown
             ? renderPublishSwitch(share, local)
@@ -270,26 +350,7 @@ function renderPublishWidget(
           }),
         ]),
       ]),
-      m("p", { class: "type-body text-secondary" }, SHARING_SENTENCE),
-      share.isLinkBeingSetUp ? renderProvisioning(share, local) : null,
-      publishFailure === null
-        ? null
-        : renderShareFailure(
-            share,
-            local,
-            "ws-share-publish-error",
-            publishFailure,
-          ),
-      loadFailure === null
-        ? null
-        : renderShareFailure(share, local, "ws-share-load-error", loadFailure),
-      share.migratedDomainFrom === null
-        ? null
-        : m(
-            Notice,
-            { variant: "info" },
-            "Sharing moved to a new address. Links you shared before no longer work.",
-          ),
+      m("p", { class: "type-helper text-tertiary" }, SHARING_SENTENCE),
     ],
   );
 }
@@ -322,9 +383,7 @@ function renderPublishPlaceholder(share: SharePanelModel): m.Children {
   return renderSwitchPlaceholder({
     id: "ws-share-publish-unknown",
     isChecking,
-    label: isChecking
-      ? "Checking whether sharing is enabled"
-      : "Sharing status unknown",
+    label: isChecking ? STATUS_CHECKING_LINE : "Sharing status unknown",
   });
 }
 
@@ -517,10 +576,7 @@ function shareRemedyActions(
       case "open_account_settings":
         actions.push({
           label: "Open account settings",
-          onclick: () =>
-            m.route.set(
-              `/workspace/${encodeURIComponent(agentId)}/options?tab=settings&group=account`,
-            ),
+          onclick: () => getAppContext().shell.openSettings(ownerSectionQuery(agentId)),
         });
         break;
       case "restart_sharing":
@@ -681,68 +737,12 @@ function openShareFailureDialog(
   });
 }
 
-function renderTargetNav(
-  share: SharePanelModel,
-  local: ShareTabLocalState,
-): m.Children {
-  return [
-    renderNavEntry(
-      share,
-      share.wholeService,
-      "Whole workspace",
-      m(Icon16, { name: "panels-top-left", extra: "shrink-0" }),
-    ),
-    ...share.appTargets.map((target) => renderAppNavEntry(share, target)),
-    ...(share.systemTargets.length === 0
-      ? []
-      : [renderSystemGroup(share, local)]),
-  ];
-}
-
 function renderAppNavEntry(share: SharePanelModel, target: string): m.Children {
   return renderNavEntry(
     share,
     target,
     share.targetDisplayName(target),
     renderAppIcon(share, target),
-  );
-}
-
-/**
- * The system apps, behind one row that opens them. Each is a target like any
- * other, but none is meant to be shared on its own by default, so they stay out
- * of the way of the apps.
- */
-function renderSystemGroup(
-  share: SharePanelModel,
-  local: ShareTabLocalState,
-): m.Children {
-  const isOpen = local.isSystemOpen ?? isSystemGroupNeeded(share);
-  return m(
-    Collapsible,
-    {
-      id: "ws-share-system",
-      isOpen,
-      onToggle: () => {
-        local.isSystemOpen = !isOpen;
-      },
-      extra: "mt-1 flex flex-col",
-      triggerExtra:
-        "flex w-full items-center gap-2 rounded-md px-2 py-1 text-left " +
-        "type-helper text-tertiary hover:text-secondary",
-      panelExtra: "flex flex-col",
-      summary: "System apps",
-    },
-    share.systemTargets.map((target) => renderAppNavEntry(share, target)),
-  );
-}
-
-/** Whether the System group has to start open: a system app is selected (a
- * deep link to one), or one already admits someone, which a closed group would
- * keep out of sight. */
-function isSystemGroupNeeded(share: SharePanelModel): boolean {
-  return share.systemTargets.some(
-    (target) => target === share.currentTarget || share.grantCount(target) > 0,
   );
 }
 
@@ -753,6 +753,14 @@ function renderNavEntry(
   icon: m.Children,
 ): m.Children {
   const isSelected = target === share.currentTarget;
+  // An app registers its address when it starts, so one that has never run
+  // has no link yet -- which is not the same as having no grants. Both this
+  // and the count come from the document, so until one lands the row says
+  // neither: an unregistered label and an empty list look exactly like a
+  // document that has not arrived.
+  const isLinkMissing =
+    !share.isSharingDocumentLoading && target !== share.wholeService && !share.isLabelKnown(target);
+  const count = share.isSharingDocumentLoading ? 0 : share.grantCount(target);
   return m(
     "button",
     {
@@ -760,6 +768,8 @@ function renderNavEntry(
       "data-share-target": target,
       "aria-pressed": isSelected ? "true" : "false",
       class: navEntryClass(isSelected),
+      // The rail is narrow, so what an entry has to say beyond its name is a tooltip rather than more text.
+      ...(isLinkMissing ? { "data-share-no-link": "true", "data-tooltip": NO_LINK_YET_TOOLTIP } : {}),
       onclick: () => share.selectTarget(target),
     },
     [
@@ -777,27 +787,12 @@ function renderNavEntry(
             )
           : null,
       ]),
-      // An app registers its address when it starts, so one that has never run
-      // has no link yet -- which is not the same as having no grants. Both
-      // this and the count come from the document, so until one lands the row
-      // says neither: an unregistered label and an empty list look exactly
-      // like a document that has not arrived.
-      share.isSharingDocumentLoading ||
-      target === share.wholeService ||
-      share.isLabelKnown(target)
-        ? null
-        : m(
-            "span",
-            { class: "shrink-0 type-helper text-tertiary" },
-            "no link yet",
-          ),
+      // How many people the target admits, once there are any.
       share.isSharingDocumentLoading
         ? m(Skeleton, { extra: "h-5 w-5 shrink-0" })
-        : m(
-            "span",
-            { "data-share-count": target, class: COUNT_BADGE_CLASS },
-            String(share.grantCount(target)),
-          ),
+        : count > 0
+          ? m("span", { "data-share-count": target, class: COUNT_BADGE_CLASS }, String(count))
+          : null,
     ],
   );
 }
@@ -825,61 +820,165 @@ function targetTitle(share: SharePanelModel, target: string): string {
   return share.isDisplayNameAmbiguous(target) ? `${shown} (${target})` : shown;
 }
 
-function renderTargetPane(
+function pageDivider(): m.Children {
+  return m("hr", { class: "my-6 shrink-0 border-t border-subtle" });
+}
+
+function renderTargetPage(
   share: SharePanelModel,
   local: ShareTabLocalState,
+  attrs: ShareTabAttrs,
 ): m.Children {
   const target = share.currentTarget;
   const isWhole = target === share.wholeService;
-  if (share.isSharingDocumentLoading) return renderTargetPaneSkeleton();
+  const name = isWhole ? attrs.workspaceName : targetTitle(share, target);
+  const connections = renderConnections(attrs.connections, isWhole, attrs.onOpenConnection);
   return [
-    m("div", { class: "shrink-0 flex items-center gap-2" }, [
+    renderOffBanner(share, local),
+    m("div", { class: "shrink-0 flex items-center gap-3" }, [
       isWhole
-        ? m(Icon16, {
-            name: "panels-top-left",
-            size: "lg",
-            extra: "shrink-0 text-primary",
-          })
-        : renderAppIcon(share, target),
+        ? workspaceSwatch(attrs.accent, { size: "md" })
+        : m("span", { class: "shrink-0 inline-flex" }, m.trust(shareTargetIconMarkup(share.targetIcon(target), share.targetDisplayName(target), 24))),
       m(
-        "h2",
-        { class: "type-heading text-primary" },
-        isWhole
-          ? "Permissions for the whole workspace"
-          : `Permissions for ${targetTitle(share, target)}`,
+        "h2#ws-share-title",
+        { class: "type-heading-lg text-primary truncate" },
+        isWhole ? `Share ${name}` : `Share the ${name} app`,
       ),
     ]),
-    m(
-      "p",
-      { class: "mt-1 shrink-0 type-helper text-tertiary" },
-      isWhole
-        ? WHOLE_SCOPE_LINE
-        : `Permissions below apply only to the ${targetTitle(share, target)} app.`,
-    ),
-    share.isPublished ? renderLinkSection(share, local) : null,
-    isWhole ? renderMobileLinkControl(share, local) : null,
-    renderAddRow(share),
-    share.isGrantsSyncPending
-      ? m(
-          "div",
-          { id: "ws-share-sync-notice", class: "mt-3 shrink-0" },
-          m(Notice, { variant: "warn" }, SYNC_PENDING_NOTICE),
-        )
-      : null,
-    share.isPublished || !share.isPublicationKnown || !hasAnyGrant(share)
-      ? null
-      : m(
-          "div",
-          { id: "ws-share-off-notice", class: "shrink-0" },
-          m(
-            Notice,
-            { variant: "info" },
-            isWhole ? OFF_NOTICE_WORKSPACE : OFF_NOTICE_APP,
-          ),
-        ),
-    renderGrantList(share, local),
+    m("div", { class: "mt-6 shrink-0" }, [renderShareNotices(share, local), renderLinkSection(share, local, name, isWhole)]),
+    pageDivider(),
+    m("section", { id: "ws-share-invite", class: "shrink-0" }, [
+      m("h2", { class: "type-label text-primary" }, "Invite others"),
+      m(
+        "p",
+        { class: "mt-0.5 type-helper text-tertiary" },
+        isWhole ? WHOLE_SCOPE_LINE : `People you invite here can open only the ${name} app.`,
+      ),
+      renderAddRow(share, local),
+      share.isGrantsSyncPending
+        ? m(
+            "div",
+            { id: "ws-share-sync-notice", class: "mt-3 shrink-0" },
+            m(Notice, { variant: "warn" }, SYNC_PENDING_NOTICE),
+          )
+        : null,
+      renderAccessList(share, local, name),
+    ]),
+    pageDivider(),
     renderVisitingAgentsSection(share, local, target),
+    connections === null ? null : [pageDivider(), connections],
+    isWhole && share.perAppTargets.length > 0 ? [pageDivider(), renderAppGrid(share)] : null,
+    isWhole ? [pageDivider(), renderPublishWidget(share, local)] : null,
   ];
+}
+
+/** Who has access, folded until asked for, so the sections under it stay in view. */
+function renderAccessList(share: SharePanelModel, local: ShareTabLocalState, name: string): m.Children {
+  const target = share.currentTarget;
+  const count =
+    share.grantCount(target) + (target === share.wholeService ? 0 : share.inheritedGrants().length);
+  // An unread list is not an empty one, and has no count to fold behind: the list says what is wrong itself.
+  if (count === 0 || !share.isGrantListKnown) return renderGrantList(share, local);
+  const isOpen = local.accessOpenTarget === target;
+  return m(
+    Collapsible,
+    {
+      id: "ws-share-access",
+      isOpen,
+      onToggle: () => {
+        local.accessOpenTarget = isOpen ? null : target;
+      },
+      extra: "mt-4 flex shrink-0 flex-col",
+      triggerExtra: "flex w-full items-center gap-1 rounded-md py-1 text-left type-helper text-secondary hover:text-primary",
+      panelExtra: "flex flex-col",
+      summary: `${count} ${count === 1 ? "has" : "have"} access to “${name}”`,
+    },
+    renderGrantList(share, local),
+  );
+}
+
+/** The workspace's connections, as a reminder of what an invitation can reach: everyone invited to the workspace
+ * reaches all of them, and everyone invited to an app reaches whichever of them the app uses. Each opens its own
+ * page under Permissions. Null while they are not known, or there are none. */
+function renderConnections(
+  connections: readonly UiPermissionConnection[] | null,
+  isWhole: boolean,
+  onOpenConnection: (sectionId: string) => void,
+): m.Children {
+  if (connections === null || connections.length === 0) return null;
+  return m("section", { id: "ws-share-connections", class: "shrink-0" }, [
+    m("h2", { class: "type-label text-primary" }, isWhole ? WORKSPACE_CONNECTIONS_HEADING : APP_CONNECTIONS_HEADING),
+    m(
+      "div",
+      { class: "mt-3 grid grid-cols-5 gap-2" },
+      connections.map((connection) =>
+        m(
+          "button",
+          {
+            type: "button",
+            "data-share-connection": connectionSectionId(connection),
+            class:
+              "flex flex-col items-center gap-1.5 rounded-lg p-2 cursor-pointer bg-transparent border-0 " +
+              "hover:bg-fill-hover focus-visible:outline-2 focus-visible:outline-accent",
+            onclick: () => onOpenConnection(connectionSectionId(connection)),
+          },
+          [
+            m(
+              "span",
+              {
+                class:
+                  "w-11 h-11 inline-flex items-center justify-center rounded-[14px] ring-1 ring-subtle bg-surface-primary",
+              },
+              serviceMark(
+                connection.service_name,
+                "w-6 h-6",
+                connection.is_connected ? "brand" : "muted",
+                m(Icon16, { name: "globe" }),
+              ),
+            ),
+            m("span", { class: "type-helper text-primary text-center leading-tight" }, [
+              connection.display_name,
+              connection.show_account_label
+                ? m("span", { class: "block text-tertiary" }, connection.account_label)
+                : null,
+            ]),
+          ],
+        ),
+      ),
+    ),
+  ]);
+}
+
+/** The workspace's apps, which everyone invited to the whole workspace can open. Each opens its own Sharing page. */
+function renderAppGrid(share: SharePanelModel): m.Children {
+  return m("section", { id: "ws-share-apps", class: "shrink-0" }, [
+    m("h2", { class: "type-label text-primary" }, APPS_HEADING),
+    m(
+      "div",
+      { class: "mt-3 grid grid-cols-5 gap-2" },
+      share.perAppTargets.map((target) =>
+        m(
+          "button",
+          {
+            type: "button",
+            "data-share-app": target,
+            class:
+              "flex flex-col items-center gap-1.5 rounded-lg p-2 cursor-pointer bg-transparent border-0 " +
+              "hover:bg-fill-hover focus-visible:outline-2 focus-visible:outline-accent",
+            onclick: () => share.selectTarget(target),
+          },
+          [
+            m(
+              "span",
+              { class: "inline-flex" },
+              m.trust(shareTargetIconMarkup(share.targetIcon(target), share.targetDisplayName(target), 44)),
+            ),
+            m("span", { class: "type-helper text-primary text-center leading-tight" }, targetTitle(share, target)),
+          ],
+        ),
+      ),
+    ),
+  ]);
 }
 
 /** Why the add row (and the mobile-link button) cannot be used, for its
@@ -893,57 +992,8 @@ function unavailableTooltip(share: SharePanelModel): string {
   return LIST_UNREAD_LINE;
 }
 
-/**
- * The pane while no document has arrived: the same blocks in the same places,
- * so the layout does not jump when the real pane replaces it.
- *
- * Every row below stands for one the pane draws -- heading, scope line, link,
- * the mobile-link control, the add row, the list -- because drawing any of
- * them for real would state a default as a fact.
- */
-function renderTargetPaneSkeleton(): m.Children {
-  return m(
-    SkeletonRegion,
-    { label: "Loading permissions", extra: "flex flex-col" },
-    [
-      m("div", { class: "shrink-0 flex items-center gap-2" }, [
-        m(Skeleton, { extra: "h-5 w-5 shrink-0" }),
-        m(Skeleton, { extra: "h-5 w-64" }),
-      ]),
-      m("div", { class: "mt-2 shrink-0 flex flex-col gap-1.5" }, [
-        m(Skeleton, { extra: "h-3 w-full" }),
-        m(Skeleton, { extra: "h-3 w-2/5" }),
-      ]),
-      m("div", { class: "mt-6 shrink-0 flex flex-col gap-1.5" }, [
-        m(Skeleton, { extra: "h-4 w-12" }),
-        m("div", { class: "flex items-center gap-2" }, [
-          m(Skeleton, { extra: "h-10 flex-1" }),
-          m(Skeleton, { extra: "h-10 w-10 shrink-0" }),
-        ]),
-        m(Skeleton, { extra: "h-3 w-72" }),
-      ]),
-      m(Skeleton, { extra: "mt-4 h-9 w-64 shrink-0" }),
-      m("div", { class: "mt-6 shrink-0 flex flex-col gap-1.5" }, [
-        m(Skeleton, { extra: "h-4 w-36" }),
-        m("div", { class: "flex items-center gap-2" }, [
-          m(Skeleton, { extra: "h-10 w-52 shrink-0" }),
-          m(Skeleton, { extra: "h-10 flex-1" }),
-          m(Skeleton, { extra: "h-10 w-20 shrink-0" }),
-        ]),
-      ]),
-      m(Skeleton, { extra: "mt-6 h-12 shrink-0" }),
-    ],
-  );
-}
-
-/** Whether anyone is granted anything anywhere in this workspace. An app's own
- * list can be empty while the whole workspace's grants still admit people to it. */
-function hasAnyGrant(share: SharePanelModel): boolean {
-  return share.knownTargets.some((target) => share.grantCount(target) > 0);
-}
-
 /** The kind is chosen beside the value, so the two cannot drift apart. */
-function renderAddRow(share: SharePanelModel): m.Children {
+function renderAddRow(share: SharePanelModel, local: ShareTabLocalState): m.Children {
   const target = share.currentTarget;
   const row = share.addRow(target);
   const offAttrs = share.canAdd
@@ -952,8 +1002,7 @@ function renderAddRow(share: SharePanelModel): m.Children {
         "aria-disabled": "true",
         "data-tooltip": unavailableTooltip(share),
       };
-  return m("section", { id: "ws-share-add", class: "mt-6 shrink-0" }, [
-    m(FormLabel, { target: "ws-share-add-value" }, "Grant permission to"),
+  return m("div", { id: "ws-share-add", class: "mt-3 shrink-0" }, [
     m(
       "div",
       {
@@ -966,6 +1015,7 @@ function renderAddRow(share: SharePanelModel): m.Children {
           Select,
           {
             id: "ws-share-add-kind",
+            "aria-label": "Who to invite",
             name: "ws_share_add_kind",
             width: "w-52",
             value: row.kind,
@@ -998,7 +1048,7 @@ function renderAddRow(share: SharePanelModel): m.Children {
           onkeydown: (event: KeyboardEvent) => {
             if (event.key !== "Enter") return;
             event.preventDefault();
-            submitAddRow(share);
+            submitAddRow(share, local);
           },
         }),
         m(
@@ -1007,7 +1057,7 @@ function renderAddRow(share: SharePanelModel): m.Children {
             id: "ws-share-add-btn",
             variant: "secondary",
             ...offAttrs,
-            onclick: () => submitAddRow(share),
+            onclick: () => submitAddRow(share, local),
           },
           [m(Icon16, { name: "plus" }), "Add"],
         ),
@@ -1023,10 +1073,12 @@ function renderAddRow(share: SharePanelModel): m.Children {
   ]);
 }
 
-function submitAddRow(share: SharePanelModel): void {
+function submitAddRow(share: SharePanelModel, local: ShareTabLocalState): void {
   if (!share.canAdd) return;
   const target = share.currentTarget;
   const row = share.addRow(target);
+  // The list unfolds for the row being added: its saving, its invitation, or its refusal is what was asked for.
+  local.accessOpenTarget = target;
   share.addGrant(target, row.kind, row.value);
 }
 
@@ -1050,7 +1102,13 @@ function renderGrantList(
   if (grants.length === 0 && inherited.length === 0) {
     // An unread list is not an empty one; with no document at all the pane
     // says so, and with an unreadable list the notice above already does.
-    if (!share.isGrantListKnown)
+    if (!share.isGrantListKnown) {
+      if (share.isSharingDocumentLoading)
+        return m(
+          SkeletonRegion,
+          { label: "Loading who has access", extra: "mt-4 shrink-0" },
+          m(Skeleton, { extra: "h-4 w-56" }),
+        );
       return share.isSharingDocumentKnown
         ? null
         : m(
@@ -1061,17 +1119,9 @@ function renderGrantList(
             },
             LIST_UNREAD_LINE,
           );
-    return m(
-      "p",
-      {
-        id: "ws-share-empty",
-        // mt-6 keeps the box clear of the tooltip the disabled add row shows.
-        class:
-          "mt-6 shrink-0 rounded-md border border-dashed border-default p-3 " +
-          "type-body text-tertiary",
-      },
-      "Nobody has been granted access yet.",
-    );
+    }
+    // A list known to be empty has nothing to say that the empty page does not.
+    return null;
   }
   return m(
     "div",
@@ -1471,9 +1521,9 @@ function refusalLine(
 
 function reinviteButton(share: SharePanelModel, grant: Grant): m.Children {
   return textButton(
-    "Invite again",
+    "Resend invite",
     () => void share.invite(share.currentTarget, grant.key),
-    { "data-invite": grant.key, "aria-label": "Invite again" },
+    { "data-invite": grant.key, "aria-label": "Resend invite" },
   );
 }
 
@@ -1588,17 +1638,20 @@ function isJustAdded(share: SharePanelModel, grant: Grant): boolean {
   return addedAtMs !== null && share.nowMs() - addedAtMs < JUST_ADDED_MS;
 }
 
-/** Absent while publishing is off, because there is nothing to open. */
+/** The target's link, as text to copy and as a code for a phone to scan. Drawn whether or not sharing is on, so a
+ * reader sees where the link will be. */
 function renderLinkSection(
   share: SharePanelModel,
   local: ShareTabLocalState,
+  name: string,
+  isWhole: boolean,
 ): m.Children {
   const target = share.currentTarget;
   // The link is shown only once it can actually be opened: a workspace still
   // being brought up has an address that answers nothing yet, and an app that
   // has not registered one has no address at all.
   const url =
-    share.isAwaitingLink || share.isAwaitingLabel(target)
+    !share.isPublished || share.isAwaitingLink || share.isAwaitingLabel(target)
       ? null
       : share.targetUrl(target);
   const copied = local.copied;
@@ -1606,51 +1659,75 @@ function renderLinkSection(
     copied !== null &&
     copied.target === target &&
     share.nowMs() - copied.atMs < COPY_FLASH_MS;
-  return m("section", { id: "ws-share-link", class: "mt-6 shrink-0" }, [
-    m("p", { class: "type-label text-primary" }, "Link"),
+  return m("section", { id: "ws-share-open-elsewhere", class: "shrink-0" }, [
+    m("h2", { class: "type-label text-primary" }, `Open “${name}” on another device`),
     m(
-      "div",
-      { class: "mt-1.5 flex items-center gap-2" },
-      url === null
-        ? renderLinkWait(share, local, target)
-        : [
-            m(CopyField, {
-              value: url,
-              extra: isCopied
-                ? "flex-1 min-w-0 border-success bg-[var(--c-success-surface)]"
-                : "flex-1 min-w-0",
-              "aria-label": "The link to this target",
-            }),
-            m(
-              Button,
-              {
-                id: "ws-share-copy",
-                variant: "secondary",
-                size: "icon",
-                "aria-label":
-                  target === share.wholeService
-                    ? "Copy the link"
-                    : `Copy the link to ${targetTitle(share, target)}`,
-                onclick: () => {
-                  void copyToClipboardWithFlash(
-                    share,
-                    local,
-                    share.currentTarget,
-                    url,
-                  );
-                },
-              },
-              m(Icon16, { name: isCopied ? "check" : "copy" }),
-            ),
-          ],
+      "p",
+      { class: "mt-0.5 type-helper text-tertiary" },
+      isWhole
+        ? "Access your workspace from your phone or another computer."
+        : "Access the app from your phone or another computer.",
     ),
-    url === null
-      ? null
-      : m(
-          "p",
-          { class: "mt-1.5 type-helper text-tertiary" },
-          "Only people granted permission can open this link.",
-        ),
+    m("div", { class: "mt-3 flex items-start gap-4" }, [
+      m(QrCode, { value: url, label: `QR code for the link to ${name}` }),
+      m("div", { class: "flex-1 min-w-0" }, [
+        // As tall as the code beside it, with the link at its head and the button at its foot: the button's
+        // bottom edge is the code's. What the button reports goes under both.
+        m("div", { class: `${QR_CODE_ROW_MIN_HEIGHT_CLASS} flex flex-col justify-between gap-1.5` }, [
+          m("div", { class: "flex flex-col gap-1.5" }, [
+            m(
+              "div",
+              // Present exactly while the workspace is published: what watches for a link to exist (the smoke
+              // journey) waits on this id arriving and leaving.
+              { id: share.isPublished ? "ws-share-link" : undefined, class: "flex items-center gap-2" },
+              url !== null
+                ? [
+                    m(CopyField, {
+                      value: url,
+                      extra: isCopied
+                        ? "flex-1 min-w-0 border-success bg-[var(--c-success-surface)]"
+                        : "flex-1 min-w-0",
+                      "aria-label": "The link to this target",
+                    }),
+                    m(
+                      Button,
+                      {
+                        id: "ws-share-copy",
+                        variant: "secondary",
+                        size: "icon",
+                        "aria-label": isWhole ? "Copy the link" : `Copy the link to ${name}`,
+                        onclick: () => {
+                          void copyToClipboardWithFlash(share, local, share.currentTarget, url);
+                        },
+                      },
+                      m(Icon16, { name: isCopied ? "check" : "copy" }),
+                    ),
+                  ]
+                : share.isCheckingPublication
+                  ? // Neither "off" nor "preparing" is known to be true until Imbue Cloud has answered.
+                    m("div", { id: "ws-share-link-checking", class: LINK_BOX_CLASS }, [
+                      m(Spinner, { size: "sm", extra: "shrink-0" }),
+                      STATUS_CHECKING_LINE,
+                    ])
+                  : share.isPublished
+                    ? renderLinkWait(share, local, target)
+                    : m(
+                      "p",
+                      {
+                        id: "ws-share-link-off",
+                        class:
+                          "flex-1 min-w-0 flex items-center h-9 px-3 rounded-md border border-dashed border-default type-helper text-tertiary",
+                      },
+                      LINK_OFF_LINE,
+                    ),
+            ),
+            url === null ? null : m("p", { class: "type-helper text-tertiary" }, SECURE_LINK_LINE),
+          ]),
+          renderMobileLinkControl(share),
+        ]),
+        renderMobileLinkStatus(share, local, share.mobileLinkState),
+      ]),
+    ]),
   ]);
 }
 
@@ -1703,20 +1780,21 @@ function renderLinkWait(
   );
 }
 
-/** The control that emails the signed-in account this workspace's link, and
- * the one line of status it leaves behind. */
-function renderMobileLinkControl(
-  share: SharePanelModel,
-  local: ShareTabLocalState,
-): m.Children {
+/** The control that emails the signed-in account the link of the target the
+ * page is on. */
+function renderMobileLinkControl(share: SharePanelModel): m.Children {
   // Dimmed the way the add row dims, so a control that cannot be pressed is
   // legible as one without the reader having to hover for the tooltip. The
   // tooltip says why only when it is not this panel's own send in flight.
   const offTooltip = !share.isPublicationKnown
-    ? STATUS_UNCHECKED_TOOLTIP
-    : share.isPublished
-      ? null
-      : MOBILE_LINK_OFF_TOOLTIP;
+    ? share.isCheckingPublication
+      ? STATUS_CHECKING_LINE
+      : STATUS_UNCHECKED_TOOLTIP
+    : !share.isPublished
+      ? MOBILE_LINK_OFF_TOOLTIP
+      : share.isMobileLinkAwaitingAppLink
+        ? MOBILE_LINK_NO_APP_LINK_TOOLTIP
+        : null;
   const offAttrs = share.canSendMobileAccessLink
     ? {}
     : {
@@ -1724,19 +1802,23 @@ function renderMobileLinkControl(
         ...(offTooltip === null ? {} : { "data-tooltip": offTooltip }),
         extra: "opacity-40",
       };
-  return m("div", { id: "ws-share-mobile-link", class: "mt-4 shrink-0" }, [
+  return m(
+    "div",
+    // A flex box, so the button is laid out as its item rather than on a line: a line box would stand a
+    // fraction of a pixel taller than the button and lift its bottom edge off the code's.
+    { id: "ws-share-mobile-link", class: "shrink-0 flex" },
     m(
       Button,
       {
         id: "ws-share-mobile-link-btn",
         variant: "secondary",
+        size: "xs",
         ...offAttrs,
         onclick: () => void share.sendMobileAccessLink(),
       },
       [m(Icon16, { name: "mail" }), MOBILE_LINK_LABEL],
     ),
-    renderMobileLinkStatus(share, local, share.mobileLinkState),
-  ]);
+  );
 }
 
 function renderMobileLinkStatus(
@@ -1818,12 +1900,18 @@ function renderVisitingAgentsSection(
 ): m.Children {
   const isWhole = target === share.wholeService;
   const inviteState = share.visitingAgentInviteState;
+  const loadAgentsOnceFirstReadIsIn = (): void => {
+    if (!share.isSharingDocumentLoading) void share.ensureVisitingAgentsLoaded();
+  };
   return m(
     "section",
     {
       id: "ws-share-agents",
-      class: "mt-6 shrink-0",
-      oncreate: () => void share.ensureVisitingAgentsLoaded(),
+      class: "shrink-0",
+      // Listing them is an exec into the workspace, which would only compete with the read the page is waiting
+      // on: it starts once that read has something to draw, or has failed.
+      oncreate: loadAgentsOnceFirstReadIsIn,
+      onupdate: loadAgentsOnceFirstReadIsIn,
     },
     [
       m("p", { class: "type-label text-primary" }, VISITING_AGENTS_HEADING),

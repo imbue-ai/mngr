@@ -168,7 +168,7 @@ class MultiAccountSessionStore(MutableModel):
     # this, a record naming an account that is NOT signed in (a stale ACTIVE row
     # left by a sign-out) re-ran `mngr imbue_cloud auth list` on EVERY read. That
     # subprocess costs ~1.7s, and it sits on the page-render path, so opening the
-    # options panel took seconds whenever such a record existed.
+    # workspace's settings took seconds whenever such a record existed.
     _has_force_refreshed: bool = PrivateAttr(default=False)
     _is_last_identity_read_failed: bool = PrivateAttr(default=False)
 

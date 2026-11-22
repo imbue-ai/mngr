@@ -480,10 +480,16 @@ class FakeImbueCloudCli(ImbueCloudCli):
     )
 
     def send_mobile_access_link(
-        self, *, account: str, host_id: str, link: str | None, workspace_name: str | None
+        self, *, account: str, host_id: str, link: str | None, workspace_name: str | None, app_name: str | None
     ) -> MobileAccessLinkCliResult:
         self.mobile_access_link_calls.append(
-            {"account": account, "host_id": host_id, "link": link, "workspace_name": workspace_name}
+            {
+                "account": account,
+                "host_id": host_id,
+                "link": link,
+                "workspace_name": workspace_name,
+                "app_name": app_name,
+            }
         )
         if not self.mobile_access_link_results:
             return MobileAccessLinkCliResult(

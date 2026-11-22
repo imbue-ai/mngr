@@ -63,7 +63,7 @@ export function NoticeBand(): m.Component<NoticeBandAttrs> {
           // squares its own to meet this), so the pair still reads as one
           // rounded card. overflow-hidden clips the tinted child to the radius.
           class:
-            "fixed left-0 right-0 top-[38px] z-[95] bg-surface-primary rounded-t-xl overflow-hidden",
+            "fixed left-0 right-0 top-(--titlebar-height) z-[95] bg-surface-primary rounded-t-xl overflow-hidden",
         },
         m(
           "div",

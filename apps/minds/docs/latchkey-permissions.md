@@ -52,9 +52,8 @@ second gateway URL or a different agent skill.
    surface; the other ways in all lead back to it: the titlebar bell's
    notification feed (whose pending rows carry the request), its toast
    cards, and OS-notification clicks each jump to the asking workspace and
-   open the same popup there. It is not a route -- it
-   stacks over whatever is on screen, including the workspace-options panel
-   -- so dismissing it via Approve/Deny, the close button, a backdrop
+   open the same popup there. It floats over whatever is on screen,
+   including Settings, so dismissing it via Approve/Deny, the close button, a backdrop
    click, or Escape returns the user to their work with nothing changed
    underneath.
 
@@ -976,7 +975,7 @@ down kills the command and everything it spawned. Every command leaves a
 `<data_dir>/events/remote_execution/events.jsonl` (what ran and how it ended,
 never its output).
 
-The workspace options panel's Permissions tab lists the grants under **This
+The workspace's Permissions tab in Settings lists the grants under **This
 computer**, one row per device and one per program, and can only turn them
 off: granting goes through the request flow alone. The design is `specs/remote-execution/spec.md`.
 
@@ -1276,7 +1275,10 @@ default) alongside it rather than waiting for someone to open the tab.
 
 ## Permissions tab (per workspace)
 
-The workspace options panel's **Permissions** tab is where connectors and
+A workspace's **Permissions** tab is a page of Settings: open Settings from
+the titlebar's gear, choose **Workspace & apps**, pick the workspace, and
+choose **Permissions**. The gear carries a dot while the workspace's agents
+wait on a request, and then opens straight onto it. It is where connectors and
 grants live, and the only place they live: each machine holds its own
 credentials, so there is nothing an app-level page could say about them that
 would be true of every machine at once. It owns both halves for one machine --
@@ -1284,7 +1286,8 @@ which accounts it is connected to, and what its agents may reach with them. It r
 host file can carry as a toggle, so the file is editable without going
 back through a request.
 
-The left nav has one entry per **connection** -- a (service, account) pair
+Nested under the Permissions entry of Settings' left rail, the nav has one
+entry per **connection** -- a (service, account) pair
 that either has stored credentials or still appears in the host's rules,
 so a grant left behind by a disconnected account is never invisible --
 plus **Add connection** (which also holds the [experimental
@@ -1362,10 +1365,10 @@ precisely so the row can be turned back on. A grant whose definition has
 gone can still be turned off, but not back on: only the agent asking again
 brings it back.
 
-The pane loads independently of the panel's other tabs. A latchkey gateway
-that cannot be reached shows as "permissions can't be loaded" rather than
-an empty, misleading "nothing granted", and does not take the share panel
-or Workspace settings down with it.
+The pane loads independently of the workspace's other Settings pages. A
+latchkey gateway that cannot be reached shows as "permissions can't be loaded"
+rather than an empty, misleading "nothing granted", and does not take Sharing
+or the workspace's other settings down with it.
 
 ### Experimental connectors
 

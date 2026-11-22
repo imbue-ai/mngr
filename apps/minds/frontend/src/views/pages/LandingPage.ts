@@ -229,7 +229,7 @@ export function otherAccountsWithWorkspaces(
   signedOut: readonly UiAccountEntry[],
 ): OtherAccountWithWorkspaces[] {
   return accountSwitcherRows(windowAccountId, signedIn, signedOut)
-    .filter((row) => !row.isCurrent && (workspaceCountByAccountId[row.accountId] ?? 0) > 0)
+    .filter((row) => (workspaceCountByAccountId[row.accountId] ?? 0) > 0)
     .map((row) => ({
       accountId: row.accountId,
       label: row.label,
@@ -628,7 +628,8 @@ export const LandingPage: m.ClosureComponent = () => {
   }
 
   function openSettings(entry: UiWorkspaceEntry): void {
-    getAppContext().shell.routeTo(`/workspace/${entry.id}/options?tab=settings`);
+    // Settings on this workspace, without opening it: the home page stays behind.
+    getAppContext().shell.openSettings({ tab: "workspace", settings_workspace: entry.id });
   }
 
   /** One status badge, toned by the label's rule (specs/home-screen-redesign, 4.13). */

@@ -15,13 +15,18 @@ import {
   SHARED_WORKSPACE_DOMAIN,
   accountEntry,
   accountsMessage,
+  attrsOf,
   jsonResponse,
+  publishPendingRequests,
+  renderRoot,
   secondAccountEntry,
   settle,
   sharedWorkspace,
   sharedWorkspaceEntry,
   workspacesMessage,
 } from "../../testing";
+import type { AnyVnode } from "../../testing";
+import { Modal, isAnyModalOpen } from "../components/Modal";
 import type { WaitingRequestList } from "./shell-state";
 import { ShellState, workspaceAppUrl } from "./shell-state";
 
@@ -69,6 +74,12 @@ function displaying(shell: ShellState, agentId: string): void {
   shell.handleRouteChanged(`/workspace/${agentId}`);
 }
 
+/** The same for any route, given as the router hands it over. */
+function displayingRoute(shell: ShellState, path: string, search: string): void {
+  stubAccentPainting();
+  shell.handleRouteChanged(path, search);
+}
+
 // The ask follows the MOUNTED FRAME, not the routed content surface. Those
 // diverge on the routes that float an app modal over a workspace (/help,
 // /inbox, /settings/ai-keys, /create/template): the frame stays mounted and
@@ -77,7 +88,27 @@ function displaying(shell: ShellState, agentId: string): void {
 // remount it either. Keying off the frame is what covers those windows.
 const WORKSPACE_ID = "agent-ab12";
 
+/** The Modals a test left on screen, taken down after it: the count of them is the Modal module's own. */
+const raisedModalRemovals: (() => void)[] = [];
+
+/** Put a Modal on screen the way a mount would, by drawing it and running the hooks that register it; returns its
+ * removal, which is what its owner's redraw does once `onClose` has flipped it shut. */
+function raiseModal(onClose?: () => void): () => void {
+  const backdrop = renderRoot(Modal, { isOpen: true, onClose }) as unknown as AnyVnode;
+  const hooks = attrsOf(backdrop) as { oncreate: () => void; onremove: () => void };
+  hooks.oncreate();
+  let isRemoved = false;
+  const remove = (): void => {
+    if (isRemoved) return;
+    isRemoved = true;
+    hooks.onremove();
+  };
+  raisedModalRemovals.push(remove);
+  return remove;
+}
+
 afterEach(() => {
+  for (const remove of raisedModalRemovals.splice(0)) remove();
   // restoreAllMocks does NOT undo vi.stubGlobal; only unstubAllGlobals does.
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -101,11 +132,19 @@ function makeShell(): ShellState {
 }
 
 /** Put the shell on `route` the way the router does, so the state it derives
- * from a route (displayed workspace, the panel behind an overlay) is real. */
+ * from a route (displayed workspace, the Settings behind an overlay) is real. */
 function land(shell: ShellState, route: string): void {
   vi.spyOn(m.route, "get").mockReturnValue(route);
   const [path, search = ""] = route.split("?");
   shell.handleRouteChanged(path, search);
+}
+
+/** Settings on the workspace's Permissions, floating over that workspace: where a "Waiting on you" row is pressed. */
+const SETTINGS_ON_WAITING = `/settings?tab=workspace&group=permissions&perm_section=waiting&workspace=${WORKSPACE_ID}&account=local`;
+
+/** The query of a route as a plain record, so an assertion on it does not depend on the order it was written in. */
+function queryOf(route: string): Record<string, string> {
+  return Object.fromEntries(new URLSearchParams(route.split("?")[1] ?? ""));
 }
 
 describe("ShellState.openInbox", () => {
@@ -161,26 +200,84 @@ describe("ShellState.openInbox", () => {
     expect(routeSet).toHaveBeenCalledTimes(2);
   });
 
-  it("remembers the Permissions pane it was opened from", () => {
-    // The pane stays mounted underneath, and is what the popup goes back to.
+  it("remembers the Settings route it was opened from, and still floats over the workspace behind Settings", () => {
+    // Settings stays mounted underneath, and is what the popup goes back to.
     const shell = makeShell();
-    const optionsRoute = `/workspace/${WORKSPACE_ID}/options?tab=permissions&section=waiting`;
-    land(shell, optionsRoute);
+    land(shell, SETTINGS_ON_WAITING);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openInbox({ selected: "evt-a" });
+
+    expect(shell.settingsRouteBehindOverlay).toBe(SETTINGS_ON_WAITING);
+    // A push, not a replace: Settings is not swapped for the popup, it sits under it.
+    expect(routeSet).toHaveBeenCalledWith(
+      "/inbox",
+      { selected: "evt-a", workspace: WORKSPACE_ID, account: "local" },
+      undefined,
+    );
+  });
+
+  it("remembers Settings whichever tab it was on, so a request arriving from a notification returns there", () => {
+    const shell = makeShell();
+    const studioRoute = "/settings?tab=studio&section=display&account=local";
+    land(shell, studioRoute);
     vi.spyOn(m.route, "set").mockImplementation(() => undefined);
 
     shell.openInbox({ selected: "evt-a" });
 
-    expect(shell.panelRouteBehindOverlay).toBe(optionsRoute);
+    expect(shell.settingsRouteBehindOverlay).toBe(studioRoute);
   });
 
-  it("names no pane when the popup was opened from the chat", () => {
+  it("keeps the remembered Settings when a second request swings the open popup", () => {
+    // The live route is /inbox by then, which names no Settings: only the
+    // first open may write what is underneath.
+    const shell = makeShell();
+    land(shell, SETTINGS_ON_WAITING);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    shell.openInbox({ selected: "evt-a" });
+    land(shell, `/inbox?selected=evt-a&workspace=${WORKSPACE_ID}&account=local`);
+
+    shell.openInbox({ selected: "evt-b" });
+
+    expect(shell.settingsRouteBehindOverlay).toBe(SETTINGS_ON_WAITING);
+    expect(routeSet).toHaveBeenLastCalledWith(
+      "/inbox",
+      { selected: "evt-b", workspace: WORKSPACE_ID, account: "local" },
+      { replace: true },
+    );
+  });
+
+  it("keeps the remembered Settings across the redraw that runs before the popup's route lands", () => {
+    // The router calls handleRouteChanged on every redraw, and one happens
+    // with Settings' own route still current right after the open.
+    const shell = makeShell();
+    land(shell, SETTINGS_ON_WAITING);
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    shell.openInbox({ selected: "evt-a" });
+
+    land(shell, SETTINGS_ON_WAITING);
+
+    expect(shell.settingsRouteBehindOverlay).toBe(SETTINGS_ON_WAITING);
+  });
+
+  it("names no Settings when the popup was opened from the chat", () => {
     const shell = makeShell();
     land(shell, `/workspace/${WORKSPACE_ID}`);
     vi.spyOn(m.route, "set").mockImplementation(() => undefined);
 
     shell.openInbox({ selected: "evt-a" });
 
-    expect(shell.panelRouteBehindOverlay).toBeNull();
+    expect(shell.settingsRouteBehindOverlay).toBeNull();
+  });
+
+  it("names no Settings when the popup was opened from Get help, the other routed flyout", () => {
+    const shell = makeShell();
+    land(shell, `/help?workspace=${WORKSPACE_ID}&assist=1`);
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openInbox({ selected: "evt-a" });
+
+    expect(shell.settingsRouteBehindOverlay).toBeNull();
   });
 });
 
@@ -287,6 +384,29 @@ describe("ShellState.closeAppOverlay", () => {
     expect(routeSet).toHaveBeenCalledTimes(1);
   });
 
+  it("closes again after stepping back onto an earlier entry of the same overlay", () => {
+    // A link from outside the page (the menu bar's Check for Updates, a notification) can push a second
+    // Settings entry over the first. Stepping back from it lands on the same path, with another query.
+    const shell = makeShell();
+    const back = vi.fn();
+    vi.stubGlobal("window", { history: { length: 5, back } });
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    land(shell, `/settings?workspace=${WORKSPACE_ID}&tab=workspace`);
+    land(shell, "/settings?section=updates");
+
+    expect(shell.closeAppOverlay()).toBe(true);
+    // A redraw on the entry still being left keeps the guard: a held Escape steps back once.
+    land(shell, "/settings?section=updates");
+    expect(shell.closeAppOverlay()).toBe(true);
+    expect(back).toHaveBeenCalledTimes(1);
+
+    land(shell, `/settings?workspace=${WORKSPACE_ID}&tab=workspace`);
+    expect(shell.closeAppOverlay()).toBe(true);
+
+    expect(back).toHaveBeenCalledTimes(1);
+    expect(routeSet.mock.calls).toEqual([[`/workspace/${WORKSPACE_ID}`, undefined, { replace: true }]]);
+  });
+
   it("closes again once the dismissal has actually landed", () => {
     // The guard is not a one-way latch: arriving somewhere new clears it, so a
     // later overlay still closes.
@@ -324,6 +444,83 @@ describe("ShellState.closeAppOverlay", () => {
       undefined,
       { replace: true },
     );
+  });
+
+  it("routes Settings directly to the machine it floats over, never through history.back()", () => {
+    // The entry behind Settings can be a request popup since answered, or the
+    // flyout it was switched to from; the machine it names is where it goes.
+    const shell = makeShell();
+    const back = vi.fn();
+    vi.stubGlobal("window", { history: { length: 5, back } });
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+    land(shell, `/settings?tab=workspace&group=sharing&workspace=${WORKSPACE_ID}&settings_workspace=agent-cd34`);
+
+    expect(shell.closeAppOverlay()).toBe(true);
+
+    expect(back).not.toHaveBeenCalled();
+    // The workspace on screen, not the one Settings had picked.
+    expect(routeSet).toHaveBeenCalledWith(
+      `/workspace/${WORKSPACE_ID}`,
+      undefined,
+      { replace: true },
+    );
+  });
+
+  it("goes back through history for a Settings opened over Home, which names no machine", () => {
+    const shell = makeShell();
+    const back = vi.fn();
+    vi.stubGlobal("window", { history: { length: 5, back } });
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    // The picked workspace is not one the window shows, so it is nowhere to dismiss to.
+    land(shell, "/settings?tab=workspace&settings_workspace=agent-cd34&account=local");
+
+    expect(shell.closeAppOverlay()).toBe(true);
+
+    expect(back).toHaveBeenCalledTimes(1);
+    expect(routeSet).not.toHaveBeenCalled();
+  });
+
+  it("lands a cold-started Settings on its account's hub when there is no history to go back through", () => {
+    const shell = makeShell();
+    vi.stubGlobal("window", { history: { length: 1, back: vi.fn() } });
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    land(shell, "/settings?tab=accounts&account=user-1");
+
+    expect(shell.closeAppOverlay()).toBe(true);
+
+    expect(routeSet).toHaveBeenCalledWith("/account/user-1/");
+  });
+
+  it("dismisses a Settings opened from the recovery page back to that page, not to the machine that would not load", () => {
+    const recoveryPage = `/agents/${WORKSPACE_ID}/recovery`;
+    const shell = makeShell();
+    land(shell, recoveryPage);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    shell.openSettingsFromBar();
+    vi.stubGlobal("window", { history: { length: 1, back: vi.fn() } });
+    land(shell, `/settings?tab=workspace&settings_workspace=${WORKSPACE_ID}&account=local`);
+
+    expect(shell.closeAppOverlay()).toBe(true);
+
+    expect(routeSet).toHaveBeenLastCalledWith(recoveryPage);
+  });
+
+  it("leaves the legacy options and accounts URLs alone: they are redirects, not surfaces to close", () => {
+    const shell = makeShell();
+    const back = vi.fn();
+    vi.stubGlobal("window", { history: { length: 5, back } });
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    land(shell, `/workspace/${WORKSPACE_ID}/options?tab=share`);
+    expect(shell.closeAppOverlay()).toBe(false);
+    expect(shell.handleEscape()).toBe(false);
+    land(shell, "/accounts");
+    expect(shell.closeAppOverlay()).toBe(false);
+
+    expect(back).not.toHaveBeenCalled();
+    expect(routeSet).not.toHaveBeenCalled();
   });
 
   it("closes the template stepper floating over a machine on its account's hub route", () => {
@@ -422,12 +619,14 @@ describe("ShellState chat deep link and workspace-message relay", () => {
     shell.openWorkspaceChat(WORKSPACE_ID, "agent-cc33");
     expect(routeSet).not.toHaveBeenCalled();
 
-    land(shell, `/workspace/${WORKSPACE_ID}/options?tab=settings&group=updates`);
+    land(shell, `/settings?tab=workspace&group=updates&workspace=${WORKSPACE_ID}`);
     shell.openWorkspaceChat(WORKSPACE_ID, "agent-dd44");
-    expect(routeSet).toHaveBeenLastCalledWith(`/workspace/${WORKSPACE_ID}`, undefined, undefined);
+    expect(routeSet).toHaveBeenCalledTimes(1);
+    expect(routeSet).toHaveBeenLastCalledWith(`/workspace/${WORKSPACE_ID}`, undefined, { replace: true });
 
     land(shell, `/help?workspace=${WORKSPACE_ID}`);
     shell.openWorkspaceChat(WORKSPACE_ID, "agent-ee55");
+    expect(routeSet).toHaveBeenCalledTimes(2);
     expect(routeSet).toHaveBeenLastCalledWith(`/workspace/${WORKSPACE_ID}`, undefined, { replace: true });
 
     expect(sent).toEqual([
@@ -550,14 +749,15 @@ describe("ShellState.routeTo (one main window per workspace)", () => {
   it("navigates here once the workspace has no other window", async () => {
     const shell = makeShell();
     land(shell, "/");
-    stubClaim(false);
+    const claims = stubClaim(false);
     const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
 
-    shell.routeTo(`/workspace/${OTHER_ID}/options?tab=settings`);
+    shell.routeTo(`/workspace/${OTHER_ID}`, { chat: "agent-ee55" });
 
     await vi.waitFor(() =>
-      expect(routeSet).toHaveBeenCalledWith(`/workspace/${OTHER_ID}/options?tab=settings`),
+      expect(routeSet).toHaveBeenCalledWith(`/workspace/${OTHER_ID}`, { chat: "agent-ee55" }),
     );
+    expect(claims).toEqual([[OTHER_ID, `/workspace/${OTHER_ID}?chat=agent-ee55`]]);
   });
 
   it("asks nothing for a route within the workspace this window shows, or off any workspace", () => {
@@ -566,11 +766,18 @@ describe("ShellState.routeTo (one main window per workspace)", () => {
     const claims = stubClaim(true);
     const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
 
-    shell.routeTo(`/workspace/${WORKSPACE_ID}/options?tab=share`);
-    shell.routeTo("/accounts");
+    shell.routeTo(`/workspace/${WORKSPACE_ID}?chat=agent-ee55`);
+    // Settings on another workspace is not that workspace's surface: only the
+    // surface route is one window's to hold.
+    shell.routeTo(`/settings?tab=workspace&settings_workspace=${OTHER_ID}`);
+    shell.routeTo(`/workspace/${OTHER_ID}/backups`);
 
     expect(claims).toEqual([]);
-    expect(routeSet.mock.calls).toEqual([[`/workspace/${WORKSPACE_ID}/options?tab=share`], ["/accounts"]]);
+    expect(routeSet.mock.calls).toEqual([
+      [`/workspace/${WORKSPACE_ID}?chat=agent-ee55`],
+      [`/settings?tab=workspace&settings_workspace=${OTHER_ID}`],
+      [`/workspace/${OTHER_ID}/backups`],
+    ]);
   });
 });
 
@@ -796,9 +1003,9 @@ describe("ShellState.switchToNotifications", () => {
     // popups, not a navigation away from a surface -- so the arrival at the
     // route the modal is dismissed to must not close the feed it opened.
     const shell = makeShell();
-    // Real history depth, since Get help is a click away from the docked
-    // options panel: history.back() would land back ON that panel, which would
-    // then be standing under the feed this switch is opening.
+    // Real history depth, since Get help is a click away from Settings:
+    // history.back() could land back ON a flyout's entry, which would then be
+    // standing under the feed this switch is opening.
     let backCount = 0;
     vi.stubGlobal("window", {
       history: { length: 5, back: () => (backCount += 1) },
@@ -843,30 +1050,32 @@ describe("ShellState.switchToNotifications", () => {
     expect(shell.isNotificationsOpen).toBe(true);
   });
 
-  it("closes the docked options panel on its way to the feed, replacing its entry", () => {
-    // Replaced like every other strip switch: pushed, the panel would sit one
+  it("puts Settings away on its way to the feed, replacing its entry", () => {
+    // Replaced like every other strip switch: pushed, Settings would sit one
     // Back away under the feed.
     const shell = makeShell();
-    land(shell, `/workspace/${WORKSPACE_ID}/options?tab=share`);
+    const back = vi.fn();
+    vi.stubGlobal("window", { history: { length: 5, back } });
+    land(shell, `/settings?tab=workspace&group=sharing&workspace=${WORKSPACE_ID}`);
     const routeSet = vi
       .spyOn(m.route, "set")
       .mockImplementation(() => undefined);
 
     shell.switchToNotifications();
 
+    expect(back).not.toHaveBeenCalled();
     expect(routeSet).toHaveBeenCalledWith(
       `/workspace/${WORKSPACE_ID}`,
       undefined,
       { replace: true },
     );
     expect(shell.isNotificationsOpen).toBe(true);
+    // The dismissal navigation lands: the feed rides across it.
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    expect(shell.isNotificationsOpen).toBe(true);
   });
 
-  it("puts a centered app modal away first, so the feed never raises beneath its backdrop", () => {
-    // The titlebar's real bell stays painted under Imbue Studio settings / Accounts
-    // (no raised strip covers it there), and the feed's backdrop draws under
-    // a later-DOM modal's at the same z -- so the bell's click must put the
-    // modal away, not float the feed beneath it.
+  it("puts a Settings opened over Home away through history, and rides across that landing too", () => {
     const shell = makeShell();
     const back = vi.fn();
     vi.stubGlobal("window", { history: { length: 5, back } });
@@ -878,6 +1087,38 @@ describe("ShellState.switchToNotifications", () => {
     expect(shell.isNotificationsOpen).toBe(true);
     // The dismissal navigation lands: the feed rides across it.
     land(shell, "/");
+    expect(shell.isNotificationsOpen).toBe(true);
+  });
+
+  it("puts a centered app modal away first, so the feed never raises beneath its backdrop", () => {
+    // The bar's real bell stays painted under a centered card (no raised strip
+    // covers it there), and the feed's backdrop draws under a later-DOM
+    // modal's at the same z -- so the bell's click must put the modal away,
+    // not float the feed beneath it.
+    const shell = makeShell();
+    const back = vi.fn();
+    vi.stubGlobal("window", { history: { length: 5, back } });
+    land(shell, "/settings/ai-keys?workspace=host-99aa");
+
+    shell.switchToNotifications();
+
+    expect(back).toHaveBeenCalledTimes(1);
+    expect(shell.isNotificationsOpen).toBe(true);
+    land(shell, "/workspace/host-99aa");
+    expect(shell.isNotificationsOpen).toBe(true);
+  });
+
+  it("closes whichever menu was open, so the feed is the one flyout up", () => {
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    shell.openWorkspaceSwitcher();
+    shell.switchToNotifications();
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+
+    shell.closeNotifications();
+    shell.openAccountSwitcher();
+    shell.switchToNotifications();
+    expect(shell.isAccountSwitcherOpen).toBe(false);
     expect(shell.isNotificationsOpen).toBe(true);
   });
 
@@ -922,9 +1163,9 @@ describe("ShellState.switchToAccountSwitcher", () => {
     expect(shell.isAccountSwitcherOpen).toBe(false);
   });
 
-  it("closes the docked options panel on its way to the switcher, replacing its entry", () => {
+  it("puts Settings away on its way to the account menu, replacing its entry", () => {
     const shell = makeShell();
-    land(shell, `/workspace/${WORKSPACE_ID}/options?tab=share`);
+    land(shell, `/settings?tab=accounts&workspace=${WORKSPACE_ID}`);
     const routeSet = vi
       .spyOn(m.route, "set")
       .mockImplementation(() => undefined);
@@ -939,6 +1180,20 @@ describe("ShellState.switchToAccountSwitcher", () => {
     expect(shell.isAccountSwitcherOpen).toBe(true);
     land(shell, `/workspace/${WORKSPACE_ID}`);
     expect(shell.isAccountSwitcherOpen).toBe(true);
+    // Armed for that one arrival only.
+    land(shell, "/create");
+    expect(shell.isAccountSwitcherOpen).toBe(false);
+  });
+
+  it("takes the workspace menu's place when switched to from it", () => {
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    shell.openWorkspaceSwitcher();
+
+    shell.switchToAccountSwitcher();
+
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+    expect(shell.isAccountSwitcherOpen).toBe(true);
   });
 
   it("just opens the switcher when there is no popup to put away, and the next navigation closes it", () => {
@@ -952,6 +1207,854 @@ describe("ShellState.switchToAccountSwitcher", () => {
     expect(shell.isAccountSwitcherOpen).toBe(true);
     land(shell, `/workspace/${WORKSPACE_ID}`);
     expect(shell.isAccountSwitcherOpen).toBe(false);
+  });
+
+  it("does not arm the other menu: only the menu that was switched to rides the landing", () => {
+    const shell = makeShell();
+    land(shell, `/help?workspace=${WORKSPACE_ID}`);
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    shell.switchToAccountSwitcher();
+
+    // The workspace menu, opened by its own button before the dismissal lands, has no claim on that landing.
+    shell.openWorkspaceSwitcher();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+    expect(shell.isAccountSwitcherOpen).toBe(false);
+  });
+});
+
+describe("ShellState.switchToWorkspaceSwitcher", () => {
+  it("puts Get help away and keeps the menu up across that navigation's landing", () => {
+    // The workspace button on the raised strip over Get help is a switch
+    // between two flyouts: the arrival at the machine Get help is dismissed
+    // to must not close the menu it opened.
+    const shell = makeShell();
+    const back = vi.fn();
+    vi.stubGlobal("window", { history: { length: 5, back } });
+    land(shell, `/help?workspace=${WORKSPACE_ID}`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.switchToWorkspaceSwitcher();
+
+    expect(back).not.toHaveBeenCalled();
+    expect(routeSet).toHaveBeenCalledWith(`/workspace/${WORKSPACE_ID}`, undefined, { replace: true });
+    expect(shell.isWorkspaceSwitcherOpen).toBe(true);
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    expect(shell.isWorkspaceSwitcherOpen).toBe(true);
+    // An ORDINARY navigation after that still closes it.
+    land(shell, "/create");
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+  });
+
+  it("puts Settings away on its way to the menu, replacing its entry", () => {
+    const shell = makeShell();
+    land(shell, `/settings?tab=workspace&workspace=${WORKSPACE_ID}`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.switchToWorkspaceSwitcher();
+
+    expect(routeSet).toHaveBeenCalledWith(`/workspace/${WORKSPACE_ID}`, undefined, { replace: true });
+    expect(shell.isWorkspaceSwitcherOpen).toBe(true);
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    expect(shell.isWorkspaceSwitcherOpen).toBe(true);
+  });
+
+  it("rides across the history step that puts away a Settings opened over Home", () => {
+    const shell = makeShell();
+    const back = vi.fn();
+    vi.stubGlobal("window", { history: { length: 5, back } });
+    land(shell, "/settings?tab=studio&account=local");
+
+    shell.switchToWorkspaceSwitcher();
+
+    expect(back).toHaveBeenCalledTimes(1);
+    land(shell, "/account/local/");
+    expect(shell.isWorkspaceSwitcherOpen).toBe(true);
+    land(shell, "/account/local/create");
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+  });
+
+  it("just opens the menu when there is no flyout route to put away, and the next navigation closes it", () => {
+    const shell = makeShell();
+    land(shell, "/create");
+    shell.openNotifications();
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.switchToWorkspaceSwitcher();
+
+    expect(routeSet).not.toHaveBeenCalled();
+    // The feed is the flyout being left.
+    expect(shell.isNotificationsOpen).toBe(false);
+    expect(shell.isWorkspaceSwitcherOpen).toBe(true);
+    // A redraw on the same route is not a navigation: still open.
+    land(shell, "/create");
+    expect(shell.isWorkspaceSwitcherOpen).toBe(true);
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+  });
+
+  it("takes the account menu's place when switched to from it", () => {
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    shell.openAccountSwitcher();
+
+    shell.switchToWorkspaceSwitcher();
+
+    expect(shell.isAccountSwitcherOpen).toBe(false);
+    expect(shell.isWorkspaceSwitcherOpen).toBe(true);
+  });
+
+  it("does not arm the other menu: only the menu that was switched to rides the landing", () => {
+    const shell = makeShell();
+    land(shell, `/help?workspace=${WORKSPACE_ID}`);
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    shell.switchToWorkspaceSwitcher();
+
+    // The account menu, opened by its own button before the dismissal lands, has no claim on that landing.
+    shell.openAccountSwitcher();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+
+    expect(shell.isAccountSwitcherOpen).toBe(false);
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+  });
+});
+
+describe("ShellState's two menus", () => {
+  it("opens each menu as local state, never a navigation, and closes the other", () => {
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openWorkspaceSwitcher();
+    expect(shell.isWorkspaceSwitcherOpen).toBe(true);
+    expect(shell.isAccountSwitcherOpen).toBe(false);
+
+    shell.openAccountSwitcher();
+    expect(shell.isAccountSwitcherOpen).toBe(true);
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+
+    shell.openWorkspaceSwitcher();
+    expect(shell.isWorkspaceSwitcherOpen).toBe(true);
+    expect(shell.isAccountSwitcherOpen).toBe(false);
+
+    shell.closeWorkspaceSwitcher();
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+    expect(routeSet).not.toHaveBeenCalled();
+  });
+
+  it("closes either menu on a navigation it was not armed for, and keeps it across a redraw", () => {
+    const shell = makeShell();
+    land(shell, "/account/local/");
+
+    shell.openWorkspaceSwitcher();
+    land(shell, "/account/local/");
+    expect(shell.isWorkspaceSwitcherOpen).toBe(true);
+    // Choosing a row routes to it, and the arrival closes the menu.
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+
+    shell.openAccountSwitcher();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    expect(shell.isAccountSwitcherOpen).toBe(true);
+    land(shell, "/account/local/");
+    expect(shell.isAccountSwitcherOpen).toBe(false);
+  });
+
+  it("closes either menu when Get help is opened from the bar", () => {
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openWorkspaceSwitcher();
+    shell.openHelp();
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+
+    shell.openAccountSwitcher();
+    shell.openHelp();
+    expect(shell.isAccountSwitcherOpen).toBe(false);
+  });
+});
+
+describe("ShellState.openSettings", () => {
+  const RECOVERY_PAGE = `/agents/${WORKSPACE_ID}/recovery?return_to=%2Fgoto%2Fhost-bb22%2F`;
+
+  it("opens plainly over Home, carrying the window's account so a reload keeps it", () => {
+    const shell = makeShell();
+    land(shell, "/account/user-1/");
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openSettings();
+
+    expect(routeSet.mock.calls).toEqual([["/settings", { account: "user-1" }, undefined]]);
+  });
+
+  it("names the workspace on screen, by its agent id, so Settings floats over it", () => {
+    const shell = makeShell();
+    shell.stores.workspaces.applyWorkspacesMessage(workspacesMessage());
+    // A cold-start restore lands on the host coordinate.
+    land(shell, "/workspace/host-bb22");
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openSettings({ tab: "studio", section: "this-computer" });
+
+    expect(routeSet.mock.calls).toEqual([
+      ["/settings", { tab: "studio", section: "this-computer", workspace: "agent-aa11", account: "local" }, undefined],
+    ]);
+  });
+
+  it("picks a workspace without floating over it: a home card's settings control does not open the workspace", () => {
+    const shell = makeShell();
+    land(shell, "/account/local/");
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openSettings({ tab: "workspace", settings_workspace: WORKSPACE_ID });
+
+    // No `workspace`: Home stays behind, and the window displays nothing new.
+    expect(routeSet.mock.calls).toEqual([
+      ["/settings", { tab: "workspace", settings_workspace: WORKSPACE_ID, account: "local" }, undefined],
+    ]);
+  });
+
+  it("keeps floating over the workspace on screen when another workspace is picked", () => {
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openSettings({ tab: "workspace", settings_workspace: "agent-cd34", workspace: "agent-cd34" });
+
+    // The workspace on screen is the window's to say, whatever the caller passed.
+    expect(routeSet).toHaveBeenCalledWith(
+      "/settings",
+      { tab: "workspace", settings_workspace: "agent-cd34", workspace: WORKSPACE_ID, account: "local" },
+      undefined,
+    );
+  });
+
+  it("replaces Get help's entry when switched to from it: a switch, not a stack", () => {
+    const shell = makeShell();
+    land(shell, `/help?workspace=${WORKSPACE_ID}&assist=1`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openSettings();
+
+    expect(routeSet.mock.calls).toEqual([
+      ["/settings", { workspace: WORKSPACE_ID, account: "local" }, { replace: true }],
+    ]);
+  });
+
+  it("replaces its own entry when asked for another place while it is open", () => {
+    const shell = makeShell();
+    land(shell, `/settings?tab=studio&workspace=${WORKSPACE_ID}`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openSettings({ tab: "accounts" });
+
+    expect(routeSet.mock.calls).toEqual([
+      ["/settings", { tab: "accounts", workspace: WORKSPACE_ID, account: "local" }, { replace: true }],
+    ]);
+  });
+
+  it("pushes over a page or a workspace, so dismissing it can go back", () => {
+    const shell = makeShell();
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    land(shell, "/account/local/create");
+    shell.openSettings({ tab: "accounts" });
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    shell.openSettings({ tab: "accounts" });
+
+    expect(routeSet.mock.calls.map((call) => call[2])).toEqual([undefined, undefined]);
+  });
+
+  it("closes whichever menu it was chosen from", () => {
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openWorkspaceSwitcher();
+    shell.openSettings({ tab: "workspace", settings_workspace: WORKSPACE_ID });
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+
+    shell.openAccountSwitcher();
+    shell.openSettings({ tab: "accounts" });
+    expect(shell.isAccountSwitcherOpen).toBe(false);
+  });
+
+  it("remembers the recovery page it was opened from, which stays painted behind it", () => {
+    // Without it the backdrop would be Home -- or, through the gear, the very
+    // machine the recovery page is there because nobody could load.
+    const shell = makeShell();
+    land(shell, RECOVERY_PAGE);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openSettings({ tab: "studio" });
+
+    expect(shell.pageRouteBehindOverlay).toBe(RECOVERY_PAGE);
+    // The recovery page displays no workspace, so Settings names none to float over.
+    expect(routeSet).toHaveBeenCalledWith("/settings", { tab: "studio", account: "local" }, undefined);
+  });
+
+  it("keeps the remembered page while moving around inside Settings", () => {
+    const shell = makeShell();
+    land(shell, RECOVERY_PAGE);
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    shell.openSettings({ tab: "studio" });
+    land(shell, "/settings?tab=studio&account=local");
+
+    shell.openSettings({ tab: "accounts" });
+    land(shell, "/settings?tab=accounts&account=local");
+
+    expect(shell.pageRouteBehindOverlay).toBe(RECOVERY_PAGE);
+  });
+
+  it("remembers no page from a surface whose own backdrop is right", () => {
+    const shell = makeShell();
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    shell.openSettings();
+    expect(shell.pageRouteBehindOverlay).toBeNull();
+
+    land(shell, "/account/local/");
+    shell.openSettings();
+    expect(shell.pageRouteBehindOverlay).toBeNull();
+  });
+});
+
+describe("ShellState.openSettingsFromBar", () => {
+  it("opens Settings plainly on Home", () => {
+    const shell = makeShell();
+    land(shell, "/account/local/");
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openSettingsFromBar();
+
+    expect(routeSet.mock.calls).toEqual([["/settings", { account: "local" }, undefined]]);
+  });
+
+  it("opens Settings plainly on a hub page that names no workspace, even while some workspace has a request", () => {
+    const shell = makeShell();
+    publishPendingRequests(shell, [WORKSPACE_ID]);
+    land(shell, "/account/local/create");
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openSettingsFromBar();
+
+    expect(routeSet.mock.calls).toEqual([["/settings", { account: "local" }, undefined]]);
+  });
+
+  it("opens Workspace & apps on the workspace on screen, floating over it", () => {
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openSettingsFromBar();
+
+    // No `group`: Settings lands on General.
+    expect(routeSet.mock.calls).toEqual([
+      [
+        "/settings",
+        { tab: "workspace", settings_workspace: WORKSPACE_ID, workspace: WORKSPACE_ID, account: "local" },
+        undefined,
+      ],
+    ]);
+  });
+
+  it("opens on Permissions while that workspace has a request waiting on an answer", () => {
+    const shell = makeShell();
+    publishPendingRequests(shell, [WORKSPACE_ID]);
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openSettingsFromBar();
+
+    expect(routeSet.mock.calls).toEqual([
+      [
+        "/settings",
+        {
+          tab: "workspace",
+          settings_workspace: WORKSPACE_ID,
+          group: "permissions",
+          workspace: WORKSPACE_ID,
+          account: "local",
+        },
+        undefined,
+      ],
+    ]);
+  });
+
+  it("does not open on Permissions for a request that is some other workspace's", () => {
+    const shell = makeShell();
+    publishPendingRequests(shell, ["agent-cd34"]);
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openSettingsFromBar();
+
+    expect(routeSet).toHaveBeenCalledWith(
+      "/settings",
+      { tab: "workspace", settings_workspace: WORKSPACE_ID, workspace: WORKSPACE_ID, account: "local" },
+      undefined,
+    );
+  });
+
+  it("reads the pending request under the agent id when the route names the workspace by its host", () => {
+    const shell = makeShell();
+    shell.stores.workspaces.applyWorkspacesMessage(workspacesMessage());
+    publishPendingRequests(shell, ["agent-aa11"]);
+    land(shell, "/workspace/host-bb22");
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openSettingsFromBar();
+
+    expect(routeSet).toHaveBeenCalledWith(
+      "/settings",
+      {
+        tab: "workspace",
+        settings_workspace: "agent-aa11",
+        group: "permissions",
+        workspace: "agent-aa11",
+        account: "local",
+      },
+      undefined,
+    );
+  });
+
+  it("picks the workspace a sub-page names, without floating over a surface that is not on screen", () => {
+    // The backups page replaces the workspace's surface: the bar still speaks
+    // for that workspace, but there is no frame to keep mounted behind Settings.
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}/backups`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openSettingsFromBar();
+
+    expect(routeSet.mock.calls).toEqual([
+      ["/settings", { tab: "workspace", settings_workspace: WORKSPACE_ID, account: "local" }, undefined],
+    ]);
+  });
+
+  it("keeps speaking for the workspace behind Get help when switched to from its strip", () => {
+    const shell = makeShell();
+    publishPendingRequests(shell, [WORKSPACE_ID]);
+    land(shell, `/help?workspace=${WORKSPACE_ID}&assist=1`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openSettingsFromBar();
+
+    expect(routeSet.mock.calls).toEqual([
+      [
+        "/settings",
+        {
+          tab: "workspace",
+          settings_workspace: WORKSPACE_ID,
+          group: "permissions",
+          workspace: WORKSPACE_ID,
+          account: "local",
+        },
+        { replace: true },
+      ],
+    ]);
+  });
+
+  it("does not take a creation page's attempt for a workspace to open Settings on", () => {
+    const shell = makeShell();
+    land(shell, "/creating/create-attempt-ff00");
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openSettingsFromBar();
+
+    expect(routeSet.mock.calls).toEqual([["/settings", { account: "local" }, undefined]]);
+  });
+});
+
+describe("ShellState.pressShare", () => {
+  const SHARING = { tab: "workspace", group: "sharing", settings_workspace: WORKSPACE_ID };
+
+  it("opens Settings at Sharing on the whole workspace on screen", () => {
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.pressShare();
+
+    // No `share_target`: the Full workspace page.
+    expect(routeSet.mock.calls).toEqual([
+      ["/settings", { ...SHARING, workspace: WORKSPACE_ID, account: "local" }, undefined],
+    ]);
+    expect(shell.isShareNotYetCreatedDialogOpen).toBe(false);
+  });
+
+  it("moves an open Settings to Sharing, replacing its entry", () => {
+    const shell = makeShell();
+    land(shell, `/settings?tab=studio&workspace=${WORKSPACE_ID}&account=local`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.pressShare();
+
+    expect(routeSet.mock.calls).toEqual([
+      ["/settings", { ...SHARING, workspace: WORKSPACE_ID, account: "local" }, { replace: true }],
+    ]);
+  });
+
+  it("moves Settings from one app's Sharing page to the whole workspace's", () => {
+    const shell = makeShell();
+    land(
+      shell,
+      `/settings?tab=workspace&group=sharing&settings_workspace=${WORKSPACE_ID}&share_target=web&workspace=${WORKSPACE_ID}`,
+    );
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.pressShare();
+
+    expect(routeSet.mock.calls).toEqual([
+      ["/settings", { ...SHARING, workspace: WORKSPACE_ID, account: "local" }, { replace: true }],
+    ]);
+  });
+
+  it("moves Settings from another workspace's Sharing to the one on screen", () => {
+    const shell = makeShell();
+    land(shell, `/settings?tab=workspace&group=sharing&settings_workspace=agent-cd34&workspace=${WORKSPACE_ID}`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.pressShare();
+
+    expect(routeSet.mock.calls).toEqual([
+      ["/settings", { ...SHARING, workspace: WORKSPACE_ID, account: "local" }, { replace: true }],
+    ]);
+  });
+
+  it("puts Settings away when it is already on that workspace's whole-workspace Sharing", () => {
+    // A second press of Share, like a second press of any flyout's button.
+    const shell = makeShell();
+    land(shell, `/settings?tab=workspace&group=sharing&settings_workspace=${WORKSPACE_ID}&workspace=${WORKSPACE_ID}`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.pressShare();
+
+    expect(routeSet.mock.calls).toEqual([[`/workspace/${WORKSPACE_ID}`, undefined, { replace: true }]]);
+  });
+
+  it("reads the picked workspace as the one behind Settings when the URL leaves it out", () => {
+    // `settings_workspace` absent means the workspace Settings floats over (spec 4.7).
+    const shell = makeShell();
+    land(shell, `/settings?tab=workspace&group=sharing&workspace=${WORKSPACE_ID}`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.pressShare();
+
+    expect(routeSet.mock.calls).toEqual([[`/workspace/${WORKSPACE_ID}`, undefined, { replace: true }]]);
+  });
+
+  it("raises the not-yet-created dialog on a creation page, and opens nothing", () => {
+    const shell = makeShell();
+    land(shell, "/creating/create-attempt-ff00");
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.pressShare();
+
+    expect(shell.isShareNotYetCreatedDialogOpen).toBe(true);
+    expect(routeSet).not.toHaveBeenCalled();
+  });
+
+  it("does nothing on Home or a hub page, where the bar is about no workspace", () => {
+    const shell = makeShell();
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    land(shell, "/account/local/");
+    shell.pressShare();
+    land(shell, "/account/local/create");
+    shell.pressShare();
+    // Settings over Home has picked a workspace, but the bar is still Home's.
+    land(shell, `/settings?tab=workspace&group=general&settings_workspace=${WORKSPACE_ID}&account=local`);
+    shell.pressShare();
+
+    expect(routeSet).not.toHaveBeenCalled();
+    expect(shell.isShareNotYetCreatedDialogOpen).toBe(false);
+  });
+
+  it("closes whichever menu was open", () => {
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openWorkspaceSwitcher();
+    shell.pressShare();
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+
+    shell.openAccountSwitcher();
+    shell.pressShare();
+    expect(shell.isAccountSwitcherOpen).toBe(false);
+  });
+});
+
+describe("ShellState.toggleWorkspaceSwitcher", () => {
+  it("opens the menu, and a second press puts it away", () => {
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    vi.mocked(m.redraw).mockClear();
+
+    shell.toggleWorkspaceSwitcher();
+    expect(shell.isWorkspaceSwitcherOpen).toBe(true);
+
+    shell.toggleWorkspaceSwitcher();
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+
+    // Local state on a surface with nothing floating: no navigation either way.
+    expect(routeSet).not.toHaveBeenCalled();
+    // Pressed outside any click handler, so each press asks for its own redraw.
+    expect(m.redraw).toHaveBeenCalledTimes(2);
+  });
+
+  it("opens on Home and on a hub page, where the bar has no workspace button of its own", () => {
+    const shell = makeShell();
+
+    land(shell, "/account/local/");
+    shell.toggleWorkspaceSwitcher();
+    expect(shell.isWorkspaceSwitcherOpen).toBe(true);
+
+    shell.toggleWorkspaceSwitcher();
+    land(shell, "/account/local/workspaces/destroyed");
+    shell.toggleWorkspaceSwitcher();
+    expect(shell.isWorkspaceSwitcherOpen).toBe(true);
+  });
+
+  it("takes the account menu's place and the feed's", () => {
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    shell.openAccountSwitcher();
+    shell.openNotifications();
+
+    shell.toggleWorkspaceSwitcher();
+
+    expect(shell.isAccountSwitcherOpen).toBe(false);
+    expect(shell.isNotificationsOpen).toBe(false);
+    expect(shell.isWorkspaceSwitcherOpen).toBe(true);
+  });
+
+  it("switches away from an open Settings or Get help like the strip's own button, and rides that landing", () => {
+    for (const flyout of ["/settings?tab=studio", "/help?assist=1"]) {
+      const shell = makeShell();
+      land(shell, `${flyout}&workspace=${WORKSPACE_ID}`);
+      const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+      shell.toggleWorkspaceSwitcher();
+
+      expect(routeSet.mock.calls).toEqual([[`/workspace/${WORKSPACE_ID}`, undefined, { replace: true }]]);
+      expect(shell.isWorkspaceSwitcherOpen).toBe(true);
+      land(shell, `/workspace/${WORKSPACE_ID}`);
+      expect(shell.isWorkspaceSwitcherOpen).toBe(true);
+      routeSet.mockRestore();
+    }
+  });
+
+  it("closes an open menu even where it would not open one", () => {
+    // Closing is never refused: a menu left up under a dialog that appeared
+    // after it could not be put away by the key that raised it.
+    const queue = new ErrorDialogQueue();
+    queue.attachHost();
+    const shell = new ShellState(createEmptyStores(), undefined, undefined, queue);
+    vi.spyOn(m, "redraw").mockImplementation(() => undefined);
+    stubAccentPainting();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    shell.openWorkspaceSwitcher();
+    queue.show({ error: { message: "Couldn't do that.", details: "" } });
+
+    shell.toggleWorkspaceSwitcher();
+
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+  });
+
+  it("does nothing in the start flow, which has no bar to hang the menu from", () => {
+    const shell = makeShell();
+    land(shell, "/start");
+    vi.mocked(m.redraw).mockClear();
+
+    shell.toggleWorkspaceSwitcher();
+
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+    expect(m.redraw).not.toHaveBeenCalled();
+  });
+
+  it("does nothing in a pulled-out window", () => {
+    const shell = makeShell();
+    land(shell, `/popout/${WORKSPACE_ID}/win-0123`);
+
+    shell.toggleWorkspaceSwitcher();
+
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+  });
+
+  it("does nothing under the error dialog", () => {
+    const queue = new ErrorDialogQueue();
+    queue.attachHost();
+    const shell = new ShellState(createEmptyStores(), undefined, undefined, queue);
+    vi.spyOn(m, "redraw").mockImplementation(() => undefined);
+    stubAccentPainting();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    queue.show({ error: { message: "Couldn't do that.", details: "" } });
+
+    shell.toggleWorkspaceSwitcher();
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+
+    // Answered, the dialog no longer holds the window.
+    queue.dismiss();
+    shell.toggleWorkspaceSwitcher();
+    expect(shell.isWorkspaceSwitcherOpen).toBe(true);
+  });
+
+  it("does nothing under the browser sign-in", () => {
+    const webLoginModel = new WebLoginModel(
+      undefined,
+      () => {},
+      () => {},
+    );
+    webLoginModel.state = "waiting";
+    const shell = new ShellState(createEmptyStores(), webLoginModel);
+    vi.spyOn(m, "redraw").mockImplementation(() => undefined);
+    stubAccentPainting();
+    land(shell, "/account/local/");
+
+    shell.toggleWorkspaceSwitcher();
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+
+    webLoginModel.dismiss();
+    shell.toggleWorkspaceSwitcher();
+    expect(shell.isWorkspaceSwitcherOpen).toBe(true);
+  });
+
+  it("does nothing under the client-permission prompt", () => {
+    const prompt = new ClientPermissionPromptModel({ redraw: () => undefined, answer: () => undefined });
+    prompt.show(clientPermissionAsk());
+    const shell = new ShellState(createEmptyStores(), undefined, undefined, undefined, prompt);
+    vi.spyOn(m, "redraw").mockImplementation(() => undefined);
+    stubAccentPainting();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+
+    shell.toggleWorkspaceSwitcher();
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+
+    prompt.dismiss();
+    shell.toggleWorkspaceSwitcher();
+    expect(shell.isWorkspaceSwitcherOpen).toBe(true);
+  });
+
+  it("does nothing under the recovery card", () => {
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    shell.openRecoveryModal(WORKSPACE_ID);
+
+    shell.toggleWorkspaceSwitcher();
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+
+    shell.finishRecovery();
+    shell.toggleWorkspaceSwitcher();
+    expect(shell.isWorkspaceSwitcherOpen).toBe(true);
+  });
+
+  it("does nothing under Share's not-yet-created dialog", () => {
+    const shell = makeShell();
+    land(shell, "/creating/create-attempt-ff00");
+    shell.pressShare();
+
+    shell.toggleWorkspaceSwitcher();
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+
+    shell.isShareNotYetCreatedDialogOpen = false;
+    shell.toggleWorkspaceSwitcher();
+    expect(shell.isWorkspaceSwitcherOpen).toBe(true);
+  });
+
+  it("does nothing under a centered app modal, and leaves that modal where it is", () => {
+    for (const modalRoute of [
+      `/inbox?selected=evt-a&workspace=${WORKSPACE_ID}`,
+      "/inbox",
+      "/settings/ai-keys?workspace=host-99aa",
+    ]) {
+      const shell = makeShell();
+      const back = vi.fn();
+      vi.stubGlobal("window", { history: { length: 5, back } });
+      land(shell, modalRoute);
+      const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+      shell.toggleWorkspaceSwitcher();
+
+      expect(shell.isWorkspaceSwitcherOpen, modalRoute).toBe(false);
+      expect(routeSet, modalRoute).not.toHaveBeenCalled();
+      expect(back, modalRoute).not.toHaveBeenCalled();
+      routeSet.mockRestore();
+    }
+  });
+
+  it("stays available while the workspace's update is landing, whose cover leaves the bar clear for it", () => {
+    const shell = makeShell();
+    shell.stores.updates.applyUpdatesMessage({
+      type: "workspace_updates",
+      updates: {
+        [WORKSPACE_ID]: {
+          availability: "OUT_OF_DATE",
+          current_version: "minds-v0.3.9",
+          supported_version: "minds-v0.4.1",
+          activity: "APPLYING",
+        },
+      },
+      update_window: "2:00 AM-5:00 AM",
+    });
+    expect(shell.stores.updates.isApplying(WORKSPACE_ID)).toBe(true);
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+
+    shell.toggleWorkspaceSwitcher();
+
+    expect(shell.isWorkspaceSwitcherOpen).toBe(true);
+  });
+
+  it("does nothing under the template stepper floating over a workspace, and leaves the stepper where it is", () => {
+    // A centered card like the request popup, though its route is a hub
+    // page's rather than one of the app-overlay paths.
+    const shell = makeShell();
+    const back = vi.fn();
+    vi.stubGlobal("window", { history: { length: 5, back } });
+    land(shell, `/account/local/create/template?workspace=${WORKSPACE_ID}&git_url=https%3A%2F%2Fexample.com%2Fr.git`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.toggleWorkspaceSwitcher();
+
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+    expect(back).not.toHaveBeenCalled();
+    expect(routeSet).not.toHaveBeenCalled();
+  });
+
+  it("opens on the template page with no workspace behind it, which is a page and not a modal", () => {
+    const shell = makeShell();
+    const back = vi.fn();
+    vi.stubGlobal("window", { history: { length: 5, back } });
+    land(shell, "/account/local/create/template?git_url=https%3A%2F%2Fexample.com%2Fr.git");
+
+    shell.toggleWorkspaceSwitcher();
+
+    expect(shell.isWorkspaceSwitcherOpen).toBe(true);
+    // Nothing floats there to put away first.
+    expect(back).not.toHaveBeenCalled();
+  });
+
+  it("does nothing while any Modal is on screen, such as a confirmation raised from inside Settings", () => {
+    const shell = makeShell();
+    land(shell, `/settings?tab=workspace&workspace=${WORKSPACE_ID}`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    const removeModal = raiseModal();
+
+    shell.toggleWorkspaceSwitcher();
+
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+    // Settings is not put away from under its own confirmation.
+    expect(routeSet).not.toHaveBeenCalled();
+
+    // The confirmation answered, the shortcut works again.
+    removeModal();
+    shell.toggleWorkspaceSwitcher();
+    expect(shell.isWorkspaceSwitcherOpen).toBe(true);
   });
 });
 
@@ -994,12 +2097,12 @@ describe("ShellState.openHelp", () => {
     );
   });
 
-  it("replaces another titlebar popup's entry when switched to from its strip", () => {
-    // Options panel -> bug icon is a switch between two of the strip's surfaces:
-    // pushed, the panel would be left one Back away under Get help, and
-    // dismissing the form would re-raise the panel that was just left.
+  it("replaces Settings' entry when switched to from its strip", () => {
+    // Settings -> bug icon is a switch between two of the strip's flyouts:
+    // pushed, Settings would be left one Back away under Get help, and
+    // dismissing the form would re-raise the Settings that was just left.
     const shell = makeShell();
-    land(shell, `/workspace/${WORKSPACE_ID}/options?tab=share`);
+    land(shell, `/settings?tab=workspace&group=sharing&workspace=${WORKSPACE_ID}`);
     const routeSet = vi
       .spyOn(m.route, "set")
       .mockImplementation(() => undefined);
@@ -1013,32 +2116,30 @@ describe("ShellState.openHelp", () => {
     );
   });
 
-  it("lets go of the panel the request popup was remembering", () => {
-    // Switching the popup for Get help leaves the panel like it leaves the
-    // popup. Kept, the panel stayed painted under Get help with its own
-    // backdrop and its own raised strip -- two of the strip's surfaces at once.
+  it("lets go of the Settings the request popup was remembering", () => {
+    // Leaving the popup for Get help leaves Settings like it leaves the
+    // popup. Kept, Settings would stay painted under Get help with its own
+    // backdrop and its own raised strip -- two flyouts at once.
     const shell = makeShell();
-    const optionsRoute = `/workspace/${WORKSPACE_ID}/options?tab=permissions&section=waiting`;
-    land(shell, optionsRoute);
+    land(shell, SETTINGS_ON_WAITING);
     const routeSet = vi
       .spyOn(m.route, "set")
       .mockImplementation(() => undefined);
     shell.openInbox({ selected: "evt-a" });
     land(shell, `/inbox?workspace=${WORKSPACE_ID}`);
-    expect(shell.panelRouteBehindOverlay).toBe(optionsRoute);
+    expect(shell.settingsRouteBehindOverlay).toBe(SETTINGS_ON_WAITING);
 
     shell.openHelp();
 
-    expect(routeSet).toHaveBeenLastCalledWith(
+    expect(routeSet.mock.lastCall?.slice(0, 2)).toEqual([
       "/help",
       { workspace: WORKSPACE_ID, assist: "1", account: "local" },
-      { replace: true },
-    );
-    // The panel lives exactly as long as /inbox is the route: it is let go
+    ]);
+    // Settings lives exactly as long as /inbox is the route: it is let go
     // the moment the /help route lands -- however /help was reached, the
-    // strip or an Electron open-overlay ask alike.
+    // bar or an Electron open-overlay ask alike.
     land(shell, `/help?workspace=${WORKSPACE_ID}&assist=1`);
-    expect(shell.panelRouteBehindOverlay).toBeNull();
+    expect(shell.settingsRouteBehindOverlay).toBeNull();
   });
 });
 
@@ -1079,11 +2180,11 @@ describe("ShellState.openHelpForAgentAsk", () => {
     });
   });
 
-  it("replaces a titlebar popup's entry rather than stacking on it", () => {
-    // Same reasoning as openHelp: pushed, the options panel would be left one
-    // Back away under the report form it was covered by.
+  it("replaces a routed flyout's entry rather than stacking on it", () => {
+    // Same reasoning as openHelp: pushed, Settings would be left one Back
+    // away under the report form it was covered by.
     const shell = makeShell();
-    land(shell, `/workspace/${WORKSPACE_ID}/options?tab=share`);
+    land(shell, `/settings?tab=workspace&group=sharing&workspace=${WORKSPACE_ID}`);
     const routeSet = vi
       .spyOn(m.route, "set")
       .mockImplementation(() => undefined);
@@ -1212,34 +2313,102 @@ describe("ShellState.openHelpForError", () => {
 });
 
 describe("ShellState.dismissAppOverlay", () => {
-  it("leaves the popup's window for the machine, replacing the popup's entry", () => {
-    // The popup took the panel's window over, so dismissing it leaves the
-    // window rather than uncovering the panel -- and replaces, so Back from
-    // the machine does not re-raise the popup that was just dismissed.
+  /** A shell whose request popup was opened from Settings and has landed. */
+  function popupOverSettings(): { shell: ShellState; routeSet: ReturnType<typeof vi.spyOn>; back: ReturnType<typeof vi.fn> } {
     const shell = makeShell();
     const back = vi.fn();
     vi.stubGlobal("window", { history: { length: 5, back } });
-    land(shell, `/workspace/${WORKSPACE_ID}/options?tab=permissions`);
-    const routeSet = vi
-      .spyOn(m.route, "set")
-      .mockImplementation(() => undefined);
+    land(shell, SETTINGS_ON_WAITING);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
     shell.openInbox({ selected: "evt-a" });
-    land(shell, `/inbox?workspace=${WORKSPACE_ID}`);
+    land(shell, `/inbox?selected=evt-a&workspace=${WORKSPACE_ID}&account=local`);
+    routeSet.mockClear();
+    return { shell, routeSet, back };
+  }
+
+  it("returns a popup opened from Settings to that Settings route, replacing the popup's entry", () => {
+    // Back to where the request was picked, with the tab and section it was
+    // left on -- and replaced, so Back from Settings does not re-raise the
+    // popup that was just dismissed.
+    const { shell, routeSet, back } = popupOverSettings();
 
     expect(shell.dismissAppOverlay()).toBe(true);
 
     expect(back).not.toHaveBeenCalled();
-    expect(routeSet).toHaveBeenLastCalledWith(
-      `/workspace/${WORKSPACE_ID}`,
-      undefined,
-      { replace: true },
-    );
+    expect(routeSet.mock.calls).toEqual([[SETTINGS_ON_WAITING, undefined, { replace: true }]]);
+  });
+
+  it("keeps Settings remembered until the return lands, then lets it go", () => {
+    // Dropped early, the Settings underneath would blink out for the frames
+    // before its own route arrives.
+    const { shell } = popupOverSettings();
+
+    shell.dismissAppOverlay();
+    expect(shell.settingsRouteBehindOverlay).toBe(SETTINGS_ON_WAITING);
+
+    land(shell, SETTINGS_ON_WAITING);
+    expect(shell.settingsRouteBehindOverlay).toBeNull();
+  });
+
+  it("does not return twice when one dismissal arrives twice", () => {
+    // The in-document Escape plus Electron's forward of it.
+    const { shell, routeSet } = popupOverSettings();
+
+    expect(shell.dismissAppOverlay()).toBe(true);
+    land(shell, `/inbox?selected=evt-a&workspace=${WORKSPACE_ID}&account=local`);
+    expect(shell.dismissAppOverlay()).toBe(true);
+
+    expect(routeSet).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives Escape on the popup the same way back", () => {
+    const { shell, routeSet } = popupOverSettings();
+
+    expect(shell.handleEscape()).toBe(true);
+
+    expect(routeSet.mock.calls).toEqual([[SETTINGS_ON_WAITING, undefined, { replace: true }]]);
+  });
+
+  it("closes the Settings it returned to as an ordinary flyout, out to the workspace", () => {
+    const { shell, routeSet } = popupOverSettings();
+    shell.dismissAppOverlay();
+    land(shell, SETTINGS_ON_WAITING);
+
+    expect(shell.dismissAppOverlay()).toBe(true);
+
+    expect(routeSet).toHaveBeenLastCalledWith(`/workspace/${WORKSPACE_ID}`, undefined, { replace: true });
+  });
+
+  it("leaves a popup opened from the chat for the workspace, with no Settings to go back to", () => {
+    const shell = makeShell();
+    const back = vi.fn();
+    vi.stubGlobal("window", { history: { length: 5, back } });
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    shell.openInbox({ selected: "evt-a" });
+    land(shell, `/inbox?selected=evt-a&workspace=${WORKSPACE_ID}&account=local`);
+
+    expect(shell.dismissAppOverlay()).toBe(true);
+
+    expect(back).not.toHaveBeenCalled();
+    expect(routeSet).toHaveBeenLastCalledWith(`/workspace/${WORKSPACE_ID}`, undefined, { replace: true });
+  });
+
+  it("does not go back to a Settings the reader has since left", () => {
+    // Remembered only while /inbox is the route: Settings that was closed and
+    // a popup opened afresh over the workspace has nothing underneath.
+    const { shell, routeSet } = popupOverSettings();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    shell.openInbox({ selected: "evt-b" });
+    land(shell, `/inbox?selected=evt-b&workspace=${WORKSPACE_ID}&account=local`);
+
+    expect(shell.dismissAppOverlay()).toBe(true);
+
+    expect(routeSet).toHaveBeenLastCalledWith(`/workspace/${WORKSPACE_ID}`, undefined, { replace: true });
   });
 });
 
-describe("ShellState.returnToPanelAfterRequest", () => {
-  const PANEL_ROUTE = `/workspace/${WORKSPACE_ID}/options?tab=permissions&section=waiting`;
-
+describe("ShellState.returnToSettingsAfterRequest", () => {
   function listWith(count: number): WaitingRequestList {
     return {
       forgetWaitingRequest: () => undefined,
@@ -1247,57 +2416,85 @@ describe("ShellState.returnToPanelAfterRequest", () => {
     };
   }
 
-  it("hands the pane back on its own list while other requests are still waiting", () => {
+  it("hands Settings back on its own list while other requests are still waiting", () => {
     // The reader picked this request off that list and the rest of it is still
     // theirs to work through, so they land back on it, on the section they left.
     const shell = makeShell();
-    shell.panelRouteBehindOverlay = PANEL_ROUTE;
+    shell.settingsRouteBehindOverlay = SETTINGS_ON_WAITING;
     shell.registerWaitingRequestList(listWith(1));
     const routeSet = vi
       .spyOn(m.route, "set")
       .mockImplementation(() => undefined);
 
-    expect(shell.returnToPanelAfterRequest()).toBe(true);
+    expect(shell.returnToSettingsAfterRequest()).toBe(true);
 
-    expect(routeSet.mock.calls[0][0]).toBe(PANEL_ROUTE);
+    expect(routeSet.mock.calls).toEqual([[SETTINGS_ON_WAITING, undefined, { replace: true }]]);
   });
 
-  it("hands the pane back on Add connection once nothing is left to answer", () => {
+  it("hands Settings back on Add connection once nothing is left to answer", () => {
     // The list that led here has just emptied, so returning to it would be
     // returning to nothing.
     const shell = makeShell();
-    shell.panelRouteBehindOverlay = PANEL_ROUTE;
+    shell.settingsRouteBehindOverlay = SETTINGS_ON_WAITING;
     shell.registerWaitingRequestList(listWith(0));
     const routeSet = vi
       .spyOn(m.route, "set")
       .mockImplementation(() => undefined);
 
-    expect(shell.returnToPanelAfterRequest()).toBe(true);
+    expect(shell.returnToSettingsAfterRequest()).toBe(true);
 
-    expect(routeSet.mock.calls[0][0]).toContain("section=add-connection");
-    expect(routeSet.mock.calls[0][0]).toContain("tab=permissions");
+    expect(routeSet).toHaveBeenCalledTimes(1);
+    const [route, params, options] = routeSet.mock.calls[0];
+    expect(String(route).split("?")[0]).toBe("/settings");
+    // Still floating over the same workspace, on the same account.
+    expect(queryOf(String(route))).toEqual({
+      tab: "workspace",
+      group: "permissions",
+      perm_section: "add-connection",
+      workspace: WORKSPACE_ID,
+      account: "local",
+    });
+    expect(params).toBeUndefined();
+    // Replaced, so Back does not re-raise the answered request.
+    expect(options).toEqual({ replace: true });
   });
 
-  it("hands the pane back on Add connection when no pane list ever registered", () => {
-    // A panel that never reached its Permissions tab has no list to speak for
-    // it; Add connection is the safe landing, never a section that is gone.
+  it("hands Settings back on Add connection when no pane list ever registered", () => {
+    // A Settings that never reached its Permissions page (a request that
+    // arrived from a notification while it showed Studio) has no list to speak
+    // for it; Add connection is the safe landing, never a section that is gone.
     const shell = makeShell();
-    shell.panelRouteBehindOverlay = PANEL_ROUTE;
+    shell.settingsRouteBehindOverlay = `/settings?tab=studio&section=display&settings_workspace=agent-cd34&workspace=${WORKSPACE_ID}&account=local`;
     const routeSet = vi
       .spyOn(m.route, "set")
       .mockImplementation(() => undefined);
 
-    expect(shell.returnToPanelAfterRequest()).toBe(true);
+    expect(shell.returnToSettingsAfterRequest()).toBe(true);
 
-    expect(routeSet.mock.calls[0][0]).toContain("section=add-connection");
+    const [route, , options] = routeSet.mock.calls[0];
+    expect(queryOf(String(route))).toEqual({
+      tab: "workspace",
+      group: "permissions",
+      perm_section: "add-connection",
+      // What Settings had picked and floated over is not the answer's to change.
+      section: "display",
+      settings_workspace: "agent-cd34",
+      workspace: WORKSPACE_ID,
+      account: "local",
+    });
+    expect(options).toEqual({ replace: true });
   });
 
-  it("reports no pane for a page opened from the chat", () => {
+  it("reports no Settings for a page opened from the chat", () => {
     // Nothing to hand back to: that page simply closes.
     const shell = makeShell();
     shell.registerWaitingRequestList(listWith(3));
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
 
-    expect(shell.returnToPanelAfterRequest()).toBe(false);
+    expect(shell.returnToSettingsAfterRequest()).toBe(false);
+    expect(shell.returnToSettingsBehindOverlay()).toBe(false);
+
+    expect(routeSet).not.toHaveBeenCalled();
   });
 });
 
@@ -1735,39 +2932,39 @@ describe("ShellState.handleEscape", () => {
     expect(shell.handleEscape()).toBe(false);
   });
 
-  it("gives the key to the switcher popover over an open card", () => {
-    // The popover (z-[200]) sits over every other surface, the card included,
-    // so it has to be asked first -- and the card must survive the keypress.
+  it("gives the key to the workspace menu over an open card", () => {
+    // The menu sits over every other surface, the card included, so it has to
+    // be asked first -- and the card must survive the keypress.
     displaying(shell, AGENT);
     shell.openRecoveryModal(AGENT);
-    shell.openSidebar({ x: 0, y: 0, width: 10, height: 10 });
+    shell.openWorkspaceSwitcher();
 
     expect(shell.handleEscape()).toBe(true);
 
-    expect(shell.isSidebarOpen).toBe(false);
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
     expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(true);
   });
 
-  it("gives the key to an error dialog over the switcher popover", () => {
+  it("gives the key to an error dialog over the workspace menu", () => {
     const queue = new ErrorDialogQueue();
     queue.attachHost();
     shell = new ShellState(createEmptyStores(), undefined, undefined, queue);
     vi.spyOn(m, "redraw").mockImplementation(() => undefined);
-    shell.openSidebar({ x: 0, y: 0, width: 10, height: 10 });
+    shell.openWorkspaceSwitcher();
     queue.show({ error: { message: "Couldn't do that.", details: "" } });
 
     expect(shell.handleEscape()).toBe(true);
 
     expect(queue.current).toBeNull();
-    expect(shell.isSidebarOpen).toBe(true);
+    expect(shell.isWorkspaceSwitcherOpen).toBe(true);
   });
 
-  it("closes the card once the popover above it is gone", () => {
-    // The keypress after the one the popover took: the card is next in line,
-    // not skipped over because the popover was there first.
+  it("closes the card once the menu above it is gone", () => {
+    // The keypress after the one the menu took: the card is next in line,
+    // not skipped over because the menu was there first.
     displaying(shell, AGENT);
     shell.openRecoveryModal(AGENT);
-    shell.openSidebar({ x: 0, y: 0, width: 10, height: 10 });
+    shell.openWorkspaceSwitcher();
     shell.handleEscape();
 
     expect(shell.handleEscape()).toBe(true);
@@ -1775,10 +2972,163 @@ describe("ShellState.handleEscape", () => {
     expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(false);
   });
 
+  it("gives the key to the account menu over an open card, as it does the workspace menu", () => {
+    displaying(shell, AGENT);
+    shell.openRecoveryModal(AGENT);
+    shell.openAccountSwitcher();
+
+    expect(shell.handleEscape()).toBe(true);
+
+    expect(shell.isAccountSwitcherOpen).toBe(false);
+    expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(true);
+  });
+
+  it("gives the key to the workspace menu over the feed and the prompts beneath it, one surface a press", () => {
+    const webLoginModel = new WebLoginModel(
+      undefined,
+      () => {},
+      () => {},
+    );
+    webLoginModel.state = "waiting";
+    shell = new ShellState(createEmptyStores(), webLoginModel);
+    shell.openNotifications();
+    shell.openWorkspaceSwitcher();
+
+    expect(shell.handleEscape()).toBe(true);
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+    expect(webLoginModel.isOpen).toBe(true);
+    expect(shell.isNotificationsOpen).toBe(true);
+
+    expect(shell.handleEscape()).toBe(true);
+    expect(webLoginModel.isOpen).toBe(false);
+    expect(shell.isNotificationsOpen).toBe(true);
+
+    expect(shell.handleEscape()).toBe(true);
+    expect(shell.isNotificationsOpen).toBe(false);
+    expect(shell.handleEscape()).toBe(false);
+  });
+
+  it("closes the workspace menu first and the Settings flyout under it second", () => {
+    // The shortcut opens the menu over Settings in the beat before Settings'
+    // dismissal lands; the menu is on top, so it takes the first press and
+    // Settings is left standing for the second.
+    vi.spyOn(m.route, "get").mockReturnValue(`/settings?tab=studio&workspace=${AGENT}`);
+    displayingRoute(shell, "/settings", `tab=studio&workspace=${AGENT}`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    shell.openWorkspaceSwitcher();
+
+    expect(shell.handleEscape()).toBe(true);
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+    expect(routeSet).not.toHaveBeenCalled();
+
+    expect(shell.handleEscape()).toBe(true);
+    expect(routeSet).toHaveBeenCalledWith(`/workspace/${AGENT}`, undefined, { replace: true });
+  });
+
+  it("closes a confirmation raised inside Settings first, and Settings second", () => {
+    vi.spyOn(m.route, "get").mockReturnValue(`/settings?tab=workspace&group=general&workspace=${AGENT}`);
+    displayingRoute(shell, "/settings", `tab=workspace&group=general&workspace=${AGENT}`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    let closes = 0;
+    const removeModal = raiseModal(() => {
+      closes += 1;
+      removeModal();
+    });
+
+    expect(shell.handleEscape()).toBe(true);
+    expect(closes).toBe(1);
+    // Settings stays where it was under the confirmation that just closed.
+    expect(routeSet).not.toHaveBeenCalled();
+
+    expect(shell.handleEscape()).toBe(true);
+    expect(closes).toBe(1);
+    expect(routeSet.mock.calls).toEqual([[`/workspace/${AGENT}`, undefined, { replace: true }]]);
+  });
+
+  it("lets a Modal that cannot be dismissed swallow the key, leaving what is under it alone", () => {
+    // The key is the Modal's to ignore, not the surface underneath's to take.
+    vi.spyOn(m.route, "get").mockReturnValue(`/settings?tab=workspace&workspace=${AGENT}`);
+    displayingRoute(shell, "/settings", `tab=workspace&workspace=${AGENT}`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    raiseModal();
+
+    expect(shell.handleEscape()).toBe(true);
+    expect(shell.handleEscape()).toBe(true);
+
+    expect(isAnyModalOpen()).toBe(true);
+    expect(routeSet).not.toHaveBeenCalled();
+  });
+
+  it("closes a Modal before the feed and the recovery card it is drawn over", () => {
+    displaying(shell, AGENT);
+    shell.openRecoveryModal(AGENT);
+    shell.openNotifications();
+    let closes = 0;
+    const removeModal = raiseModal(() => {
+      closes += 1;
+      removeModal();
+    });
+
+    expect(shell.handleEscape()).toBe(true);
+
+    expect(closes).toBe(1);
+    expect(shell.isNotificationsOpen).toBe(true);
+    expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(true);
+    // The feed is next, then the card.
+    expect(shell.handleEscape()).toBe(true);
+    expect(shell.isNotificationsOpen).toBe(false);
+    expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(true);
+  });
+
+  it("closes only the topmost of two Modals a press", () => {
+    displaying(shell, AGENT);
+    const closed: string[] = [];
+    const removeFirst = raiseModal(() => {
+      closed.push("first");
+      removeFirst();
+    });
+    const removeSecond = raiseModal(() => {
+      closed.push("second");
+      removeSecond();
+    });
+
+    expect(shell.handleEscape()).toBe(true);
+    expect(closed).toEqual(["second"]);
+    expect(shell.handleEscape()).toBe(true);
+    expect(closed).toEqual(["second", "first"]);
+    expect(shell.handleEscape()).toBe(false);
+  });
+
+  it("gives the key to a menu, the client-permission prompt and the sign-in before a Modal under them", () => {
+    const webLoginModel = new WebLoginModel(
+      undefined,
+      () => {},
+      () => {},
+    );
+    webLoginModel.state = "waiting";
+    const prompt = new ClientPermissionPromptModel({ redraw: () => undefined, answer: () => undefined });
+    prompt.show(clientPermissionAsk());
+    shell = new ShellState(createEmptyStores(), webLoginModel, undefined, undefined, prompt);
+    shell.openWorkspaceSwitcher();
+    let closes = 0;
+    raiseModal(() => (closes += 1));
+
+    expect(shell.handleEscape()).toBe(true);
+    expect(shell.isWorkspaceSwitcherOpen).toBe(false);
+    expect(shell.handleEscape()).toBe(true);
+    expect(prompt.isOpen).toBe(false);
+    expect(shell.handleEscape()).toBe(true);
+    expect(webLoginModel.isOpen).toBe(false);
+    expect(closes).toBe(0);
+
+    expect(shell.handleEscape()).toBe(true);
+    expect(closes).toBe(1);
+  });
+
   it("gives the key to the sign-in modal over the z-[110] surface beneath it", () => {
     // The Shell paints the sign-in modal over every other z-[110] surface
-    // (Manage Accounts, the feed), so Escape must close it and leave the
-    // surface that opened it standing.
+    // (Settings' Accounts tab, the feed), so Escape must close it and leave
+    // the surface that opened it standing.
     const webLoginModel = new WebLoginModel(
       undefined,
       () => {},
@@ -1875,7 +3225,7 @@ describe("ShellState updates", () => {
     return shell;
   }
 
-  it("opens the machine's Updates tab from Home, flagging one arrival for the tab to flash", () => {
+  it("opens Settings on the machine's Updates from Home without entering it, flagging one arrival to flash", () => {
     const shell = outOfDateShell();
     stubAccentPainting();
     land(shell, "/");
@@ -1883,16 +3233,46 @@ describe("ShellState updates", () => {
 
     shell.openUpdatesTab(AGENT);
 
-    expect(routeSet).toHaveBeenCalledWith(`/workspace/${AGENT}/options`, { tab: "settings", group: "updates" });
+    // The machine is picked, not floated over: no `workspace`, so Home stays behind Settings.
+    expect(routeSet.mock.calls).toEqual([
+      ["/settings", { tab: "workspace", group: "updates", settings_workspace: AGENT, account: "local" }, undefined],
+    ]);
     expect(shell.takeUpdatesTabArrival(AGENT)).toMatchObject({ agentId: AGENT, failure: null });
+    // Taken once: a later draw of the page does not flash again.
+    expect(shell.takeUpdatesTabArrival(AGENT)).toBeNull();
   });
 
-  it("replaces the open panel's history entry, and flags a fresh arrival on each request", () => {
-    // Asked from the tab itself (a pill click while the panel is up) it must
+  it("names the machine by its agent id whichever coordinate asked, floating over it when it is on screen", () => {
+    const shell = outOfDateShell();
+    stubAccentPainting();
+    land(shell, "/workspace/host-bb22");
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openUpdatesTab("host-bb22");
+
+    // The listed workspace's host coordinate resolves to its agent id.
+    expect(routeSet).toHaveBeenCalledWith(
+      "/settings",
+      {
+        tab: "workspace",
+        group: "updates",
+        settings_workspace: "agent-aa11",
+        workspace: "agent-aa11",
+        account: "local",
+      },
+      undefined,
+    );
+    // Held for the machine it names, and for no other.
+    expect(shell.takeUpdatesTabArrival(AGENT)).toBeNull();
+    expect(shell.takeUpdatesTabArrival("agent-aa11")?.agentId).toBe("agent-aa11");
+  });
+
+  it("replaces the open Settings' history entry, and flags a fresh arrival on each request", () => {
+    // Asked from the page itself (a pill click while Settings is up) it must
     // still flash, without stacking a Back entry per click.
     const shell = outOfDateShell();
     stubAccentPainting();
-    land(shell, `/workspace/${AGENT}/options?tab=settings&group=general`);
+    land(shell, `/settings?tab=workspace&group=general&settings_workspace=${AGENT}&workspace=${AGENT}`);
     const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
 
     shell.openUpdatesTab(AGENT);
@@ -1901,8 +3281,8 @@ describe("ShellState updates", () => {
     shell.openUpdatesTab(AGENT, { failure });
 
     expect(routeSet).toHaveBeenLastCalledWith(
-      `/workspace/${AGENT}/options`,
-      { tab: "settings", group: "updates" },
+      "/settings",
+      { tab: "workspace", group: "updates", settings_workspace: AGENT, workspace: AGENT, account: "local" },
       { replace: true },
     );
     const second = shell.takeUpdatesTabArrival(AGENT);
@@ -2479,7 +3859,8 @@ describe("ShellState's account", () => {
     expect(shell.accountId).toBe("local");
     // An overlay's ?workspace= and a bare overlay say nothing the backend should be asked about.
     land(shell, `/help?workspace=${BOBS_WORKSPACE}`);
-    land(shell, "/accounts");
+    land(shell, `/settings?tab=workspace&workspace=${BOBS_WORKSPACE}&settings_workspace=${BOBS_WORKSPACE}`);
+    land(shell, "/settings?tab=accounts");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 

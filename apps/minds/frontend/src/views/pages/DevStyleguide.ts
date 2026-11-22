@@ -1000,7 +1000,7 @@ export function DevStyleguide(): m.Component {
           // Dev-only light/dark toggle. Fixed top-right so it stays reachable at
           // any scroll position; floats over the page on its own opaque surface
           // (the styleguide-toggle recipe in style.css). Sits below the Shell's
-          // ~42px titlebar so it clears the inbox / bug-report icons there.
+          // titlebar so it clears the inbox / bug-report icons there.
           m(
             Button,
             {

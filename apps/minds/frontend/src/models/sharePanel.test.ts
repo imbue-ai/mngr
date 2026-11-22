@@ -6,6 +6,7 @@ import {
   jsonResponse,
   postedProfileEvents,
   settle,
+  SHARING_LOCAL_READ_SUFFIX,
   sharePanelOptions,
   UNVERIFIED_REFUSAL,
 } from "../testing";
@@ -54,10 +55,12 @@ function deferred(): Deferred {
 function makeSharePanel(
   responder: Responder,
   overrides: Partial<SharePanelModelOptions> = {},
+  localRead: { isLocalReadServed?: boolean } = {},
 ): { model: SharePanelModel; requests: RecordedRequest[] } {
   const requests: RecordedRequest[] = [];
   const model = new SharePanelModel(
-    sharePanelOptions({
+    sharePanelOptions(
+      {
       fetchJson: (url: string, init?: RequestInit) => {
         requests.push({
           url,
@@ -70,7 +73,9 @@ function makeSharePanel(
         return Promise.resolve(responder(url, init));
       },
       ...overrides,
-    }),
+      },
+      localRead,
+    ),
   );
   return { model, requests };
 }
@@ -2952,6 +2957,189 @@ describe("what the panel calls a target", () => {
   });
 });
 
+describe("SharePanelModel local read", () => {
+  const LOCAL_URL = "https://m.relay.example/";
+
+  function localDocument(
+    overrides: Partial<MachineSharingResponse> = {},
+  ): MachineSharingResponse {
+    return sharingResponse({
+      enabled: true,
+      url: LOCAL_URL,
+      grants: grantsDocument({ emails: ["friend@example.com"] }),
+      is_connector_pending: true,
+      ...overrides,
+    });
+  }
+
+  /** A panel whose local read answers `local`, and whose fresh read is held
+   * until `answerFresh` releases it. */
+  function heldFreshRead(local: FetchResult): {
+    model: SharePanelModel;
+    requests: RecordedRequest[];
+    answerFresh: (result: FetchResult) => void;
+  } {
+    let release: (result: FetchResult) => void = () => undefined;
+    const requests: RecordedRequest[] = [];
+    const model = new SharePanelModel(
+      sharePanelOptions(
+        {
+          fetchJson: (url, init) => {
+            requests.push({ url, method: init?.method ?? "GET", body: null });
+            if (url.endsWith(SHARING_LOCAL_READ_SUFFIX))
+              return Promise.resolve(local);
+            if (url.endsWith("/invitation-outcomes"))
+              return Promise.resolve(okResult({ outcomes: [] }));
+            return new Promise((resolve) => {
+              release = resolve;
+            });
+          },
+        },
+        { isLocalReadServed: true },
+      ),
+    );
+    return { model, requests, answerFresh: (result) => release(result) };
+  }
+
+  it("asks for the local document beside the fresh one on a first load", async () => {
+    const { model, requests, answerFresh } = heldFreshRead(
+      okResult(localDocument()),
+    );
+
+    const loading = model.load();
+    await settle();
+
+    expect(requests.map((request) => request.url.split("/").at(-1))).toEqual([
+      "local",
+      expect.stringMatching(/^host-/),
+    ]);
+    answerFresh(okResult(sharingResponse()));
+    await loading;
+  });
+
+  it("draws from the local document while the fresh read is out, with the publication unconfirmed", async () => {
+    const { model } = heldFreshRead(okResult(localDocument()));
+
+    void model.load();
+    await settle();
+
+    expect(model.isSharingDocumentKnown).toBe(true);
+    expect(model.isSharingDocumentLoading).toBe(false);
+    expect(model.isPublished).toBe(true);
+    expect(model.isPublicationKnown).toBe(false);
+    expect(model.isCheckingPublication).toBe(true);
+    expect(model.targetUrl("system_interface")).toBe(
+      "https://shell-r4nd.m.relay.example/",
+    );
+    expect(model.isAwaitingLink).toBe(false);
+    expect(model.isGrantListKnown).toBe(true);
+    expect(model.canAdd).toBe(true);
+    expect(model.grantCount("system_interface")).toBe(1);
+  });
+
+  it("asks Imbue Cloud for nothing on the strength of the local document", async () => {
+    const { model, requests } = heldFreshRead(okResult(localDocument()));
+
+    void model.load();
+    await settle();
+
+    expect(
+      requests.filter(
+        (request) =>
+          request.url.endsWith("/invitation-outcomes") ||
+          request.url.endsWith("/invitations") ||
+          request.url.endsWith("/readiness"),
+      ),
+    ).toEqual([]);
+  });
+
+  it("settles on the fresh read's document when it answers", async () => {
+    const { model, answerFresh } = heldFreshRead(okResult(localDocument()));
+    const loading = model.load();
+    await settle();
+
+    answerFresh(
+      okResult(sharingResponse({ enabled: false, url: null, grants: grantsDocument() })),
+    );
+    await loading;
+
+    expect(model.isPublicationKnown).toBe(true);
+    expect(model.isPublished).toBe(false);
+    expect(model.grantCount("system_interface")).toBe(0);
+  });
+
+  it("ignores a local document that answers after the fresh read has", async () => {
+    let answerLocal: (result: FetchResult) => void = () => undefined;
+    const model = new SharePanelModel(
+      sharePanelOptions(
+        {
+          fetchJson: (url) => {
+            if (url.endsWith(SHARING_LOCAL_READ_SUFFIX))
+              return new Promise((resolve) => {
+                answerLocal = resolve;
+              });
+            if (url.endsWith("/invitation-outcomes"))
+              return Promise.resolve(okResult({ outcomes: [] }));
+            return Promise.resolve(
+              okResult(sharingResponse({ enabled: false, url: null })),
+            );
+          },
+        },
+        { isLocalReadServed: true },
+      ),
+    );
+    await model.load();
+
+    answerLocal(okResult(localDocument()));
+    await settle();
+
+    expect(model.isPublished).toBe(false);
+    expect(model.isPublicationKnown).toBe(true);
+  });
+
+  it("stays loading when the local read fails, leaving the fresh read to say what happened", async () => {
+    const { model } = heldFreshRead({ ok: false, status: 500, body: null });
+
+    void model.load();
+    await settle();
+
+    expect(model.isSharingDocumentKnown).toBe(false);
+    expect(model.isSharingDocumentLoading).toBe(true);
+  });
+
+  it("stays loading on a local document from a workspace that could not be read", async () => {
+    const { model } = heldFreshRead(okResult(localDocument({ enabled: false, url: null, grants: null })));
+
+    void model.load();
+    await settle();
+
+    expect(model.isSharingDocumentKnown).toBe(false);
+    expect(model.isSharingDocumentLoading).toBe(true);
+  });
+
+  it("does not ask for the local document again once a document is on screen", async () => {
+    const { model, requests } = makeSharePanel(
+      (url) =>
+        url.endsWith("/invitation-outcomes")
+          ? okResult({ outcomes: [] })
+          : okResult(sharingResponse()),
+      {},
+      { isLocalReadServed: true },
+    );
+    await model.load();
+    const localReadsAfterFirstLoad = requests.filter((request) =>
+      request.url.endsWith(SHARING_LOCAL_READ_SUFFIX),
+    ).length;
+
+    await model.load();
+
+    expect(localReadsAfterFirstLoad).toBe(1);
+    expect(
+      requests.filter((request) => request.url.endsWith(SHARING_LOCAL_READ_SUFFIX)),
+    ).toHaveLength(1);
+  });
+});
+
 describe("SharePanelModel mobile access link", () => {
   const MOBILE_SUFFIX = "/mobile-access-link";
 
@@ -3151,6 +3339,60 @@ describe("SharePanelModel mobile access link", () => {
     await model.load();
 
     expect(model.mobileLinkState).toEqual({ state: "idle" });
+  });
+
+  it("names the app whose page it is on, and keeps that app's answer to that app's page", async () => {
+    const { model, requests } = linkablePanel();
+    await model.load();
+    model.selectTarget("web");
+
+    await model.sendMobileAccessLink();
+
+    expect(mobileRequests(requests)).toEqual([
+      {
+        url: expect.stringContaining(MOBILE_SUFFIX),
+        method: "POST",
+        body: { app: "web" },
+      },
+    ]);
+    expect(model.mobileLinkState).toEqual({
+      state: "sent",
+      recipientEmail: "owner@example.com",
+    });
+    model.selectTarget("system_interface");
+    expect(model.mobileLinkState).toEqual({ state: "idle" });
+  });
+
+  it("offers nothing to click on an app that has no link of its own yet", async () => {
+    const { model, requests } = linkablePanel();
+    await model.load();
+    model.selectTarget("docs");
+
+    expect(model.isMobileLinkAwaitingAppLink).toBe(true);
+    expect(model.canSendMobileAccessLink).toBe(false);
+    await model.sendMobileAccessLink();
+
+    expect(mobileRequests(requests)).toEqual([]);
+    model.selectTarget("web");
+    expect(model.isMobileLinkAwaitingAppLink).toBe(false);
+    expect(model.canSendMobileAccessLink).toBe(true);
+  });
+
+  it("says an app's link is not ready in the app's own terms", async () => {
+    const { model } = linkablePanel(() => ({
+      ok: false,
+      status: 409,
+      body: { error: "no_workspace_link", message: "not ready" },
+    }));
+    await model.load();
+    model.selectTarget("web");
+
+    await model.sendMobileAccessLink();
+
+    expect(refusalMessageOf(model.mobileLinkState)).toBe(
+      "This app's link isn't ready yet. If you've just turned on sharing, " +
+        "try again in a few minutes.",
+    );
   });
 });
 

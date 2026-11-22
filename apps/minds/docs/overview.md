@@ -54,13 +54,13 @@ Each app gets two URLs:
 1. **Local**: `https://{label}.{workspace_id}.localhost:8421/` (the desktop client byte-forwards the service-origin request straight to the registered service's backend)
 2. **Shared**: `https://{label}.{workspace_domain}/` (over the workspace's share, while the workspace is published). A new share's workspace domain is `{share_label}.{user_hash}.{region}.{domain}` (older shares lead with the host id and the unhashed user id instead), and the bare workspace domain does not route.
 
-The share panel in the workspace options is authoritative for whether a workspace is published and who may open it.
+The share panel (Settings > Workspace & apps > Sharing, also reached from the titlebar's Share button) is authoritative for whether a workspace is published and who may open it.
 
 ## Visiting agents
 
 A coding agent running outside the workspace can be invited in the way a person is.
-The Share panel's Visiting agents section mints a one-time code (publishing the workspace first when it is not published) and shows the instruction block to paste to the agent; the agent installs the helper the workspace serves, joins with the code, and from then on works through the workspace's own exec channel with exactly the workspace's access, orienting itself from a primer and skills index the workspace renders live.
-Agents are a grant kind of their own, kept inside the workspace beside the human grants; the panel lists them and revokes them.
+Each Sharing page's "Invite an agent" section mints a one-time code (publishing the workspace first when it is not published) and shows the instruction block to paste to the agent; the agent installs the helper the workspace serves, joins with the code, and from then on works through the workspace's own exec channel with exactly the workspace's access, orienting itself from a primer and skills index the workspace renders live.
+Agents are a grant kind of their own, kept inside the workspace beside the human grants; the same section lists them and revokes them.
 The design is `specs/studio-agent-access/spec.md`; the gateway side is documented in the default-workspace-template's `system/services/share_gateway/README.md`.
 
 ## Workspace sharing

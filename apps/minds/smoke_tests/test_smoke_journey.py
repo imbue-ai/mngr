@@ -5,7 +5,7 @@ app's own web-login flow, completing the hosted page in the suite's browser;
 create an Imbue Cloud workspace; run default-workspace-template's CI test
 suites and its OOM drill inside it; have its agent build and register a hello-world web app;
 stop the workspace from the home page, start it again, and have the agent
-bring the app back; share the workspace from the Share tab and open the app's
+bring the app back; share the workspace from its Sharing page in Settings and open the app's
 route through the share as the owner; turn sharing off; destroy the workspace.
 Every resource created on the way is recorded in the run manifest, so the
 teardown job releases it however this test ends.

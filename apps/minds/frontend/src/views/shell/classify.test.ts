@@ -8,12 +8,12 @@ import {
   isAccountId,
   isHubPage,
   isAppOverlayPath,
-  isWorkspaceOverlayPath,
+  isTitlebarPopupRoutePath,
   overlayBehindWorkspaceId,
   popoutFromPath,
+  SETTINGS_PATH,
   workspaceDisplayIdFromPath,
   workspacePageIdFromPath,
-  workspaceSurfaceIdFromPath,
 } from "./classify";
 import { parseWorkspaceIdFromUrl } from "../../router";
 
@@ -22,50 +22,23 @@ describe("classifyRoute", () => {
     const context = classifyRoute("/workspace/agent-ab12");
     expect(context.kind).toBe("workspace");
     expect(context.workspaceAnyId).toBe("agent-ab12");
-    expect(context.activeTab).toBeNull();
     const hostScoped = classifyRoute("/workspace/host-99aa");
     expect(hostScoped.kind).toBe("workspace");
     expect(hostScoped.workspaceAnyId).toBe("host-99aa");
   });
 
-  it("marks workspace-scoped pages with the settings tab", () => {
-    expect(classifyRoute("/workspace/agent-ab12/settings").activeTab).toBe(
-      "settings",
-    );
-    expect(classifyRoute("/workspace/agent-ab12/options").kind).toBe(
-      "workspace",
-    );
-    expect(classifyRoute("/workspace/agent-ab12/backups").activeTab).toBe(
-      "settings",
-    );
+  it("gives the backups sub-page its workspace's context", () => {
+    expect(classifyRoute("/workspace/agent-ab12/backups")).toEqual({
+      kind: "workspace",
+      workspaceAnyId: "agent-ab12",
+      pageLabel: "",
+    });
   });
 
-  it("derives the options tab from ?tab, defaulting to share like the page does", () => {
-    expect(classifyRoute("/workspace/agent-ab12/options").activeTab).toBe(
-      "share",
-    );
-    expect(
-      classifyRoute("/workspace/agent-ab12/options", "tab=share").activeTab,
-    ).toBe("share");
-    expect(
-      classifyRoute(
-        "/workspace/agent-ab12/options",
-        "tab=settings&group=backup",
-      ).activeTab,
-    ).toBe("settings");
-    expect(
-      classifyRoute("/workspace/agent-ab12/options", "tab=permissions")
-        .activeTab,
-    ).toBe("permissions");
-    expect(
-      classifyRoute(
-        "/workspace/agent-ab12/options",
-        "tab=permissions&section=local-files",
-      ).activeTab,
-    ).toBe("permissions");
-    expect(
-      classifyRoute("/workspace/agent-ab12/options", "tab=nonsense").activeTab,
-    ).toBe("share");
+  it("gives the legacy options and settings spellings no workspace context: they only redirect into Settings", () => {
+    expect(classifyRoute("/workspace/agent-ab12/options", "tab=permissions").kind).toBe("home");
+    expect(classifyRoute("/workspace/agent-ab12/settings").kind).toBe("home");
+    expect(accentSourceForRoute("/workspace/agent-ab12/options")).toBeNull();
   });
 
   it("labels hub pages like the legacy chrome", () => {
@@ -106,12 +79,19 @@ describe("classifyRoute", () => {
   });
 
   it("treats app modals as their opener's context, not a standalone page", () => {
-    // Imbue Studio settings / Accounts / Get help / inbox opened from Home -> home context.
+    // Settings / Get help / inbox opened from Home -> home context.
     expect(classifyRoute("/settings").kind).toBe("home");
-    expect(classifyRoute("/accounts").kind).toBe("home");
     expect(classifyRoute("/help").kind).toBe("home");
     expect(classifyRoute("/inbox").kind).toBe("home");
-    // Get help / the inbox opened over a workspace keep that workspace's context + accent.
+    // Settings / Get help / the inbox opened over a workspace keep that workspace's context + accent.
+    expect(classifyRoute("/settings", "tab=workspace&workspace=agent-ab12")).toMatchObject({
+      kind: "workspace",
+      workspaceAnyId: "agent-ab12",
+    });
+    expect(accentSourceForRoute("/settings", "workspace=agent-ab12")).toBe("agent-ab12");
+    // The picked workspace is not the one on screen, so it lends neither context nor accent.
+    expect(classifyRoute("/settings", "tab=workspace&settings_workspace=agent-ab12").kind).toBe("home");
+    expect(accentSourceForRoute("/settings", "settings_workspace=agent-ab12")).toBeNull();
     expect(classifyRoute("/help", "workspace=agent-ab12")).toMatchObject({
       kind: "workspace",
       workspaceAnyId: "agent-ab12",
@@ -152,18 +132,30 @@ describe("classifyRoute", () => {
 
 describe("app overlay routing", () => {
   it("flags the app modal routes", () => {
-    expect(isAppOverlayPath("/settings")).toBe(true);
-    expect(isAppOverlayPath("/accounts")).toBe(true);
+    expect(SETTINGS_PATH).toBe("/settings");
+    expect(isAppOverlayPath(SETTINGS_PATH)).toBe(true);
     expect(isAppOverlayPath("/help")).toBe(true);
     expect(isAppOverlayPath("/inbox")).toBe(true);
     // The notification feed is a state-keyed popover, not a route.
     expect(isAppOverlayPath("/notifications")).toBe(false);
     expect(isAppOverlayPath("/settings/ai-keys")).toBe(true);
-    expect(isAppOverlayPath("/settings")).toBe(true);
     expect(isAppOverlayPath("/workspace/agent-ab12")).toBe(false);
+    // The legacy accounts URL is a redirect into Settings' Accounts tab, not an overlay.
+    expect(isAppOverlayPath("/accounts")).toBe(false);
   });
 
-  it("reads the workspace behind /help, /inbox, the template modal, and AI-keys from ?workspace only", () => {
+  it("counts only Settings and Get help as the bar's routed flyouts", () => {
+    expect(isTitlebarPopupRoutePath("/settings")).toBe(true);
+    expect(isTitlebarPopupRoutePath("/help")).toBe(true);
+    // Centered cards: they float, but hang from no bar button.
+    expect(isTitlebarPopupRoutePath("/inbox")).toBe(false);
+    expect(isTitlebarPopupRoutePath("/settings/ai-keys")).toBe(false);
+    expect(isTitlebarPopupRoutePath("/workspace/agent-ab12")).toBe(false);
+    expect(isTitlebarPopupRoutePath("/workspace/agent-ab12/options")).toBe(false);
+    expect(isTitlebarPopupRoutePath("/accounts")).toBe(false);
+  });
+
+  it("reads the workspace behind Settings, /help, /inbox, the template modal, and AI-keys from ?workspace only", () => {
     expect(overlayBehindWorkspaceId("/help", "workspace=agent-ab12")).toBe(
       "agent-ab12",
     );
@@ -196,28 +188,29 @@ describe("app overlay routing", () => {
       overlayBehindWorkspaceId("/settings/ai-keys", "workspace=host-99aa"),
     ).toBe("host-99aa");
     expect(overlayBehindWorkspaceId("/settings/ai-keys", "")).toBeNull();
-    // Settings / Accounts never carry a behind-workspace -> float over Home.
+    // Settings floats over the workspace it was opened from, which is not the one it has picked.
+    expect(overlayBehindWorkspaceId("/settings", "tab=workspace&workspace=agent-ab12")).toBe("agent-ab12");
     expect(
-      overlayBehindWorkspaceId("/settings", "workspace=agent-ab12"),
-    ).toBeNull();
+      overlayBehindWorkspaceId("/settings", "tab=workspace&workspace=agent-ab12&settings_workspace=agent-cd34"),
+    ).toBe("agent-ab12");
+    expect(overlayBehindWorkspaceId("/settings", "tab=workspace&settings_workspace=agent-cd34")).toBeNull();
+    expect(overlayBehindWorkspaceId("/settings", "")).toBeNull();
+    // A route that is not a floating one names nothing, whatever its query says.
+    expect(overlayBehindWorkspaceId("/accounts", "workspace=agent-ab12")).toBeNull();
+    expect(overlayBehindWorkspaceId("/workspace/agent-cd34", "workspace=agent-ab12")).toBeNull();
   });
 });
 
-describe("workspaceSurfaceIdFromPath", () => {
-  it("keeps the surface mounted on the bare route and the options overlay only", () => {
-    expect(workspaceSurfaceIdFromPath("/workspace/agent-ab12")).toBe(
-      "agent-ab12",
-    );
-    expect(workspaceSurfaceIdFromPath("/workspace/host-99aa/options")).toBe(
-      "host-99aa",
-    );
-    expect(
-      workspaceSurfaceIdFromPath("/workspace/agent-ab12/settings"),
-    ).toBeNull();
-    expect(
-      workspaceSurfaceIdFromPath("/workspace/agent-ab12/backups"),
-    ).toBeNull();
-    expect(workspaceSurfaceIdFromPath("/")).toBeNull();
+describe("the workspace route matchers", () => {
+  it("names the workspace on display for the bare surface route only", () => {
+    expect(workspaceDisplayIdFromPath("/workspace/agent-ab12")).toBe("agent-ab12");
+    expect(workspaceDisplayIdFromPath("/workspace/host-99aa")).toBe("host-99aa");
+    expect(workspaceDisplayIdFromPath("/workspace/host-99aa/options")).toBeNull();
+    expect(workspaceDisplayIdFromPath("/workspace/agent-ab12/settings")).toBeNull();
+    expect(workspaceDisplayIdFromPath("/workspace/agent-ab12/backups")).toBeNull();
+    expect(workspaceDisplayIdFromPath("/")).toBeNull();
+    // Settings names the workspace it floats over in its query, never in its path.
+    expect(workspaceDisplayIdFromPath("/settings")).toBeNull();
   });
 
   it("names the workspace of every one of its pages, sub-pages included", () => {
@@ -233,23 +226,6 @@ describe("workspaceSurfaceIdFromPath", () => {
     );
     expect(workspacePageIdFromPath("/workspace/agent-ab12/other")).toBeNull();
     expect(workspacePageIdFromPath("/popout/agent-ab12/win-01")).toBeNull();
-  });
-
-  it("keeps the display matcher strict to the bare surface", () => {
-    expect(workspaceDisplayIdFromPath("/workspace/agent-ab12")).toBe(
-      "agent-ab12",
-    );
-    expect(
-      workspaceDisplayIdFromPath("/workspace/agent-ab12/options"),
-    ).toBeNull();
-  });
-
-  it("flags only the options route as the workspace overlay", () => {
-    expect(isWorkspaceOverlayPath("/workspace/agent-ab12/options")).toBe(true);
-    expect(isWorkspaceOverlayPath("/workspace/agent-ab12")).toBe(false);
-    expect(isWorkspaceOverlayPath("/workspace/agent-ab12/settings")).toBe(
-      false,
-    );
   });
 });
 
@@ -294,11 +270,9 @@ describe("popoutFromPath", () => {
     const context = classifyRoute("/popout/agent-ab12/win-01");
     expect(context.kind).toBe("workspace");
     expect(context.workspaceAnyId).toBe("agent-ab12");
-    expect(context.activeTab).toBeNull();
     expect(accentSourceForRoute("/popout/agent-ab12/win-01")).toBe("agent-ab12");
     // The Shell mounts the popout's surface itself (with the solo window);
     // the plain surface matcher stays strict to /workspace routes.
-    expect(workspaceSurfaceIdFromPath("/popout/agent-ab12/win-01")).toBeNull();
     expect(workspaceDisplayIdFromPath("/popout/agent-ab12/win-01")).toBeNull();
   });
 });

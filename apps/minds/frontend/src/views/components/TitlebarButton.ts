@@ -7,7 +7,7 @@ export type TitlebarButtonTone = "default" | "muted" | "danger";
 const VARIANTS: Record<TitlebarButtonVariant, string> = {
   nav: "p-1.5 rounded-md",
   crumb: "px-1.5 py-1 rounded-md",
-  control: "w-9 h-[38px] rounded-none",
+  control: "w-9 h-(--titlebar-height) rounded-none",
 };
 
 const TONES: Record<TitlebarButtonTone, string> = {

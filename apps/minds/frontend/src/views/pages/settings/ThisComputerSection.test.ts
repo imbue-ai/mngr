@@ -9,7 +9,7 @@ import {
 } from "../../../app-context";
 import { DeviceResourcesStore } from "../../../models/deviceResources";
 import { SettingsModel } from "../../../models/settings";
-import { SettingsSections } from "./SettingsSections";
+import { studioSettingsPanel } from "./SettingsSections";
 import { REMOTE_EXECUTION_CONSEQUENCES } from "../../components/RemoteExecutionWarning";
 import type { AnyVnode } from "../../../testing";
 import {
@@ -20,7 +20,6 @@ import {
   deviceResourcesWireView,
   jsonResponse,
   renderDeep,
-  renderRoot,
   settingsOverview,
   settle,
 } from "../../../testing";
@@ -58,7 +57,7 @@ function harness(isAllowed: boolean): Harness {
     model,
     requests,
     render: () =>
-      renderDeep(renderRoot(SettingsSections, { model })) as AnyVnode,
+      renderDeep(studioSettingsPanel(model, { newPassword: "", confirmPassword: "" })) as AnyVnode,
   };
 }
 

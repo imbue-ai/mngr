@@ -3903,6 +3903,93 @@ def test_machine_sharing_readiness_ready_when_shell_label_origin_answers(tmp_pat
     assert probed_hosts == [f"system_interface-shl1.{_active_share().workspace_domain}"]
 
 
+def test_workspace_sharing_local_get_answers_from_the_workspace_alone_without_asking_imbue_cloud(
+    tmp_path: Path,
+) -> None:
+    agent_id = AgentId()
+    grants_toml = '[workspace]\nemails = ["viewer@example.com"]\nemail_domains = []\n'
+    cli = _fake_sharing_cli(
+        share=_active_share(),
+        mngr_caller=_ShareProbeCaller(is_share_env_present=True, grants_stdout=grants_toml),
+    )
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    response = client.get(f"/api/v1/workspace-sharing/{agent_id}/local", headers=_auth_header())
+
+    assert response.status_code == 200, response.data
+    body = json.loads(response.data)
+    assert body["is_connector_pending"] is True
+    # The workspace holds share materials and its own grants document.
+    assert body["enabled"] is True
+    assert body["grants"]["workspace"]["emails"] == ["viewer@example.com"]
+    # Only Imbue Cloud can name the share's domain, and it has not been asked in this run.
+    assert body["url"] is None
+    assert body["workspace_domain"] is None
+    assert body["grants_synced"] is None
+    assert body["invitation_outcomes"] is None
+    assert cli.share_status_call_count == 0
+    assert cli.pushed_grants_documents == []
+
+
+def test_workspace_sharing_local_get_builds_the_link_from_the_domain_imbue_cloud_named_earlier(
+    tmp_path: Path,
+) -> None:
+    agent_id = AgentId()
+    share = _active_share()
+    cli = _fake_sharing_cli(share=share, mngr_caller=_ShareProbeCaller(is_share_env_present=True))
+    cli.known_share_domains.remember(_TEST_HOST_ID, share)
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    body = json.loads(client.get(f"/api/v1/workspace-sharing/{agent_id}/local", headers=_auth_header()).data)
+
+    assert body["enabled"] is True
+    assert body["url"] == f"https://{share.workspace_domain}/"
+    assert body["is_connector_pending"] is True
+
+
+def test_workspace_sharing_local_get_shows_no_link_for_a_workspace_holding_no_share_materials(
+    tmp_path: Path,
+) -> None:
+    # A domain remembered from before the workspace was unpublished must not come back as a link.
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller(is_share_env_present=False))
+    cli.known_share_domains.remember(_TEST_HOST_ID, _active_share())
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    body = json.loads(client.get(f"/api/v1/workspace-sharing/{agent_id}/local", headers=_auth_header()).data)
+
+    assert body["enabled"] is False
+    assert body["url"] is None
+    assert body["is_connector_pending"] is True
+
+
+def test_workspace_sharing_local_get_answers_unknown_grants_when_the_workspace_cannot_be_read(
+    tmp_path: Path,
+) -> None:
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(
+        mngr_caller=RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="the workspace is stopped"))
+    )
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    response = client.get(f"/api/v1/workspace-sharing/{agent_id}/local", headers=_auth_header())
+
+    assert response.status_code == 200, response.data
+    body = json.loads(response.data)
+    assert body["grants"] is None
+    assert body["is_connector_pending"] is True
+
+
+def test_workspace_sharing_get_is_never_marked_as_waiting_on_imbue_cloud(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_ShareProbeCaller(is_share_env_present=True))
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    body = json.loads(client.get(f"/api/v1/workspace-sharing/{agent_id}", headers=_auth_header()).data)
+
+    assert body["is_connector_pending"] is False
+
+
 def test_workspace_sharing_get_records_the_catalog_spans_under_its_request_span(
     tmp_path: Path, profile_writer_path: Path
 ) -> None:
@@ -7437,6 +7524,59 @@ def test_workspace_sharing_mobile_access_link_carries_the_whole_workspaces_link_
     (call,) = cli.mobile_access_link_calls
     assert call["link"] == f"https://system_interface-shl1.{_TEST_HOST_ID}.owner1234.us1.shares.example/"
     assert call["workspace_name"] == _INVITED_WORKSPACE_NAME
+    assert call["app_name"] is None
+
+
+def test_workspace_sharing_mobile_access_link_for_an_app_carries_the_apps_link_and_the_name_the_panel_shows(
+    tmp_path: Path,
+) -> None:
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller(is_share_env_present=True))
+    client = _invitation_client(
+        tmp_path,
+        agent_id,
+        cli,
+        extra_service_logs=make_service_log(
+            "world-of-nonsense", "http://localhost:8100", "world-of-nonsense-fs6k", "World of Nonsense"
+        )
+        + make_service_log("web", "http://localhost:8200", "web-fs6k"),
+    )
+
+    named = client.post(
+        f"/api/v1/workspace-sharing/{agent_id}/mobile-access-link",
+        headers=_auth_header(),
+        json={"app": "world-of-nonsense"},
+    )
+    unnamed = client.post(
+        f"/api/v1/workspace-sharing/{agent_id}/mobile-access-link", headers=_auth_header(), json={"app": "web"}
+    )
+
+    assert named.status_code == 200, named.data
+    assert unnamed.status_code == 200, unnamed.data
+    named_call, unnamed_call = cli.mobile_access_link_calls
+    assert named_call["link"] == f"https://world-of-nonsense-fs6k.{_TEST_HOST_ID}.owner1234.us1.shares.example/"
+    assert named_call["app_name"] == "World of Nonsense"
+    assert named_call["workspace_name"] == _INVITED_WORKSPACE_NAME
+    # An app that registered no display name goes by its service name, as the panel shows it.
+    assert unnamed_call["link"] == f"https://web-fs6k.{_TEST_HOST_ID}.owner1234.us1.shares.example/"
+    assert unnamed_call["app_name"] == "web"
+
+
+def test_workspace_sharing_mobile_access_link_leaves_an_app_with_no_link_yet_to_imbue_cloud(tmp_path: Path) -> None:
+    # An app registers its address when it first starts; until then the desktop
+    # asks with the app's name and no link, which the connector refuses.
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller(is_share_env_present=True))
+    client = _invitation_client(tmp_path, agent_id, cli)
+
+    response = client.post(
+        f"/api/v1/workspace-sharing/{agent_id}/mobile-access-link", headers=_auth_header(), json={"app": "notes"}
+    )
+
+    assert response.status_code == 200, response.data
+    (call,) = cli.mobile_access_link_calls
+    assert call["link"] is None
+    assert call["app_name"] == "notes"
 
 
 def test_workspace_sharing_mobile_access_link_reports_a_refusal_by_its_code(tmp_path: Path) -> None:

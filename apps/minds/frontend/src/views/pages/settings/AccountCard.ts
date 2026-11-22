@@ -1,4 +1,4 @@
-// One signed-in account's card on the Accounts page: identity row, the log-out
+// One signed-in account's card on Settings' Accounts tab: identity row, the log-out
 // action, and the asynchronously-loaded plan/usage section. Port of the
 // account loop in templates/pages/Accounts.jinja + AccountPlanSection.jinja +
 // accounts.js. Which account a window shows is the titlebar switcher's

@@ -7,6 +7,7 @@ import { NoticeBand } from "./NoticeBand";
 import { Shell } from "./Shell";
 import { ToastLayer } from "./ToastLayer";
 import { RecoveryModal } from "../recovery/RecoveryModal";
+import { DialogCloseButton } from "../components/Modal";
 import { UpdateApplyModal } from "../components/UpdateApplyModal";
 import { WebLoginModal } from "../components/WebLoginModal";
 import { WorkspaceFrame } from "./WorkspaceFrame";
@@ -15,7 +16,7 @@ import { AutoUpdatePromptModel } from "../../models/autoUpdatePrompt";
 import type { UiNotificationEntry } from "../../channel/messages";
 import type { ToastLink } from "../../electron-bridge";
 import type { ToastItem } from "../../models/notificationsUi";
-import type { AnyVnode } from "../../testing";
+import type { AnyVnode, StubRect } from "../../testing";
 import {
   allText,
   attrsOf,
@@ -25,19 +26,19 @@ import {
   renderRoot,
   settingsOverview,
   settle,
+  stubTitlebarRects,
 } from "../../testing";
 
 const WORKSPACE_ID = "agent-ab12";
-const OPTIONS_PATH = `/workspace/${WORKSPACE_ID}/options`;
+const SETTINGS_PATH = "/settings";
 
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
-/** Every OverlayShell vnode the Shell floated. The Shell renders at most one
- * (its single overlay slot; the options panel's own layer renders its
- * OverlayShell only once the routed page inside it is itself rendered). */
+/** Every OverlayShell vnode the Shell floated: at most one in its single
+ * overlay slot, and Settings' own beside it. */
 function overlayShells(root: AnyVnode): AnyVnode[] {
   return collectVnodes(root).filter(
     (vnode) =>
@@ -46,9 +47,22 @@ function overlayShells(root: AnyVnode): AnyVnode[] {
   );
 }
 
-/** The overlay layer, if the Shell floated one. */
+/** The layer Settings has to itself, which the Shell emits on every route. */
+function settingsLayer(root: AnyVnode): AnyVnode {
+  const layer = collectVnodes(root).find((vnode) => vnode.attrs?.id === "settings-layer");
+  expect(layer, "no settings layer").toBeDefined();
+  return layer as AnyVnode;
+}
+
+/** Settings' own overlay, if the Shell floated it. */
+function settingsOverlay(root: AnyVnode): AnyVnode | undefined {
+  return overlayShells(settingsLayer(root))[0];
+}
+
+/** The overlay in the Shell's one shared slot (every floating surface but Settings), if it floated one. */
 function appOverlay(root: AnyVnode): AnyVnode | undefined {
-  return overlayShells(root)[0];
+  const settings = settingsOverlay(root);
+  return overlayShells(root).find((vnode) => vnode !== settings);
 }
 
 /** Render an overlay down to its own DOM tree (the Shell hands back the
@@ -104,20 +118,23 @@ function updatesStoreStub(
 function makeShell(overrides: Partial<ShellState> = {}): FakeShell {
   const state = {
     channel: null,
-    isSidebarOpen: false,
+    isWorkspaceSwitcherOpen: false,
+    isAccountSwitcherOpen: false,
     notificationsUi: null,
     currentRouteSearch: () => `workspace=${WORKSPACE_ID}`,
     closeAppOverlay: () => true,
+    displayedWorkspaceAnyId: WORKSPACE_ID,
     displayedWorkspaceAgentId: () => WORKSPACE_ID,
     accountId: "local",
     isAccountSignedOut: () => false,
     stores: {
       requests: { hasPendingForWorkspace: () => false },
-      accounts: { labelFor: () => "This device" },
+      accounts: { labelFor: () => "This device", emailLabelFor: () => "This device" },
       workspaces: {
         workspaces: [],
         toAgentScopedId: (anyId: string) => anyId,
         entryByAnyId: () => null,
+        accentEntry: () => null,
       },
       health: {
         statusFor: () => "healthy",
@@ -139,35 +156,29 @@ function makeShell(overrides: Partial<ShellState> = {}): FakeShell {
   return { state };
 }
 
-/** The titlebar's measurable boxes in a 1000px window, laid out as the real
- * one lays them out: the machine tab strip after the breadcrumb, the bell and
- * the bug-report button at the right edge. */
-const TITLEBAR_RECTS: Record<
-  string,
-  { left: number; top: number; width: number; height: number }
-> = {
-  "ws-tab-strip": { left: 331, top: 5, width: 92, height: 28 },
-  "ws-tab-permissions": { left: 331, top: 5, width: 28, height: 28 },
-  "ws-tab-settings": { left: 363, top: 5, width: 28, height: 28 },
-  "ws-tab-share": { left: 395, top: 5, width: 28, height: 28 },
-  "notifications-toggle": { left: 900, top: 5, width: 28, height: 28 },
-  "help-toggle": { left: 940, top: 5, width: 28, height: 28 },
+/** The bar's measurable boxes in a 1000px window, laid out as the real one
+ * lays them out: the trail's account and workspace buttons at the left; the
+ * bell, the bug-report button, the gear and Share at the right. */
+const TITLEBAR_RECTS: Record<string, StubRect> = {
+  "account-switcher-btn": { left: 96, top: 8, width: 160, height: 28 },
+  "workspace-switcher-btn": { left: 272, top: 8, width: 120, height: 28 },
+  "notifications-toggle": { left: 812, top: 8, width: 28, height: 28 },
+  "help-toggle": { left: 844, top: 8, width: 28, height: 28 },
+  "settings-btn": { left: 876, top: 8, width: 28, height: 28 },
+  "share-btn": { left: 912, top: 8, width: 76, height: 28 },
 };
 
+/** The bar of a hub page other than Home: no workspace button, and no Share. */
+const HUB_PAGE_BAR_IDS = ["account-switcher-btn", "notifications-toggle", "help-toggle", "settings-btn"];
+
 /** Put a measurable titlebar on screen. `ids` names which boxes are there; the
- * rest read as absent, the way a hub page's machine tabs do. Call it AFTER
+ * rest read as absent, the way a hub page's workspace button does. Call it AFTER
  * `renderShell` (whose own window stub carries no innerWidth) and before the
  * overlay component is instantiated, which is when it measures. */
 function stubTitlebar(
   ids: readonly string[] = Object.keys(TITLEBAR_RECTS),
 ): void {
-  vi.stubGlobal("document", {
-    getElementById: (id: string) => {
-      const rect = TITLEBAR_RECTS[id];
-      if (rect === undefined || !ids.includes(id)) return null;
-      return { getBoundingClientRect: () => rect };
-    },
-  });
+  stubTitlebarRects(Object.fromEntries(ids.filter((id) => id in TITLEBAR_RECTS).map((id) => [id, TITLEBAR_RECTS[id]])));
   vi.stubGlobal("window", { location: { search: "" }, innerWidth: 1000 });
 }
 
@@ -181,6 +192,13 @@ function raisedStrip(rendered: AnyVnode): AnyVnode {
   );
   expect(strip, "no raised titlebar icons").toBeDefined();
   return renderComponent(strip as AnyVnode);
+}
+
+/** Whether an overlay, rendered, raised a strip at all. */
+function hasRaisedStrip(rendered: AnyVnode): boolean {
+  return collectVnodes(rendered).some(
+    (vnode) => typeof vnode.tag === "function" && (vnode.tag as { name?: string }).name === "RaisedTitlebarIcons",
+  );
 }
 
 /** The raised copy of one titlebar popup icon, drawn by whichever surface is
@@ -213,7 +231,7 @@ function popoverLayer(root: AnyVnode, id: string): AnyVnode | undefined {
 
 interface RenderOptions {
   workspaceParam?: string | null;
-  optionsContent?: m.Children;
+  settingsContent?: m.Children;
   behindContent?: m.Children;
 }
 
@@ -226,6 +244,8 @@ function renderShell(
   options: RenderOptions = {},
 ): AnyVnode {
   vi.stubGlobal("window", { location: { search: "" } });
+  // The shell reports the route it is rendered at, as the live one does: the raised strip reads it.
+  Object.assign(shell, { currentRoutePath: () => routePath });
   const instance = Shell() as unknown as m.Component;
   const vnode = m(instance, {
     shell,
@@ -237,7 +257,7 @@ function renderShell(
     content,
     homeContent: m("div#home-content"),
     behindContent: options.behindContent ?? null,
-    optionsContent: options.optionsContent ?? null,
+    settingsContent: options.settingsContent ?? null,
   } as unknown as m.Attributes) as m.Vnode;
   return (instance.view as unknown as (v: m.Vnode) => m.Vnode).call(
     instance,
@@ -245,40 +265,180 @@ function renderShell(
   ) as unknown as AnyVnode;
 }
 
-describe("Shell request popup layer", () => {
-  it("renders no app modal over the options panel while no request is open", () => {
+describe("Shell Settings layer", () => {
+  it("floats Settings in a layer of its own, hung from the gear, and leaves the shared slot empty", () => {
     const { state } = makeShell();
-    const content = m("div#panel-content");
-    const root = renderShell(state, OPTIONS_PATH, content);
+    const content = m("div#settings-page");
+    const root = renderShell(state, SETTINGS_PATH, content, { workspaceParam: null });
+
     expect(appOverlay(root)).toBeUndefined();
-    expect(collectVnodes(root)).toContain(content);
+    const settings = settingsOverlay(root);
+    expect(settings).toBeDefined();
+    expect(collectVnodes(settings).filter((vnode) => vnode === content)).toHaveLength(1);
+    expect(attrsOf(settings as AnyVnode)).toMatchObject({
+      placement: "anchored",
+      selected: "settings",
+      panelId: "settings-panel",
+      backdropId: "settings-backdrop",
+    });
+    // Right-aligned to its own button: only the feed and Get help share a box.
+    expect(attrsOf(settings as AnyVnode).alignTo).toBeUndefined();
   });
 
-  it("keeps the options panel mounted under the popup, and hides it", () => {
-    // The popup is a route (/inbox), so the panel is no longer the routed page:
-    // it is the copy the router keeps painted, and it holds the SAME vtree slot
-    // as the routed one, so its models are not torn down and rebuilt.
-    //
-    // It is hidden rather than painted: the popup resizes out of the panel's
-    // own box, so for the length of that resize the two cards sit on top of
-    // each other, each with its own close X -- which is what made one window
-    // read as two. `visibility` keeps it laid out, so the popup can still
-    // measure the box it is growing out of.
+  it("keeps the workspace Settings was opened over mounted behind it", () => {
     const { state } = makeShell();
-    const popupBody = m("div#request-popup");
-    const panel = m("div#panel-content");
-    const root = renderShell(state, "/inbox", popupBody, {
+    const root = renderShell(state, SETTINGS_PATH, m("div#settings-page"), { workspaceParam: null });
+
+    const frame = collectVnodes(root).find((vnode) => vnode.tag === WorkspaceFrame);
+    expect(attrsOf(frame as AnyVnode).workspaceAnyId).toBe(WORKSPACE_ID);
+    expect(collectVnodes(root).some((vnode) => attrsOf(vnode).id === "home-content")).toBe(false);
+  });
+
+  it("floats Settings over Home when it names no workspace, whatever workspace it has picked", () => {
+    const { state } = makeShell({
+      currentRouteSearch: () => `tab=workspace&settings_workspace=${WORKSPACE_ID}`,
+    } as Partial<ShellState>);
+    const root = renderShell(state, SETTINGS_PATH, m("div#settings-page"), { workspaceParam: null });
+
+    expect(settingsOverlay(root)).toBeDefined();
+    expect(collectVnodes(root).some((vnode) => attrsOf(vnode).id === "home-content")).toBe(true);
+    expect(collectVnodes(root).some((vnode) => vnode.tag === WorkspaceFrame)).toBe(false);
+  });
+
+  it("keeps the remembered recovery page painted behind Settings, instead of the machine it names", () => {
+    const { state } = makeShell();
+    const recoveryPage = m("div#recovery-page");
+    const root = renderShell(state, SETTINGS_PATH, m("div#settings-page"), {
       workspaceParam: null,
-      optionsContent: panel,
+      behindContent: recoveryPage,
     });
 
-    expect(appOverlay(root)).toBeDefined();
-    expect(collectVnodes(root)).toContain(popupBody);
-    expect(collectVnodes(root)).toContain(panel);
-    const layer = collectVnodes(root).find(
-      (vnode) => vnode.attrs?.id === "ws-options-layer",
-    );
-    expect(String(attrsOf(layer as AnyVnode).style)).toContain(
+    expect(settingsOverlay(root)).toBeDefined();
+    expect(collectVnodes(root)).toContain(recoveryPage);
+    expect(collectVnodes(root).some((vnode) => vnode.tag === WorkspaceFrame)).toBe(false);
+  });
+
+  it("hangs the card from the gear's bottom edge, right-aligned and joined to it", () => {
+    const { state } = makeShell();
+    const root = renderShell(state, SETTINGS_PATH, m("div#settings-page"), { workspaceParam: null });
+    // The rects are measured when the overlay component instantiates.
+    stubTitlebar();
+    const rendered = renderOverlay(settingsOverlay(root) as AnyVnode);
+
+    const panel = collectVnodes(rendered).find((vnode) => attrsOf(vnode).id === "settings-panel");
+    expect(panel).toBeDefined();
+    const style = String(attrsOf(panel as AnyVnode).style);
+    // top = the gear's bottom (8 + 28), flush; right = 1000 - (876 + 28).
+    expect(style).toContain("top: 36px");
+    expect(style).toContain("right: 96px");
+    const panelClass = String(attrsOf(panel as AnyVnode).className);
+    expect(panelClass).toContain("w-[880px]");
+    // The gear stands at the card's right corner, so that corner squares off.
+    expect(panelClass).toContain("rounded-tr-none");
+  });
+
+  it("draws no close X on Settings: a flyout is put away by its own button", () => {
+    const { state } = makeShell();
+    const root = renderShell(state, SETTINGS_PATH, m("div#settings-page"), { workspaceParam: null });
+    stubTitlebar();
+    const rendered = renderOverlay(settingsOverlay(root) as AnyVnode);
+
+    expect(collectVnodes(rendered).some((vnode) => vnode.tag === DialogCloseButton)).toBe(false);
+  });
+
+  it("raises every bar button over Settings, the gear lit, and puts Settings away from the gear", () => {
+    const { state } = makeShell();
+    let dismissals = 0;
+    (state as unknown as { dismissAppOverlay: () => boolean }).dismissAppOverlay = () => {
+      dismissals += 1;
+      return true;
+    };
+    const root = renderShell(state, SETTINGS_PATH, m("div#settings-page"), { workspaceParam: null });
+    stubTitlebar();
+    const rendered = renderOverlay(settingsOverlay(root) as AnyVnode);
+
+    expect(raisedIconIds(rendered)).toEqual(["account", "workspace", "notifications", "help", "settings"]);
+    const gear = raisedIcon(rendered, "settings") as AnyVnode;
+    expect(attrsOf(gear)["aria-selected"]).toBe("true");
+    expect(attrsOf(raisedIcon(rendered, "help") as AnyVnode)["aria-selected"]).toBe("false");
+
+    (attrsOf(gear).onclick as () => void)();
+    expect(dismissals).toBe(1);
+  });
+
+  it("dismisses Settings through the shell from a click on the dimmed window", () => {
+    const { state } = makeShell();
+    let dismissals = 0;
+    (state as unknown as { dismissAppOverlay: () => boolean }).dismissAppOverlay = () => {
+      dismissals += 1;
+      return true;
+    };
+    const root = renderShell(state, SETTINGS_PATH, m("div#settings-page"), { workspaceParam: null });
+
+    (attrsOf(settingsOverlay(root) as AnyVnode).onDismiss as () => void)();
+
+    expect(dismissals).toBe(1);
+  });
+
+  it("carries the waiting-on-you dot on the raised gear while a dismissed reminder still has a pending request", () => {
+    const { state } = makeShell();
+    const requests = new RequestsStore();
+    requests.applyRequestsMessage({
+      count: 1,
+      request_ids: ["evt-a"],
+      workspace_agent_ids: [WORKSPACE_ID],
+    });
+    state.stores.requests = requests;
+    const root = renderShell(state, "/help", m("div#help-form"), {
+      workspaceParam: null,
+    });
+    stubTitlebar();
+    const rendered = renderOverlay(appOverlay(root) as AnyVnode);
+
+    const gear = raisedIcon(rendered, "settings") as AnyVnode;
+    expect(collectVnodes(gear).some((vnode) => attrsOf(vnode).id === "permissions-badge-raised")).toBe(true);
+    // The feed's own count is the bell's, and nothing is unread there.
+    expect(
+      collectVnodes(raisedStrip(rendered)).some(
+        (vnode) => attrsOf(vnode).id === "notifications-badge-raised",
+      ),
+    ).toBe(false);
+  });
+
+  it("emits the Settings layer on every route, empty where Settings is not up, so Settings keeps one slot", () => {
+    const { state } = makeShell();
+    for (const [routePath, workspaceParam] of [
+      [`/workspace/${WORKSPACE_ID}`, WORKSPACE_ID],
+      ["/help", null],
+      ["/inbox", null],
+      ["/account/local/", null],
+    ] as const) {
+      const root = renderShell(state, routePath, m("div#routed-page"), { workspaceParam });
+      expect(settingsOverlay(root), routePath).toBeUndefined();
+      expect(String(attrsOf(settingsLayer(root)).style), routePath).toBe("display: contents");
+    }
+  });
+});
+
+describe("Shell request popup layer", () => {
+  it("keeps Settings mounted under the popup opened from it, and hides it", () => {
+    // The popup is a route (/inbox), so Settings is no longer the routed page:
+    // it is the copy the router keeps, and it holds the SAME vtree slot as the
+    // routed one, so its models are not torn down and rebuilt.
+    //
+    // Hidden rather than unmounted: Settings keeps its scroll, its section and
+    // its in-flight edits for the return trip.
+    const { state } = makeShell();
+    const popupBody = m("div#request-popup");
+    const settings = m("div#settings-page");
+    const root = renderShell(state, "/inbox", popupBody, {
+      workspaceParam: null,
+      settingsContent: settings,
+    });
+
+    expect(collectVnodes(appOverlay(root))).toContain(popupBody);
+    expect(collectVnodes(settingsOverlay(root))).toContain(settings);
+    expect(String(attrsOf(settingsLayer(root)).style)).toContain(
       "visibility: hidden",
     );
     // ...over the live workspace, which stays mounted behind both.
@@ -288,71 +448,56 @@ describe("Shell request popup layer", () => {
     expect(attrsOf(frame as AnyVnode).workspaceAnyId).toBe(WORKSPACE_ID);
   });
 
-  it("paints the options panel when it is the surface itself", () => {
-    // Nothing has taken the window over on the options route, so the panel is
-    // shown -- the hide is scoped to the popup that replaces it.
+  it("emits the popup after the Settings it covers, so it paints on top at the same z", () => {
     const { state } = makeShell();
-    const root = renderShell(state, OPTIONS_PATH, m("div#panel-content"));
+    const root = renderShell(state, "/inbox", m("div#request-popup"), {
+      workspaceParam: null,
+      settingsContent: m("div#settings-page"),
+    });
 
-    const layer = collectVnodes(root).find(
-      (vnode) => vnode.attrs?.id === "ws-options-layer",
+    const order = collectVnodes(root);
+    expect(order.indexOf(appOverlay(root) as AnyVnode)).toBeGreaterThan(
+      order.indexOf(settingsOverlay(root) as AnyVnode),
     );
-    expect(String(attrsOf(layer as AnyVnode).style)).not.toContain(
+  });
+
+  it("paints Settings when it is the route itself", () => {
+    // Nothing covers it on its own route -- the hide is scoped to the popup
+    // that floats over it.
+    const { state } = makeShell();
+    const root = renderShell(state, SETTINGS_PATH, m("div#settings-page"), { workspaceParam: null });
+
+    expect(String(attrsOf(settingsLayer(root)).style)).not.toContain(
       "visibility: hidden",
     );
   });
 
-  it("keeps the raised permission badge while a dismissed reminder still has a pending request", () => {
+  it("hides nothing under a popup that was opened from the chat, which has no Settings beneath it", () => {
     const { state } = makeShell();
-    const requests = new RequestsStore();
-    requests.applyRequestsMessage({
-      count: 1,
-      request_ids: ["evt-a"],
-      workspace_agent_ids: [WORKSPACE_ID],
-    });
-    state.stores.requests = requests;
-    stubTitlebar();
-    const root = renderShell(state, "/inbox", m("div#request-popup"), {
-      workspaceParam: null,
-    });
-    const rendered = renderOverlay(appOverlay(root) as AnyVnode);
-    expect(
-      collectVnodes(raisedStrip(rendered)).some(
-        (vnode) => attrsOf(vnode).id === "permissions-badge-raised",
-      ),
-    ).toBe(true);
-    expect(
-      collectVnodes(raisedStrip(rendered)).some(
-        (vnode) => attrsOf(vnode).id === "notifications-badge-raised",
-      ),
-    ).toBe(false);
+    const root = renderShell(state, "/inbox", m("div#request-popup"), { workspaceParam: null });
+
+    expect(settingsOverlay(root)).toBeUndefined();
+    expect(String(attrsOf(settingsLayer(root)).style)).not.toContain("visibility: hidden");
   });
 
-  it("draws all six titlebar icons, not just the one the popup is", () => {
-    // The popup covers the titlebar's icons, so drawing only its own key took
-    // the others off screen for as long as it was open.
+  it("draws the popup as a centered card that resizes with its content", () => {
     const { state } = makeShell();
-    stubTitlebar();
     const root = renderShell(state, "/inbox", m("div#request-popup"), {
       workspaceParam: null,
     });
 
-    const rendered = renderOverlay(appOverlay(root) as AnyVnode);
-
-    expect(raisedIconIds(rendered)).toEqual([
-      "permissions",
-      "settings",
-      "share",
-      "notifications",
-      "help",
-    ]);
+    expect(attrsOf(appOverlay(root) as AnyVnode)).toMatchObject({
+      placement: "centered",
+      selected: null,
+      animatesBox: true,
+      panelId: "app-overlay-panel",
+      backdropId: "app-overlay-backdrop",
+    });
   });
 
-  it("closes the popup from the key it hangs off, which covers the titlebar's own", () => {
-    // The raised key sits exactly over the titlebar tab it stands in for, and
-    // that tab is how the Permissions panel is put away -- so the same gesture
-    // has to put the popup away. Inert, the click did nothing and the next one
-    // (landing on the backdrop) made the popup look like it needed two.
+  it("raises no strip over the popup, even with a bar on screen to copy, and gives it a close X", () => {
+    // A centered card hangs from no bar button, so there is no button of its
+    // own to raise, and it is put away by its X or the dimmed window.
     const { state } = makeShell();
     let dismissals = 0;
     (
@@ -361,21 +506,21 @@ describe("Shell request popup layer", () => {
       dismissals += 1;
       return true;
     };
-    // The popup hangs off the titlebar key, so it only draws its own key when
-    // there is one on screen to measure and cover.
     stubTitlebar();
     const root = renderShell(state, "/inbox", m("div#request-popup"), {
       workspaceParam: null,
     });
 
-    // The Shell hands the popup off to its own component, so render that to
-    // reach the chrome it draws around the card.
     const rendered = renderOverlay(appOverlay(root) as AnyVnode);
-    const keyTab = raisedIcon(rendered, "permissions");
 
-    expect(keyTab).toBeDefined();
-    (attrsOf(keyTab as AnyVnode).onclick as () => void)();
-
+    expect(hasRaisedStrip(rendered)).toBe(false);
+    const region = collectVnodes(rendered).find((vnode) =>
+      String(attrsOf(vnode).className ?? "").includes("items-center"),
+    );
+    expect(region, "no centered region").toBeDefined();
+    const closeX = collectVnodes(rendered).find((vnode) => vnode.tag === DialogCloseButton);
+    expect(closeX).toBeDefined();
+    (attrsOf(closeX as AnyVnode).onClose as () => void)();
     expect(dismissals).toBe(1);
   });
 
@@ -396,7 +541,8 @@ describe("Shell request popup layer", () => {
     const content = m("div#panel-content");
     const root = renderShell(state, `/workspace/${WORKSPACE_ID}`, content);
     expect(appOverlay(root)).toBeUndefined();
-    // No options route and no remembered panel: nothing paints the panel.
+    expect(settingsOverlay(root)).toBeUndefined();
+    // The frame is the surface: the routed page vnode is not painted at all.
     expect(collectVnodes(root)).not.toContain(content);
   });
 });
@@ -476,11 +622,12 @@ describe("Shell notifications overlay", () => {
       accountId: "local",
       stores: {
         requests: { hasPendingForWorkspace: () => false },
-        accounts: { labelFor: () => "This device" },
+        accounts: { labelFor: () => "This device", emailLabelFor: () => "This device" },
         workspaces: {
           workspaces: [],
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => null,
+          accentEntry: () => null,
         },
         health: {
           statusFor: () => "healthy",
@@ -538,16 +685,18 @@ describe("Shell notifications overlay", () => {
     ).toBe(false);
   });
 
-  it("suppresses the live options panel underneath for the same switch beat", () => {
-    // Same beat, other left-hand surface: feed opened from the docked panel,
-    // dismissal navigation not yet landed. The panel (which draws its own
-    // OverlayShell when rendered) must sit this beat out, or its backdrop
-    // doubles the feed's.
+  it("suppresses the live Settings underneath for the same switch beat", () => {
+    // Same beat, other routed flyout: feed opened from Settings, dismissal
+    // navigation not yet landed. Settings (which draws its own OverlayShell
+    // when rendered) must sit this beat out, or its backdrop doubles the
+    // feed's.
     const { state } = shellWithFeedOpen();
-    const content = m("div#options-panel-content");
-    const root = renderShell(state, OPTIONS_PATH, content);
+    const content = m("div#settings-page");
+    const root = renderShell(state, SETTINGS_PATH, content, { workspaceParam: null });
 
     expect(notificationsLayer(root)).toBeDefined();
+    expect(overlayShells(root)).toHaveLength(1);
+    expect(settingsOverlay(root)).toBeUndefined();
     expect(collectVnodes(root)).not.toContain(content);
   });
 
@@ -564,11 +713,11 @@ describe("Shell notifications overlay", () => {
     );
     expect(panel).toBeDefined();
     const style = String(attrsOf(panel as AnyVnode).style);
-    // top = icon bottom (5 + 28), flush; right = 1000 - (940 + 28), the BUG
+    // top = icon bottom (8 + 28), flush; right = 1000 - (844 + 28), the BUG
     // button's edge rather than the bell's -- so switching between the two
     // does not slide the box out from under the cursor.
-    expect(style).toContain("top: 33px");
-    expect(style).toContain("right: 32px");
+    expect(style).toContain("top: 36px");
+    expect(style).toContain("right: 128px");
     const panelClass = String(attrsOf(panel as AnyVnode).className);
     // A narrow dropdown, not a centered modal's width, and the same width
     // Get help gets.
@@ -590,8 +739,8 @@ describe("Shell notifications overlay", () => {
     const raisedBell = raisedIcon(rendered, "notifications");
     expect(raisedBell).toBeDefined();
     const style = String(attrsOf(raisedBell as AnyVnode).style);
-    expect(style).toContain("left: 900px");
-    expect(style).toContain("top: 5px");
+    expect(style).toContain("left: 812px");
+    expect(style).toContain("top: 8px");
     expect(style).toContain("width: 28px");
     expect(style).toContain("height: 28px");
     const raisedClass = String(attrsOf(raisedBell as AnyVnode).className);
@@ -603,21 +752,32 @@ describe("Shell notifications overlay", () => {
     expect(raisedClass).toContain("rounded-b-none");
   });
 
-  it("raises the bug button alongside the bell, so one is a click from the other", () => {
-    // On a hub page the three machine tabs are not on screen, so the strip is
-    // the right-hand pair alone -- and Get help is still reachable without
-    // clicking out of the feed first.
+  it("raises the bar's other buttons alongside the bell, so each is a click from the feed", () => {
+    // On a hub page the workspace button is not on the bar, so it has no copy
+    // -- and Get help and Settings are still reachable without clicking out
+    // of the feed first.
     const { state } = shellWithFeedOpen();
+    const switches: string[] = [];
+    Object.assign(state, {
+      openHelp: () => switches.push("help"),
+      openSettingsFromBar: () => switches.push("settings"),
+      switchToAccountSwitcher: () => switches.push("account"),
+    });
     const root = renderShell(state, "/create", m("div#create-form"), {
       workspaceParam: null,
     });
-    stubTitlebar(["notifications-toggle", "help-toggle"]);
+    stubTitlebar(HUB_PAGE_BAR_IDS);
     const rendered = renderOverlay(notificationsLayer(root) as AnyVnode);
 
-    expect(raisedIconIds(rendered)).toEqual(["notifications", "help"]);
-    const bug = raisedIcon(rendered, "help") as AnyVnode;
-    expect(attrsOf(bug)["aria-selected"]).toBe("false");
-    expect(typeof attrsOf(bug).onclick).toBe("function");
+    expect(raisedIconIds(rendered)).toEqual(["account", "notifications", "help", "settings"]);
+    expect(attrsOf(raisedIcon(rendered, "notifications") as AnyVnode)["aria-selected"]).toBe("true");
+    for (const id of ["account", "help", "settings"]) {
+      const copy = raisedIcon(rendered, id) as AnyVnode;
+      expect(attrsOf(copy)["aria-selected"], id).toBe("false");
+      (attrsOf(copy).onclick as () => void)();
+    }
+    // Each leaves the feed for its own flyout, through the shell's one switch per flyout.
+    expect(switches).toEqual(["account", "help", "settings"]);
   });
 
   it("falls back to the centered card when no titlebar is mounted to hang from", () => {
@@ -659,10 +819,10 @@ describe("Shell help overlay", () => {
     );
     expect(panel).toBeDefined();
     const style = String(attrsOf(panel as AnyVnode).style);
-    // Identical top and right to the feed's: top = icon bottom (5 + 28),
-    // flush; right = 1000 - (940 + 28).
-    expect(style).toContain("top: 33px");
-    expect(style).toContain("right: 32px");
+    // Identical top and right to the feed's: top = icon bottom (8 + 28),
+    // flush; right = 1000 - (844 + 28).
+    expect(style).toContain("top: 36px");
+    expect(style).toContain("right: 128px");
     const panelClass = String(attrsOf(panel as AnyVnode).className);
     expect(panelClass).toContain("w-[400px]");
     // The bug button IS the icon standing at the panel's right corner, so
@@ -682,8 +842,8 @@ describe("Shell help overlay", () => {
     const raisedButton = raisedIcon(rendered, "help");
     expect(raisedButton).toBeDefined();
     const style = String(attrsOf(raisedButton as AnyVnode).style);
-    expect(style).toContain("left: 940px");
-    expect(style).toContain("top: 5px");
+    expect(style).toContain("left: 844px");
+    expect(style).toContain("top: 8px");
     expect(style).toContain("width: 28px");
     expect(style).toContain("height: 28px");
     const raisedClass = String(attrsOf(raisedButton as AnyVnode).className);
@@ -692,7 +852,7 @@ describe("Shell help overlay", () => {
     expect(raisedClass).toContain("rounded-b-none");
   });
 
-  it("raises the machine tabs too, so the panel is a click away from a machine", () => {
+  it("raises every bar button, so Settings and both menus are a click away from Get help", () => {
     const { state } = makeShell();
     const root = renderShell(state, "/help", m("div#help-content"), {
       workspaceParam: null,
@@ -701,15 +861,28 @@ describe("Shell help overlay", () => {
     const rendered = renderOverlay(helpLayer(root) as AnyVnode);
 
     expect(raisedIconIds(rendered)).toEqual([
-      "permissions",
-      "settings",
-      "share",
+      "account",
+      "workspace",
       "notifications",
       "help",
+      "settings",
     ]);
     expect(
       attrsOf(raisedIcon(rendered, "help") as AnyVnode)["aria-selected"],
     ).toBe("true");
+    // Share is not a flyout of its own, but its live copy stands in the strip beside them.
+    expect(collectVnodes(raisedStrip(rendered)).some((vnode) => attrsOf(vnode).id === "share-btn-raised")).toBe(true);
+  });
+
+  it("draws no close X on Get help: a flyout is put away by its own button", () => {
+    const { state } = makeShell();
+    const root = renderShell(state, "/help", m("div#help-content"), {
+      workspaceParam: null,
+    });
+    stubTitlebar();
+    const rendered = renderOverlay(helpLayer(root) as AnyVnode);
+
+    expect(collectVnodes(rendered).some((vnode) => vnode.tag === DialogCloseButton)).toBe(false);
   });
 
   it("takes the same body shape the feed takes, so the two headers sit on one line", () => {
@@ -745,10 +918,23 @@ describe("Shell help overlay", () => {
 });
 
 describe("Shell sign-in modal layering", () => {
-  it("paints the sign-in modal over the Manage Accounts card that opened it", () => {
+  it("paints the sign-in modal over the Settings flyout whose Accounts tab opened it", () => {
     // Both sit at z-[110], so DOM order decides which is on top.
+    const { state } = makeShell({ currentRouteSearch: () => "tab=accounts" } as Partial<ShellState>);
+    const root = renderShell(state, SETTINGS_PATH, m("div#settings-page"), {
+      workspaceParam: null,
+    });
+
+    const order = collectVnodes(root);
+    const overlayIndex = order.indexOf(settingsOverlay(root) as AnyVnode);
+    const signInIndex = order.findIndex((vnode) => vnode.tag === WebLoginModal);
+    expect(overlayIndex).toBeGreaterThanOrEqual(0);
+    expect(signInIndex).toBeGreaterThan(overlayIndex);
+  });
+
+  it("paints the sign-in modal over a centered app modal too", () => {
     const { state } = makeShell();
-    const root = renderShell(state, "/accounts", m("div#accounts-page"), {
+    const root = renderShell(state, "/settings/ai-keys", m("div#ai-keys"), {
       workspaceParam: null,
     });
 
@@ -766,15 +952,15 @@ describe("Shell app-overlay card chrome", () => {
     const root = renderShell(state, routePath, m("div#overlay-content"), {
       workspaceParam: null,
     });
-    const overlay = appOverlay(root);
-    expect(overlay, `${routePath} floats an app-overlay card`).toBeDefined();
+    const overlay = routePath === SETTINGS_PATH ? settingsOverlay(root) : appOverlay(root);
+    expect(overlay, `${routePath} floats an overlay card`).toBeDefined();
     return attrsOf(overlay as AnyVnode);
   }
 
-  it("hands Imbue Studio settings a bounded column instead of a scrolling card body", () => {
+  it("hands Settings a bounded column instead of a scrolling card body", () => {
     // Its pane scrolls its own two columns; a scroller here would take the
     // section list down with the panel, which is the bug it exists to prevent.
-    const bodyClass = String(overlayAttrsAt("/settings").bodyClass);
+    const bodyClass = String(overlayAttrsAt(SETTINGS_PATH).bodyClass);
     expect(bodyClass).toContain("flex-1");
     expect(bodyClass).toContain("min-h-0");
     expect(bodyClass).toContain("flex-col");
@@ -785,28 +971,38 @@ describe("Shell app-overlay card chrome", () => {
     // A flex-1 body inside an auto-height card has no height to hand its
     // columns, so they would never scroll and the card would resize per
     // section, moving the list out from under the cursor.
-    expect(String(overlayAttrsAt("/settings").cardClass)).toContain(
-      "h-[min(660px,",
-    );
+    const cardClass = String(overlayAttrsAt(SETTINGS_PATH).cardClass);
+    expect(cardClass).toContain("h-[min(660px,");
+    expect(cardClass).toContain("w-[880px]");
   });
 
-  it("leaves every other overlay scrolling its card as a whole", () => {
-    // Accounts, the request popup, the AI-keys dialog and the template stepper
-    // are single columns that depend on the card scrolling. (Get help does not
+  it("leaves every centered card scrolling as a whole, with no bar button of its own to raise", () => {
+    // The request popup, the AI-keys dialog and the template stepper are
+    // single columns that depend on the card scrolling. (Get help does not
     // come through here -- it takes the right-hand popover's own box, and its
     // own suite pins the scrolling body it gets there.)
     for (const routePath of [
-      "/accounts",
       "/inbox",
       "/settings/ai-keys",
       "/create/template",
       // The route the stepper is actually opened on: its account's hub.
       "/account/local/create/template",
     ]) {
-      expect(String(overlayAttrsAt(routePath).bodyClass), routePath).toContain(
-        "overflow-y-auto",
-      );
+      const attrs = overlayAttrsAt(routePath);
+      expect(String(attrs.bodyClass), routePath).toContain("overflow-y-auto");
+      expect(attrs.placement, routePath).toBe("centered");
+      // No bar button of its own, so no strip is raised over it.
+      expect(attrs.selected, routePath).toBeNull();
     }
+  });
+
+  it("floats nothing for the retired Manage Accounts URL, which only redirects into Settings", () => {
+    const { state } = makeShell({ currentRouteSearch: () => "" } as Partial<ShellState>);
+    const content = m("div#redirecting");
+    const root = renderShell(state, "/accounts", content, { workspaceParam: null });
+
+    expect(overlayShells(root)).toHaveLength(0);
+    expect(collectVnodes(root)).toContain(content);
   });
 });
 
@@ -1220,13 +1416,14 @@ describe("Shell on the popout route", () => {
       .filter((name) => name !== "");
   }
 
-  it("mounts the workspace surface in solo mode under the popout bar, with no titlebar or sidebar", () => {
+  it("mounts the workspace surface in solo mode under the popout bar, with no titlebar or menus", () => {
     const { state } = makeShell({ currentRouteSearch: () => "" } as unknown as Partial<ShellState>);
     const root = renderShell(state, POPOUT_PATH, m("div#popout-page"));
     const names = componentNames(root);
     expect(names).toContain("PopoutChrome");
     expect(names).not.toContain("Titlebar");
-    expect(names).not.toContain("SidebarMenu");
+    expect(names).not.toContain("WorkspaceSwitcherMenu");
+    expect(names).not.toContain("AccountSwitcherMenu");
     const frame = collectVnodes(root).find((vnode) => vnode.tag === WorkspaceFrame);
     expect(attrsOf(frame as AnyVnode).workspaceAnyId).toBe(WORKSPACE_ID);
     expect(attrsOf(frame as AnyVnode).soloWindowId).toBe("win-0123");
@@ -1249,6 +1446,9 @@ describe("Shell on the popout route", () => {
     const root = renderShell(state, `/workspace/${WORKSPACE_ID}`, m("div#surface"));
     const names = componentNames(root);
     expect(names).toContain("Titlebar");
+    // The two menus the bar's trail opens are mounted with it, and only with it.
+    expect(names).toContain("WorkspaceSwitcherMenu");
+    expect(names).toContain("AccountSwitcherMenu");
     const frame = collectVnodes(root).find((vnode) => vnode.tag === WorkspaceFrame);
     expect(attrsOf(frame as AnyVnode).soloWindowId).toBeNull();
   });
@@ -1364,7 +1564,7 @@ describe("Shell auto-update prompt", () => {
           content: null,
           homeContent: null,
           behindContent: null,
-          optionsContent: null,
+          settingsContent: null,
         },
       }) as unknown as m.Vnode;
     const path = `/workspace/${WORKSPACE_ID}`;

@@ -242,7 +242,7 @@ describe("WebLoginModel", () => {
   });
 
   it("closes on sign-in instead of confirming it when asked to", async () => {
-    // Manage Accounts shows the new account itself, so "You're signed in" on
+    // Settings' Accounts tab shows the new account itself, so "You're signed in" on
     // top of it would only be one more thing to dismiss.
     vi.useFakeTimers();
     try {

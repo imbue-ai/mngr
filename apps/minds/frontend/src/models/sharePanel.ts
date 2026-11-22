@@ -128,12 +128,15 @@ const INVITE_REFUSAL_MESSAGES: Record<string, string> = {
     "Verify your email to invite people: click the link we emailed you.",
 };
 
-/** What the panel says when the route refuses: the workspace has no address to
+/** What the panel says when the route refuses: the target has no address to
  * send yet, whether because sharing is off or because it is still coming up.
  * Which of the two it is names an internal state, so the panel says neither. */
-const MOBILE_LINK_NO_ACCESS_POINT_MESSAGE =
-  "This workspace's link isn't ready yet. If you've just turned on sharing, " +
-  "try again in a few minutes.";
+function mobileLinkNoAccessPointMessage(isWhole: boolean): string {
+  return (
+    `This ${isWhole ? "workspace" : "app"}'s link isn't ready yet. If you've just turned on sharing, ` +
+    "try again in a few minutes."
+  );
+}
 
 const MOBILE_LINK_UNVERIFIED_MESSAGE =
   "Verify your email first: click the link we emailed you.";
@@ -420,6 +423,9 @@ export class SharePanelModel {
   // cannot overwrite a newer document.
   private statusRequestCount = 0;
   private adoptedStatusSequence: StatusSequence | null = null;
+  /** Whether the publication on screen is the local read's: what the
+   * workspace holds, which Imbue Cloud has not confirmed yet. */
+  private isPublicationUnconfirmed = false;
   /** The publication as the newest document has it; the switch reads this
    * only while no toggle is in flight. */
   private isPublishedByDocument = false;
@@ -452,10 +458,9 @@ export class SharePanelModel {
    * its person never visited. */
   private isOutcomesKnown = false;
   private readonly inviteStateByKey = new Map<GrantKey, InviteState>();
-  // What the mobile-link control is doing. One per panel rather than per
-  // target: the message carries the whole workspace's link, whichever target
-  // the pane is on.
-  private mobileLink: MobileLinkState = { state: "idle" };
+  // What each target's mobile-link control is doing: the message carries
+  // that target's own link. A target with no entry is idle.
+  private readonly mobileLinkByTarget = new Map<string, MobileLinkState>();
   // The visiting agents (outside coding agents invited into the workspace),
   // read on demand: listing them costs an exec into the workspace.
   private visitingAgents: VisitingAgentEntry[] = [];
@@ -728,7 +733,8 @@ export class SharePanelModel {
     if (this.isPublishWriteInFlight || this.isAddressMoveBroken) return true;
     return (
       this.adoptedStatusSequence !== null &&
-      this.publicationUnknownReason === null
+      this.publicationUnknownReason === null &&
+      !this.isPublicationUnconfirmed
     );
   }
 
@@ -1104,8 +1110,10 @@ export class SharePanelModel {
 
   /**
    * Draw the document the cache holds for this workspace, if any, and read a
-   * fresh one behind it. The first read of a session leaves the switch
-   * undrawn (isCheckingPublication) until it answers.
+   * fresh one behind it. With nothing cached, the local read is asked for
+   * beside the fresh one: it answers without waiting on Imbue Cloud, and the
+   * pane draws the link and the list from it while the switch stays undrawn
+   * (isCheckingPublication) until the fresh read answers.
    */
   async load(): Promise<void> {
     await span("share_panel.load", async () => {
@@ -1115,12 +1123,17 @@ export class SharePanelModel {
         if (state.state === "refused") this.inviteStateByKey.delete(key);
       // The mobile link's confirmation and refusal are about the moment they
       // happened too, so a fresh look at the panel starts over.
-      if (this.mobileLink.state !== "sending")
-        this.mobileLink = { state: "idle" };
+      for (const [target, state] of this.mobileLinkByTarget)
+        if (state.state !== "sending") this.mobileLinkByTarget.delete(target);
       const cached = this.statusQuery.getCurrentResult().data;
       if (cached !== undefined && this.adoptedStatusSequence === null)
         this.adoptLoadedDocument(cached, this.nextStatusSequence());
-      if (this.adoptedStatusSequence === null) this.loadStatus = "loading";
+      if (this.adoptedStatusSequence === null) {
+        this.loadStatus = "loading";
+        // Numbered before the fresh read, so whichever answers second is
+        // adopted only if it is the fresh one.
+        void this.readLocalDocument(this.nextStatusSequence());
+      }
       this.redraw();
       const sequence = this.nextStatusSequence();
       const query = this.statusQuery.getCurrentQuery();
@@ -1159,6 +1172,21 @@ export class SharePanelModel {
       for (const mutation of staleFailures) mutationCache.remove(mutation);
       this.adoptLoadedDocument(result.data, sequence);
     });
+  }
+
+  /** Draw from what this computer and the workspace can say of the share
+   * without Imbue Cloud. A failure says nothing: the fresh read reports its own. */
+  private async readLocalDocument(sequence: StatusSequence): Promise<void> {
+    const result = await this.fetchJson(`${this.shareApiBase()}/local`);
+    if (this.isDisposed || !result.ok) return;
+    // A workspace that could not be read has nothing to draw from: the pane
+    // keeps its placeholders rather than trading them for blanks.
+    if ((result.body as MachineSharingResponse).grants === null) return;
+    const isProvisioningElsewhere = this.isProvisioningInProgress;
+    if (!this.adoptStatusDocument(result.body, sequence)) return;
+    // A link the local read can build was published before this panel opened.
+    if (!isProvisioningElsewhere) this.isLive = this.isPublished;
+    this.redraw();
   }
 
   private failedPublicationsFromEarlierPanels(): Mutation[] {
@@ -1395,37 +1423,63 @@ export class SharePanelModel {
     this.redraw();
   }
 
-  /** What the mobile-link control is doing. */
+  /** What the current target's mobile-link control is doing. */
   get mobileLinkState(): MobileLinkState {
-    return this.mobileLink;
+    return this.mobileLinkByTarget.get(this.currentTarget) ?? { state: "idle" };
   }
 
-  /** Whether the link can be emailed now: sharing is on, and no request of
-   * this panel's is already in flight. A workspace whose address has not
-   * arrived yet is still askable -- the route answers with the wait. */
+  /** Whether the current target is an app that has registered no address
+   * yet, so there is no link of its own to email. */
+  get isMobileLinkAwaitingAppLink(): boolean {
+    return (
+      this.currentTarget !== this.options.wholeService &&
+      this.isAwaitingLabel(this.currentTarget)
+    );
+  }
+
+  /** Whether the current target's link can be emailed now: sharing is on, no
+   * request for it is already in flight, and an app has a link of its own. A
+   * workspace whose address has not arrived yet is still askable -- the route
+   * answers with the wait. */
   get canSendMobileAccessLink(): boolean {
-    return this.isPublished && this.mobileLink.state !== "sending";
+    return (
+      this.isPublished &&
+      this.mobileLinkState.state !== "sending" &&
+      !this.isMobileLinkAwaitingAppLink
+    );
   }
 
   /**
-   * Ask Imbue Cloud to email the signed-in account the link to this workspace.
+   * Ask Imbue Cloud to email the signed-in account the link to the current
+   * target: the whole workspace, or the one app the page is on.
    *
    * Where it goes is not the panel's to choose: the connector reads the
    * address off the session, so the control cannot be aimed at anyone else.
    */
   async sendMobileAccessLink(): Promise<void> {
     if (!this.canSendMobileAccessLink) return;
-    this.mobileLink = { state: "sending" };
+    const target = this.currentTarget;
+    const isWhole = target === this.options.wholeService;
+    this.mobileLinkByTarget.set(target, { state: "sending" });
     this.redraw();
     const result = await this.fetchJson(
       `${this.shareApiBase()}/mobile-access-link`,
-      { method: "POST", headers: { "Content-Type": "application/json" } },
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // The whole workspace is what the route sends with no body.
+        ...(isWhole ? {} : { body: JSON.stringify({ app: target }) }),
+      },
     );
     if (this.isDisposed) return;
-    this.mobileLink = adoptMobileLinkAnswer(
-      result,
-      this.granterEmail,
-      this.failureContext(),
+    this.mobileLinkByTarget.set(
+      target,
+      adoptMobileLinkAnswer(
+        result,
+        this.granterEmail,
+        this.failureContext(),
+        isWhole,
+      ),
     );
     this.redraw();
   }
@@ -1433,19 +1487,21 @@ export class SharePanelModel {
   /** Send the link a refused mobile-link request is waiting on, and say beside
    * the control what became of it. */
   async resendVerificationForMobileLink(email: string): Promise<void> {
+    const target = this.currentTarget;
     const outcome = await resendVerificationEmail(email);
+    const current = this.mobileLinkByTarget.get(target);
     if (
       this.isDisposed ||
-      this.mobileLink.state !== "refused" ||
-      this.mobileLink.unverifiedEmail === undefined
+      current?.state !== "refused" ||
+      current.unverifiedEmail === undefined
     )
       return;
-    this.mobileLink = {
+    this.mobileLinkByTarget.set(target, {
       state: "refused",
       failure: plainShareFailure(verificationEmailSentNote(email, outcome)),
       unverifiedEmail: outcome === "already_verified" ? undefined : email,
       resendOutcome: outcome,
-    };
+    });
     this.redraw();
   }
 
@@ -2003,6 +2059,7 @@ export class SharePanelModel {
     this.isPublishedByDocument = Boolean(data.enabled);
     this.machineUrl = data.url ?? null;
     this.publicationUnknownReason = data.publication_unknown_reason ?? null;
+    this.isPublicationUnconfirmed = data.is_connector_pending === true;
     this.isAddressMoveBroken = false;
   }
 
@@ -2358,6 +2415,7 @@ function adoptMobileLinkAnswer(
   result: RequestResult,
   granterEmail: string,
   context: { isWorkspaceStopped: boolean },
+  isWhole: boolean,
 ): MobileLinkState {
   if (result.ok) {
     const body = result.body as MobileAccessLinkResponse;
@@ -2386,7 +2444,7 @@ function adoptMobileLinkAnswer(
   if (result.status === 409)
     return {
       state: "refused",
-      failure: plainShareFailure(MOBILE_LINK_NO_ACCESS_POINT_MESSAGE, result),
+      failure: plainShareFailure(mobileLinkNoAccessPointMessage(isWhole), result),
     };
   return {
     state: "refused",

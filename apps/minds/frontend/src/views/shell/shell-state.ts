@@ -19,15 +19,15 @@ import {
   destroyingWorkspaceIdFromPath,
   hubPagePath,
   isAccountId,
+  SETTINGS_PATH,
+  classifyRoute,
   isAppOverlayPath,
   isTitlebarPopupRoutePath,
-  isWorkspaceOverlayPath,
   overlayBehindWorkspaceId,
   popoutFromPath,
   recoveryWorkspaceIdFromPath,
   workspaceDisplayIdFromPath,
   workspacePageIdFromPath,
-  workspaceSurfaceIdFromPath,
 } from "./classify";
 import type { HubPage, PopoutRoute } from "./classify";
 import { LOCAL_PROFILE_USER_ID } from "../../models/providers";
@@ -38,6 +38,7 @@ import type {
 } from "../../channel/messages";
 import type { PopoutReattachAsk, TearOutReport } from "../../electron-bridge";
 import { electronBridge } from "../../electron-bridge";
+import { dismissTopmostModal, isAnyModalOpen } from "../components/Modal";
 import { recoveryRoute } from "../../models/create";
 import { bugReportTextFor } from "../../models/errors";
 import type { UserFacingError } from "../../models/errors";
@@ -245,22 +246,19 @@ export class ShellState {
    * route the window builds carries it, and the channel scopes its frames to it.
    */
   accountId: string = LOCAL_PROFILE_USER_ID;
-  isSidebarOpen = false;
-  sidebarAnchor: {
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-  } | null = null;
+  /** The bar's workspace menu, local state like the feed. */
+  isWorkspaceSwitcherOpen = false;
+  /** Share's "check back after the workspace is created" dialog, raised on a creation page. */
+  isShareNotYetCreatedDialogOpen = false;
   /** The workspace whose CONTENT is displayed (null on hub pages). */
   displayedWorkspaceAnyId: string | null = null;
   /** The chrome control the displayed workspace's tour is talking about, ringed in the titlebar; null for none. */
   highlightedChromeAnchor: ChromeAnchor | null = null;
-  /** The workspace-options route an app modal was opened over, so the Shell can
-   * keep that panel painted (and mounted) beneath the modal: the live route is
-   * the modal's, which carries none of the panel's params. Null whenever no
-   * modal floats over the panel. */
-  panelRouteBehindOverlay: string | null = null;
+  /** The Settings route the request popup was opened over, so the Shell can
+   * keep Settings mounted (and hidden) beneath the popup: the live route is
+   * the popup's, which carries none of Settings' params. Null whenever the
+   * popup does not float over Settings. */
+  settingsRouteBehindOverlay: string | null = null;
   /**
    * The hub PAGE an app-level modal was opened over, so the Shell keeps that
    * page painted (and mounted) beneath it. Null whenever no modal floats over
@@ -302,9 +300,13 @@ export class ShellState {
   private isNotificationsArmed = false;
   /** The same for the account switcher, raised by `switchToAccountSwitcher`. */
   private isAccountSwitcherArmed = false;
+  /** The same, for the workspace menu. */
+  private isWorkspaceSwitcherArmed = false;
   /** The path the last `handleRouteChanged` saw, so a redraw on the route the
    * window is already on is not mistaken for a navigation to it. */
   private lastHandledRoutePath: string | null = null;
+  /** The query that came with it. */
+  private lastHandledRouteSearch: string | null = null;
   /** Whether the route the window is on has not said whose account it is yet
    * (a workspace whose row has not arrived), so a later redraw asks it again. */
   private isRouteAccountUnknown = false;
@@ -414,7 +416,7 @@ export class ShellState {
     return accountHubRoute(this.accountId, page);
   }
 
-  /** The query an overlay route (/settings, /accounts, /help, /inbox) carries so a reload keeps the window's account. */
+  /** The query an overlay route (/settings, /help, /inbox) carries so a reload keeps the window's account. */
   overlayQuery(params: Record<string, string> = {}): Record<string, string> {
     return { ...params, account: this.accountId };
   }
@@ -473,6 +475,7 @@ export class ShellState {
   }
 
   openAccountSwitcher(): void {
+    this.isWorkspaceSwitcherOpen = false;
     this.isAccountSwitcherOpen = true;
   }
 
@@ -481,16 +484,22 @@ export class ShellState {
   }
 
   /**
-   * Open the switcher from a raised titlebar strip, putting the open surface
-   * away first. Like the feed (see switchToNotifications), the switcher is
-   * armed across the navigation that puts a route-backed surface away, so
-   * that arrival does not close it the way an ordinary navigation does.
+   * Open the account menu from a raised strip, putting the open flyout away
+   * first. Like the feed (see switchToNotifications), the menu is armed
+   * across the navigation that puts a route-backed flyout away, so that
+   * arrival does not close it the way an ordinary navigation does.
    */
   switchToAccountSwitcher(): void {
     this.closeNotifications();
-    this.isAccountSwitcherArmed =
-      this.dismissAppOverlay() || this.closeWorkspaceOverlay({ replace: true });
+    this.isAccountSwitcherArmed = this.dismissAppOverlay();
     this.openAccountSwitcher();
+  }
+
+  /** The same for the workspace menu. */
+  switchToWorkspaceSwitcher(): void {
+    this.closeNotifications();
+    this.isWorkspaceSwitcherArmed = this.dismissAppOverlay();
+    this.openWorkspaceSwitcher();
   }
 
   /**
@@ -652,7 +661,7 @@ export class ShellState {
       if (params === undefined) m.route.set(route);
       else m.route.set(route, params);
     };
-    const targetAnyId = workspaceSurfaceIdFromPath(route.split("?")[0]);
+    const targetAnyId = workspaceDisplayIdFromPath(route.split("?")[0]);
     const displayed = this.displayedWorkspaceAnyId;
     const workspaces = this.stores.workspaces;
     if (
@@ -682,14 +691,14 @@ export class ShellState {
   }
 
   /** Land in a workspace on one of its chats: asked of the frame directly when
-   * the workspace is already on screen, with whatever floats over it (its
-   * options panel, or an app modal opened over it) put away so the chat is
+   * the workspace is already on screen, with whatever floats over it (Settings,
+   * or an app modal opened over it) put away so the chat is
    * not left behind it, else carried as ``?chat=`` for handleRouteChanged to
    * forward once the frame is up. */
   openWorkspaceChat(anyId: string, chatAgentId: string): void {
     const agentScoped = this.stores.workspaces.toAgentScopedId(anyId);
     if (this.displayedWorkspaceAgentId() === agentScoped) {
-      if (!this.dismissAppOverlay()) this.closeWorkspaceOverlay();
+      this.dismissAppOverlay();
       this.requestFocusChat(agentScoped, chatAgentId);
       return;
     }
@@ -854,7 +863,7 @@ export class ShellState {
 
   /** The app of the target the share's frame is on, as openSharedWorkspace takes it (null for the shell): an open
    * the shell starts on its own goes back to that target, not to the shell. */
-  private sharedFrameTargetApp(entry: SharedEntry): string | null {
+  sharedFrameTargetApp(entry: SharedEntry): string | null {
     const frameLink = this.stores.workspaces.sharedFrameLink(entry.share.share_key);
     const app = entry.share.targets.find((target) => target.link === frameLink)?.app ?? null;
     return app === "system_interface" ? null : app;
@@ -981,9 +990,9 @@ export class ShellState {
    * carries none and floats over Home. Extra query params (`selected` for a
    * named request) are merged in.
    *
-   * Opened from the workspace-options panel, the route it was opened from is
-   * remembered so that panel stays mounted underneath rather than being torn
-   * down and rebuilt around the popup. */
+   * Opened from Settings, the route it was opened from is remembered so that
+   * Settings stays mounted underneath rather than being torn down and rebuilt
+   * around the popup. */
   openInbox(params: Record<string, string> = {}): void {
     const path = this.currentRoutePath();
     const selected = params.selected;
@@ -999,10 +1008,10 @@ export class ShellState {
       this.lastOpenedInboxAtMs = Date.now();
     }
     // Only ever set here (handleRouteChanged clears it), so a second request
-    // arriving while the popup is already up does not drop the panel it floats
-    // over -- the route is /inbox by then, which names no panel.
-    if (isWorkspaceOverlayPath(path))
-      this.panelRouteBehindOverlay = m.route.get() ?? null;
+    // arriving while the popup is already up does not drop the Settings it
+    // floats over -- the route is /inbox by then, which names no Settings.
+    if (path === SETTINGS_PATH)
+      this.settingsRouteBehindOverlay = m.route.get() ?? null;
     const displayed = this.displayedWorkspaceAnyId;
     const query = this.overlayQuery(
       displayed === null
@@ -1290,28 +1299,14 @@ export class ShellState {
     sender(resolved.requestId, resolved.verdict);
   }
 
-  /** Close the options overlay if one is open, returning whether it was.
-   * `routeOptions` is forwarded to the route set: a strip switch passes
-   * `{replace: true}` so the panel being left is not one Back away under the
-   * surface replacing it; a plain dismissal (Escape, the X) pushes, leaving
-   * the panel in history like any left page. */
-  closeWorkspaceOverlay(routeOptions?: { replace: boolean }): boolean {
-    const path = this.currentRoutePath();
-    if (!isWorkspaceOverlayPath(path)) return false;
-    const surfaceId = workspaceSurfaceIdFromPath(path);
-    if (surfaceId === null) return false;
-    m.route.set(`/workspace/${surfaceId}`, undefined, routeOptions);
-    return true;
-  }
-
-  /** Dismiss an open app-level modal (the request popup, Imbue Studio settings,
-   * Accounts, Get help), returning to the surface it was opened over, and
+  /** Dismiss an open floating route (Settings, Get help, the request popup,
+   * the AI-keys dialog), returning to the surface it was opened over, and
    * report whether there was one. Prefers history so the opener (Home, Create,
-   * the workspace, or its options panel) is restored exactly; falls back to
-   * routing to the base when there is no history (a cold-start deep link).
+   * the workspace) is restored exactly; falls back to routing to the base when
+   * there is no history (a cold-start deep link).
    *
-   * Get help naming a machine is one exception: it routes straight to that
-   * machine, for the reasons on `dismissHelpToItsMachine`.
+   * A flyout naming a machine is one exception: it routes straight to that
+   * machine, for the reasons on `dismissFlyoutToItsMachine`.
    *
    * The request popup (/inbox) is the other exception: routed there directly
    * (from the workspace already on screen), history.back()'s "undo exactly
@@ -1341,7 +1336,7 @@ export class ShellState {
     // even so: the key belongs to the overlay that is still on its way out.
     if (this.isAppOverlayClosing) return true;
     this.isAppOverlayClosing = true;
-    if (this.dismissHelpToItsMachine()) return true;
+    if (this.dismissFlyoutToItsMachine()) return true;
     if (path === "/inbox") {
       // Replace, not push: this collapses the popup's own entry into the
       // workspace view rather than adding a further forward step, so the
@@ -1376,82 +1371,63 @@ export class ShellState {
   }
 
   /**
-   * Go back up to the Permissions panel this popup was opened from, reporting
-   * whether there was one.
-   *
-   * The way OUT of the popup leaves the window (see `dismissAppOverlay`); this
-   * is the way BACK, for a reader who opened a request from the panel and wants
-   * the panel again. It restores the panel's own route, so the tab and section
-   * it was left on come back with it.
+   * Go back to the Settings this popup was opened from, reporting whether
+   * there was one. It restores Settings' own route, so the tab and section it
+   * was left on come back with it.
    */
-  returnToPanelBehindOverlay(): boolean {
-    const panelRoute = this.panelRouteBehindOverlay;
-    if (panelRoute === null) return false;
+  returnToSettingsBehindOverlay(): boolean {
+    const settingsRoute = this.settingsRouteBehindOverlay;
+    if (settingsRoute === null) return false;
     // Left set: handleRouteChanged drops it on arrival, and until then the
-    // panel underneath keeps rendering rather than blinking out.
-    m.route.set(panelRoute);
+    // Settings underneath keeps rendering rather than blinking out. Replace,
+    // so Back from Settings does not re-raise the popup being left.
+    m.route.set(settingsRoute, undefined, { replace: true });
     return true;
   }
 
   /**
-   * Dismiss an app-level modal the way the person dismissing it means it,
+   * Dismiss a floating route the way the person dismissing it means it,
    * reporting whether there was one.
    *
    * Differs from `closeAppOverlay` for one surface: the request popup opened
-   * from a "Waiting on you" row. That popup takes the options panel's window
-   * over -- it hangs from the same key and resizes out of the panel's box -- so
-   * it reads as that window showing a request, not as a second card stacked on
-   * one. Clicking away from it therefore leaves the window, rather than
-   * uncovering a panel the reader has not thought of as still being there.
-   *
-   * Resolving the last request still goes through `closeAppOverlay`, which
-   * returns to the panel: finishing the review is what the panel is FOR, and
-   * landing back on it is how the new grant is seen.
+   * from Settings' "Waiting on you" list, which goes back to the Settings it
+   * was opened from rather than out to the workspace.
    */
   dismissAppOverlay(): boolean {
-    const path = this.currentRoutePath();
-    if (path === "/inbox" && this.panelRouteBehindOverlay !== null) {
-      const behind = overlayBehindWorkspaceId(path, this.currentRouteSearch());
-      if (behind !== null) {
-        // Same re-entrancy guard as closeAppOverlay: one dismissal can arrive
-        // twice (the in-document Escape plus Electron's forward of it).
-        if (this.isAppOverlayClosing) return true;
-        this.isAppOverlayClosing = true;
-        // Straight to the machine rather than back through history: the panel
-        // is the history entry, and going back to it is the thing this avoids.
-        // Replace, so Back from the machine does not re-raise the popup being
-        // dismissed. handleRouteChanged forgets the remembered panel on the
-        // way.
-        m.route.set(`/workspace/${behind}`, undefined, { replace: true });
-        return true;
-      }
+    if (this.currentRoutePath() === "/inbox" && this.settingsRouteBehindOverlay !== null) {
+      // Same re-entrancy guard as closeAppOverlay: one dismissal can arrive
+      // twice (the in-document Escape plus Electron's forward of it).
+      if (this.isAppOverlayClosing) return true;
+      this.isAppOverlayClosing = true;
+      return this.returnToSettingsBehindOverlay();
     }
     return this.closeAppOverlay();
   }
 
   /**
-   * Hand the Permissions panel back once the request it was opened from has
-   * been answered, reporting whether there was a panel to hand back. A request
-   * opened from the chat has none, and its page simply closes.
+   * Hand Settings back once the request it was opened from has been answered,
+   * reporting whether there was a Settings to hand back. A request opened
+   * from the chat has none, and its page simply closes.
    *
-   * Back to the panel's own route while other requests are still waiting: the
+   * Back to Settings' own route while other requests are still waiting: the
    * list the reader picked from is still there, still theirs to work through,
    * and it is the section they left. Once nothing is waiting that list is gone,
    * so returning them to it would return them to nothing -- they land on Add
    * connection instead, the next thing anyone is in that pane to do.
    */
-  returnToPanelAfterRequest(): boolean {
-    const panelRoute = this.panelRouteBehindOverlay;
-    if (panelRoute === null) return false;
+  returnToSettingsAfterRequest(): boolean {
+    const settingsRoute = this.settingsRouteBehindOverlay;
+    if (settingsRoute === null) return false;
     // Asked after the answer, and the pane drops an answered request the
     // moment it is answered, so "any left" is already the list without it.
     if (this.waitingRequestList?.hasWaitingRequests() === true)
-      return this.returnToPanelBehindOverlay();
-    const [path, query = ""] = panelRoute.split("?");
+      return this.returnToSettingsBehindOverlay();
+    const [path, query = ""] = settingsRoute.split("?");
     const params = new URLSearchParams(query);
-    params.set("tab", "permissions");
-    params.set("section", "add-connection");
-    m.route.set(`${path}?${params.toString()}`);
+    params.set("tab", "workspace");
+    params.set("group", "permissions");
+    params.set("perm_section", "add-connection");
+    m.route.set(`${path}?${params.toString()}`, undefined, { replace: true });
     return true;
   }
 
@@ -1463,27 +1439,27 @@ export class ShellState {
    * listener registration order (which follows mount order, not z-order).
    *
    * The error dialog leads: it is drawn above every other surface, the
-   * switcher popover included. Then the switcher popover (z-[200]), then the
+   * two menus included. Then the menus (z-[200]), then the
    * client-permission prompt, which the Shell emits last of all the z-[110]
    * surfaces, then the browser sign-in modal: the Shell emits it after every
-   * other z-[110] surface but that one, so it sits over the app modal (Manage
-   * Accounts) that opened it,
-   * and over the recovery card too.
+   * other z-[110] surface but that one, so it sits over the Settings that
+   * opened it, and over the recovery card too.
+   * Then a dialog the page on screen raised, which is drawn over the flyouts
+   * and the routed overlays.
    * Next the notification feed, which can also open over the recovery card.
-   * The card comes before the two route-based overlays because it is not one
-   * -- it can be raised over the workspace options overlay, and it sits above
-   * it. It is never raised over an app-level modal, so this never
-   * has to choose between those two. The two route-based closers gate on the
-   * live route, so a request popup floating over the options panel closes
-   * alone (the route is the popup's) and leaves the panel standing.
+   * The card comes before the route-based overlays because it is not one,
+   * and it is never raised over one, so this never has to choose between
+   * them. The route-based closer gates on the live route, so a request popup
+   * floating over Settings closes alone (the route is the popup's) and
+   * leaves Settings standing.
    */
   handleEscape(): boolean {
     if (this.errorDialogs.current !== null) {
       this.errorDialogs.dismiss();
       return true;
     }
-    if (this.isSidebarOpen) {
-      this.closeSidebar();
+    if (this.isWorkspaceSwitcherOpen) {
+      this.closeWorkspaceSwitcher();
       return true;
     }
     if (this.isAccountSwitcherOpen) {
@@ -1498,15 +1474,14 @@ export class ShellState {
       this.webLogin.dismiss();
       return true;
     }
+    // A dialog raised by whatever is on screen (a confirmation inside Settings, a page's own): it is drawn over
+    // the flyouts and the routed overlays, so it goes first and they stay.
+    if (dismissTopmostModal()) return true;
     if (this.isNotificationsOpen) {
       this.closeNotifications();
       return true;
     }
-    return (
-      this.closeOpenRecoveryModal() ||
-      this.closeWorkspaceOverlay() ||
-      this.dismissAppOverlay()
-    );
+    return this.closeOpenRecoveryModal() || this.dismissAppOverlay();
   }
 
   /**
@@ -1523,10 +1498,7 @@ export class ShellState {
       serial: ++this.updatesTabArrivalCount,
       failure: options.failure ?? null,
     };
-    const params = { tab: "settings", group: "updates" };
-    if (isTitlebarPopupRoutePath(this.currentRoutePath()))
-      m.route.set(`/workspace/${agentId}/options`, params, { replace: true });
-    else this.routeTo(`/workspace/${agentId}/options`, params);
+    this.openSettings({ tab: "workspace", group: "updates", settings_workspace: agentId });
   }
 
   /** Take the pending Updates-tab request if it is for this machine, so it is acted on once. */
@@ -1550,7 +1522,9 @@ export class ShellState {
     // navigation threw away the panel that had just been remembered, one
     // instruction after it was written.
     const isSameRoute = path === this.lastHandledRoutePath;
+    const isSameSearch = search === this.lastHandledRouteSearch;
     this.lastHandledRoutePath = path;
+    this.lastHandledRouteSearch = search;
     // The window's account follows the route when the route changes, and is
     // asked of it again while it has not said whose it is. A redraw of an
     // unchanged route leaves the account alone: an account adopted without a
@@ -1574,14 +1548,19 @@ export class ShellState {
     if (!isSameRoute) {
       if (this.isAccountSwitcherArmed) this.isAccountSwitcherArmed = false;
       else this.isAccountSwitcherOpen = false;
+      if (this.isWorkspaceSwitcherArmed) this.isWorkspaceSwitcherArmed = false;
+      else this.isWorkspaceSwitcherOpen = false;
     }
     // The dismissal navigation has landed; clear the closeAppOverlay guard.
     // Gated on an actual navigation, like the panel below: history.back() does
     // not land synchronously, so a redraw on the route still being left would
     // otherwise drop the guard before the dismissal it guards -- and a held
     // Escape (repeating every ~30ms) would fire a second back(), carrying the
-    // reader past the surface the popup was opened over.
-    if (!isSameRoute) this.isAppOverlayClosing = false;
+    // reader past the surface the popup was opened over. The query counts as
+    // well as the path: a step back from one Settings entry onto an earlier
+    // one (a link from outside the page pushed the second) lands on the same
+    // path, and a guard left set there would swallow every later dismissal.
+    if (!isSameRoute || !isSameSearch) this.isAppOverlayClosing = false;
     // The feed is a popover over the surface it was opened on; leaving that
     // surface (a feed row's jump to a machine, the sidebar, anything) closes
     // it, like a dropdown would. A switch INTO it from another titlebar popup
@@ -1597,13 +1576,10 @@ export class ShellState {
     // request is a fresh, legitimate ask, not a duplicate.
     if (!isSameRoute && path !== "/inbox")
       this.lastOpenedInboxSelectedId = null;
-    // The panel underneath belongs to the request popup that took its window
-    // over, so it lives exactly as long as /inbox is the route: navigating to
-    // ANY other route -- including another app modal's, like a Get help the
-    // strip or an Electron open-overlay ask raised -- leaves the panel
-    // behind. A modal route that kept it would paint the panel underneath
-    // itself, backdrop and raised strip and all.
-    if (!isSameRoute && path !== "/inbox") this.panelRouteBehindOverlay = null;
+    // The Settings underneath belongs to the request popup opened over it, so
+    // it lives exactly as long as /inbox is the route: navigating to ANY other
+    // route leaves it behind.
+    if (!isSameRoute && path !== "/inbox") this.settingsRouteBehindOverlay = null;
     // The page underneath belongs to the modal that was opened over it; once
     // the route is no longer a modal's, it is (or is not) the route.
     if (!isSameRoute && !isAppOverlayPath(path))
@@ -1611,12 +1587,12 @@ export class ShellState {
     // Pass the query so an app modal opened over a workspace (/help?workspace=)
     // keeps that workspace's accent painting behind it.
     const accentSource = accentSourceForRoute(path, search);
-    // The options overlay and the app modals both keep the workspace surface
-    // mounted behind them, so either still counts as displaying that
-    // workspace -- which is what addresses a verdict to the machine that asked
-    // while its request popup is the current route.
+    // A floating route keeps the workspace surface mounted behind it, so it
+    // still counts as displaying that workspace -- which is what addresses a
+    // verdict to the machine that asked while its request popup is the
+    // current route.
     this.displayedWorkspaceAnyId =
-      workspaceSurfaceIdFromPath(path) ??
+      workspaceDisplayIdFromPath(path) ??
       popoutFromPath(path)?.workspaceAnyId ??
       overlayBehindWorkspaceId(path, search);
     this.paintAccent(accentSource);
@@ -1812,7 +1788,7 @@ export class ShellState {
    * ahead of the two route-based overlays it can be raised over.
    *
    * Keyed on ``displayedWorkspaceAnyId``, which ``handleRouteChanged`` derives
-   * with the same ``workspaceSurfaceIdFromPath`` the router computes the
+   * with the same ``workspaceDisplayIdFromPath`` the router computes the
    * Shell's ``workspaceParam`` from -- the condition the card is rendered
    * under. The two must keep sharing that derivation: a card held through an
    * app-level modal (see ``handleRouteChanged``) is not rendered, and reporting
@@ -1898,18 +1874,126 @@ export class ShellState {
     this.openRecovery = { agentId, isAutoRaised: true };
   }
 
-  openSidebar(anchor: {
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-  }): void {
-    this.sidebarAnchor = anchor;
-    this.isSidebarOpen = true;
+  openWorkspaceSwitcher(): void {
+    this.isAccountSwitcherOpen = false;
+    this.isWorkspaceSwitcherOpen = true;
   }
 
-  closeSidebar(): void {
-    this.isSidebarOpen = false;
+  closeWorkspaceSwitcher(): void {
+    this.isWorkspaceSwitcherOpen = false;
+  }
+
+  /**
+   * The switcher's shortcut: open the workspace menu, or put it away. Nothing
+   * happens in the start flow, which has no bar to hang it from, nor under a
+   * modal that is not one of the bar's flyouts, which holds the window until
+   * it is answered.
+   */
+  toggleWorkspaceSwitcher(): void {
+    if (this.isWorkspaceSwitcherOpen) {
+      this.closeWorkspaceSwitcher();
+      m.redraw();
+      return;
+    }
+    const path = this.currentRoutePath();
+    if (classifyRoute(path, this.currentRouteSearch()).kind === "start") return;
+    if (popoutFromPath(path) !== null) return;
+    const isModalUp =
+      this.errorDialogs.current !== null ||
+      this.clientPermissionPrompt.isOpen ||
+      this.webLogin.isOpen ||
+      this.openRecovery !== null ||
+      this.isShareNotYetCreatedDialogOpen ||
+      // A centered card over the window: the request popup, the AI-keys dialog, the template stepper.
+      ((isAppOverlayPath(path) || overlayBehindWorkspaceId(path, this.currentRouteSearch()) !== null) &&
+        !isTitlebarPopupRoutePath(path)) ||
+      isAnyModalOpen();
+    if (isModalUp) return;
+    this.switchToWorkspaceSwitcher();
+    m.redraw();
+  }
+
+  /** What the workspace menu's search field shows for the shortcut that opens it; null when it has none to show
+   * (turned off, or not yet read). */
+  async workspaceSwitcherShortcutLabel(): Promise<string | null> {
+    return electronBridge.workspaceSwitcherShortcutLabel();
+  }
+
+  /**
+   * Open Settings over what the window shows. `params` say where in it (see
+   * SettingsPage); the workspace on screen rides along as `?workspace=`, so
+   * Settings floats over it (kept mounted) and speaks for it by default.
+   *
+   * Arrived at from another routed flyout, this is a switch, not a stack: that
+   * flyout's history entry is replaced rather than built on.
+   */
+  openSettings(params: Record<string, string> = {}): void {
+    const path = this.currentRoutePath();
+    this.isAccountSwitcherOpen = false;
+    this.isWorkspaceSwitcherOpen = false;
+    // Opened over another floating route, the page behind is already the one that route remembered.
+    if (!isAppOverlayPath(path)) this.rememberPageBehindOverlay();
+    const agentScoped = this.displayedWorkspaceAgentId();
+    m.route.set(
+      SETTINGS_PATH,
+      this.overlayQuery(agentScoped === null ? params : { ...params, workspace: agentScoped }),
+      isTitlebarPopupRoutePath(path) ? { replace: true } : undefined,
+    );
+  }
+
+  /** The workspace the bar is about: the one on screen, else the one a workspace page (its backups, its recovery)
+   * names; null on a hub page. */
+  private barWorkspaceAgentId(): string | null {
+    const displayed = this.displayedWorkspaceAgentId();
+    if (displayed !== null) return displayed;
+    const context = classifyRoute(this.currentRoutePath(), this.currentRouteSearch());
+    return context.kind === "workspace" && context.workspaceAnyId !== null
+      ? this.stores.workspaces.toAgentScopedId(context.workspaceAnyId)
+      : null;
+  }
+
+  /** The gear: Settings on the workspace the bar is about, at its Permissions while its agents wait on an answer. */
+  openSettingsFromBar(): void {
+    const agentId = this.barWorkspaceAgentId();
+    if (agentId === null) {
+      this.openSettings();
+      return;
+    }
+    const params: Record<string, string> = { tab: "workspace", settings_workspace: agentId };
+    if (this.stores.requests.hasPendingForWorkspace(agentId)) params.group = "permissions";
+    this.openSettings(params);
+  }
+
+  /**
+   * The bar's Share: Settings at Sharing, on the whole workspace the bar is
+   * about. With Settings already there it puts Settings away, as a second
+   * press of any flyout's button does. On a creation page the workspace does
+   * not exist yet, and a dialog says so.
+   */
+  pressShare(): void {
+    const path = this.currentRoutePath();
+    const search = this.currentRouteSearch();
+    this.isAccountSwitcherOpen = false;
+    this.isWorkspaceSwitcherOpen = false;
+    if (classifyRoute(path, search).kind === "creating") {
+      this.isShareNotYetCreatedDialogOpen = true;
+      return;
+    }
+    const agentId = this.barWorkspaceAgentId();
+    if (agentId === null) return;
+    if (path === SETTINGS_PATH) {
+      const params = new URLSearchParams(search);
+      const isOnWholeWorkspaceSharing =
+        params.get("tab") === "workspace" &&
+        params.get("group") === "sharing" &&
+        (params.get("settings_workspace") ?? params.get("workspace")) === agentId &&
+        !params.get("share_target");
+      if (isOnWholeWorkspaceSharing) {
+        this.dismissAppOverlay();
+        return;
+      }
+    }
+    this.openSettings({ tab: "workspace", group: "sharing", settings_workspace: agentId });
   }
 
   /** The displayed workspace's stable agent id, or null on a hub page. */
@@ -1942,37 +2026,36 @@ export class ShellState {
    * Putting a route-backed surface away is a navigation, and an arriving
    * navigation ordinarily closes the feed, so the feed is armed across that
    * one arrival. Opened from a surface with nothing floating, there is
-   * nothing to put away and nothing to arm. The options panel's entry is
-   * REPLACED, like the other strip switches, so the panel is not one Back
-   * away under the feed.
+   * nothing to put away and nothing to arm. A flyout's entry is REPLACED,
+   * like the other strip switches, so the flyout is not one Back away under
+   * the feed.
    */
   switchToNotifications(): void {
-    this.isNotificationsArmed =
-      this.dismissAppOverlay() ||
-      this.closeWorkspaceOverlay({ replace: true });
+    this.isAccountSwitcherOpen = false;
+    this.isWorkspaceSwitcherOpen = false;
+    this.isNotificationsArmed = this.dismissAppOverlay();
     this.openNotifications();
   }
 
   /**
-   * Put Get help away by routing straight to the machine it names, rather than
-   * back through history, reporting whether that applied.
+   * Put a routed flyout (Settings, Get help) away by routing straight to the
+   * machine it names, rather than back through history, reporting whether
+   * that applied.
    *
    * The entry `history.back()` returns to is not reliably the machine: it can
-   * be the docked options panel (which the feed would then sit on top of), a
-   * request popup that has since been answered, or another /help entry. Back
-   * onto another /help is a dismissal that never visibly lands, so the close X
-   * and Escape stay inert behind `isAppOverlayClosing`. `replace` so the
-   * machine is not left one Back away from the modal again.
+   * be a request popup that has since been answered, or another flyout's
+   * entry. Back onto one of those is a dismissal that never visibly lands, so
+   * Escape stays inert behind `isAppOverlayClosing`. `replace` so the machine
+   * is not left one Back away from the flyout again.
    *
-   * Only with a machine named and no remembered page: the recovery page's Get
-   * help forwards the very machine nobody could load (see
+   * Only with a machine named and no remembered page: the recovery page's
+   * flyouts forward the very machine nobody could load (see
    * `pageRouteBehindOverlay`), and with no `?workspace=` at all history is the
-   * only thing that knows where this came from -- and no popup can be waiting
-   * there to come back up.
+   * only thing that knows where this came from.
    */
-  private dismissHelpToItsMachine(): boolean {
+  private dismissFlyoutToItsMachine(): boolean {
     const path = this.currentRoutePath();
-    if (path !== "/help" || this.pageRouteBehindOverlay !== null) return false;
+    if (!isTitlebarPopupRoutePath(path) || this.pageRouteBehindOverlay !== null) return false;
     const behind = overlayBehindWorkspaceId(path, this.currentRouteSearch());
     if (behind === null) return false;
     m.route.set(`/workspace/${behind}`, undefined, { replace: true });
@@ -1985,13 +2068,15 @@ export class ShellState {
    * interface is healthy. The one place the bug button's route is built, so
    * the titlebar's own button and its raised copy open the identical page.
    *
-   * Arrived at from another titlebar popup's route (the options panel or the
-   * request popup, via the raised strip), this is a switch, not a stack: that
-   * popup's history entry is replaced rather than built on. (The panel a
-   * request popup was remembering is let go by handleRouteChanged when the
-   * /help route lands -- the panel lives exactly as long as /inbox does.)
+   * Arrived at from another flyout's route (Settings, via the raised strip),
+   * this is a switch, not a stack: that flyout's history entry is replaced
+   * rather than built on. (The Settings a request popup was remembering is let
+   * go by handleRouteChanged when the /help route lands -- it lives exactly as
+   * long as /inbox does.)
    */
   openHelp(): void {
+    this.isAccountSwitcherOpen = false;
+    this.isWorkspaceSwitcherOpen = false;
     const isSwitching = isTitlebarPopupRoutePath(this.currentRoutePath());
     const routeOptions = isSwitching ? { replace: true } : undefined;
     const agentScoped = this.displayedWorkspaceAgentId();
@@ -2090,9 +2175,9 @@ export class ShellState {
       workspaceName:
         this.stores.workspaces.accentEntry(workspaceAgentId)?.name ?? "",
     });
-    // Same switch-not-stack rule as `openHelp`: raised over the options panel
-    // or the request popup, this takes that surface's entry rather than
-    // leaving it one Back away underneath.
+    // Same switch-not-stack rule as `openHelp`: raised over another flyout,
+    // this takes that flyout's entry rather than leaving it one Back away
+    // underneath.
     const isSwitching =
       isHelpPending || isTitlebarPopupRoutePath(this.currentRoutePath());
     m.route.set(

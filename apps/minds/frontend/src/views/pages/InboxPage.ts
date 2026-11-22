@@ -2,8 +2,8 @@
 // request is reviewed on, and it opens only when the user asks -- the in-chat
 // card's "Review & respond" button or a "Waiting on you" row. An app-overlay
 // route, so the Shell floats it as a centered card over the surface it was
-// opened from -- the live workspace (?workspace=) or the options panel --
-// which stays mounted behind it.
+// opened from -- the live workspace (?workspace=) or Settings -- which stays
+// mounted behind it.
 //
 // Port of the legacy Inbox.jinja popup shell: an eyebrow naming the asking
 // machine, and ONE request at a time (never a master/detail list). The request
@@ -27,10 +27,10 @@ import { requestDetailView } from "./inbox/RequestDetail";
 function eyebrow(model: InboxModel): m.Children {
   const selected = model.cards.find((card) => card.id === model.selectedId) ?? null;
   const { shell } = getAppContext();
-  // Only when there IS a Permissions pane to go back to -- opened from the
-  // in-chat card there is no menu above this, and a back arrow would promise
-  // one. Closing still leaves the window; this is the way back UP.
-  const isOpenedFromPermissions = shell.panelRouteBehindOverlay !== null;
+  // Only when there IS a Permissions page to go back to -- opened from the
+  // in-chat card there is no list above this, and a back arrow would promise
+  // one.
+  const isOpenedFromPermissions = shell.settingsRouteBehindOverlay !== null;
   return m(
     "span",
     {
@@ -57,7 +57,7 @@ function eyebrow(model: InboxModel): m.Children {
               class:
                 "-ml-2 mr-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md " +
                 "text-secondary hover:text-primary hover:bg-fill-hover cursor-pointer",
-              onclick: () => shell.returnToPanelBehindOverlay(),
+              onclick: () => shell.returnToSettingsBehindOverlay(),
             },
             m(Icon16, { name: "chevron-left", size: "lg" }),
           )
@@ -78,14 +78,10 @@ function eyebrow(model: InboxModel): m.Children {
 
 function detailPane(model: InboxModel): m.Children {
   if (!model.isListLoaded || model.isDetailLoading) {
-    // Identified so the Shell can tell the popup has nothing to size to yet:
-    // opened over the Permissions panel it holds that window's size rather
-    // than shrinking to a spinner and growing again once the request lands.
-    //
-    // The min-height is for every other way in, where there is no window to
-    // hold: a card sized to a spinner alone is barely a strip, so the request
-    // landing would blow it open from almost nothing. Roughly the height of a
-    // request, so what follows is a small settle rather than an expansion.
+    // The min-height keeps the card from opening as a strip: sized to a
+    // spinner alone it is barely one, so the request landing would blow it
+    // open from almost nothing. Roughly the height of a request, so what
+    // follows is a small settle rather than an expansion.
     return m(
       "div#request-popup-loading",
       { class: "flex justify-center items-center pt-10 min-h-[220px]" },
@@ -136,7 +132,7 @@ function InboxPageComponent(): m.Component {
         // none are), or, opened from the chat, back to the machine the card is
         // in.
         onClose: () => {
-          if (!shell.returnToPanelAfterRequest()) shell.closeAppOverlay();
+          if (!shell.returnToSettingsAfterRequest()) shell.closeAppOverlay();
         },
         onResolved: (resolved) => shell.notifyRequestResolved(resolved),
         onGone: (requestId) => shell.forgetWaitingRequest(requestId),

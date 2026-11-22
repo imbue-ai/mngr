@@ -1,7 +1,7 @@
 """/ui/api routes owned by tranche T3 (workspace options/settings).
 
-One read endpoint serves everything the workspace options panel and the
-standalone settings page render: ``GET /ui/api/workspaces/<agent_id>/options``.
+One read endpoint serves everything a workspace's General, Sharing, Backup and
+Updates pages in Settings render: ``GET /ui/api/workspaces/<agent_id>/options``.
 
 Writes deliberately have no /ui twin here: rename, color, account
 association, destroy, and the machine-sharing document all ride the existing
@@ -108,7 +108,7 @@ class WorkspaceOptionsAccount(FrozenModel):
 
 
 class WorkspaceOptionsData(FrozenModel):
-    """Everything the workspace options panel + settings page render for one workspace."""
+    """Everything a workspace's pages in Settings (bar Permissions) render for one workspace."""
 
     agent_id: str = Field(description="The workspace's stable identity")
     host_id: str = Field(description="The machine's host-<hex> coordinate (keys the sharing API); '' when unknown")

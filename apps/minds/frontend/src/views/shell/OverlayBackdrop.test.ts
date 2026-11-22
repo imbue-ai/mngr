@@ -13,7 +13,7 @@ describe("OverlayBackdrop alignment", () => {
     expect(className).not.toContain("items-center");
   });
 
-  it("keeps the docked workspace-options overlay vertically centered", () => {
+  it("centers its card below the titlebar when it does not cover the whole window", () => {
     const root = renderRoot(OverlayBackdrop, {
       backdropId: "b",
       onDismiss: () => undefined,

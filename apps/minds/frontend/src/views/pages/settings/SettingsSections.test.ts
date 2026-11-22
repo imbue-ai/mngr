@@ -16,7 +16,10 @@ import {
   SettingsModel,
   type SettingsOverview,
 } from "../../../models/settings";
-import { SettingsSections } from "./SettingsSections";
+import { KeyboardShortcutsSection } from "./KeyboardShortcutsSection";
+import { studioSettingsPanel } from "./SettingsSections";
+import { createEmptyStores } from "../../../models/boot";
+import { ShellState } from "../../shell/shell-state";
 import { Button } from "../../components/Button";
 import { jsonResponse, settingsOverview } from "../../../testing";
 import type { AnyVnode } from "../../../testing";
@@ -30,7 +33,6 @@ import {
   collectText,
   collectVnodes,
   renderDeep,
-  renderRoot,
   renderedText,
   setFailedImport,
   unreadableChromeProfileOutcome,
@@ -85,9 +87,14 @@ function updatesModel(overrides: Partial<SettingsModel> = {}): SettingsModel {
   return Object.assign(model, overrides);
 }
 
+/** The model's active section's panel, as Settings' Studio tab draws it. */
+function drawPanel(model: SettingsModel): m.Children {
+  return studioSettingsPanel(model, { newPassword: "", confirmPassword: "" });
+}
+
 function panelText(model: SettingsModel): string {
   return renderedText(
-    renderDeep(renderRoot(SettingsSections, { model })) as m.Vnode,
+    renderDeep(drawPanel(model)) as m.Vnode,
   );
 }
 
@@ -125,7 +132,7 @@ function primaryLabels(node: unknown): string[] {
 
 /** Whether the panel's Check now control is refused. */
 function isCheckDisabled(model: SettingsModel): boolean {
-  return collectVnodes(renderRoot(SettingsSections, { model })).some((node) => {
+  return collectVnodes(drawPanel(model)).some((node) => {
     const label = collectText(node).join("").trim();
     if (label !== "Check now" && label !== "Checking...") return false;
     const attrs = (node as { attrs?: Record<string, unknown> | null }).attrs;
@@ -247,8 +254,8 @@ describe("the Updates panel", () => {
     const command = "/x/scripts/install-linux.sh --version latest";
     await withMindsNative({}, async () => {
       const tree = renderDeep(
-        renderRoot(SettingsSections, {
-          model: updatesModel({
+        drawPanel(
+          updatesModel({
             updateState: {
               ...ON_STABLE,
               status: {
@@ -258,7 +265,7 @@ describe("the Updates panel", () => {
               },
             },
           }),
-        }),
+        ),
       );
 
       expect(allText(byId(tree, "update-source-install-command"))).toBe(command);
@@ -309,7 +316,7 @@ describe("the Updates panel", () => {
       expect(text.indexOf("Stable")).toBeLessThan(text.indexOf("Beta"));
       expect(text.indexOf("Beta")).toBeLessThan(text.indexOf("Alpha"));
       expect(
-        channelRadios(renderRoot(SettingsSections, { model })),
+        channelRadios(drawPanel(model)),
       ).toHaveLength(3);
     });
   });
@@ -327,7 +334,7 @@ describe("the Updates panel", () => {
       expect(text).not.toContain("Alpha");
       expect(text).not.toContain("Internal channels");
       expect(
-        channelRadios(renderRoot(SettingsSections, { model })),
+        channelRadios(drawPanel(model)),
       ).toHaveLength(1);
     });
   });
@@ -344,7 +351,7 @@ describe("the Updates panel", () => {
         available: ["stable"],
       };
       const model = updatesModel({ updateState: stranded });
-      const radios = channelRadios(renderRoot(SettingsSections, { model }));
+      const radios = channelRadios(drawPanel(model));
 
       expect(panelText(model)).toContain("Alpha");
       expect(radios).toHaveLength(2);
@@ -355,7 +362,7 @@ describe("the Updates panel", () => {
   it("keeps alpha behind a disclosure, so it is never a stray click", async () => {
     await withMindsNative({}, async () => {
       const model = updatesModel({});
-      const root = renderRoot(SettingsSections, { model });
+      const root = drawPanel(model);
       const details = collectVnodes(root).filter(
         (vnode) => vnode.tag === "details",
       );
@@ -374,7 +381,7 @@ describe("the Updates panel", () => {
     await withMindsNative({}, async () => {
       const onAlpha: UpdateState = { ...ON_STABLE, channel: "alpha" };
       const model = updatesModel({ updateState: onAlpha });
-      const root = renderRoot(SettingsSections, { model });
+      const root = drawPanel(model);
       const details = collectVnodes(root).filter(
         (vnode) => vnode.tag === "details",
       );
@@ -443,7 +450,7 @@ describe("the Updates panel", () => {
     await withMindsNative({}, async () => {
       const model = updatesModel({ peekedChannels: unpublishedAlpha });
       const text = panelText(model);
-      const radios = channelRadios(renderRoot(SettingsSections, { model }));
+      const radios = channelRadios(drawPanel(model));
 
       expect(text).toContain("Unavailable right now.");
       expect(radios).toHaveLength(3);
@@ -483,7 +490,7 @@ describe("the Updates panel", () => {
       const loadAgain = vi.spyOn(broken, "loadUpdateState").mockResolvedValue();
 
       const notice = collectVnodes(
-        renderRoot(SettingsSections, { model: broken }),
+        drawPanel(broken),
       ).find((vnode) => attrsOf(vnode).id === "update-state-error");
       expect(notice).toBeDefined();
       expect(attrsOf(notice!).error).toBe(broken.updateError);
@@ -595,7 +602,7 @@ describe("the Updates panel", () => {
             },
           },
         });
-        const tree = renderDeep(renderRoot(SettingsSections, { model }));
+        const tree = renderDeep(drawPanel(model));
         const notice = byId(tree, "update-check-failure");
         expect(primaryLabels(notice)).toEqual(["Try again"]);
         expect(allText(notice)).toContain("Report a bug");
@@ -616,7 +623,7 @@ describe("the Updates panel", () => {
     await withMindsNative({}, async () => {
       const staged = { ...ON_STABLE, downloadedVersion: "0.5.0" };
       const primaries = (model: SettingsModel): string[] =>
-        primaryLabels(renderDeep(renderRoot(SettingsSections, { model })));
+        primaryLabels(renderDeep(drawPanel(model)));
       const afterFailedCheck = (kind: UpdateFailureKind): SettingsModel =>
         updatesModel({
           updateState: {
@@ -664,7 +671,7 @@ describe("the Updates panel", () => {
         },
       });
       expect(
-        renderedText(renderRoot(SettingsSections, { model: downloading })),
+        renderedText(drawPanel(downloading) as m.Vnode),
       ).toContain("Downloading 0.5.0");
       expect(isCheckDisabled(downloading)).toBe(true);
       // Idle, it is live again.
@@ -769,93 +776,29 @@ describe("the Updates panel", () => {
   });
 });
 
-/** The sections view, rendered from a bare model: every panel guards on a
- * null overview and renders nothing, so the layout is exercised without a
- * payload fixture or any network. */
-function renderSections(
-  model: SettingsModel = new SettingsModel(),
-): AnyVnode[] {
-  const instance = SettingsSections() as unknown as m.Component;
-  const vnode = m(instance, { model } as unknown as m.Attributes) as m.Vnode;
-  const rendered = (
-    instance.view as unknown as (v: m.Vnode) => m.Children
-  ).call(instance, vnode);
-  return rendered as unknown as AnyVnode[];
-}
+describe("studioSettingsPanel", () => {
+  it("draws the Keyboard shortcuts section for that section, which asks the main process itself", () => {
+    const model = new SettingsModel(undefined, () => {});
+    model.selectSection("keyboard-shortcuts");
 
-/** The nav column and the panel column of the settings pane, in that order. */
-function columns(): AnyVnode[] {
-  const row = renderSections()[0];
-  return row.children as AnyVnode[];
-}
-
-// The nav lists the sections this build can service, which it reads off the
-// native bridge, and vitest runs without a `window` -- so every render below
-// declares which build it is.
-describe("SettingsSections layout", () => {
-  it("scrolls the section list and the panel independently of each other", async () => {
-    // Regression guard for the bug this pane replaced: the app-overlay card was
-    // the only scroller, so reading down a long panel carried the section list
-    // off the top of the card with it.
-    await withMindsNative({}, async () => {
-      const [nav, panel] = columns();
-      expect(nav.tag).toBe("nav");
-      expect(nav.attrs?.["aria-label"]).toBe("Settings sections");
-      for (const column of [nav, panel]) {
-        expect(classTokensOf(column)).toEqual(
-          expect.arrayContaining(["overflow-y-auto", "min-h-0"]),
-        );
-      }
-    });
+    expect((drawPanel(model) as AnyVnode).tag).toBe(KeyboardShortcutsSection);
   });
 
-  it("takes a bounded height from the card rather than growing to its content", async () => {
-    // items-start (the old row) leaves both columns content-height, so their
-    // overflow never bites however the card above them is shaped.
+  it("draws a panel of its own for every section the rail can offer", async () => {
+    // The Updates and This computer panels read the stores; the rest only the window's account.
+    const shell = new ShellState(createEmptyStores());
+    registerAppContext({ stores: shell.stores, shell });
     await withMindsNative({}, async () => {
-      const row = renderSections()[0];
-      expect(classTokensOf(row)).toEqual(
-        expect.arrayContaining(["flex-1", "min-h-0"]),
-      );
-      expect(classTokensOf(row)).not.toContain("items-start");
-    });
-  });
+      const model = new SettingsModel(undefined, () => {});
+      model.overview = settingsOverview();
+      const headings = SETTINGS_SECTIONS.map((section) => {
+        model.selectSection(section.name);
+        const heading = collectVnodes(renderDeep(drawPanel(model))).find((vnode) => vnode.tag === "h2");
+        return heading === undefined ? "" : allText(heading);
+      });
 
-  it("keeps the group heading and every section in the nav", async () => {
-    await withMindsNative({}, async () => {
-      const [nav] = columns();
-      const navText = collectText(nav).join(" ");
-      expect(navText).toContain("Other");
-      for (const section of SETTINGS_SECTIONS) {
-        expect(navText, section.label).toContain(section.label);
-      }
-    });
-  });
-
-  it("keeps Updates in the nav in the browser build, for the machine-update window", async () => {
-    // There is no binary to update in a browser, but machines update the same
-    // way everywhere, and their window is configured on this panel.
-    await withMindsNative(null, async () => {
-      const navText = collectText(columns()[0]).join(" ");
-      expect(navText).toContain("Updates");
-      expect(navText).toContain("Error reporting");
-    });
-  });
-
-  it("styles its nav entries like every other pane's", async () => {
-    // "The main page's settings have a different left menu" -- they no longer
-    // do: the entries come from the shared recipe, not a fifth one.
-    await withMindsNative({}, async () => {
-      const [nav] = columns();
-      const entries = collectVnodes(nav).filter(
-        (vnode) => vnode.tag === "button",
-      );
-      expect(entries).toHaveLength(SETTINGS_SECTIONS.length);
-      for (const entry of entries) {
-        expect(classTokensOf(entry)).toEqual(
-          expect.arrayContaining(["type-body", "rounded-md", "text-primary"]),
-        );
-      }
+      expect(headings).not.toContain("");
+      expect(new Set(headings).size).toBe(SETTINGS_SECTIONS.length);
     });
   });
 });
@@ -885,10 +828,10 @@ async function notificationsModel(
   return model;
 }
 
-describe("SettingsSections notifications panel", () => {
+describe("the Notifications panel", () => {
   it("offers the master toggle and the three-style radio, current style checked", async () => {
     vi.stubGlobal("window", {});
-    const panel = renderSections(await notificationsModel());
+    const panel = drawPanel(await notificationsModel());
     const toggle = collectVnodes(panel).find(
       (vnode) => attrsOf(vnode).id === "notifications-enabled-toggle",
     );
@@ -925,7 +868,7 @@ describe("SettingsSections notifications panel", () => {
       style: "both",
       version: "np-1",
     };
-    const panel = renderSections(model);
+    const panel = drawPanel(model);
     expect(
       collectVnodes(panel).some(
         (vnode) => attrsOf(vnode).role === "radiogroup",
@@ -944,7 +887,7 @@ describe("SettingsSections notifications panel", () => {
       writtenBodies.push(body);
       return jsonResponse({ version: "np-2" });
     });
-    const panel = renderSections(model);
+    const panel = drawPanel(model);
     const osRadio = collectVnodes(panel).find(
       (vnode) => attrsOf(vnode).id === "notification-style-os",
     );
@@ -965,7 +908,7 @@ describe("SettingsSections notifications panel", () => {
     };
     model.testNotificationResult = "Sent.";
 
-    const panel = renderSections(model);
+    const panel = drawPanel(model);
 
     const button = collectVnodes(panel).find(
       (vnode) => attrsOf(vnode).id === "notifications-send-test",
@@ -990,7 +933,7 @@ describe("SettingsSections notifications panel", () => {
       version: "np-1",
     };
 
-    const panel = renderSections(model);
+    const panel = drawPanel(model);
 
     const notice = collectVnodes(panel).find((vnode) =>
       allText(vnode).includes("Open System Settings"),
@@ -1019,13 +962,13 @@ describe("SettingsSections notifications panel", () => {
       version: "np-1",
     };
 
-    expect(allText(renderSections(model))).not.toContain(
+    expect(allText(drawPanel(model))).not.toContain(
       "Couldn't open System Settings",
     );
 
     await model.openNotificationOsSettings();
 
-    expect(allText(renderSections(model))).toContain(
+    expect(allText(drawPanel(model))).toContain(
       "Couldn't open System Settings",
     );
   });
@@ -1046,7 +989,7 @@ describe("SettingsSections notifications panel", () => {
         ...overrides,
       };
 
-      const panel = renderSections(model);
+      const panel = drawPanel(model);
 
       expect(allText(panel)).not.toContain("Open System Settings");
     },
@@ -1061,7 +1004,7 @@ describe("SettingsSections notifications panel", () => {
       version: "np-1",
     };
 
-    const panel = renderSections(model);
+    const panel = drawPanel(model);
 
     expect(allText(panel)).not.toContain("Open System Settings");
   });
@@ -1075,7 +1018,7 @@ describe("SettingsSections notifications panel", () => {
       is_enabled: false,
       style: "cards",
     });
-    const panel = renderSections(model);
+    const panel = drawPanel(model);
     const notice = collectVnodes(panel).find(
       (vnode) => attrsOf(vnode).id === "notification-prefs-error",
     );
@@ -1092,7 +1035,7 @@ describe("SettingsSections notifications panel", () => {
   });
 });
 
-describe("SettingsSections master password panel", () => {
+describe("the master password panel", () => {
   it("names each account that couldn't be updated and keeps its reason behind See details", async () => {
     vi.stubGlobal("window", {});
     const model = new SettingsModel(
@@ -1114,7 +1057,7 @@ describe("SettingsSections master password panel", () => {
     model.selectSection("backups");
     await model.changeMasterPassword("p", "p");
 
-    const notice = collectVnodes(renderSections(model)).find(
+    const notice = collectVnodes(drawPanel(model)).find(
       (vnode) => attrsOf(vnode).id === "master-password-result",
     ) as AnyVnode;
     const listText = allText(attrsOf(notice).content);
@@ -1130,7 +1073,7 @@ describe("SettingsSections master password panel", () => {
       details: "c@d.com: locked on this device",
     });
     expect(
-      allText(renderDeep(renderRoot(SettingsSections, { model }))),
+      allText(renderDeep(drawPanel(model))),
     ).toContain("Report a bug");
   });
 
@@ -1148,7 +1091,7 @@ describe("SettingsSections master password panel", () => {
     model.selectSection("backups");
     await model.changeMasterPassword("p", "p");
 
-    const text = allText(renderDeep(renderRoot(SettingsSections, { model })));
+    const text = allText(renderDeep(drawPanel(model)));
 
     expect(text).toContain("a@b.com: updated");
     expect(text).toContain("Master password updated for every account.");
@@ -1166,7 +1109,7 @@ describe("Display panel", () => {
 
   it("offers every zoom size with the stored one selected", async () => {
     await withMindsNative({}, async () => {
-      const tree = renderRoot(SettingsSections, { model: displayModel(125) });
+      const tree = drawPanel(displayModel(125));
       const select = collectVnodes(tree).find(
         (vnode) => vnode.tag === "select",
       );
@@ -1195,7 +1138,7 @@ describe("Display panel", () => {
 
   it("points at the browser's own zoom when the shell cannot scale windows", async () => {
     await withMindsNative(null, async () => {
-      const tree = renderRoot(SettingsSections, { model: displayModel(null) });
+      const tree = drawPanel(displayModel(null));
       expect(
         collectVnodes(tree).find((vnode) => vnode.tag === "select"),
       ).toBeUndefined();
@@ -1210,7 +1153,7 @@ describe("Display panel", () => {
       const model = displayModel(100);
       model.displayZoomError = "Unknown display zoom 137";
       const text = collectText(
-        renderDeep(renderRoot(SettingsSections, { model })),
+        renderDeep(drawPanel(model)),
       ).join(" ");
       expect(text).toContain("Unknown display zoom 137");
     });
@@ -1225,7 +1168,7 @@ describe("the Browser cookies panel", () => {
   }
 
   function runButton(model: SettingsModel): AnyVnode | undefined {
-    return collectVnodes(renderRoot(SettingsSections, { model })).find(
+    return collectVnodes(drawPanel(model)).find(
       (node) => attrsOf(node).id === "browser-import-run",
     );
   }
@@ -1260,7 +1203,7 @@ describe("the Browser cookies panel", () => {
         detail: "Error: closed",
       }),
     );
-    const shown = allText(renderDeep(renderRoot(SettingsSections, { model: failed })));
+    const shown = allText(renderDeep(drawPanel(failed)));
     expect(shown).toContain("Imbue Studio couldn't import your Chrome cookies.");
     expect(shown).toContain("See details");
   });
@@ -1273,7 +1216,7 @@ describe("the Browser cookies panel", () => {
 
       // Rendered through: the notice is a component of its own, so a shallow
       // render would show neither its text nor its button.
-      const nodes = collectVnodes(renderDeep(renderRoot(SettingsSections, { model })));
+      const nodes = collectVnodes(renderDeep(drawPanel(model)));
       expect(allText(nodes)).toContain("Full Disk Access");
       expect(allText(nodes)).not.toContain("EPERM");
       const openButton = byId(nodes, "browser-import-open-full-disk-access");
@@ -1286,7 +1229,7 @@ describe("the Browser cookies panel", () => {
     const model = browserImportModel();
     setFailedImport(model.browserImport, chromeMissingOutcome());
 
-    const shown = allText(renderDeep(renderRoot(SettingsSections, { model })));
+    const shown = allText(renderDeep(drawPanel(model)));
 
     expect(shown).toContain("Imbue Studio couldn't find Google Chrome's cookies on this computer.");
     expect(shown).toContain("See details");

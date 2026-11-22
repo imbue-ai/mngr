@@ -1,4 +1,4 @@
-// Model for the options panel's Permissions tab: the machine's whole toggle
+// Model for a workspace's Permissions in Settings: the machine's whole toggle
 // tree plus the single-flip writes that replace it.
 //
 // A flip POSTs ONLY the flipped permission and its new state; the server
@@ -14,7 +14,7 @@
 // something the machine has confirmed.
 //
 // Loading is separate from WorkspaceOptionsModel's: an unreachable latchkey
-// gateway must not take the Share or Settings tabs down with it.
+// gateway must not take Sharing or the workspace's own settings down with it.
 //
 // Add connection has two writes, because a service has two ways of being
 // connected: the settings page's browser sign-in, and -- for the services

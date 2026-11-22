@@ -317,9 +317,9 @@ export type RecoveryIntent = "start" | "restart" | null;
 /** The Recovery deep-link for a workspace.
  *
  * `returnTo` is encoded twice: Mithril decodes the whole route once before it
- * splits off the query, so a return path carrying its own query (the options
- * panel's ?tab=share) would otherwise end the outer query early and arrive
- * empty. The second decode is the query parser's own. */
+ * splits off the query, so a return path carrying its own query (Settings'
+ * ?tab=workspace&group=sharing) would otherwise end the outer query early and
+ * arrive empty. The second decode is the query parser's own. */
 export function recoveryRoute(
   agentId: string,
   returnTo: string,

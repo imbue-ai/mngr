@@ -566,9 +566,9 @@ def test_sync_pass_signs_out_an_account_whose_refresh_the_connector_refuses(
     assert cli.signed_out_accounts == [_EMAIL]
     assert imbue_cloud_provider_name_for_user(_USER_ID) not in _parsed(settings_path)["providers"]
     assert is_provider_gone_at_wake == [True]
-    # The user hears of it: one banner naming the account, landing on the accounts page.
+    # The user hears of it: one banner naming the account, landing on Settings' Accounts tab.
     assert [(request.title, request.subtitle, request.url) for request in dispatcher.dispatched] == [
-        (_EMAIL, ACCOUNT_SIGNED_OUT_TITLE, f"/accounts?account={_USER_ID}")
+        (_EMAIL, ACCOUNT_SIGNED_OUT_TITLE, f"/settings?tab=accounts&account={_USER_ID}")
     ]
 
 

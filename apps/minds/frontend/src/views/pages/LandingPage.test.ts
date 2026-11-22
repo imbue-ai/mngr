@@ -52,7 +52,8 @@ describe("shouldRedirectToStartFlow", () => {
 });
 
 describe("otherAccountsWithWorkspaces", () => {
-  const ALICE = accountEntry({ user_id: "user-alice", email: "alice@example.com" });
+  // Labelled by email, as the account menu labels them, whatever name the account carries.
+  const ALICE = accountEntry({ user_id: "user-alice", email: "alice@example.com", display_name: "Alice Liddell" });
   const BOB = accountEntry({ user_id: "user-bob", email: "bob@example.com", display_name: "Bob" });
   const GONE = accountEntry({ user_id: "user-gone", email: "gone@example.com" });
 
@@ -201,14 +202,14 @@ async function initSettledDeviceHub(options: {
 }
 
 describe("the other-accounts notice", () => {
-  const ALICE = accountEntry({ user_id: "user-alice", email: "alice@example.com" });
+  const ALICE = accountEntry({ user_id: "user-alice", email: "alice@example.com", display_name: "Alice Liddell" });
 
   async function drawSettledDeviceHub(countByAccountId: Record<string, number>) {
     const { shell, view } = await initSettledDeviceHub({ signedIn: [ALICE], countByAccountId });
     return { shell, root: view() };
   }
 
-  it("offers the account that has workspaces, and choosing it switches the window", async () => {
+  it("offers the account that has workspaces by its email, and choosing it switches the window", async () => {
     const { shell, root } = await drawSettledDeviceHub({ "user-alice": 4 });
     const switchAccount = vi.spyOn(shell, "switchAccount").mockResolvedValue(undefined);
 

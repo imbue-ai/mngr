@@ -257,31 +257,33 @@ export class NotificationGestures {
   }
 
   /** The system-event gesture: the route the event names, else the workspace's
-   * backups page, or the accounts page (where the backup quota lives) for an
-   * account-level event, opened as this window's overlay: an entry that names
-   * an account only reaches that account's windows. */
+   * backups page, or Settings' Accounts tab (where the backup quota lives)
+   * for an account-level event, opened as this window's overlay: an entry that
+   * names an account only reaches that account's windows. */
   openSystemEvent(workspaceAgentId: string, linkPath = ""): void {
     if (linkPath !== "") {
       m.route.set(linkPath);
       return;
     }
     if (workspaceAgentId === "") {
-      m.route.set("/accounts", this.context?.overlayQuery({}));
+      const place = { tab: "accounts" };
+      m.route.set("/settings", this.context?.overlayQuery(place) ?? place);
       return;
     }
     m.route.set(`/workspace/${this.agentScopedIdOf(workspaceAgentId)}/backups`);
   }
 
-  /** A toast's link to a workspace's Client permissions: the options panel's
-   * Permissions pane floated over the workspace, at that section. */
+  /** A toast's link to a workspace's Client permissions: Settings floated over
+   * the workspace, at that section of its Permissions. */
   openClientPermissions(workspaceAgentId: string): void {
-    m.route.set(
-      `/workspace/${this.agentScopedIdOf(workspaceAgentId)}/options`,
-      {
-        tab: "permissions",
-        section: CLIENT_PERMISSIONS_SECTION,
-      },
-    );
+    const agentId = this.agentScopedIdOf(workspaceAgentId);
+    const place = {
+      workspace: agentId,
+      tab: "workspace",
+      group: "permissions",
+      perm_section: CLIENT_PERMISSIONS_SECTION,
+    };
+    m.route.set("/settings", this.context?.overlayQuery(place) ?? place);
   }
 }
 

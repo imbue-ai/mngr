@@ -3,7 +3,7 @@ Feature: Post-login destination
   The decision is ordered.
   The one-time error-reporting consent screen precedes every other destination, so a user who has not answered it is sent to "/" regardless of any requested destination.
   A caller-supplied return destination is honored next, but only when it is a safe same-origin path -- "safe" is the no-open-redirects predicate, defined in browser-authorization/ and not restated here.
-  Absent a usable return destination, the default depends on whether the user has any workspace yet: the account-management page if they do, the home page ("/") if they do not -- which, per home-page.feature, shows the new-workspace form once the installation's onboarding is complete and otherwise hands over to the start flow.
+  Absent a usable return destination, the default depends on whether the user has any workspace yet: Settings on its Accounts tab if they do, the home page ("/") if they do not -- which, per home-page.feature, shows the new-workspace form once the installation's onboarding is complete and otherwise hands over to the start flow.
   The session gate on "/post-login", and the confinement of the return destination to the origin, are access-control facts specified in browser-authorization/.
 
   @consent-first
@@ -28,5 +28,5 @@ Feature: Post-login destination
 
     Examples:
       | workspaces             | destination                                                                                  |
-      | at least one workspace | the account-management page                                                                  |
+      | at least one workspace | Settings on its Accounts tab                                                                 |
       | no workspaces          | "/" (the home page: the new-workspace form, or the start flow while onboarding is incomplete) |

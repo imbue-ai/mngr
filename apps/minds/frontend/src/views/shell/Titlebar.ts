@@ -1,12 +1,12 @@
-// The fixed 38px titlebar: breadcrumb (home / workspace / page), workspace
-// icon-tabs and the status pill after them, notification bell, bug-report
-// button, and non-mac window controls. Faithful port of ChromeShell.jinja's markup + chrome.js's context
-// state machine; DOM ids are preserved for the Playwright renderer-contract
-// specs.
+// The fixed titlebar. At its left, after the window controls, the trail: Home
+// (the wordmark), the window's account, and the workspace open in it, the last
+// two each a button that opens its own menu. At its right: the notification
+// bell, Report a bug, the Settings gear, Share, and the non-mac window
+// controls. The start flow's bar is the centered mark alone.
 //
-// The bell counts notification reminders. The Permissions tab separately
-// stays badged while its workspace has unanswered requests, even after the
-// user opens or clears their reminders.
+// The bell counts notification reminders. The gear separately stays badged
+// while the workspace on screen has unanswered permission requests, even
+// after the user opens or clears their reminders.
 
 import m from "mithril";
 import lockupUrl from "../../assets/studio-wordmark.svg?inline";
@@ -18,13 +18,25 @@ import { TitlebarButton } from "../components/TitlebarButton";
 import { TrafficLights } from "./TrafficLights";
 import { electronBridge } from "../../electron-bridge";
 import { isSharedEntry } from "../../models/sharedWithMe";
-import type { OptionsTab } from "../../models/workspaceOptions";
 import type { ChromeAnchor, ShellState } from "./shell-state";
-import type { TitlebarContext } from "./classify";
-import { classifyRoute, hubPagePath, isWorkspaceOverlayPath } from "./classify";
-import { AccountSwitcherButton } from "./AccountSwitcher";
+import { classifyRoute } from "./classify";
 import { DeviceResourceWarning, DeviceResourceWarningSlot } from "./ResourceWarning";
+import {
+  SETTINGS_BUTTON_ID,
+  SHARE_BUTTON_CLASS,
+  SHARE_BUTTON_ID,
+  isTitlebarFlyoutOpen,
+  shareButtonContent,
+} from "./RaisedTitlebarIcons";
 import { TitlebarStatusPill } from "./titlebar-status";
+import {
+  ACCOUNT_BUTTON_ID,
+  TRAIL_BUTTON_INSET,
+  WORKSPACE_BUTTON_ID,
+  accountButtonContent,
+  trailWorkspaceFor,
+  workspaceButtonContent,
+} from "./trail";
 import { titlebarStatusFor } from "./workspace-notices";
 import { defaultFetchJson } from "../../models/workspaceOptions";
 import { warmPermissionsOverview } from "../../models/permissionsPrefetch";
@@ -36,9 +48,10 @@ export interface TitlebarAttrs {
 
 /** The bar across the top of every chrome (the titlebar and the popout's bar):
  * painted with the workspace accent while one is active (--titlebar-bg), else
- * the app's ground (--c-surface-app). The workspace surface starts 38px below it. */
+ * the app's ground (--c-surface-app). The workspace surface starts under it. */
 export const CHROME_BAR_STYLE = "background-color: var(--titlebar-bg, var(--c-surface-app));";
-export const CHROME_BAR_CLASS = "fixed top-0 left-0 right-0 h-[38px] flex items-center select-none z-[100] px-1";
+export const CHROME_BAR_CLASS =
+  "fixed top-0 left-0 right-0 h-(--titlebar-height) flex items-center select-none z-[100] px-1";
 
 /** The ring a workspace's tour asks for around one chrome control (minds:highlight-chrome), as extra classes. */
 export function chromeAnchorRingClass(
@@ -71,12 +84,8 @@ export function leftWindowControls(shell: ShellState): m.Children {
   return shell.isMac ? trafficLightSpacer() : null;
 }
 
-/** What each tab's dialog says on a creation page, where the workspace does not exist yet. */
-export const NOT_YET_CREATED_MESSAGE_BY_TAB: Record<OptionsTab, string> = {
-  permissions: "Check back here after the workspace is created to manage its permissions.",
-  settings: "Check back here after the workspace is created to change its settings.",
-  share: "Check back here after the workspace is created to share it.",
-};
+/** What Share's dialog says on a creation page, where the workspace does not exist yet. */
+export const SHARE_NOT_YET_CREATED_MESSAGE = "Check back here after the workspace is created to share it.";
 
 /**
  * The start flow's titlebar: the lockup, centered, in the brand color, and at
@@ -114,69 +123,50 @@ function startTitlebar(shell: ShellState): m.Children {
   );
 }
 
+/** A trail button's classes beyond the crumb's own: lit while its menu is open, and without its focus ring then
+ * (it keeps focus from the click that opened the menu, and the ring would show around the raised copy over it). */
+function trailButtonExtra(isOpen: boolean, extra: string): string {
+  return `${TRAIL_BUTTON_INSET} ${isOpen ? "bg-fill-active !outline-none " : ""}${extra}`;
+}
+
 export function Titlebar(): m.Component<TitlebarAttrs> {
-  // The tab whose "check back after the workspace is created" dialog is up,
-  // on a creation page.
-  let notYetTab: OptionsTab | null = null;
   return {
     view(vnode) {
       const { shell, routePath } = vnode.attrs;
-      const routeSearch = (m.route.get() ?? "").split("?")[1] ?? "";
-      const context = classifyRoute(routePath, routeSearch);
+      const context = classifyRoute(routePath, shell.currentRouteSearch());
       if (context.kind === "start") return startTitlebar(shell);
       const workspaces = shell.stores.workspaces;
       // A creation page wears the frame of the workspace it is making: the
-      // attempt's list row carries the name and accent, and the tabs open a
+      // attempt's list row carries the name and accent, and Share opens a
       // dialog instead of a workspace that is not there yet.
       const isCreating = context.kind === "creating";
       // The dialog belongs to the creation page: a route change (the wash
       // entering the workspace, the home button) takes it down with the page.
-      if (!isCreating) notYetTab = null;
+      if (!isCreating) shell.isShareNotYetCreatedDialogOpen = false;
       const isWorkspace = context.kind === "workspace" || isCreating;
-      // Someone else's workspace (specs/shared-with-me, S12): its owner-only
-      // surfaces (settings, share, permissions, backups) are not offered.
-      const workspaceEntry = isWorkspace && !isCreating ? workspaces.entryByAnyId(context.workspaceAnyId ?? "") : null;
+      // Someone else's workspace (specs/shared-with-me, S12): a guest cannot share it on.
+      const workspaceEntry =
+        context.kind === "workspace" ? workspaces.entryByAnyId(context.workspaceAnyId ?? "") : null;
       const isShared = workspaceEntry !== null && isSharedEntry(workspaceEntry);
-      const workspaceName = isWorkspace
-        ? (workspaces.accentEntry(context.workspaceAnyId ?? "")?.name ??
-          workspaces.entryByAnyId(context.workspaceAnyId ?? "")?.name ??
-          "…")
-        : "";
       // The permission badge tracks pending requests, not dismissible reminders.
-      const currentWorkspaceAgentId = isWorkspace
-        ? workspaces.toAgentScopedId(context.workspaceAnyId ?? "")
-        : null;
-      const hasCurrentWorkspaceRequest =
-        shell.stores.requests.hasPendingForWorkspace(
-          currentWorkspaceAgentId,
-        );
+      const currentWorkspaceAgentId =
+        context.kind === "workspace" ? workspaces.toAgentScopedId(context.workspaceAnyId ?? "") : null;
+      const hasCurrentWorkspaceRequest = shell.stores.requests.hasPendingForWorkspace(currentWorkspaceAgentId);
       const isDesktop = electronBridge.isDesktop;
       const isHomeSelected = context.kind === "home";
-      // Every one of these six icons' surfaces (the docked options panel, the
-      // request popup, the bell's feed, Get help) draws a raised copy of ALL
-      // SIX at their measured rects, so hide all six here (by visibility,
-      // which keeps their boxes and so those rects true) or the two strips
-      // would ghost through each other -- matching the legacy
-      // body.ws-options-open rule. The panel is still up, frozen, while an app
-      // modal (a request popup) floats over it, hence panelRouteBehindOverlay;
-      // `/inbox` covers the popup opened from the in-chat card too, which
-      // names no panel.
-      //
-      // The request popup hangs from #ws-tab-strip, and with no machine on
-      // screen there is no strip: it falls back to a centered card that raises
-      // nothing, so the real six stay painted (as they do under every other
-      // centered app modal).
-      const isTitlebarPopupOpen =
-        isWorkspaceOverlayPath(routePath) ||
-        (hubPagePath(routePath) === "/inbox" && isWorkspace) ||
-        hubPagePath(routePath) === "/help" ||
-        shell.panelRouteBehindOverlay !== null ||
-        shell.isNotificationsOpen;
-      const popupHiddenClass = isTitlebarPopupOpen ? "invisible" : "";
-      // The workspace's own status, after its icon group. Not on a creation
+      // An open flyout draws a raised copy of the bar's buttons at their
+      // measured rects, so the real ones are hidden here (by visibility, which
+      // keeps their boxes and so those rects true) or the two strips would
+      // ghost through each other.
+      const popupHiddenClass = isTitlebarFlyoutOpen(shell, routePath) ? "invisible" : "";
+      // The workspace's own status, after its button. Not on a creation
       // page: the workspace it would speak for does not exist yet.
       const status =
         context.kind === "workspace" ? titlebarStatusFor(shell, context.workspaceAnyId ?? null) : null;
+      // The bar names a workspace wherever one is in context, and offers to open one from Home.
+      const isWorkspaceButtonShown = isWorkspace || isHomeSelected;
+      const isAccountMenuOpen = shell.isAccountSwitcherOpen;
+      const isWorkspaceMenuOpen = shell.isWorkspaceSwitcherOpen;
 
       const bar = m(
         "div#minds-titlebar",
@@ -186,6 +176,7 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
         },
         m("div", { class: "flex-1 flex items-center gap-0.5 min-w-0" }, [
           leftWindowControls(shell),
+          // The wordmark is the way Home.
           m(
             TitlebarButton,
             {
@@ -193,180 +184,63 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
               "aria-label": "Home",
               "data-tooltip": "Home",
               variant: "crumb",
-              tone: isHomeSelected ? "default" : "muted",
-              extra: "gap-1",
+              extra: "mr-1 shrink-0" + (isHomeSelected ? "" : " opacity-90 hover:opacity-100"),
               onclick: () => shell.routeToHub(),
             },
-            [
-              m(Icon16, { name: "home" }),
-              m("span", { class: "type-label" }, "Imbue Studio"),
-            ],
+            // Drawn in the bar's text colour (the artwork's own is fixed), so it reads on every workspace accent.
+            m("span", {
+              role: "img",
+              "aria-label": "Imbue Studio",
+              class: "block h-[18px] w-[64px] bg-current text-primary",
+              style:
+                `mask: url("${lockupUrl}") no-repeat center / contain;` +
+                ` -webkit-mask: url("${lockupUrl}") no-repeat center / contain;`,
+            }),
+          ),
+          m(
+            TitlebarButton,
+            {
+              id: ACCOUNT_BUTTON_ID,
+              "aria-label": "Switch account",
+              "data-tooltip": "Switch account",
+              "aria-haspopup": "menu",
+              "aria-expanded": isAccountMenuOpen ? "true" : "false",
+              "data-account-id": shell.accountId,
+              variant: "crumb",
+              extra: trailButtonExtra(isAccountMenuOpen, popupHiddenClass),
+              onclick: () => (isAccountMenuOpen ? shell.closeAccountSwitcher() : shell.openAccountSwitcher()),
+            },
+            accountButtonContent(shell, isAccountMenuOpen, "account-switcher-name"),
           ),
           m(
             "div#ws-crumb",
-            { class: "flex items-center min-w-0", hidden: !isWorkspace },
-            isWorkspace
+            { class: "flex items-center min-w-0", hidden: !isWorkspaceButtonShown },
+            isWorkspaceButtonShown
               ? [
-                  m(
-                    "span",
-                    {
-                      class: "type-label text-tertiary px-0.5",
-                      "aria-hidden": "true",
-                    },
-                    "/",
-                  ),
+                  m("span", { class: "type-label text-tertiary px-1", "aria-hidden": "true" }, "/"),
                   m(
                     TitlebarButton,
                     {
-                      id: "workspace-switcher-btn",
-                      "aria-label": "Switch workspace",
-                      "data-tooltip": "Switch workspace",
+                      id: WORKSPACE_BUTTON_ID,
+                      "aria-label": isWorkspace ? "Switch workspace" : "Open a workspace",
+                      "data-tooltip": isWorkspace ? "Switch workspace" : "Open a workspace",
+                      "aria-haspopup": "menu",
+                      "aria-expanded": isWorkspaceMenuOpen ? "true" : "false",
                       variant: "crumb",
-                      extra:
-                        "gap-1 min-w-0" +
-                        chromeAnchorRingClass(shell, "workspace-switcher"),
-                      onclick: (event: MouseEvent) => {
-                        const button = (
-                          event.currentTarget as HTMLElement
-                        ).getBoundingClientRect();
-                        shell.openSidebar({
-                          x: button.left,
-                          y: button.top,
-                          width: button.width,
-                          height: button.height,
-                        });
-                      },
+                      extra: trailButtonExtra(
+                        isWorkspaceMenuOpen,
+                        popupHiddenClass + chromeAnchorRingClass(shell, "workspace-switcher"),
+                      ),
+                      onclick: () =>
+                        isWorkspaceMenuOpen ? shell.closeWorkspaceSwitcher() : shell.openWorkspaceSwitcher(),
                     },
-                    [
-                      m(
-                        "span#workspace-switcher-name",
-                        { class: "type-label truncate max-w-[180px]" },
-                        workspaceName,
-                      ),
-                      m(Icon16, {
-                        name: "chevron-down-small",
-                        extra: "shrink-0 text-tertiary",
-                      }),
-                    ],
+                    workspaceButtonContent(isWorkspace ? trailWorkspaceFor(shell, context.workspaceAnyId) : null, {
+                      isOpen: isWorkspaceMenuOpen,
+                      isOnBar: true,
+                      nameId: "workspace-switcher-name",
+                    }),
                   ),
-                  m(
-                    "span",
-                    {
-                      class: "type-label text-tertiary px-0.5",
-                      "aria-hidden": "true",
-                    },
-                    "/",
-                  ),
-                  m(
-                    "div#ws-tab-strip",
-                    { class: "flex items-center gap-1 ml-1", hidden: isShared },
-                    [
-                      m(
-                        TitlebarButton,
-                        {
-                          id: "ws-tab-permissions",
-                          "aria-label": "Permissions",
-                          "data-tooltip": "Permissions",
-                          tone:
-                            context.activeTab === "permissions"
-                              ? "default"
-                              : "muted",
-                          extra:
-                            (isTitlebarPopupOpen
-                              ? "invisible"
-                              : context.activeTab === "permissions"
-                                ? "bg-fill-active"
-                                : "") +
-                            " relative" +
-                            chromeAnchorRingClass(shell, "permissions"),
-                          // Pointing at the key starts the read the pane makes
-                          // on its first mount, so opening it usually lands on
-                          // an answer instead of on "Loading permissions...".
-                          onpointerenter: () => {
-                            if (!isCreating) warmPermissionsFor(shell, context);
-                          },
-                          onfocus: () => {
-                            if (!isCreating) warmPermissionsFor(shell, context);
-                          },
-                          onclick: () => {
-                            if (isCreating) notYetTab = "permissions";
-                            else toggleWorkspaceOptions(shell, routePath, context, "permissions");
-                          },
-                        },
-                        [
-                          m(Icon16, { name: "key" }),
-                          hasCurrentWorkspaceRequest
-                            ? m(
-                                "span",
-                                {
-                                  // Centered on the key glyph's own top-right
-                                  // corner (the icon sits inset from the
-                                  // button's edges by its padding), not the
-                                  // button's -- so the dot actually touches
-                                  // the key rather than floating in the
-                                  // button's outer padding. flex (rather than
-                                  // the bare inline span the bell's badge
-                                  // wrapper uses) shrink-wraps this span to
-                                  // the dot's own 8px box instead of the
-                                  // surrounding line-height, which otherwise
-                                  // inflates it and vertical-centers the dot
-                                  // well past the corner it is meant to sit on.
-                                  class:
-                                    "pointer-events-none absolute top-0.5 right-0.5 flex",
-                                },
-                                m(Badge, { id: "permissions-badge" }),
-                              )
-                            : null,
-                        ],
-                      ),
-                      m(
-                        TitlebarButton,
-                        {
-                          id: "ws-tab-settings",
-                          "aria-label": "Workspace settings",
-                          "data-tooltip": "Workspace settings",
-                          tone:
-                            context.activeTab === "settings"
-                              ? "default"
-                              : "muted",
-                          extra:
-                            (isTitlebarPopupOpen
-                              ? "invisible"
-                              : context.activeTab === "settings"
-                                ? "bg-fill-active"
-                                : "") +
-                            chromeAnchorRingClass(shell, "settings"),
-                          onclick: () => {
-                            if (isCreating) notYetTab = "settings";
-                            else toggleWorkspaceOptions(shell, routePath, context, "settings");
-                          },
-                        },
-                        m(Icon16, { name: "settings" }),
-                      ),
-                      m(
-                        TitlebarButton,
-                        {
-                          id: "ws-tab-share",
-                          "aria-label": "Sharing",
-                          "data-tooltip": "Sharing",
-                          tone:
-                            context.activeTab === "share" ? "default" : "muted",
-                          extra:
-                            (isTitlebarPopupOpen
-                              ? "invisible"
-                              : context.activeTab === "share"
-                                ? "bg-fill-active"
-                                : "") + chromeAnchorRingClass(shell, "share"),
-                          onclick: () => {
-                            if (isCreating) notYetTab = "share";
-                            else toggleWorkspaceOptions(shell, routePath, context, "share");
-                          },
-                        },
-                        m(Icon16, { name: "user-plus" }),
-                      ),
-                    ],
-                  ),
-                  // Hidden like the icons while a popup raises its copy over the titlebar.
+                  // Hidden like the buttons while a flyout raises its copy over the bar.
                   status !== null ? m(TitlebarStatusPill, { status, extra: popupHiddenClass }) : null,
                 ]
               : null,
@@ -379,110 +253,131 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
             },
             context.kind === "page"
               ? [
-                  m(
-                    "span",
-                    {
-                      class: "type-label text-tertiary px-0.5",
-                      "aria-hidden": "true",
-                    },
-                    "/",
-                  ),
-                  m(
-                    "span#page-crumb-name",
-                    {
-                      class:
-                        "type-label text-primary truncate max-w-[240px] px-1",
-                    },
-                    context.pageLabel,
-                  ),
+                  m("span", { class: "type-label text-tertiary px-0.5", "aria-hidden": "true" }, "/"),
+                  m("span#page-crumb-name", { class: "type-label text-primary truncate max-w-[240px] px-1" }, context.pageLabel),
                 ]
               : null,
           ),
         ]),
-        m(
-          "div",
-          { class: "flex items-center justify-end shrink-0 gap-1 pr-1" },
-          [
-            // This computer's resource warning, left of the account: about the device, not the account. Only
-            // its place is kept here; the live pill is drawn above the bar (see ResourceWarning.ts).
-            m(DeviceResourceWarningSlot, { store: shell.stores.deviceResources }),
-            // The account this window shows, first in the group: left of the bell.
-            m(AccountSwitcherButton, { shell, popupHiddenClass }),
-            notificationsBell(shell, popupHiddenClass),
+        m("div", { class: "flex items-center justify-end shrink-0 gap-1 pr-1" }, [
+          // This computer's resource warning: about the device, not the account. Only its place is kept
+          // here; the live pill is drawn above the bar (see ResourceWarning.ts).
+          m(DeviceResourceWarningSlot, { store: shell.stores.deviceResources }),
+          notificationsBell(shell, popupHiddenClass),
+          m(
+            TitlebarButton,
+            {
+              id: "help-toggle",
+              "aria-label": "Report a bug",
+              "data-tooltip": "Report a bug",
+              tone: "muted",
+              extra: popupHiddenClass + chromeAnchorRingClass(shell, "help"),
+              onclick: () => shell.openHelp(),
+            },
+            m(Icon16, { name: "bug" }),
+          ),
+          // The one way into settings, from Home and from a workspace alike. A workspace's permissions live
+          // there: while its agents wait on an answer, the gear carries the dot and opens straight onto them.
+          m(
+            TitlebarButton,
+            {
+              id: SETTINGS_BUTTON_ID,
+              "aria-label": "Settings",
+              "data-tooltip": "Settings",
+              tone: "muted",
+              extra:
+                "relative " +
+                popupHiddenClass +
+                chromeAnchorRingClass(shell, "settings") +
+                chromeAnchorRingClass(shell, "permissions"),
+              // Pointing at the gear starts the read the Permissions pane makes on its first mount, so opening
+              // it on a waiting request usually lands on an answer instead of on "Loading permissions...".
+              onpointerenter: () => {
+                if (hasCurrentWorkspaceRequest && currentWorkspaceAgentId !== null)
+                  warmPermissionsOverview(currentWorkspaceAgentId, defaultFetchJson);
+              },
+              onclick: () => shell.openSettingsFromBar(),
+            },
+            [
+              m(Icon16, { name: "settings" }),
+              hasCurrentWorkspaceRequest
+                ? m(
+                    "span",
+                    // flex shrink-wraps this span to the dot's own 8px box instead of the surrounding
+                    // line-height, which would otherwise push the dot past the glyph's corner.
+                    { class: "pointer-events-none absolute top-0.5 right-0.5 flex" },
+                    m(Badge, { id: "permissions-badge" }),
+                  )
+                : null,
+            ],
+          ),
+          // Sharing, the workspace's one action in the bar. Not in someone else's workspace.
+          isWorkspace && !isShared
+            ? m(
+                "button",
+                {
+                  type: "button",
+                  id: SHARE_BUTTON_ID,
+                  "aria-label": "Share",
+                  class: `ml-1 ${SHARE_BUTTON_CLASS} ${popupHiddenClass}${chromeAnchorRingClass(shell, "share")}`,
+                  onclick: () => shell.pressShare(),
+                },
+                shareButtonContent(),
+              )
+            : null,
+          m("div", { class: "flex" + (hasOwnWindowButtons(shell) ? "" : " hidden") }, [
             m(
               TitlebarButton,
               {
-                id: "help-toggle",
-                "aria-label": "Report a bug",
-                "data-tooltip": "Report a bug",
-                tone: "muted",
-                extra: popupHiddenClass + chromeAnchorRingClass(shell, "help"),
-                onclick: () => shell.openHelp(),
+                variant: "control",
+                id: "min-btn",
+                "aria-label": "Minimize",
+                "data-tooltip": "Minimize",
+                hidden: !isDesktop,
+                onclick: () => electronBridge.minimize(),
               },
-              m(Icon16, { name: "bug" }),
+              m(Icon12, { name: "minimize" }),
             ),
-            m("div", { class: "flex" + (hasOwnWindowButtons(shell) ? "" : " hidden") }, [
-              m(
-                TitlebarButton,
-                {
-                  variant: "control",
-                  id: "min-btn",
-                  "aria-label": "Minimize",
-                  "data-tooltip": "Minimize",
-                  hidden: !isDesktop,
-                  onclick: () => electronBridge.minimize(),
-                },
-                m(Icon12, { name: "minimize" }),
-              ),
-              m(
-                TitlebarButton,
-                {
-                  variant: "control",
-                  id: "max-btn",
-                  "aria-label": "Maximize",
-                  "data-tooltip": "Maximize",
-                  hidden: !isDesktop,
-                  onclick: () => electronBridge.maximize(),
-                },
-                m(Icon12, { name: "maximize" }),
-              ),
-              m(
-                TitlebarButton,
-                {
-                  variant: "control",
-                  tone: "danger",
-                  id: "close-btn",
-                  "aria-label": "Close",
-                  "data-tooltip": "Close",
-                  hidden: !isDesktop,
-                  onclick: () => electronBridge.close(),
-                },
-                m(Icon12, { name: "close" }),
-              ),
-            ]),
-          ],
-        ),
+            m(
+              TitlebarButton,
+              {
+                variant: "control",
+                id: "max-btn",
+                "aria-label": "Maximize",
+                "data-tooltip": "Maximize",
+                hidden: !isDesktop,
+                onclick: () => electronBridge.maximize(),
+              },
+              m(Icon12, { name: "maximize" }),
+            ),
+            m(
+              TitlebarButton,
+              {
+                variant: "control",
+                tone: "danger",
+                id: "close-btn",
+                "aria-label": "Close",
+                "data-tooltip": "Close",
+                hidden: !isDesktop,
+                onclick: () => electronBridge.close(),
+              },
+              m(Icon12, { name: "close" }),
+            ),
+          ]),
+        ]),
       );
       // A sibling of the bar, not a child: .titlebar-surface re-bases the text
       // tokens for the accent, which would paint the dialog's card white on white.
-      const dialog =
-        notYetTab !== null
-          ? m(
-              Modal,
-              { isOpen: true, id: "creating-not-yet-dialog", onClose: () => (notYetTab = null) },
-              [
-                m("p", { class: "type-body text-primary mb-4" }, NOT_YET_CREATED_MESSAGE_BY_TAB[notYetTab]),
-                m(
-                  "div",
-                  { class: "flex justify-end" },
-                  m(Button, { variant: "secondary", onclick: () => (notYetTab = null) }, "Close"),
-                ),
-              ],
-            )
-          : null;
+      const closeNotYet = () => (shell.isShareNotYetCreatedDialogOpen = false);
+      const dialog = shell.isShareNotYetCreatedDialogOpen
+        ? m(Modal, { isOpen: true, id: "creating-not-yet-dialog", onClose: closeNotYet }, [
+            m("p", { class: "type-body text-primary mb-4" }, SHARE_NOT_YET_CREATED_MESSAGE),
+            m("div", { class: "flex justify-end" }, m(Button, { variant: "secondary", onclick: closeNotYet }, "Close")),
+          ])
+        : null;
       const resourceWarning = m(DeviceResourceWarning, {
         store: shell.stores.deviceResources,
-        onOpenSettings: () => m.route.set("/settings", shell.overlayQuery({ section: "this-computer" })),
+        onOpenSettings: () => shell.openSettings({ tab: "studio", section: "this-computer" }),
         extra: popupHiddenClass,
       });
       return [bar, resourceWarning, dialog];
@@ -491,13 +386,8 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
 }
 
 /** The notification bell + its unresolved-count badge. Clicking opens the
- * feed overlay (putting away whatever modal is up), forwarding the displayed
- * workspace so the feed floats over it (kept mounted), exactly as Get help
- * forwards ?workspace. */
-function notificationsBell(
-  shell: ShellState,
-  popupHiddenClass: string,
-): m.Children {
+ * feed (putting away whatever modal is up) over whatever the window shows. */
+function notificationsBell(shell: ShellState, popupHiddenClass: string): m.Children {
   const unresolvedCount = shell.stores.notifications.unresolvedCount;
   const isOpen = shell.isNotificationsOpen;
   return m(
@@ -510,11 +400,10 @@ function notificationsBell(
       tone: "muted",
       // relative for the badge's own absolute positioning.
       extra: "relative " + popupHiddenClass,
-      // The switch, not a bare open: a CENTERED app modal (Imbue Studio settings,
-      // Accounts) leaves this button reachable, and the feed's backdrop
-      // draws under a later-DOM modal's at the same z -- so the modal must
-      // be put away first or the feed raises beneath it, dimmed and
-      // unclickable.
+      // The switch, not a bare open: a CENTERED app modal leaves this button
+      // reachable, and the feed's backdrop draws under a later-DOM modal's at
+      // the same z -- so the modal must be put away first or the feed raises
+      // beneath it, dimmed and unclickable.
       onclick: () => shell.switchToNotifications(),
     },
     [
@@ -522,47 +411,12 @@ function notificationsBell(
       unresolvedCount > 0
         ? m(
             "span",
-            // -top-1: the titlebar gives the button only 5px of clearance,
-            // less than the 14px badge needs to clear the icon, and a wider
-            // offset (e.g. -top-2.5) pushes the badge off the window's top
-            // edge. -top-1 is the deepest offset that stays on screen, at the
-            // cost of a few px of corner overlap. flex (not a bare inline
-            // span) shrink-wraps the wrapper to the badge's own 14px box
-            // rather than the surrounding line-height, which would inflate it
-            // and push the badge past the intended offset.
+            // flex (not a bare inline span) shrink-wraps the wrapper to the badge's own 14px box rather than
+            // the surrounding line-height, which would inflate it and push the badge past the intended offset.
             { class: "pointer-events-none absolute -top-1 -right-1 flex" },
             m(Badge, { id: "notifications-badge", count: unresolvedCount }),
           )
         : null,
     ],
-  );
-}
-
-/** Open the options overlay on `tab` -- or, when that tab's overlay is
- * already showing, close it back to the bare workspace (legacy toggle). */
-function toggleWorkspaceOptions(
-  shell: ShellState,
-  routePath: string,
-  context: TitlebarContext,
-  tab: OptionsTab,
-): void {
-  if (context.workspaceAnyId === null) return;
-  const agentScoped = shell.stores.workspaces.toAgentScopedId(
-    context.workspaceAnyId,
-  );
-  if (isWorkspaceOverlayPath(routePath) && context.activeTab === tab) {
-    m.route.set(`/workspace/${agentScoped}`);
-    return;
-  }
-  m.route.set(`/workspace/${agentScoped}/options?tab=${tab}`);
-}
-
-/** Start reading this machine's permissions, if the route names one. */
-function warmPermissionsFor(shell: ShellState, context: TitlebarContext): void {
-  if (context.workspaceAnyId === null || context.workspaceAnyId === undefined)
-    return;
-  warmPermissionsOverview(
-    shell.stores.workspaces.toAgentScopedId(context.workspaceAnyId),
-    defaultFetchJson,
   );
 }

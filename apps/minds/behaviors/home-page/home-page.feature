@@ -145,8 +145,8 @@ Feature: Home page routing
     Then the card stays in place reading "Declined" with Undo until they leave the tab, after which it files under "Declined invitations"
 
   @settings-and-account
-  Scenario: Studio settings sits in the section head, and the account page is reached from the account switcher
+  Scenario: Studio settings sits in the section head, and the accounts are reached through "Manage accounts" in the account switcher
     Given an authenticated user who has answered the consent question
     When they visit a home page
     Then "Studio settings" is at the right of the active tab's first section head
-    And the account switcher's menu ends with "Account settings", under a line, which opens the account page under the window's account
+    And while any account is signed in, the account switcher's menu ends with "Manage accounts", under a line, which opens Settings on its Accounts tab, at the window's account's entry (the first signed-in account's, in the device's window)

@@ -71,8 +71,11 @@ user id or `local` for the device. Every window is for one account, and sees tha
     once discovery completes with no workspaces, shows the agent creation form (for a signed-out account, a log-in prompt)
     The account's other hub pages are `/account/<account_id>/create`, `/create/template`,
     `/workspaces/destroyed`, and `/workspaces/shared`; the bare paths redirect to the most recently
-    used account's. Overlays (`/settings`, `/accounts`, `/inbox`, `/help`) float over the window and
-    take the window's account from `?account=<account_id>`.
+    used account's. Overlays (`/settings`, `/inbox`, `/help`) float over the window and
+    take the window's account from `?account=<account_id>`, else from the workspace they float over
+    (`?workspace=<id>`). `/settings` holds Studio's settings, the
+    accounts, and each workspace's settings, permissions and sharing; `/accounts`,
+    `/workspace/<id>/options` and `/workspace/<id>/settings` redirect into it.
 
 `/create` route (requires auth):
     GET: shows a form to enter a git URL for creating a new workspace, under the window's account
@@ -236,6 +239,6 @@ The desktop client only byte-forwards requests. Each workspace owns a family of 
 
 ## The SPA shell and the workspace iframe
 
-The user-facing UI is one web context per window (both in the desktop app and in a plain browser): the Mithril SPA shell, which renders the titlebar, the hub pages (Home, Create, Settings, ... routed client-side by `frontend/src/router.ts`), the sandboxed cross-origin iframe that displays workspace content (`frontend/src/views/shell/WorkspaceFrame.ts`), and in-DOM Mithril modals. Workspace entry goes through `GET /forward-bridge?next=/goto/<workspace-id>/`: Imbue Studio verifies its own session and 302s to the forward plugin's `/_bridge` with a spawn-time secret, which sets the plugin's bare-origin cookie and redirects onward -- the browser twin of the Electron shell's programmatic cookie injection.
+The user-facing UI is one web context per window (both in the desktop app and in a plain browser): the Mithril SPA shell, which renders the titlebar, the hub pages (Home, Create, ... routed client-side by `frontend/src/router.ts`), the sandboxed cross-origin iframe that displays workspace content (`frontend/src/views/shell/WorkspaceFrame.ts`), and the in-DOM Mithril surfaces that float over them (Settings and the titlebar's other flyouts, and centered modals). Workspace entry goes through `GET /forward-bridge?next=/goto/<workspace-id>/`: Imbue Studio verifies its own session and 302s to the forward plugin's `/_bridge` with a spawn-time secret, which sets the plugin's bare-origin cookie and redirects onward -- the browser twin of the Electron shell's programmatic cookie injection.
 
 Shell<->workspace messaging flows exclusively through the embed contract (`static/embed_contract.js`, documented in `apps/minds/docs/embed-contract.md`); the forward plugin's appended `frame-ancestors` policy is what makes "being framed at all" proof the embedder was allowed.

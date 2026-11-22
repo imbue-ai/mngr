@@ -39,8 +39,14 @@ from imbue.minds.desktop_client.update_status import format_update_window
 ACCOUNT_HUB_PATH_PREFIX: Final[str] = "/account/"
 # The query parameter an overlay route carries so a reload keeps its window's account.
 ACCOUNT_QUERY_PARAMETER: Final[str] = "account"
+# Settings' Accounts tab: where an account is signed in to, managed, and logged out of.
+ACCOUNTS_SETTINGS_ROUTE: Final[str] = "/settings?tab=accounts"
+# The query parameter an overlay route carries to name the workspace it floats over.
+OVERLAY_WORKSPACE_QUERY_PARAMETER: Final[str] = "workspace"
 # A SuperTokens user id (a UUID) or the device's pseudo-account id.
 _ACCOUNT_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+# A workspace by either coordinate, or a shared row's ``shared-`` alias.
+_WORKSPACE_ANY_ID_RE: Final[re.Pattern[str]] = re.compile(r"^(?:agent|host|shared)-[a-f0-9]+$", re.IGNORECASE)
 _HUB_PATH_RE: Final[re.Pattern[str]] = re.compile(r"^/account/([^/?#]+)(?:/|$)")
 # The SPA routes that name a workspace, whose account is the workspace's association.
 _WORKSPACE_PATH_RE: Final[re.Pattern[str]] = re.compile(
@@ -279,6 +285,13 @@ def account_id_from_query(query: str) -> str | None:
     return next((value for value in values if is_valid_account_id(value)), None)
 
 
+@pure
+def workspace_any_id_from_query(query: str) -> str | None:
+    """The ``?workspace=`` an overlay route carries (the workspace it floats over), when it names a workspace id."""
+    values = parse_qs(query.lstrip("?")).get(OVERLAY_WORKSPACE_QUERY_PARAMETER, [])
+    return next((value for value in values if _WORKSPACE_ANY_ID_RE.match(value) is not None), None)
+
+
 def resolve_window_account_id(
     path: str,
     query: str,
@@ -293,9 +306,11 @@ def resolve_window_account_id(
     """The account a served URL belongs to, which seeds the window's account at first paint.
 
     The hub segment wins, then a named workspace's account, then a creation page's
-    attempt, then the overlay's ``?account=``; the start flow is the device's, and
-    anything else (``/`` included) takes the most recently used account, else
-    ``resolve_account_id_when_none_recorded``'s.
+    attempt, then the overlay's ``?account=``; the start flow is the device's; an
+    overlay that names no account takes the account of the workspace it floats over
+    (``?workspace=``), so a link to a workspace's Settings opens on that workspace
+    whichever account was used last; and anything else (``/`` included) takes the
+    most recently used account, else ``resolve_account_id_when_none_recorded``'s.
     """
     hub_account_id = account_id_from_hub_path(path)
     if hub_account_id is not None:
@@ -311,6 +326,9 @@ def resolve_window_account_id(
         return query_account_id
     if path.rstrip("/") in {device_path.rstrip("/") for device_path in _DEVICE_PATHS}:
         return LOCAL_PROFILE_USER_ID
+    overlay_workspace_any_id = workspace_any_id_from_query(query)
+    if overlay_workspace_any_id is not None:
+        return resolve_workspace_account_id(overlay_workspace_any_id)
     return recent_account_ids[0] if recent_account_ids else resolve_account_id_when_none_recorded()
 
 

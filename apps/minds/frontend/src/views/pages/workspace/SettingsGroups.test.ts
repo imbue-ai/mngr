@@ -9,7 +9,6 @@ import { createEmptyStores } from "../../../models/boot";
 import { WINDOW_LOGIN_LAPSED_SENTENCE } from "../../../models/errors";
 import type { UiWorkspaceUpdate } from "../../../channel/messages";
 import type {
-  SettingsGroup,
   WorkspaceMachineSizeData,
   WorkspaceOptionsData,
 } from "../../../models/workspaceOptions";
@@ -24,16 +23,26 @@ import {
   collectVnodes,
   jsonResponse,
   renderDeep,
+  required,
   settle,
   withMindsNative,
+  workspaceOptionsData,
 } from "../../../testing";
 import { CopyField } from "../../components/Layout";
-import { SettingsGroups } from "./SettingsGroups";
+import { BackupGroup } from "./BackupGroup";
+import type { WorkspaceOwnSettingsGroup } from "./SettingsGroups";
+import { WorkspaceSettingsGroup, updatesNavDot } from "./SettingsGroups";
+import { UpdatesGroup } from "./UpdatesGroup";
 
 // Two machines, one without backups: the pane's state must be keyed on which
 // is being drawn.
 const UNBACKED = "agent-" + "a".repeat(8);
 const BACKED = "agent-" + "b".repeat(8);
+/** Where the pages are drawn: Settings' Workspace & apps tab, on a workspace picked there rather than the one
+ * behind Settings. */
+const SETTINGS_ROUTE = `/settings?account=local&tab=workspace&settings_workspace=${BACKED}&group=general`;
+/** That route after a move to the Accounts tab, which changes nothing else. */
+const ACCOUNTS_TAB_ROUTE = `/settings?account=local&tab=accounts&settings_workspace=${BACKED}&group=general`;
 
 const OUT_OF_DATE: UiWorkspaceUpdate = {
   availability: "OUT_OF_DATE",
@@ -43,16 +52,23 @@ const OUT_OF_DATE: UiWorkspaceUpdate = {
 };
 
 interface Harness {
-  /** Draw the pane for one machine against the same component instance, as a
-   * route change would. */
+  /** Draw one of a machine's pages against the same component instance, as a
+   * change of Settings' rail or picker would. */
   draw: (
     agentId: string,
-    group?: SettingsGroup,
+    group?: WorkspaceOwnSettingsGroup,
     data?: Partial<WorkspaceOptionsData>,
   ) => m.Children;
   requests: string[];
-  /** The per-machine model the pane draws against, keyed by agent id. */
+  /** The per-machine model the page draws against, keyed by agent id. */
   models: Map<string, WorkspaceOptionsModel>;
+  /** Run the component's oncreate or onupdate for a draw, which is where it scrolls. */
+  runHook: (
+    hook: "oncreate" | "onupdate",
+    agentId: string,
+    group: WorkspaceOwnSettingsGroup,
+    isOwnerSectionAsked: boolean,
+  ) => void;
 }
 
 function pressableWithLabel(
@@ -95,61 +111,64 @@ function harness(
     return respond(url, init);
   });
   // A successful press routes and redraws; there is no mount for either.
-  vi.spyOn(m.route, "get").mockReturnValue(
-    "/workspace/x/options?tab=settings&group=updates",
-  );
+  vi.spyOn(m.route, "get").mockReturnValue(SETTINGS_ROUTE);
   vi.spyOn(m.route, "set").mockImplementation(() => undefined);
   vi.spyOn(m, "redraw").mockImplementation(() => undefined);
 
   const models = new Map<string, WorkspaceOptionsModel>();
-  const instance = SettingsGroups() as unknown as m.Component;
-  function draw(
+  const instance = WorkspaceSettingsGroup() as unknown as m.Component;
+  function modelFor(
     agentId: string,
-    group: SettingsGroup = "updates",
     data: Partial<WorkspaceOptionsData> = {},
-  ): m.Children {
+  ): WorkspaceOptionsModel {
     let model = models.get(agentId);
     if (model === undefined) {
       model = new WorkspaceOptionsModel(agentId);
-      model.data = {
+      model.data = workspaceOptionsData({
         agent_id: agentId,
         host_id: `host-${agentId}`,
         name: agentId,
-        color: "#aabbcc",
         palette: { blue: "#aabbcc", pink: "#e8a7a8" },
-        is_stale: false,
-        is_provider_signed_out: false,
-        is_account_owned_provider: false,
-        leased_owner_email: "",
-        has_account: false,
-        account_email: "",
-        account_display_name: null,
-        account_profile_picture_url: null,
-        current_account: null,
-        accounts: [],
-        app_services: [],
-        service_labels: {},
         whole_service: "",
-        public_email_domains: [],
-        grantable_email_domain: "",
         ssh_command: sshCommandByAgent[agentId] ?? "",
         ...data,
-      };
+      });
       model.lastSavedColor = model.data.color;
       models.set(agentId, model);
     }
-    const attrs = {
-      model,
-      selectedGroup: group,
-      onSelectGroup: () => undefined,
-    };
-    const vnode = m(instance, attrs as unknown as m.Attributes) as m.Vnode;
+    return model;
+  }
+  function vnodeFor(
+    agentId: string,
+    group: WorkspaceOwnSettingsGroup,
+    isOwnerSectionAsked: boolean,
+    data: Partial<WorkspaceOptionsData> = {},
+  ): m.Vnode {
+    const attrs = { model: modelFor(agentId, data), group, isOwnerSectionAsked };
+    return m(instance, attrs as unknown as m.Attributes) as m.Vnode;
+  }
+  function draw(
+    agentId: string,
+    group: WorkspaceOwnSettingsGroup = "updates",
+    data: Partial<WorkspaceOptionsData> = {},
+  ): m.Children {
     return (instance.view as unknown as (v: m.Vnode) => m.Children).call(
       instance,
-      vnode,
+      vnodeFor(agentId, group, false, data),
     );
   }
-  return { draw, requests, models };
+  function runHook(
+    hook: "oncreate" | "onupdate",
+    agentId: string,
+    group: WorkspaceOwnSettingsGroup,
+    isOwnerSectionAsked: boolean,
+  ): void {
+    (instance[hook] as unknown as (v: m.Vnode) => void).call(
+      instance,
+      vnodeFor(agentId, group, isOwnerSectionAsked),
+    );
+  }
+  return { draw, requests, models, runHook };
 }
 
 /** A dispatch answers over several promise hops: the request, its body parse,
@@ -164,15 +183,49 @@ afterEach(() => {
   clearAppContextForTests();
 });
 
-describe("the Updates entry in the settings nav", () => {
-  function navDot(root: m.Children): AnyVnode | undefined {
-    return byId(root, "updates-nav-dot");
-  }
-
-  it("wears the titlebar pill's colour while the pill shows, and nothing otherwise", () => {
+describe("a workspace's settings pages", () => {
+  it("draws only the page asked for, with no nav of its own", () => {
     const { draw } = harness();
+
+    const general = collectVnodes(draw(BACKED, "general"));
+    expect(general.some((vnode) => attrsOf(vnode).id === "account-section")).toBe(true);
+    expect(general.some((vnode) => vnode.tag === BackupGroup || vnode.tag === UpdatesGroup)).toBe(false);
+
+    const backup = collectVnodes(draw(BACKED, "backup"));
+    expect(backup.filter((vnode) => vnode.tag === BackupGroup).map((vnode) => attrsOf(vnode).agentId)).toEqual([
+      BACKED,
+    ]);
+    expect(backup.some((vnode) => attrsOf(vnode).id === "account-section")).toBe(false);
+
+    const updates = collectVnodes(draw(BACKED, "updates"));
+    expect(updates.filter((vnode) => vnode.tag === UpdatesGroup).map((vnode) => attrsOf(vnode).agentId)).toEqual([
+      BACKED,
+    ]);
+
+    // The list of pages is Settings' rail's.
+    for (const page of [general, backup, updates]) {
+      expect(page.some((vnode) => vnode.tag === "nav")).toBe(false);
+      expect(page.some((vnode) => attrsOf(vnode)["data-settings-group"] !== undefined)).toBe(false);
+    }
+  });
+
+  it("draws nothing before the workspace's options have loaded", () => {
+    const { draw, models } = harness();
+    draw(BACKED, "general");
+    const model = models.get(BACKED);
+    if (model === undefined) throw new Error("the machine's model was not built");
+    model.data = null;
+
+    expect(draw(BACKED, "general")).toBeNull();
+  });
+});
+
+describe("the Updates entry's dot in Settings' rail", () => {
+  it("wears the titlebar pill's colour while the pill shows, and nothing otherwise", () => {
+    harness();
     // Out of date, nothing handling it: the pill's orange dot.
-    expect(classesOf(navDot(draw(BACKED)) as AnyVnode)).toContain("bg-warning");
+    expect(classesOf(updatesNavDot(BACKED) as AnyVnode)).toContain("bg-warning");
+    expect(attrsOf(updatesNavDot(BACKED) as AnyVnode).id).toBe("updates-nav-dot");
 
     getAppContext().stores.updates.applyUpdatesMessage({
       type: "workspace_updates",
@@ -180,7 +233,7 @@ describe("the Updates entry in the settings nav", () => {
       update_window: "2:00 AM-5:00 AM",
     });
     // A landed update with a note: good news, green.
-    expect(classesOf(navDot(draw(BACKED)) as AnyVnode)).toContain("bg-success");
+    expect(classesOf(updatesNavDot(BACKED) as AnyVnode)).toContain("bg-success");
 
     getAppContext().stores.updates.applyUpdatesMessage({
       type: "workspace_updates",
@@ -188,13 +241,13 @@ describe("the Updates entry in the settings nav", () => {
       update_window: "2:00 AM-5:00 AM",
     });
     // A schedule asks nothing, so there is no pill and no dot.
-    expect(navDot(draw(BACKED))).toBeUndefined();
+    expect(updatesNavDot(BACKED)).toBeNull();
   });
 });
 
-describe("the Account settings group on a workspace on an account-owned provider", () => {
-  /** The drawn Account section's text, whitespace collapsed, and whether it offers an Unlink. */
-  function accountSection(root: m.Children): {
+describe("General's Owner section on a workspace on an account-owned provider", () => {
+  /** The drawn Owner section's text, whitespace collapsed, and whether it offers an Unlink. */
+  function ownerSection(root: m.Children): {
     text: string;
     hasUnlink: boolean;
   } {
@@ -202,7 +255,7 @@ describe("the Account settings group on a workspace on an account-owned provider
       (vnode) => attrsOf(vnode).id === "account-section",
     );
     if (section === undefined)
-      throw new Error("the Account section was not drawn");
+      throw new Error("the Owner section was not drawn");
     return {
       text: allText(section.children)
         .replace(/\s+/g, " ")
@@ -216,8 +269,8 @@ describe("the Account settings group on a workspace on an account-owned provider
 
   it("says the account cannot change and names the owner, with no Unlink to press", () => {
     const { draw } = harness();
-    const section = accountSection(
-      draw(UNBACKED, "account", {
+    const section = ownerSection(
+      draw(UNBACKED, "general", {
         is_account_owned_provider: true,
         leased_owner_email: "owner@example.com",
       }),
@@ -231,8 +284,8 @@ describe("the Account settings group on a workspace on an account-owned provider
 
   it("names the linked account for a workspace on its own account's provider, with no Unlink", () => {
     const { draw } = harness();
-    const section = accountSection(
-      draw(UNBACKED, "account", {
+    const section = ownerSection(
+      draw(UNBACKED, "general", {
         is_account_owned_provider: true,
         has_account: true,
         account_email: "me@example.com",
@@ -253,8 +306,8 @@ describe("the Account settings group on a workspace on an account-owned provider
 
   it("leaves the owner out when it is not known", () => {
     const { draw } = harness();
-    const section = accountSection(
-      draw(UNBACKED, "account", {
+    const section = ownerSection(
+      draw(UNBACKED, "general", {
         is_account_owned_provider: true,
         leased_owner_email: "",
       }),
@@ -267,7 +320,93 @@ describe("the Account settings group on a workspace on an account-owned provider
   });
 });
 
-describe("the Account settings group's link to an account", () => {
+describe("General's Owner section", () => {
+  it("sits in General under the heading Owner, after the workspace's own settings and before the danger zone", () => {
+    const text = allText(harness().draw(UNBACKED, "general"));
+
+    const owner = text.indexOf("Owner");
+    expect(owner).toBeGreaterThan(text.indexOf("Color"));
+    expect(owner).toBeLessThan(text.indexOf("Danger zone"));
+    // The section is headed "Owner", never "Account".
+    expect(text).not.toContain("Account");
+  });
+
+  it("sends a workspace with no account to link to Settings' Accounts tab, keeping the workspace's place", () => {
+    const root = harness().draw(UNBACKED, "general");
+    const section = required(collectVnodes(root).find((vnode) => attrsOf(vnode).id === "account-section"));
+
+    press(section, "Sign in or create an account");
+
+    expect(vi.mocked(m.route.set).mock.calls).toEqual([[ACCOUNTS_TAB_ROUTE, undefined, { replace: true }]]);
+  });
+
+  describe("when the arrival asked for it", () => {
+    /** A document holding the Owner section (or not yet), recording each scroll to it. */
+    function stubOwnerSection(): { scrolls: unknown[]; setIsDrawn: (isDrawn: boolean) => void } {
+      const scrolls: unknown[] = [];
+      let isSectionDrawn = true;
+      vi.stubGlobal("document", {
+        getElementById: (id: string) =>
+          id === "account-section" && isSectionDrawn
+            ? { scrollIntoView: (options: unknown) => scrolls.push(options) }
+            : null,
+      });
+      return { scrolls, setIsDrawn: (isDrawn) => (isSectionDrawn = isDrawn) };
+    }
+
+    it("scrolls the Owner section into view once, and not again on every redraw", () => {
+      const { runHook } = harness();
+      const { scrolls } = stubOwnerSection();
+
+      runHook("oncreate", UNBACKED, "general", true);
+      runHook("onupdate", UNBACKED, "general", true);
+      runHook("onupdate", UNBACKED, "general", true);
+
+      expect(scrolls).toEqual([{ block: "start" }]);
+    });
+
+    it("leaves the page where it is for an arrival that did not ask", () => {
+      const { runHook } = harness();
+      const { scrolls } = stubOwnerSection();
+
+      runHook("oncreate", UNBACKED, "general", false);
+      runHook("onupdate", UNBACKED, "general", false);
+
+      expect(scrolls).toEqual([]);
+    });
+
+    it("waits for General, and for the section to be on the page", () => {
+      const { runHook } = harness();
+      const { scrolls, setIsDrawn } = stubOwnerSection();
+
+      runHook("oncreate", UNBACKED, "backup", true);
+      expect(scrolls).toEqual([]);
+
+      // General, but its options are still loading: nothing to scroll to yet.
+      setIsDrawn(false);
+      runHook("onupdate", UNBACKED, "general", true);
+      expect(scrolls).toEqual([]);
+
+      setIsDrawn(true);
+      runHook("onupdate", UNBACKED, "general", true);
+      expect(scrolls).toHaveLength(1);
+    });
+
+    it("scrolls again for a later ask, after the first was left behind", () => {
+      const { runHook } = harness();
+      const { scrolls } = stubOwnerSection();
+
+      runHook("oncreate", UNBACKED, "general", true);
+      // Choosing a rail entry drops the ask from the URL.
+      runHook("onupdate", UNBACKED, "backup", false);
+      runHook("onupdate", UNBACKED, "general", true);
+
+      expect(scrolls).toHaveLength(2);
+    });
+  });
+});
+
+describe("General's Owner section's link to an account", () => {
   const OFFERED = {
     user_id: "user-1",
     email: "me@example.com",
@@ -295,7 +434,7 @@ describe("the Account settings group's link to an account", () => {
   it("leaves for the window's account's hub once the workspace belongs to the account", async () => {
     const { draw, requests } = linkingHarness(200);
     const routeSet = vi.spyOn(m.route, "set");
-    const root = draw(UNBACKED, "account", { accounts: [OFFERED] });
+    const root = draw(UNBACKED, "general", { accounts: [OFFERED] });
 
     press(root as AnyVnode, `Link to ${OFFERED.email}`);
     await settleDispatch();
@@ -313,7 +452,7 @@ describe("the Account settings group's link to an account", () => {
   it("stays put and shows the refusal when the association is refused", async () => {
     const { draw, models } = linkingHarness(400);
     const routeSet = vi.spyOn(m.route, "set");
-    const root = draw(UNBACKED, "account", { accounts: [OFFERED] });
+    const root = draw(UNBACKED, "general", { accounts: [OFFERED] });
 
     press(root as AnyVnode, `Link to ${OFFERED.email}`);
     await settleDispatch();
@@ -501,22 +640,24 @@ describe("the General settings group while its provider is erroring", () => {
     expect(allText(signedOut)).toContain(
       "Sign in to Imbue Cloud again  to rename this workspace or change its color.",
     );
-    const signIn = collectVnodes(signedOut).find(
-      (vnode) =>
-        typeof attrsOf(vnode).onclick === "function" &&
-        allText(vnode.children) === "Sign in",
-    );
+    const signInButton = (root: m.Children): AnyVnode | undefined =>
+      collectVnodes(root).find(
+        (vnode) =>
+          typeof attrsOf(vnode).onclick === "function" &&
+          allText(vnode.children) === "Sign in",
+      );
+    const signIn = signInButton(signedOut);
     if (signIn === undefined) throw new Error("no Sign in button");
     (attrsOf(signIn).onclick as () => void)();
-    expect(m.route.set).toHaveBeenCalledWith("/accounts");
+    // Settings' Accounts tab, where the sign-in lives.
+    expect(vi.mocked(m.route.set).mock.calls).toEqual([[ACCOUNTS_TAB_ROUTE, undefined, { replace: true }]]);
 
-    const otherwise = allText(
-      harness().draw(BACKED, "general", { is_stale: true }),
-    );
-    expect(otherwise).toContain(
+    const otherwise = harness().draw(BACKED, "general", { is_stale: true });
+    expect(allText(otherwise)).toContain(
       "Imbue Studio can't check on this workspace right now",
     );
-    expect(otherwise).not.toContain("Sign in");
+    expect(allText(otherwise)).not.toContain("Sign in to Imbue Cloud again");
+    expect(signInButton(otherwise)).toBeUndefined();
   });
 });
 
@@ -870,7 +1011,7 @@ describe("the General settings group's Machine size section", () => {
     expect(pressableWithLabel(after, "Restart now")).toBeDefined();
   });
 
-  it("sends a resize refused for want of a linked account to the Account settings, asking no bug report", async () => {
+  it("sends a resize refused for want of a linked account to General's Owner section, asking no bug report", async () => {
     const h = harness((url) =>
       url.startsWith("/api/v1/")
         ? Promise.resolve(
@@ -903,10 +1044,13 @@ describe("the General settings group's Machine size section", () => {
     expect(attrsOf(notice).isBugReportOffered).toBe(false);
     const [openAccount] = attrsOf(notice).actions as { label: string; onclick: () => void }[];
     expect(openAccount.label).toBe("Open account settings");
+    const openSettings = vi
+      .spyOn(getAppContext().shell, "openSettings")
+      .mockImplementation(() => undefined);
     openAccount.onclick();
-    expect(m.route.set).toHaveBeenLastCalledWith(
-      `/workspace/${UNBACKED}/options?tab=settings&group=account`,
-    );
+    expect(openSettings.mock.calls).toEqual([
+      [{ tab: "workspace", group: "general", settings_workspace: UNBACKED, focus: "owner" }],
+    ]);
   });
 
   it("says the machine is restarting, offers no second restart, and holds the controls", () => {

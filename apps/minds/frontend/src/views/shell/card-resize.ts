@@ -1,10 +1,8 @@
 // Size morphing for the shell's overlay cards: a card that changes size grows
 // or shrinks into the new one instead of jumping to it.
 //
-// The cards this animates are anchored by their top-left corner (the request
-// popup and the options panel both hang from the titlebar), so animating the
-// box alone reads as that window resizing -- no transform, so text is never
-// scaled or blurred on the way.
+// Animating the box alone reads as the card itself resizing -- no transform,
+// so text is never scaled or blurred on the way.
 //
 // The animation is driven through the Web Animations API rather than a CSS
 // transition because the size being animated TO is `auto`: the card is sized
@@ -41,28 +39,6 @@ export function measureCardBox(element: HTMLElement): CardBox | null {
   const rect = element.getBoundingClientRect();
   if (rect.width === 0 && rect.height === 0) return null;
   return { width: rect.width, height: rect.height };
-}
-
-/** Whether the card is still waiting on the content that decides its size.
- *
- * The Shell asks before sizing to what is on screen: a card showing a spinner
- * would have it shrink past the answer and grow back into it, which reads as
- * two windows rather than one resizing.
- */
-export function isContentPending(card: HTMLElement): boolean {
-  return card.querySelector("#request-popup-loading") !== null;
-}
-
-/** Hold the card at `box`, overriding its content sizing until released. */
-export function holdSize(card: HTMLElement, box: CardBox): void {
-  card.style.width = `${box.width}px`;
-  card.style.height = `${box.height}px`;
-}
-
-/** Hand the card back to its own sizing. */
-export function releaseSize(card: HTMLElement): void {
-  card.style.removeProperty("width");
-  card.style.removeProperty("height");
 }
 
 function isMotionUnwanted(): boolean {

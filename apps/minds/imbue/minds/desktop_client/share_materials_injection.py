@@ -27,6 +27,7 @@ import binascii
 import json
 import shlex
 import threading
+import time
 from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
@@ -335,11 +336,19 @@ def read_share_state_from_agent(agent_address: str, mngr_caller: MngrCaller) -> 
     not be read (the script's UNREADABLE marker), or whose payload cannot be
     decoded, raises :class:`ShareGrantsUnreadableError` for the same reason.
     """
+    started_at = time.monotonic()
     with get_profiler().span("sharing.probe_share_state", agent_address=agent_address):
         result = mngr_caller.call(
             ["exec", agent_address, _PROBE_SHARE_STATE_SCRIPT, "--no-start", "--format", "json"],
             timeout=SHARE_EXEC_TIMEOUT_SECONDS,
         )
+    logger.debug(
+        "Read the share state of {} from the workspace in {:.1f}s: returncode={} timed_out={}",
+        agent_address,
+        time.monotonic() - started_at,
+        result.returncode,
+        result.is_timed_out,
+    )
     if result.returncode != 0:
         raise ShareStateUnreadError(
             f"Could not read the share state of agent {agent_address}: {result.stderr.strip() or 'exec failed'}"

@@ -9,7 +9,7 @@
 
 // The chrome's titlebar (and the popout's own bar) height; the workspace
 // surface starts below it in every window.
-const TITLEBAR_HEIGHT = 38;
+const TITLEBAR_HEIGHT = 44;
 // The smallest a popout can be, matching the workspace shell's own minimum
 // window size so a window never shrinks on the way out.
 const POPOUT_MIN_WIDTH = 320;

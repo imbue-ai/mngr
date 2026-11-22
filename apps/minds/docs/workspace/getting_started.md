@@ -69,9 +69,10 @@ After creation, the agent is accessible at:
 ## Publishing a workspace
 
 Publishing is one switch, "Enable sharing and web access", for the whole
-workspace. It lives in the workspace options, in the panel headed "Share"
-followed by the workspace's name. Open that panel from the share button in the titlebar,
-or from the Share button inside the workspace. Publishing gives the workspace an address on
+workspace. It lives in Settings, under Workspace & apps > Sharing, at the
+foot of the "Full workspace" page, which is headed "Share" followed by the
+workspace's name. Open that page from the Share button in the titlebar, or
+from the Share button inside the workspace. Publishing gives the workspace an address on
 the internet. It admits nobody by itself. The account that published
 the workspace can always open it, with or without a grant.
 
@@ -107,22 +108,22 @@ name you read for it, or the whole workspace -- with its link, and naming
 you by the verified email address on your account rather than by your
 display name, so that nobody can dress an invitation up as mail from
 someone else. Inviting needs your own address verified, for the same
-reason, and so does "Email me a Mobile Access Link"; everything else
-about sharing works without it. If yours is not verified yet, the row or
-the link's control says so and offers "Send the email again". Once you
+reason, and so does "Email me a Mobile Access Link" (on the workspace's
+page or an app's, where it emails you that page's own link); everything
+else about sharing works without it. If yours is not verified yet, the row
+or the link's control says so and offers "Send the email again". Once you
 have invited someone the row reads "Invited" with when, or "Could not
-invite". Once they
-have opened the link the row reads "Joined". A domain grant notifies
-nobody: pass the link on yourself. Invite appears only while the workspace
-is published and its permissions have reached Imbue Cloud, which happens
-behind every save; until then the panel says the permissions have not
-reached Imbue Cloud yet and sends them again on its own. Imbue limits how
-many invitations an account sends in a day and how often the same person
-can be invited; the panel says so when a limit refuses one. See
-`specs/inviting-granted-visitors/spec.md` for the rules.
+invite". Once they have opened the link the row reads "Joined". A domain
+grant notifies nobody: pass the link on yourself. Invite appears only
+while the workspace is published and its permissions have reached Imbue
+Cloud, which happens behind every save; until then the panel says the
+permissions have not reached Imbue Cloud yet and sends them again on its
+own. Imbue limits how many invitations an account sends in a day and how
+often the same person can be invited; the panel says so when a limit
+refuses one. See `specs/inviting-granted-visitors/spec.md` for the rules.
 
-Anyone can turn these emails off for their own account on the Accounts
-page, under "Email notifications". The emails an account needs, such as a
+Anyone can turn these emails off for their own account in Settings, on the
+Accounts tab, under "Receive email notifications?". The emails an account needs, such as a
 password reset, are never affected.
 
 Turning publishing off drops the address, and anyone connected is cut

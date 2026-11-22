@@ -440,9 +440,8 @@ describe("updateAppActions", () => {
       actions[0].onclick();
     });
 
-    expect(routeSet).toHaveBeenCalledWith("/settings", {
-      section: "updates",
-      account: "user-cd34",
-    });
+    expect(routeSet.mock.calls).toEqual([
+      ["/settings", { tab: "studio", section: "updates", account: "user-cd34" }, undefined],
+    ]);
   });
 });

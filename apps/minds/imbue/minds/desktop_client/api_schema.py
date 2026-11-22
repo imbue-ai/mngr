@@ -81,6 +81,7 @@ from imbue.minds.desktop_client.api_models import MachineSharingResponse
 from imbue.minds.desktop_client.api_models import MachineSizeChangeRequest
 from imbue.minds.desktop_client.api_models import MachineSizeChangeResponse
 from imbue.minds.desktop_client.api_models import MediaEndpointsResponse
+from imbue.minds.desktop_client.api_models import MobileAccessLinkRequest
 from imbue.minds.desktop_client.api_models import MobileAccessLinkResponse
 from imbue.minds.desktop_client.api_models import OkResponse
 from imbue.minds.desktop_client.api_models import OperationHandleResponse
@@ -151,9 +152,6 @@ _SECURITY_BY_TRANSPORT: Final[Mapping[ApiTransport, tuple[Mapping[str, Sequence[
     ApiTransport.GATEWAY: ({"bearerAuth": ()}, {"cookieAuth": ()}),
     ApiTransport.LOCAL_SOCKET: ({},),
 }
-
-
-# -- Route -> model registry (models live in ``api_models``) --
 
 
 class _RouteModels(FrozenModel):
@@ -241,6 +239,7 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
     ("PUT", "/api/v1/workspace-sharing/{workspace_id}/grants"): _RouteModels(
         request_model=WorkspaceGrantsRequest, response_model=MachineSharingResponse
     ),
+    ("GET", "/api/v1/workspace-sharing/{workspace_id}/local"): _RouteModels(response_model=MachineSharingResponse),
     ("GET", "/api/v1/workspace-sharing/{workspace_id}/readiness"): _RouteModels(
         response_model=SharingReadinessResponse
     ),
@@ -251,7 +250,7 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
         response_model=InvitationOutcomesResponse
     ),
     ("POST", "/api/v1/workspace-sharing/{workspace_id}/mobile-access-link"): _RouteModels(
-        response_model=MobileAccessLinkResponse
+        request_model=MobileAccessLinkRequest, response_model=MobileAccessLinkResponse
     ),
     ("GET", "/api/v1/workspace-sharing/{workspace_id}/agents"): _RouteModels(response_model=VisitingAgentsResponse),
     ("POST", "/api/v1/workspace-sharing/{workspace_id}/agents/invites"): _RouteModels(

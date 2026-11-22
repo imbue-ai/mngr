@@ -351,7 +351,11 @@ describe("plan and notification reads that failed", () => {
       );
       vnodeButtonLabelled(root, "Update Imbue Studio").click();
     });
-    expect(routed).toHaveBeenCalledWith("/settings", { section: "updates", account: "user-cd34" });
+    expect(routed).toHaveBeenCalledWith(
+      "/settings",
+      { tab: "studio", section: "updates", account: "user-cd34" },
+      undefined,
+    );
   });
 });
 

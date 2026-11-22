@@ -89,7 +89,7 @@ import {
   revokeAllRowKey,
   selfToggleRowKey,
 } from "../../../models/workspacePermissions";
-import { navEntryClass, splitPane } from "../../components/SplitPane";
+import { navEntryClass } from "../../components/SplitPane";
 import { SETTING_SELECT_CLASS, renderFolderSyncSetting, renderSettingRow } from "../../components/FolderSyncSetting";
 import { renderDesktopEgressRouteSetting } from "../../components/DesktopEgressRouteSetting";
 import { areRoutesEqual } from "../../../models/desktopEgressRoute";
@@ -147,14 +147,32 @@ const CANNOT_SHARE_FILES_SENTENCE = "Imbue Studio can't share files from this co
 
 export interface PermissionsTabAttrs {
   model: PermissionsModel;
-  /** Workspace name for the heading; '' when the options load has not landed. */
+  /** Workspace name for the copy; '' when the options load has not landed. */
   workspaceName: string;
-  /** ?section from the URL, or null for "whatever is first". */
+  /** The section the URL asks for, or null for "whatever is first". */
   requestedSection: string | null;
   onSelectSection: (section: string) => void;
-  /** Open a waiting request. It opens as its own page over this pane, which
+  /** Open a waiting request. It opens as its own page over Settings, which
    * stays mounted underneath with its scroll and section intact. */
   onReviewRequest: (requestId: string) => void;
+}
+
+/** The sections of a workspace's permissions (Waiting on you, each connection, Add connection, Local files and the
+ * rest), as entries for Settings' rail, which nests them under its Permissions entry. Nothing until the read has
+ * landed: the page itself says what is loading or wrong. */
+export function permissionsNav(
+  model: PermissionsModel,
+  requestedSection: string | null,
+  onSelectSection: (section: string) => void,
+): m.Children {
+  const data = model.data;
+  if (model.status !== "ready" || data === null) return null;
+  return renderNav(
+    data.connections,
+    data.waiting_requests,
+    resolvePermissionsSection(data, requestedSection),
+    onSelectSection,
+  );
 }
 
 interface PermissionsTabLocalState {
@@ -191,7 +209,11 @@ interface PermissionsTabLocalState {
  * live. */
 const FOLDER_SYNC_POLL_MS = 1000;
 
+/** The selected section's page. The list of sections is Settings' rail's (permissionsNav). */
 export function PermissionsTab(): m.Component<PermissionsTabAttrs> {
+  // The section on screen: a change of it, which comes from the rail outside this component, drops whatever was
+  // half-done in the last one.
+  let shownSection: string | null = null;
   const local: PermissionsTabLocalState = {
     armedRevokeRowKey: null,
     disarmTimer: null,
@@ -228,27 +250,12 @@ export function PermissionsTab(): m.Component<PermissionsTabAttrs> {
     },
     view(vnode) {
       const { model, workspaceName, requestedSection, onSelectSection, onReviewRequest } = vnode.attrs;
-      const machineName = workspaceName.trim();
-
-      return m("div", { class: "flex flex-col flex-1 min-h-0" }, [
-        m("h1", { class: "type-heading-lg text-primary flex items-center gap-2 min-w-0 shrink-0" }, [
-          m(Icon16, { name: "key", size: "lg", extra: "shrink-0" }),
-          m("span", { class: "shrink-0" }, machineName ? "Permissions:" : "Permissions"),
-          machineName ? m("span", { class: "truncate max-w-[280px]" }, machineName) : null,
-        ]),
-        m(
-          "p",
-          { class: "mt-2 max-w-[760px] type-body text-primary shrink-0" },
-          machineName
-            ? [
-                "What agents in ",
-                m("span", { class: "font-semibold" }, machineName),
-                " can access. They can never reach beyond the permissions you grant them.",
-              ]
-            : "What agents in this workspace can access. They can never reach beyond the permissions you grant them.",
-        ),
-        renderBody(model, local, machineName, requestedSection, onSelectSection, onReviewRequest),
-      ]);
+      if (model.status === "ready" && model.data !== null) {
+        const selected = resolvePermissionsSection(model.data, requestedSection);
+        if (shownSection !== null && selected !== shownSection) leaveSection(model, local);
+        shownSection = selected;
+      }
+      return renderBody(model, local, workspaceName.trim(), requestedSection, onSelectSection, onReviewRequest);
     },
   };
 }
@@ -291,43 +298,38 @@ function renderBody(
   // the URL asks for.
   const selected = resolvePermissionsSection(data, requestedSection);
   const selectSection = (section: string): void => {
-    disarmRevoke(local);
-    local.disconnectSectionId = null;
-    local.desktopEgressDraft = null;
-    model.clearWriteError();
-    model.clientPermissions.clearErrorMessage();
+    leaveSection(model, local);
     onSelectSection(section);
   };
 
   return [
-    splitPane({
-      navLabel: "Permission sections",
-      nav: renderNav(data.connections, data.waiting_requests, selected, selectSection),
-      content: [
-        renderStaleRefreshNotice(model),
-        model.writeError !== null && local.disconnectSectionId === null
-          ? m(ErrorNotice, {
-              id: "ws-perm-error",
-              error: model.writeError,
-              actions: writeErrorActions(model, local),
-              workspaceAgentId: model.agentId,
-              footer: m(AskAgentFailure, {
-                id: ASK_AGENT_ID,
-                model: local.askAgent,
-                workspaceAgentId: model.agentId,
-                isBoxed: false,
-              }),
-              extra: "shrink-0",
-            })
-          : null,
-        renderSelectedPanel(model, local, data, machineName, selected, selectSection, onReviewRequest),
-      ],
-      extra: "mt-8",
-      // pb-8 keeps the panel foot (the Disconnect button) off the pane's
-      // bottom edge when scrolled to the end.
-      contentExtra: "flex flex-col pb-8",
-    }),
+    renderStaleRefreshNotice(model),
+    model.writeError !== null && local.disconnectSectionId === null
+      ? m(ErrorNotice, {
+          id: "ws-perm-error",
+          error: model.writeError,
+          actions: writeErrorActions(model, local),
+          workspaceAgentId: model.agentId,
+          footer: m(AskAgentFailure, {
+            id: ASK_AGENT_ID,
+            model: local.askAgent,
+            workspaceAgentId: model.agentId,
+            isBoxed: false,
+          }),
+          extra: "shrink-0",
+        })
+      : null,
+    renderSelectedPanel(model, local, data, machineName, selected, selectSection, onReviewRequest),
   ];
+}
+
+/** Drop what was half-done in the section being left: an armed revoke, an open dialog or editor, a shown error. */
+function leaveSection(model: PermissionsModel, local: PermissionsTabLocalState): void {
+  disarmRevoke(local);
+  local.disconnectSectionId = null;
+  local.desktopEgressDraft = null;
+  model.clearWriteError();
+  model.clientPermissions.clearErrorMessage();
 }
 
 /** Said in place of a pane the gateway (or the machine's host) could not

@@ -1,24 +1,19 @@
-// The Workspace settings pane: General / Account / Backup / Updates groups
-// behind a left nav, rendered by the options panel's Settings tab
-// (WorkspaceSettingsSections.jinja's successor; the old standalone
-// /workspace/<id>/settings page now redirects into that tab).
+// A workspace's own settings, one page each: General (name, colour, size,
+// owner, the danger zone), Backup, and Updates. Settings' Workspace & apps tab
+// lists them in its rail (SettingsPage.ts) and draws the selected one here.
 
 import m from "mithril";
 import { getAppContext } from "../../../app-context";
 import { Button } from "../../components/Button";
 import { ColorSwatch } from "../../components/ColorSwatch";
-import { Icon16 } from "../../components/Icon";
 import { ErrorNotice, restartAppActions } from "../../components/ErrorDisplay";
 import { InlineError, richErrorText } from "../../components/errorDesign";
-import type { IconName } from "../../components/icons";
 import { destroyRefusalActions } from "../lifecycle/destroy-refusal";
 import { Modal } from "../../components/Modal";
 import { Notice } from "../../components/Notice";
-import { routeLinkAttrs } from "../../components/route-link";
 import { CopyField, SectionHeader } from "../../components/Layout";
 import { FormLabel, Select, TextInput } from "../../components/FormControls";
 import type {
-  SettingsGroup,
   WorkspaceMachineSizeData,
   WorkspaceOptionsData,
   WorkspaceOptionsModel,
@@ -44,19 +39,16 @@ import { shownUpdatePill } from "../../shell/workspace-notices";
 import { BackupGroup } from "./BackupGroup";
 import { UpdatesGroup } from "./UpdatesGroup";
 import { Spinner } from "../../components/Spinner";
-import { navEntryClass, splitPane } from "../../components/SplitPane";
+import { OWNER_SECTION_ID, ownerSectionQuery, rememberSettingsPlace } from "../settings/settings-route";
 
-const GROUPS: { id: SettingsGroup; icon: IconName; label: string }[] = [
-  { id: "general", icon: "info", label: "General" },
-  { id: "account", icon: "user", label: "Account" },
-  { id: "backup", icon: "cloud", label: "Backup" },
-  { id: "updates", icon: "restart", label: "Updates" },
-];
+/** The pages this module draws. */
+export type WorkspaceOwnSettingsGroup = "general" | "backup" | "updates";
 
-export interface SettingsGroupsAttrs {
+export interface WorkspaceSettingsGroupAttrs {
   model: WorkspaceOptionsModel;
-  selectedGroup: SettingsGroup;
-  onSelectGroup: (group: SettingsGroup) => void;
+  group: WorkspaceOwnSettingsGroup;
+  /** Whether the arrival asked for the workspace's account: General scrolls its Owner section into view, once. */
+  isOwnerSectionAsked: boolean;
 }
 
 interface SettingsGroupsLocalState {
@@ -78,7 +70,7 @@ function forMachine<T extends { agentId: string }>(
   return held?.agentId === agentId ? held : null;
 }
 
-export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
+export function WorkspaceSettingsGroup(): m.Component<WorkspaceSettingsGroupAttrs> {
   const local: SettingsGroupsLocalState = {
     nameDraft: null,
     colorDraft: null,
@@ -86,54 +78,32 @@ export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
     isUnlinkDialogOpen: false,
     sizeDraft: null,
   };
+  let isOwnerSectionShown = false;
+  function showOwnerSection(vnode: m.VnodeDOM<WorkspaceSettingsGroupAttrs>): void {
+    if (!vnode.attrs.isOwnerSectionAsked) {
+      isOwnerSectionShown = false;
+      return;
+    }
+    if (isOwnerSectionShown || vnode.attrs.group !== "general") return;
+    const section = document.getElementById(OWNER_SECTION_ID);
+    if (section === null) return;
+    isOwnerSectionShown = true;
+    section.scrollIntoView({ block: "start" });
+  }
   return {
+    oncreate: showOwnerSection,
+    onupdate: showOwnerSection,
     view(vnode) {
-      const { model, selectedGroup, onSelectGroup } = vnode.attrs;
+      const { model, group } = vnode.attrs;
       const data = model.data;
       if (data === null) return null;
 
       return [
-        splitPane({
-          navLabel: "Settings groups",
-          nav: m(
-            "div",
-            { class: "flex flex-col gap-0.5" },
-            GROUPS.map((group) =>
-              m(
-                "button",
-                {
-                  type: "button",
-                  "data-settings-group": group.id,
-                  "aria-pressed": group.id === selectedGroup ? "true" : "false",
-                  class: navEntryClass(group.id === selectedGroup),
-                  onclick: () => onSelectGroup(group.id),
-                },
-                [
-                  m(Icon16, { name: group.icon, extra: "shrink-0" }),
-                  m("span", { class: "truncate" }, group.label),
-                  group.id === "updates" ? updatesNavDot(data.agent_id) : null,
-                ],
-              ),
-            ),
-          ),
-          content: [
-            selectedGroup === "general"
-              ? renderGeneralGroup(model, local)
-              : null,
-            selectedGroup === "account"
-              ? renderAccountGroup(model, local)
-              : null,
-            selectedGroup === "backup"
-              ? m(BackupGroup, { agentId: data.agent_id })
-              : null,
-            selectedGroup === "updates"
-              ? m(UpdatesGroup, { agentId: data.agent_id })
-              : null,
-          ],
-          extra: "mt-8",
-        }),
+        group === "general" ? renderGeneralGroup(model, local) : null,
+        group === "backup" ? m(BackupGroup, { agentId: data.agent_id }) : null,
+        group === "updates" ? m(UpdatesGroup, { agentId: data.agent_id }) : null,
         // Fixed-position when open and nothing at all when closed, so they ride
-        // beside the pane rather than as extra columns inside it.
+        // beside the page rather than inside it.
         renderDestroyDialog(model, local),
         renderUnlinkDialog(model, local),
       ];
@@ -142,7 +112,7 @@ export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
 }
 
 /** The Updates entry's dot, in the titlebar pill's colour, while the pill shows. */
-function updatesNavDot(agentId: string): m.Children {
+export function updatesNavDot(agentId: string): m.Children {
   const dot = updateNavDotFor(shownUpdatePill(getAppContext().shell, agentId));
   if (dot === null) return null;
   return m("span", {
@@ -325,6 +295,8 @@ function renderGeneralGroup(
           ]),
         ]
       : null,
+
+    renderOwnerSection(model, local),
 
     m(SectionHeader, "Danger zone"),
     m(
@@ -778,7 +750,11 @@ function providerTroubleNotice(data: WorkspaceOptionsData): m.Children {
       ),
       m(
         Button,
-        { variant: "primary", extra: "mt-2", onclick: () => m.route.set("/accounts") },
+        {
+          variant: "primary",
+          extra: "mt-2",
+          onclick: () => rememberSettingsPlace({ tab: "accounts" }),
+        },
         "Sign in",
       ),
     ]);
@@ -812,10 +788,7 @@ function renderMachineResizeError(model: WorkspaceOptionsModel): m.Children {
               ? [
                   {
                     label: "Open account settings",
-                    onclick: () =>
-                      m.route.set(
-                        `/workspace/${encodeURIComponent(model.agentId)}/options?tab=settings&group=account`,
-                      ),
+                    onclick: () => getAppContext().shell.openSettings(ownerSectionQuery(model.agentId)),
                   },
                 ]
               : [],
@@ -843,16 +816,18 @@ function commitHexDraft(
   void model.pickColor(normalized);
 }
 
-function renderAccountGroup(
+/** Whose the workspace is: the account it is linked to, and the link and unlink that sharing and cloud backups
+ * hang on. */
+function renderOwnerSection(
   model: WorkspaceOptionsModel,
   local: SettingsGroupsLocalState,
 ): m.Children {
   const data = model.data;
   if (data === null) return null;
 
-  return m("div", [
-    m(SectionHeader, "Account"),
-    m("div", { id: "account-section" }, [
+  return m("div", { class: "mb-8" }, [
+    m(SectionHeader, "Owner"),
+    m("div", { id: OWNER_SECTION_ID }, [
       data.is_account_owned_provider
         ? [
             data.current_account
@@ -945,12 +920,11 @@ function renderAssociatePrompt(
         "p",
         { class: "type-body text-secondary" },
         m(
-          "a",
+          "button",
           {
-            class: "text-primary underline",
-            ...routeLinkAttrs(
-              m.buildPathname("/accounts", getAppContext().shell.overlayQuery()),
-            ),
+            type: "button",
+            class: "text-primary underline cursor-pointer",
+            onclick: () => rememberSettingsPlace({ tab: "accounts" }),
           },
           "Sign in or create an account",
         ),

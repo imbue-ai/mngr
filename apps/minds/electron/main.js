@@ -48,8 +48,9 @@ const {
   parsePopoutRoute,
   popoutRoutePath,
 } = require('./surface-routing');
-// The SPA routes that show a workspace surface: /workspace/<id> and its
-// /options overlay, which keeps the surface mounted underneath.
+// The SPA routes that show a workspace surface: /workspace/<id>, and its
+// legacy /options spelling, which the SPA redirects into Settings floated
+// over that workspace (so a saved session on it restores there).
 const SPA_WORKSPACE_SURFACE_RE = new RegExp(`^/workspace/(${SPA_WORKSPACE_ID})(?:/options)?/?$`, 'i');
 const {
   DEVICE_ACCOUNT_ID,
@@ -116,6 +117,7 @@ const {
 const updater = require('./updater');
 const { INSTALL_NO_SIGNAL_CODE } = require('./install-policy');
 const displayZoom = require('./display-zoom');
+const keyboardShortcuts = require('./keyboard-shortcuts');
 const launchVersion = require('./launch-version');
 const { NATIVE_FRAME, resolveWindowControls, windowControlsSwitch } = require('./window-controls');
 const { removeLegacyNameDirs } = require('./legacy-name-cleanup');
@@ -913,6 +915,31 @@ function applyDisplayZoomToAllWindows() {
   }
 }
 
+// The workspace switcher's shortcut (Settings > Studio > Keyboard shortcuts).
+// Read from disk once and kept here for the app's life, wrapped so that a
+// binding turned off (a null chord) still counts as read;
+// `set-workspace-switcher-shortcut` is the only writer.
+let workspaceSwitcherBinding = null;
+
+function currentWorkspaceSwitcherChord() {
+  if (workspaceSwitcherBinding === null) {
+    const read = keyboardShortcuts.readWorkspaceSwitcherChord(paths.getStateDir(), process.platform);
+    if (read.reason !== null) {
+      console.warn(`[keyboard-shortcuts] falling back to the default workspace switcher shortcut: stored preference ${read.reason}`);
+    }
+    workspaceSwitcherBinding = { chord: read.chord };
+  }
+  return workspaceSwitcherBinding.chord;
+}
+
+function broadcastKeyboardShortcuts(shortcuts) {
+  for (const bundle of bundles) {
+    if (!bundle.window.isDestroyed() && !bundle.window.webContents.isDestroyed()) {
+      bundle.window.webContents.send('keyboard-shortcuts-changed', shortcuts);
+    }
+  }
+}
+
 function updateOsTitle(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
   bundle.window.setTitle(computeTitleFor(bundle));
@@ -1074,6 +1101,9 @@ function createBundle({ kind = 'main', popout = null, bounds = null, accountId =
     // integration spec, section 5): menu shortcuts are off and the
     // before-input-event relays are silenced while it is.
     isImmersive: false,
+    // The chord capture the page's shortcut recorder asked for, if any: while
+    // one is pending every key-down in this window is its, and none is relayed.
+    shortcutCapture: keyboardShortcuts.createShortcutCapture(),
     // The URL this window's content is "at" for session persistence and
     // titles: the displayed workspace's /goto path, or the local page path.
     currentContentUrl: null,
@@ -1175,6 +1205,7 @@ function wireBundleWindowEvents(bundle) {
     crashAnnotations.recordMainEvent('window-focus');
   });
   win.on('blur', () => {
+    bundle.shortcutCapture.cancel();
     relayFocus(false);
     crashAnnotations.recordMainEvent('window-blur');
   });
@@ -1212,6 +1243,7 @@ function wireBundleWindowEvents(bundle) {
   });
 
   win.on('closed', () => {
+    bundle.shortcutCapture.cancel();
     if (isPopoutBundle(bundle)) {
       stopFollowingCursor(bundle);
       // A pending reattach handshake ends with the window: its timer must not
@@ -1287,9 +1319,9 @@ function wireBundleNavigationEvents(bundle) {
     const historyIndex = wc.navigationHistory.getActiveIndex();
     const isArrivedByGoingBack = bundle.historyIndex !== null && historyIndex < bundle.historyIndex;
     bundle.historyIndex = historyIndex;
-    // The SPA's workspace routes (/workspace/<id>, and its /options overlay,
-    // which keeps the workspace surface mounted underneath -- but NOT
-    // /workspace/<id>/settings, a legacy redirect route) show a workspace:
+    // The SPA's workspace routes (/workspace/<id>, and its legacy /options
+    // spelling, which redirects into Settings over the workspace -- but NOT
+    // /workspace/<id>/settings, the older redirect route) show a workspace:
     // the path id is the authoritative record until the iframe commits.
     // Other SPA routes clear the displayed workspace. Either workspace
     // coordinate counts (a cold-start restore may carry the host-scoped id
@@ -1476,8 +1508,17 @@ function registerShortcutsFor(bundle, wc) {
     if (input.type === 'mouseUp' && bundle.dragWatch) releaseDragWatch(bundle);
   });
 
+  // The page that asked for a capture is gone once the window navigates, and
+  // nothing else would end it short of a blur.
+  wc.on('did-navigate', () => bundle.shortcutCapture.cancel());
+
   wc.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown') return;
+    if (bundle.shortcutCapture.isPending()) {
+      event.preventDefault();
+      bundle.shortcutCapture.offerKeyDown(input);
+      return;
+    }
     // In immersive mode every key is the remote desktop's; the held Escape
     // that ends it is Chromium's, handled before any page or relay sees it.
     if (isKeyRelaySilenced(bundle)) return;
@@ -1517,6 +1558,20 @@ function registerShortcutsFor(bundle, wc) {
         return;
       }
       try { wc.send('close-active-tab'); } catch { /* noop */ }
+      return;
+    }
+    // The workspace switcher's shortcut, which like the relays above has to
+    // work with focus inside the workspace iframe. A pulled-out window has no
+    // switcher.
+    if (
+      !isPopoutBundle(bundle) &&
+      keyboardShortcuts.matchesChord(currentWorkspaceSwitcherChord(), input, process.platform)
+    ) {
+      event.preventDefault();
+      // A held chord toggles once, not once per repeat.
+      if (!input.isAutoRepeat) {
+        try { wc.send('toggle-workspace-switcher'); } catch { /* noop */ }
+      }
       return;
     }
     // When the app menu is installed, it owns cmd+Q / cmd+N.
@@ -3658,6 +3713,39 @@ ipcMain.handle('set-display-zoom', (_event, percent) => {
   displayZoomPercent = normalized;
   applyDisplayZoomToAllWindows();
   return normalized;
+});
+
+ipcMain.handle('get-keyboard-shortcuts', () =>
+  keyboardShortcuts.describeKeyboardShortcuts(currentWorkspaceSwitcherChord(), process.platform));
+
+// Settings > Studio > Keyboard shortcuts. `value` is a chord, null for off, or
+// "default". Stores the binding, then applies it at once and tells every
+// window, so each one's hint follows.
+ipcMain.handle('set-workspace-switcher-shortcut', (_event, value) => {
+  const resolved = keyboardShortcuts.resolveWorkspaceSwitcherRequest(value, process.platform);
+  if (resolved.rejection !== null) {
+    throw new Error(resolved.rejection);
+  }
+  keyboardShortcuts.writeWorkspaceSwitcherChord(paths.getStateDir(), resolved.chord, process.platform);
+  workspaceSwitcherBinding = { chord: resolved.chord };
+  const shortcuts = keyboardShortcuts.describeKeyboardShortcuts(resolved.chord, process.platform);
+  broadcastKeyboardShortcuts(shortcuts);
+  return shortcuts;
+});
+
+// Resolves with the next chord pressed in the calling window ({ chord }), or
+// { cancelled: true } when the capture ends without one: on Escape, on
+// `cancel-shortcut-capture`, when the window loses focus, navigates or
+// closes, and when the page asks for another.
+ipcMain.handle('capture-shortcut-chord', (event) => {
+  const bundle = getBundleFromEvent(event);
+  if (!bundle) return { cancelled: true };
+  return bundle.shortcutCapture.begin();
+});
+
+ipcMain.handle('cancel-shortcut-capture', (event) => {
+  const bundle = getBundleFromEvent(event);
+  if (bundle) bundle.shortcutCapture.cancel();
 });
 
 ipcMain.handle('get-launch-version-change', () => launchVersionChange);

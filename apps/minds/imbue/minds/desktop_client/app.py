@@ -142,6 +142,7 @@ from imbue.minds.desktop_client.report_collector import submit_report_with_attac
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.request_handler import find_handler_for_event
 from imbue.minds.desktop_client.request_profiling import install_request_profiling
+from imbue.minds.desktop_client.request_timing import install_request_timing
 from imbue.minds.desktop_client.responses import make_html_response
 from imbue.minds.desktop_client.responses import make_json_error_response
 from imbue.minds.desktop_client.responses import make_redirect_response
@@ -179,6 +180,7 @@ from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.system_interface_health import RecoveryFailureCause
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.turn_credentials import TurnCredentialBroker
+from imbue.minds.desktop_client.ui_account_scope import ACCOUNTS_SETTINGS_ROUTE
 from imbue.minds.desktop_client.ui_api import SPA_INDEX_ENDPOINT_PREFIX
 from imbue.minds.desktop_client.ui_api import create_ui_blueprint
 from imbue.minds.desktop_client.ui_api import serve_spa_index
@@ -882,7 +884,7 @@ def _handle_help_assist() -> Response:
 def _build_ui_accounts_message(session_store: MultiAccountSessionStore | None) -> UiAccountsMessage:
     """The `/ui/ws` ``accounts`` frame: the switcher's lists, before the publisher stamps each window's account.
 
-    The titlebar's account switcher and Manage Accounts both render from this
+    The titlebar's account switcher and Settings' Accounts tab both render from this
     one frame, so a sign-in or sign-out updates them together, without a
     reload. Beside the signed-in accounts it lists the accounts signed out on
     this install whose workspaces are still here, so a window can switch to
@@ -1162,14 +1164,14 @@ def _handle_post_login_redirect() -> Response:
     here. A ``?return_to=`` query param (a safe same-origin path, e.g.
     ``/create`` when the user came from the create page to enable the remote
     preset) wins when present. Otherwise a user who already has workspaces
-    goes to the account-management page (the prior behavior); a user with none
-    goes to ``/`` -- which renders the create form -- so first-time users land
-    on the new-workspace screen instead of the account page.
+    goes to Settings' Accounts tab; a user with none goes to ``/`` -- which
+    renders the create form -- so first-time users land on the new-workspace
+    screen instead of on their accounts.
     """
     if not _is_request_authenticated():
         return make_response(status_code=302, headers={"Location": "/login"})
     # The error-reporting consent screen sits just after login. While it is unanswered, send the user
-    # to "/" (the landing handler shows the consent screen there) rather than straight to /accounts or
+    # to "/" (the landing handler shows the consent screen there) rather than straight to the accounts or
     # a return_to deep-link, so the one-time consent gate is answered first.
     minds_config: MindsConfig | None = get_state().minds_config
     if minds_config is not None and not minds_config.get_error_reporting_consent_given():
@@ -1179,7 +1181,7 @@ def _handle_post_login_redirect() -> Response:
         return make_response(status_code=302, headers={"Location": return_to})
     backend_resolver = get_state().backend_resolver
     has_any_workspace = bool(backend_resolver.list_active_workspace_ids())
-    destination = "/accounts" if has_any_workspace else "/"
+    destination = ACCOUNTS_SETTINGS_ROUTE if has_any_workspace else "/"
     return make_response(status_code=302, headers={"Location": destination})
 
 
@@ -1889,7 +1891,7 @@ def _handle_account_trim_backups(user_id: str) -> Response:
         paths=paths,
         notification_feed=get_state().notification_feed,
     )
-    return make_response(status_code=303, headers={"Location": "/accounts"})
+    return make_response(status_code=303, headers={"Location": ACCOUNTS_SETTINGS_ROUTE})
 
 
 def _handle_account_set_plan(user_id: str) -> Response:
@@ -1934,7 +1936,7 @@ def _handle_account_set_plan(user_id: str) -> Response:
         logger.warning("Could not switch {} to the {} plan: {}", account.email, plan, exc)
         # No sentence of our own: the page names the switch that failed, with this text behind See details.
         return make_response(status_code=502, content=json.dumps({"detail": str(exc)}), media_type="application/json")
-    return make_response(status_code=303, headers={"Location": "/accounts"})
+    return make_response(status_code=303, headers={"Location": ACCOUNTS_SETTINGS_ROUTE})
 
 
 def _account_action_account_missing_response() -> Response:
@@ -2157,23 +2159,25 @@ def _handle_account_logout(
         return make_json_error_response(CREATE_IN_FLIGHT_ON_ACCOUNT_MESSAGE, 409)
     if state.session_store is not None:
         signout_user_via_plugin(user_id)
-    return make_response(status_code=303, headers={"Location": "/accounts"})
+    return make_response(status_code=303, headers={"Location": ACCOUNTS_SETTINGS_ROUTE})
 
 
 def _handle_sharing_redirect(
     agent_id: str,
     service_name: str = "",
 ) -> Response:
-    """Redirect a legacy sharing-editor URL to the options panel's share panel.
+    """Redirect a legacy sharing-editor URL to Settings' Sharing page for the workspace.
 
-    The standalone editor is gone -- the share panel in the workspace options
-    panel is the one sharing surface -- but its URLs were handed out (workspace
-    settings links, permission-request approvals), so they land on the
-    replacement instead of a 404. A service segment picks that target.
+    The standalone editor is gone -- Sharing in Settings is the one sharing
+    surface -- but its URLs were handed out (workspace settings links,
+    permission-request approvals), so they land on the replacement instead of
+    a 404. A service segment picks that target's page.
     """
     # The old /modal spelling is a rendering variant, not a share target.
-    target = f"&target={quote(service_name)}" if service_name and service_name != "modal" else ""
-    return make_redirect_response(f"/workspace/{quote(agent_id)}/options?tab=share{target}", status_code=302)
+    target = f"&share_target={quote(service_name)}" if service_name and service_name != "modal" else ""
+    return make_redirect_response(
+        f"/settings?workspace={quote(agent_id)}&tab=workspace&group=sharing{target}", status_code=302
+    )
 
 
 def _handle_request_grant(
@@ -3152,6 +3156,7 @@ def create_desktop_client(
         return make_response(status_code=500, content=raw_text)
 
     install_request_profiling(app)
+    install_request_timing(app)
 
     # The /ui channel: the broadcaster fans serialized frames out to every
     # connected SPA window, and the edge-driven publisher derives + diffs the
@@ -3590,7 +3595,7 @@ def create_desktop_client(
     app.add_url_rule("/requests/<request_id>/grant", view_func=_handle_request_grant, methods=["POST"])
     app.add_url_rule("/requests/<request_id>/deny", view_func=_handle_request_deny, methods=["POST"])
 
-    # Legacy sharing-editor URLs redirect to the options panel's share panel
+    # Legacy sharing-editor URLs redirect to Settings' Sharing page
     # (the /modal spelling included -- an overlay that lands there follows the
     # redirect into the browser-mode page, which still renders the panel).
     app.add_url_rule("/sharing/<agent_id>", view_func=_handle_sharing_redirect)

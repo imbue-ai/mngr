@@ -41,7 +41,7 @@ export function FirstRunCover(): m.Component<FirstRunCoverAttrs> {
       };
       return m(
         "div",
-        { id: "first-run-cover", class: "fixed inset-x-0 bottom-0 top-[38px] z-[90] overflow-y-auto" },
+        { id: "first-run-cover", class: "fixed inset-x-0 bottom-0 top-(--titlebar-height) z-[90] overflow-y-auto" },
         firstRunWelcome({
           id: "first-run-cover-welcome",
           attemptId: state.createAttemptId,

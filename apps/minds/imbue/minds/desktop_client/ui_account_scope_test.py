@@ -13,6 +13,7 @@ from imbue.minds.desktop_client.ui_account_scope import account_id_from_query
 from imbue.minds.desktop_client.ui_account_scope import choose_switch_route
 from imbue.minds.desktop_client.ui_account_scope import project_snapshot
 from imbue.minds.desktop_client.ui_account_scope import resolve_window_account_id
+from imbue.minds.desktop_client.ui_account_scope import workspace_any_id_from_query
 from imbue.minds.desktop_client.ui_models import AccountPanelState
 from imbue.minds.desktop_client.ui_models import NotificationKind
 from imbue.minds.desktop_client.ui_models import ProviderPanelStatus
@@ -249,6 +250,11 @@ def test_hub_path_and_query_parsing() -> None:
     assert account_id_from_hub_path("/account/../etc") is None
     assert account_id_from_query(f"?workspace=agent-a1&account={ALICE}") == ALICE
     assert account_id_from_query("account=") is None
+    assert workspace_any_id_from_query(f"?workspace=agent-a1&account={ALICE}") == "agent-a1"
+    assert workspace_any_id_from_query("workspace=host-0b2c&tab=workspace") == "host-0b2c"
+    assert workspace_any_id_from_query("workspace=shared-0f3a9c") == "shared-0f3a9c"
+    assert workspace_any_id_from_query("workspace=../etc") is None
+    assert workspace_any_id_from_query("tab=workspace") is None
     assert account_hub_route(ALICE) == f"/account/{ALICE}/"
 
 
@@ -278,6 +284,13 @@ def test_resolve_window_account_id_follows_the_hub_the_workspace_the_attempt_the
     assert resolve("/creating/create-attempt-ffffffff") == LOCAL_PROFILE_USER_ID
     assert resolve("/settings", f"account={ALICE}") == ALICE
     assert resolve("/start") == LOCAL_PROFILE_USER_ID
+    # An overlay that names no account takes the account of the workspace it floats over; ?account= wins when
+    # both are there, and a value that is no workspace id says nothing.
+    assert resolve("/settings", "workspace=agent-a1&tab=workspace&group=sharing") == ALICE
+    assert resolve("/settings", f"workspace=agent-a1&account={BOB}") == BOB
+    assert resolve("/settings", "workspace=agent-ffff") == LOCAL_PROFILE_USER_ID
+    assert resolve("/settings", "workspace=elsewhere") == BOB
+    assert resolve("/start", "workspace=agent-a1") == LOCAL_PROFILE_USER_ID
     # A bare route takes the most recently used account, and the stand-in when none was used yet.
     assert resolve("/") == BOB
     assert resolve("/accounts") == BOB

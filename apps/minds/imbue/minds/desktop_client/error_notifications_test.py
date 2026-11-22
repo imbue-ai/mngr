@@ -83,7 +83,7 @@ def test_account_signed_out_reporter_appends_one_account_level_entry_and_banner(
     ]
     assert email in entries[0].body
     assert [(request.title, request.subtitle, request.url) for request in dispatcher.dispatched] == [
-        (email, ACCOUNT_SIGNED_OUT_TITLE, f"/accounts?account={user_id}")
+        (email, ACCOUNT_SIGNED_OUT_TITLE, f"/settings?tab=accounts&account={user_id}")
     ]
 
 

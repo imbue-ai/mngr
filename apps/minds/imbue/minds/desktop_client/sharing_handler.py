@@ -1411,6 +1411,74 @@ def _with_publication_unknown_reason(
     return document
 
 
+def get_local_sharing(
+    host_id: str,
+    backend_resolver: BackendResolverInterface,
+    cli: ImbueCloudCli | None,
+    session_store: MultiAccountSessionStore | None,
+    identity_cache: IdentityCache | None,
+) -> dict[str, Any]:
+    """The machine's sharing document as this computer and the workspace can say it, without asking Imbue Cloud.
+
+    One exec reads the workspace's share state, which gives the grants in force
+    and whether the workspace holds share materials. The share's domain is the
+    one the connector last answered in this run of the app (see
+    :class:`KnownShareDomains`), so a link is built only for a workspace the
+    connector has spoken for; the identities are whatever the cache holds.
+    Everything only the connector can say is absent: the document is marked
+    ``is_connector_pending``, and :func:`get_sharing` is what settles it.
+
+    Read-only, so it takes no sharing lock and never repairs a share. A
+    workspace that cannot be resolved or read answers ``grants: null``, as
+    :func:`get_sharing` does.
+    """
+    with get_profiler().span("sharing.get_local_sharing", host_id=host_id):
+        if cli is None:
+            return _local_document(_unknown_grants_document(host_id, None, {}))
+        try:
+            agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
+        except SharingError as exc:
+            logger.debug("Local sharing read: {}", exc)
+            return _local_document(_unknown_grants_document(host_id, None, {}))
+        service_labels = resolve_share_target_labels(backend_resolver, agent_id)
+        try:
+            probe = read_share_state_from_agent(build_agent_address(agent_id, backend_resolver), cli.mngr_caller)
+        except ShareInjectionError as exc:
+            logger.debug("Local sharing read: {}", exc)
+            return _local_document(_unknown_grants_document(host_id, None, service_labels))
+        grants = _readable_grants_document(probe.grants_toml_text) or SharingGrantsDocument()
+        document = _share_status_document(
+            host_id,
+            None,
+            grants,
+            service_labels,
+            _cached_identities(_granted_user_ids(grants), identity_cache),
+            None,
+            None,
+        )
+        # Materials present means the workspace believes itself published; the
+        # connector is still what says so, and what the page waits on.
+        document["enabled"] = probe.has_share_env
+        known_domain = cli.known_share_domains.lookup(host_id)
+        if probe.has_share_env and known_domain is not None and known_domain.value is not None:
+            document["workspace_domain"] = known_domain.value
+            document["url"] = f"https://{known_domain.value}/"
+        return _local_document(document)
+
+
+def _local_document(document: dict[str, Any]) -> dict[str, Any]:
+    document["is_connector_pending"] = True
+    return document
+
+
+def _cached_identities(user_ids: Sequence[str], identity_cache: IdentityCache | None) -> dict[str, IdentityRecord]:
+    """The identity record per granted user id that the cache already holds, with no lookup for the rest."""
+    if identity_cache is None:
+        return {}
+    cached_by_user_id = {user_id: identity_cache.get(user_id) for user_id in user_ids}
+    return {user_id: cached.record for user_id, cached in cached_by_user_id.items() if cached is not None}
+
+
 def _unknown_grants_document(
     host_id: str, share: ShareCliInfo | None, service_labels: Mapping[str, str]
 ) -> dict[str, Any]:
@@ -1720,18 +1788,23 @@ def _invite_through_cli(cli: ImbueCloudCli, attempt: _InvitationAttempt) -> Invi
 
 
 def send_mobile_access_link_for_workspace(
-    host_id: str, backend_resolver: BackendResolverInterface
+    host_id: str,
+    # The share target the link opens; None for the whole workspace.
+    app: str | None,
+    backend_resolver: BackendResolverInterface,
 ) -> MobileAccessLinkCliResult:
-    """Have Imbue Cloud email the signed-in account the link to this workspace, and report how it went.
+    """Have Imbue Cloud email the signed-in account the link to this workspace, or to one app of it, and report how it went.
 
-    The message carries the whole workspace's link, built from the labels the
-    workspace has registered, and the workspace's display name. Where it goes
-    is not ours to choose: the connector reads the address off the session, so
-    this can only ever reach the account that asked.
+    The message carries the target's own link, built from the labels the
+    workspace has registered, the workspace's display name, and for an app the
+    name the share panel shows for it. Where it goes is not ours to choose: the
+    connector reads the address off the session, so this can only ever reach
+    the account that asked.
 
-    A workspace with no live share is not refused here: the connector owns that
-    judgment and answers it as a structured refusal, so the desktop never has
-    to describe the share's state in its own words.
+    A workspace with no live share, or an app with no link yet, is not refused
+    here: the connector owns that judgment and answers it as a structured
+    refusal, so the desktop never has to describe the share's state in its own
+    words.
     Raises :class:`ImbueCloudShareRefusedCliError` for the connector's
     structured refusals, :class:`ImbueCloudEmailNotVerifiedCliError` for an
     unverified account, and :class:`SharingError` when the connector cannot be
@@ -1744,14 +1817,21 @@ def send_mobile_access_link_for_workspace(
     agent_id = resolve_agent_for_host(backend_resolver, host_id, state.session_store)
     account_email = resolve_account_email_for_workspace(state.session_store, agent_id)
     share = _read_active_share(cli, account_email, host_id)
-    label = resolve_share_target_labels(backend_resolver, agent_id).get(WHOLE_MACHINE_SERVICE)
+    target = app if app else WHOLE_MACHINE_SERVICE
+    label = resolve_share_target_labels(backend_resolver, agent_id).get(target)
     link = f"https://{label}.{share.workspace_domain}/" if share is not None and label else None
+    app_name = (
+        None
+        if target == WHOLE_MACHINE_SERVICE
+        else resolve_share_target_display_names(backend_resolver, agent_id).get(target) or target
+    )
     try:
         return cli.send_mobile_access_link(
             account=account_email,
             host_id=host_id,
             link=link,
             workspace_name=_workspace_display_name(backend_resolver, agent_id),
+            app_name=app_name,
         )
     except (ImbueCloudShareRefusedCliError, ImbueCloudEmailNotVerifiedCliError):
         raise

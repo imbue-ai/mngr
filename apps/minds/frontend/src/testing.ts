@@ -34,6 +34,7 @@ import type {
 } from "./profiling";
 import type { SharePanelModelOptions } from "./models/sharePanel";
 import type { SharedWorkspaceRow } from "./models/sharedWorkspaces";
+import type { WorkspaceOptionsData } from "./models/workspaceOptions";
 import { triggerIdFor } from "./views/components/Collapsible";
 import { BTN_VARIANTS } from "./views/components/constants";
 import { ICONS_16 } from "./views/components/icons";
@@ -182,6 +183,25 @@ export function secondAccountEntry(): UiAccountEntry {
   });
 }
 
+/** A third account signed in beside those two, with workspaces on this install. */
+export function thirdAccountEntry(): UiAccountEntry {
+  return accountEntry({ user_id: "user-3", email: "carol@example.com", workspace_count: 2 });
+}
+
+/** The id of `createAttemptEntry`'s row. */
+export const CREATE_ATTEMPT_ID = "create-attempt-0123abcd";
+
+/** A create attempt's row in the workspace list: "gamma", still being made, on no host yet. */
+export function createAttemptEntry(): UiWorkspaceEntry {
+  return {
+    ...workspacesMessage().workspaces[0],
+    id: CREATE_ATTEMPT_ID,
+    host_id: "",
+    name: "gamma",
+    create_attempt_state: "creating",
+  };
+}
+
 /** The workspace domain every shared-row fixture's targets are labels under. */
 export const SHARED_WORKSPACE_DOMAIN = "k3j9.a1b2.us1.shares.example";
 
@@ -222,6 +242,26 @@ export function sharedWorkspace(
     verdict_at: null,
     is_manual: false,
     ...overrides,
+  };
+}
+
+/** `sharedWorkspace`'s owner as someone with a display name, "Sam Okafor", which is then what names them. */
+export function namedSharedOwner(): UiSharedWorkspace["owner"] {
+  return { ...sharedWorkspace().owner, email: "sam@acme.example", display_name: "Sam Okafor" };
+}
+
+/** One app target of a shared-row fixture, its link the app's label under the fixtures' domain. */
+export function sharedAppTarget(
+  app: string,
+  displayName: string,
+  isGrantedAsApp = false,
+): UiSharedWorkspace["targets"][number] {
+  return {
+    app,
+    display_name: displayName,
+    link: `https://${app}-1.${SHARED_WORKSPACE_DOMAIN}/`,
+    granted_via: "user",
+    is_granted_as_app: isGrantedAsApp,
   };
 }
 
@@ -471,12 +511,30 @@ export function chromeMissingOutcome(): BrowserImportResult {
   });
 }
 
-/** SharePanelModel options for a workspace granted by owner@example.com, with
+/** The suffix of the share panel's local read, which answers without Imbue Cloud. */
+export const SHARING_LOCAL_READ_SUFFIX = "/local";
+
+/**
+ * SharePanelModel options for a workspace granted by owner@example.com, with
  * inert redraw/timer hooks and a query client of its own, so no case reads
- * what another cached; tests pass the `fetchJson` stub they want answered. */
+ * what another cached; tests pass the `fetchJson` stub they want answered.
+ * The panel's local read goes unanswered (a 404 the panel ignores) unless
+ * `isLocalReadServed`, so a test of the fresh read's document is not handed
+ * that document twice.
+ */
 export function sharePanelOptions(
   overrides: Partial<SharePanelModelOptions> = {},
+  { isLocalReadServed = false }: { isLocalReadServed?: boolean } = {},
 ): SharePanelModelOptions {
+  const fetchJson = overrides.fetchJson;
+  if (fetchJson !== undefined && !isLocalReadServed)
+    overrides = {
+      ...overrides,
+      fetchJson: (url, init) =>
+        url.endsWith(SHARING_LOCAL_READ_SUFFIX)
+          ? Promise.resolve({ ok: false, status: 404, body: null })
+          : fetchJson(url, init),
+    };
   return {
     hostId: "host-" + "a".repeat(32),
     granterEmail: "owner@example.com",
@@ -546,6 +604,20 @@ export function scheduleWindowAtLocalHour(
   };
 }
 
+/** Leave `shell`'s updates store holding `updates`, as a `workspace_updates` frame would. */
+export function publishUpdates(
+  shell: ShellState,
+  updates: Record<string, UiWorkspaceUpdate>,
+  isAutoUpdateEnabled: boolean,
+): void {
+  shell.stores.updates.applyUpdatesMessage({
+    type: "workspace_updates",
+    updates,
+    update_window: "2:00 AM-5:00 AM",
+    is_auto_update_enabled: isAutoUpdateEnabled,
+  });
+}
+
 /** A shell registered as the app's context, its updates store holding `updates`
  * as a `workspace_updates` frame would leave it. */
 export function updatesShell(
@@ -554,13 +626,72 @@ export function updatesShell(
 ): ShellState {
   const shell = new ShellState(createEmptyStores());
   registerAppContext({ stores: shell.stores, shell });
-  shell.stores.updates.applyUpdatesMessage({
-    type: "workspace_updates",
-    updates,
-    update_window: "2:00 AM-5:00 AM",
-    is_auto_update_enabled: isAutoUpdateEnabled,
-  });
+  publishUpdates(shell, updates, isAutoUpdateEnabled);
   return shell;
+}
+
+/** Leave `shell`'s requests store holding one request waiting on an answer for each of `workspaceAgentIds`, as a
+ * `requests` frame would. */
+export function publishPendingRequests(shell: ShellState, workspaceAgentIds: readonly string[]): void {
+  shell.stores.requests.applyRequestsMessage({
+    count: workspaceAgentIds.length,
+    request_ids: workspaceAgentIds.map((agentId) => `request-${agentId}`),
+    workspace_agent_ids: [...workspaceAgentIds],
+  });
+}
+
+/** Where a stubbed bar element measures, as `getBoundingClientRect` reports it. */
+export interface StubRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+/** A document (for a suite with no DOM) whose only elements are `rects`' ids, each measuring at its rect, and
+ * everything else absent, the way the workspace button is absent on a hub page. The map is read live, so a case
+ * can move the bar under something already mounted. Installed with `vi.stubGlobal`. */
+export function stubTitlebarRects(rects: Record<string, StubRect>): void {
+  vi.stubGlobal("document", {
+    getElementById: (id: string) => (id in rects ? { getBoundingClientRect: () => rects[id] } : null),
+  });
+}
+
+/** Put an element with `id` in the (jsdom) document, measuring at `rect`. */
+export function placeMeasuredElement(id: string, rect: StubRect): void {
+  const element = document.createElement("div");
+  element.id = id;
+  element.getBoundingClientRect = () => rect as DOMRect;
+  document.body.appendChild(element);
+}
+
+/** One workspace's options payload (`GET /ui/api/workspaces/<id>/options`): "alpha", linked to no account, with
+ * no apps registered and no SSH command. */
+export function workspaceOptionsData(overrides: Partial<WorkspaceOptionsData> = {}): WorkspaceOptionsData {
+  return {
+    agent_id: "agent-aa11",
+    host_id: "host-bb22",
+    name: "alpha",
+    color: "#aabbcc",
+    palette: { blue: "#aabbcc" },
+    is_stale: false,
+    is_provider_signed_out: false,
+    is_account_owned_provider: false,
+    leased_owner_email: "",
+    has_account: false,
+    account_email: "",
+    account_display_name: null,
+    account_profile_picture_url: null,
+    current_account: null,
+    accounts: [],
+    app_services: [],
+    service_labels: {},
+    whole_service: "system_interface",
+    public_email_domains: [],
+    grantable_email_domain: "",
+    ssh_command: "",
+    ...overrides,
+  };
 }
 
 /** A `fetch` that answers with `respond` and records every URL it was asked for. */

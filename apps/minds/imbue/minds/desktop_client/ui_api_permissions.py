@@ -1,4 +1,4 @@
-"""/ui/api routes for the workspace options panel's Permissions pane.
+"""/ui/api routes for a workspace's Permissions page in Settings.
 
 One read endpoint serves the whole pane -- every grantable permission for one
 workspace as a toggle, plus the pending requests waiting on the user -- and two

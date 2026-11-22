@@ -39,7 +39,7 @@ type FetchLike = typeof fetch;
 
 export interface WebLoginStartOptions {
   // Close the modal when the sign-in lands instead of showing "You're signed
-  // in": for a page that shows the new account itself (Manage Accounts).
+  // in": for a page that shows the new account itself (Settings' Accounts tab).
   isClosedOnSignIn?: boolean;
 }
 

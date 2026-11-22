@@ -385,13 +385,18 @@ describe("buildEmbedHandlers", () => {
     ).toBeUndefined();
   });
 
-  it("opens the Permissions pane at Local files when the workspace asks, and answers nothing", () => {
+  it("floats Settings over this workspace at Permissions' Local files when the workspace asks, and answers nothing", () => {
     const { contract, handlers, navigations, sent } = makeHandlers();
     handlers[contract.OPEN_LOCAL_FILES]({});
     expect(navigations).toEqual([
       {
-        path: `/workspace/${WORKSPACE_AGENT_ID}/options`,
-        params: { tab: "permissions", section: "local-files" },
+        path: "/settings",
+        params: {
+          workspace: WORKSPACE_AGENT_ID,
+          tab: "workspace",
+          group: "permissions",
+          perm_section: "local-files",
+        },
       },
     ]);
     expect(sent).toEqual([]);
@@ -565,30 +570,31 @@ describe("buildEmbedHandlers", () => {
     });
   });
 
-  it("floats the Share tab over this workspace, focused on the asking app", () => {
+  it("floats Settings over this workspace at Sharing, on the asking app's page", () => {
     // No ack: with no Imbue Studio chrome present the Share click is simply a no-op.
     const { contract, handlers, navigations, acks } = makeHandlers();
     handlers[contract.OPEN_SHARE_SETTINGS]({ serviceName: "web" });
     expect(navigations).toEqual([
       {
-        path: `/workspace/${WORKSPACE_AGENT_ID}/options`,
-        params: { tab: "share", target: "web" },
+        path: "/settings",
+        params: { workspace: WORKSPACE_AGENT_ID, tab: "workspace", group: "sharing", share_target: "web" },
       },
     ]);
     expect(acks).toEqual([]);
   });
 
-  it("lands the Share tab on the whole workspace when the name is absent", () => {
+  it("lands Sharing on the whole workspace's page when the name is absent or is not a name", () => {
     // The workspace shell's tray share button (the multiplayer spec) is to send the message
     // without a name (contract v13).
     const { contract, handlers, navigations } = makeHandlers();
     handlers[contract.OPEN_SHARE_SETTINGS]({});
-    expect(navigations).toEqual([
-      {
-        path: `/workspace/${WORKSPACE_AGENT_ID}/options`,
-        params: { tab: "share" },
-      },
-    ]);
+    handlers[contract.OPEN_SHARE_SETTINGS]({ serviceName: 7 });
+    // No `share_target` at all: an absent target is the whole workspace.
+    const wholeWorkspace = {
+      path: "/settings",
+      params: { workspace: WORKSPACE_AGENT_ID, tab: "workspace", group: "sharing" },
+    };
+    expect(navigations).toEqual([wholeWorkspace, wholeWorkspace]);
   });
 
   it("keeps the owner-only overlays closed over a shared workspace, still answering the AI-keys request", () => {

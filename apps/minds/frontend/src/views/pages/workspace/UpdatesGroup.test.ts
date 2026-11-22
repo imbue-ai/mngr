@@ -32,6 +32,8 @@ import { UpdatesGroup } from "./UpdatesGroup";
 // Two machines, one without backups: the tab's state must be keyed on which is being drawn.
 const UNBACKED = "agent-" + "a".repeat(8);
 const BACKED = "agent-" + "b".repeat(8);
+/** Where the page lives: Settings, floated over the workspace, on its Updates page. */
+const SETTINGS_ROUTE = `/settings?workspace=${BACKED}&tab=workspace&group=updates`;
 const NO_BACKUP_QUESTION = "This workspace has no backups.";
 
 const OUT_OF_DATE: UiWorkspaceUpdate = {
@@ -96,9 +98,7 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
       },
       options.isAutoUpdateEnabled ?? false,
     );
-  vi.spyOn(m.route, "get").mockReturnValue(
-    "/workspace/x/options?tab=settings&group=updates",
-  );
+  vi.spyOn(m.route, "get").mockReturnValue(SETTINGS_ROUTE);
   const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
   vi.spyOn(m, "redraw").mockImplementation(() => undefined);
   if (options.promptDecision !== undefined) {
@@ -495,7 +495,7 @@ describe("the Updates tab's presses", () => {
     press(byId(draw(BACKED), "ws-update-error"), "Start workspace");
 
     expect(routeSet).toHaveBeenLastCalledWith(
-      recoveryRoute(BACKED, "/workspace/x/options?tab=settings&group=updates", "start"),
+      recoveryRoute(BACKED, SETTINGS_ROUTE, "start"),
     );
   });
 
@@ -1423,6 +1423,17 @@ describe("the Updates tab's automatic updates", () => {
       attrsOf(byId(tab, "update-window-start-workspace") as AnyVnode).value,
     ).toBe("1");
     expect(byId(draw(UNBACKED), "ws-auto-update-pitch")).toBeDefined();
+  });
+
+  it("opens Studio's own update settings from Change as a move inside Settings that keeps the workspace's place", async () => {
+    const { draw, routeSet } = await harness({ promptDecision: "declined" });
+
+    pressId(draw(BACKED), "ws-auto-update-change");
+
+    // One replaced entry, with the workspace and its Updates entry still named for the way back to the tab.
+    expect(routeSet.mock.calls).toEqual([
+      [`/settings?workspace=${BACKED}&tab=studio&group=updates&section=updates`, undefined, { replace: true }],
+    ]);
   });
 
   it("shows the three choices once the offer is answered, with Studio's own state", async () => {

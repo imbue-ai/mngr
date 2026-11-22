@@ -105,8 +105,8 @@ class ErrorNotificationGate(MutableModel):
 class AccountSignedOutReporter(FrozenModel):
     """The sync loop's report that it signed out an account whose session could not be refreshed.
 
-    Account-level: the entry reaches that account's windows and lands on the
-    accounts page, where the account can sign in again. Every report is news:
+    Account-level: the entry reaches that account's windows and lands on
+    Settings' Accounts tab, where the account can sign in again. Every report is news:
     the loop stops refreshing an account it signed out, so it can only report
     the same account again after the user has signed it back in.
     """

@@ -84,6 +84,7 @@ from imbue.minds.desktop_client.e2e_workspace_runner import find_free_port
 from imbue.minds.desktop_client.e2e_workspace_runner import resolve_default_workspace_template_path
 from imbue.minds.desktop_client.e2e_workspace_runner import workspace_coordinate_from_subdomain
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.ui_account_scope import ACCOUNTS_SETTINGS_ROUTE
 from imbue.minds.mngr_settings.profile_paths import read_active_profile_dir
 from imbue.minds.testing import SyncE2EAccount
 from imbue.minds.testing import SyncE2EEnv
@@ -106,7 +107,7 @@ _DOCKER_STATE_MARKER: Final[str] = "docker-state"
 # budget nobody re-derived.
 # Headless `auth signin` + the app's account poll listing it on /accounts.
 _SIGN_IN_TIMEOUT_SECONDS: Final[int] = 90
-# The account reaching the Account group's "Link to <email>" button: measured ~7s.
+# The account reaching the Owner section's "Link to <email>" button: measured ~7s.
 _ACCOUNT_VISIBLE_TIMEOUT_SECONDS: Final[int] = 90
 # A real R2 bucket + scoped key + restic init: measured ~31s.
 _BACKUP_CONFIGURE_TIMEOUT_SECONDS: Final[int] = 180
@@ -471,10 +472,12 @@ def _sign_in_headless(runtime: _SyncE2ERuntime, page: Page, email: str, password
     )
 
     def account_listed() -> bool | None:
-        page.goto(f"{origin}/accounts", wait_until="domcontentloaded")
+        page.goto(f"{origin}{ACCOUNTS_SETTINGS_ROUTE}", wait_until="domcontentloaded")
         return True if email in page.inner_text("body") else None
 
-    _wait_until(f"the signed-in account {email} to appear on /accounts", _SIGN_IN_TIMEOUT_SECONDS, account_listed)
+    _wait_until(
+        f"the signed-in account {email} to appear in Settings' Accounts tab", _SIGN_IN_TIMEOUT_SECONDS, account_listed
+    )
     _mark_onboarding_complete(page)
     logger.info("Signed in as {}", email)
     return origin
@@ -493,13 +496,13 @@ def _mark_onboarding_complete(page: Page) -> None:
     assert status == 200, f"marking onboarding complete failed: HTTP {status}"
 
 
-def _account_group_url(origin: str, agent_id: str) -> str:
-    """The options overlay's Machine settings Account group (SettingsGroups.ts)."""
-    return f"{origin}/workspace/{agent_id}/options?tab=settings&group=account"
+def _owner_section_url(origin: str, agent_id: str) -> str:
+    """Settings on the workspace's General page, at its Owner section (SettingsGroups.ts)."""
+    return f"{origin}/settings?workspace={agent_id}&tab=workspace&group=general&focus=owner"
 
 
 def _account_section_text(page: Page) -> str:
-    """The Account group's section text once the options data has loaded.
+    """The Owner section's text once the options data has loaded.
 
     The SPA renders `#account-section` only after its /ui/api options fetch
     resolves; the short in-page wait covers that load, and its timeout raises
@@ -511,13 +514,13 @@ def _account_section_text(page: Page) -> str:
 
 
 def _associate_workspace_via_ui(page: Page, origin: str, agent_id: str, email: str) -> None:
-    """Associate the workspace with the signed-in account from its Machine settings.
+    """Associate the workspace with the signed-in account from its settings.
 
-    The Account group offers one "Link to <email>" button per signed-in
+    General's Owner section offers one "Link to <email>" button per signed-in
     account (SettingsGroups.renderAssociatePrompt); linking swaps the prompt
     for a "Linked to <email>." line with an Unlink control.
     """
-    account_url = _account_group_url(origin, agent_id)
+    account_url = _owner_section_url(origin, agent_id)
     link_button_selector = f'#account-section button:has-text("Link to {email}")'
 
     def account_link_ready() -> bool | None:
@@ -525,7 +528,7 @@ def _associate_workspace_via_ui(page: Page, origin: str, agent_id: str, email: s
         _account_section_text(page)
         return True if page.query_selector(link_button_selector) is not None else None
 
-    _wait_until(f"the Account group to offer linking to {email}", _ACCOUNT_VISIBLE_TIMEOUT_SECONDS, account_link_ready)
+    _wait_until(f"the Owner section to offer linking to {email}", _ACCOUNT_VISIBLE_TIMEOUT_SECONDS, account_link_ready)
     page.click(link_button_selector)
     # The link click PATCHes the association from the page itself; navigating
     # away immediately would abort that in-flight request, so wait for the
@@ -536,7 +539,7 @@ def _associate_workspace_via_ui(page: Page, origin: str, agent_id: str, email: s
         "the link to land (the linked state, or the window leaving for its hub)",
         60,
         lambda: True
-        if "/options" not in page.url or page.query_selector('#account-section:has-text("Linked to")') is not None
+        if "/settings" not in page.url or page.query_selector('#account-section:has-text("Linked to")') is not None
         else None,
     )
 
@@ -545,7 +548,7 @@ def _associate_workspace_via_ui(page: Page, origin: str, agent_id: str, email: s
         section_text = _account_section_text(page)
         return True if ("Linked to" in section_text and email in section_text) else None
 
-    _wait_until(f"the Account group to show {email} as the linked account", 60, associated)
+    _wait_until(f"the Owner section to show {email} as the linked account", 60, associated)
     logger.info("Associated {} with {}", agent_id, email)
 
 
@@ -1025,19 +1028,19 @@ def test_legacy_association_files_migrate_into_synced_records(
             assert (runtime.state_root / "backup_password_hash.pre-sync").exists()
 
             # The workspace shows as associated in the real settings UI: the
-            # Account group renders the linked state (never the associate
+            # Owner section renders the linked state (never the associate
             # prompt) once the migration landed. Polled, not asserted on the
             # first paint: the SPA fills `#account-section` only after its
             # asynchronous options fetch resolves.
             def migration_shown_as_linked() -> bool | None:
-                page.goto(_account_group_url(origin, agent_id), wait_until="domcontentloaded")
+                page.goto(_owner_section_url(origin, agent_id), wait_until="domcontentloaded")
                 section_text = _account_section_text(page)
                 if "Linked to" in section_text and sync_e2e_account.email in section_text:
                     return True
                 return None
 
             _wait_until(
-                f"the Account group to show {sync_e2e_account.email} as linked post-migration",
+                f"the Owner section to show {sync_e2e_account.email} as linked post-migration",
                 60,
                 migration_shown_as_linked,
             )

@@ -1,9 +1,9 @@
 """The journey's steps inside the launched Imbue Studio app, driven through its own UI.
 
 Every control here is the one a user presses: the landing page and its
-consent screen, the Manage Accounts page's sign-in, the create form, the
-desktop's launcher field, the home page's Stop and Start, the Share tab, and
-the Settings tab's destroy.
+consent screen, the sign-in from Settings' Accounts tab, the create form, the
+desktop's launcher field, the home page's Stop and Start, Settings' Sharing page, and
+its General page's destroy.
 What the UI did is then confirmed by reading the app's own routes,
 through a same-origin fetch on a page it already has open -- the chrome page
 for the desktop's routes, the chat's page for the workspace's -- so each
@@ -62,8 +62,8 @@ _START_FLOW: Final[str] = "#start-flow"
 # start titlebar's log-in.
 _REPORTING_DECLINE: Final[str] = '[data-answer="reporting-no"]'
 _EXISTING_LOGIN_BUTTON: Final[str] = "#start-log-in"
-# The Manage Accounts page's one button, and the web-login modal's copy of the sign-in URL.
-_ACCOUNTS_PATH: Final[str] = "/accounts"
+# Settings' Accounts tab and its rail's Add account, and the web-login modal's copy of the sign-in URL.
+_ACCOUNTS_PATH: Final[str] = "/settings?tab=accounts"
 _ADD_ACCOUNT_BUTTON: Final[str] = 'button:has-text("Add account")'
 _WEB_LOGIN_URL: Final[str] = "#web-login-url"
 # The modal's Try again, shown when the app could not start its sign-in flow.
@@ -85,9 +85,10 @@ _CREATE_SHARING_SWITCH: Final[str] = "#enable_web_access"
 _CREATE_SUBMIT: Final[str] = "#create-submit"
 _CREATING_PAGE: Final[str] = "#creating"
 IMBUE_CLOUD_LAUNCH_MODE: Final[str] = "IMBUE_CLOUD"
-# The Share tab (``ShareTab.ts``) and the Settings tab's destroy (``SettingsGroups.ts``).
-_SHARE_TAB_PATH: Final[str] = "/workspace/{agent_id}/options?tab=share"
-_SETTINGS_TAB_PATH: Final[str] = "/workspace/{agent_id}/options?tab=settings"
+# Settings' Sharing page for the whole workspace (``ShareTab.ts``) and its General page's destroy
+# (``SettingsGroups.ts``).
+_SHARE_TAB_PATH: Final[str] = "/settings?workspace={agent_id}&tab=workspace&group=sharing"
+_SETTINGS_TAB_PATH: Final[str] = "/settings?workspace={agent_id}&tab=workspace&group=general"
 _PUBLISH_SWITCH: Final[str] = "#ws-share-publish-switch"
 # The switch is a ``role="switch"`` button: it says which way it points, and says
 # it is busy while the publish or unpublish it started is still settling.
@@ -204,7 +205,7 @@ def start_web_login(session: StudioAppSession, landed_on: str) -> str:
     """Open the app's web-login flow the way the page it landed on offers it; return the hosted sign-in URL.
 
     A fresh install is in its start flow, whose title bar offers "Already set up? Log in"
-    throughout; an install past onboarding signs in from Manage Accounts.
+    throughout; an install past onboarding signs in from Settings' Accounts tab.
     """
     if landed_on == _START_FLOW:
         return _start_web_login_from_start_flow(session)
@@ -222,7 +223,7 @@ def _start_web_login_from_start_flow(session: StudioAppSession) -> str:
 
 
 def _start_web_login_from_accounts_page(session: StudioAppSession) -> str:
-    """Press Add account on Manage Accounts."""
+    """Press Add account on Settings' Accounts tab."""
     page = session.page
     page.goto(f"{session.backend_origin}{_ACCOUNTS_PATH}", wait_until="domcontentloaded")
     page.wait_for_selector(_ADD_ACCOUNT_BUTTON, state="visible", timeout=_PAGE_TIMEOUT_MS)
@@ -314,7 +315,7 @@ def create_imbue_cloud_workspace(session: StudioAppSession, workspace_name: str,
     if not region:
         raise SmokeAppError("The create form offers no Imbue Cloud region to create the workspace in.")
     # The form shares a workspace on an account as it is created; the journey
-    # shares it from the Share tab instead, which only publishes an unshared one.
+    # shares it from Settings' Sharing page instead, which only publishes an unshared one.
     _turn_switch_off(page, _CREATE_SHARING_SWITCH)
     logger.info("Creating Imbue Cloud workspace {!r} as {} in region {}", workspace_name, account_email, region)
     page.click(_CREATE_SUBMIT)
@@ -482,7 +483,7 @@ def stop_workspace_from_account_home(
 
 
 def publish_share_from_panel(session: StudioAppSession, agent_id: str) -> None:
-    """Turn sharing on from the Share tab and wait until the link is live (or publishing is refused)."""
+    """Turn sharing on from Settings' Sharing page and wait until the link is live (or publishing is refused)."""
     page = session.page
     page.goto(f"{session.backend_origin}{_SHARE_TAB_PATH.format(agent_id=agent_id)}", wait_until="domcontentloaded")
     page.wait_for_selector(_PUBLISH_SWITCH, state="visible", timeout=_PAGE_TIMEOUT_MS)
@@ -494,16 +495,15 @@ def publish_share_from_panel(session: StudioAppSession, agent_id: str) -> None:
     refusal = page.locator(_PUBLISH_ERROR)
     if refusal.count() > 0:
         raise SmokeAppError(f"The workspace could not be published: {refusal.first.inner_text()}")
-    logger.info("Workspace {} is published; the Share tab shows its link", agent_id)
+    logger.info("Workspace {} is published; its Sharing page shows its link", agent_id)
 
 
 def unpublish_share_from_panel(session: StudioAppSession, agent_id: str) -> None:
-    """Turn sharing off from the Share tab and wait for the panel to show it off.
+    """Turn sharing off from Settings' Sharing page and wait for the page to show it off.
 
-    The switch pointing off, with its link section gone, is what the panel
-    shows every workspace whose sharing was turned off; the "sharing is off"
-    notice beside it is only drawn for a workspace that also has grants, which
-    a journey that shares with nobody never has.
+    The switch pointing off, with the link's row gone from the section that
+    holds it, is what the page shows every workspace whose sharing was turned
+    off.
     """
     page = session.page
     page.goto(f"{session.backend_origin}{_SHARE_TAB_PATH.format(agent_id=agent_id)}", wait_until="domcontentloaded")
@@ -527,7 +527,7 @@ def share_url_for_service(status: Mapping[str, Any], service: str) -> str | None
 
     The status carries the share's base URL (whose bare domain does not route)
     and a label per registered service; the link that routes is
-    ``https://<label>.<domain>/``, the way the Share tab builds it.
+    ``https://<label>.<domain>/``, the way the Sharing page builds it.
     """
     labels = status.get("service_labels")
     label = labels.get(service) if isinstance(labels, Mapping) else None
@@ -557,7 +557,7 @@ def wait_for_share_url(session: StudioAppSession, agent_id: str, service: str, t
 
 
 def destroy_workspace_from_settings(session: StudioAppSession, agent_id: str) -> None:
-    """Press Destroy, then confirm, on the workspace's Settings tab."""
+    """Press Destroy, then confirm, on the workspace's General page in Settings."""
     page = session.page
     page.goto(f"{session.backend_origin}{_SETTINGS_TAB_PATH.format(agent_id=agent_id)}", wait_until="domcontentloaded")
     page.wait_for_selector(_DESTROY_BUTTON, state="visible", timeout=_PAGE_TIMEOUT_MS)
@@ -579,7 +579,7 @@ def wait_for_destroy_done(session: StudioAppSession, agent_id: str, timeout_seco
     deadline = time.monotonic() + timeout_seconds
     last_answer: PageFetchAnswer | None = None
     while time.monotonic() < deadline:
-        # The chrome page routes away from the settings tab once the destroy is
+        # The chrome page routes away from Settings once the destroy is
         # confirmed, which can tear down the document a fetch was evaluated in.
         try:
             if is_workspace_gone(list_workspaces(session), agent_id):

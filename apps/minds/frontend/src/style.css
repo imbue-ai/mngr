@@ -67,7 +67,7 @@
   --c-surface-app: var(--first-run-ground);
 }
 /* A white surface in light mode (cards, modals, menus, tooltips) is drawn in black ink. Two kinds keep their own
-   tokens: a surface a component draws dark on purpose (the switcher menus, `dark` on the element or an ancestor),
+   tokens: a surface a component draws dark on purpose (`dark` on the element or an ancestor),
    and one that takes its contrast from its own color (`titlebar-surface`: the workspace cards, status chips). */
 :root:not(.dark) :is(.bg-surface-primary, .bg-white, .minds-card):not(.dark, .dark *, .titlebar-surface) {
   --c-ink: #000000;
@@ -168,7 +168,7 @@
  * Corner-radius scale -- five steps (px: sm 4 / md 6 / lg 8 / xl 12 / 2xl 16),
  * alongside the built-in rounded-full / rounded-none. md is the default control
  * radius (buttons, inputs, badges, swatches) and matches Figma's 6px; xl (12px)
- * is the floating-modal-card radius (the app modals + the docked options panel).
+ * is the floating-card radius (the app modals and the bar's flyouts).
  * The chrome content frame uses an explicit rounded-[12px] pinned to Electron's
  * CONTENT_CORNER_RADIUS and the OS window's outer rounding -- numerically the
  * same as xl now, but kept decoupled from the token so it stays correct if the
@@ -338,7 +338,7 @@
 /*
  * Both shell modes lock the document to the viewport: the agent surface fills
  * it with the fixed workspace iframe, and local pages scroll inside
- * #local-page-scroll -- a container pinned below the fixed 38px titlebar. So
+ * #local-page-scroll -- a container pinned below the fixed titlebar. So
  * the DOCUMENT never scrolls on any Imbue Studio page, the titlebar never shares an
  * edge with a scrollbar, and its buttons never shift with gutter differences
  * between pages. A universal default (a page that genuinely needs document
@@ -398,10 +398,10 @@ body {
  */
 #local-page-scroll {
   position: fixed;
-  inset: 38px 0 0 0;
+  inset: var(--titlebar-height) 0 0 0;
 }
 body:has(#minds-titlebar.titlebar-surface) #local-page-scroll {
-  inset: 38px 4px 4px 4px;
+  inset: var(--titlebar-height) 4px 4px 4px;
   border-radius: 12px;
 }
 
@@ -424,14 +424,17 @@ body:has(#minds-titlebar.titlebar-surface) #local-page-scroll {
  * at stays on screen and stays readable.
  */
 :root {
+  /* The bar's height, in every window. Electron mirrors it (popout-policy.js's
+     TITLEBAR_HEIGHT, shell.html), and a unit test holds the three together. */
+  --titlebar-height: 44px;
   --notice-band-height: 0px;
 }
 .workspace-surface {
   position: fixed;
   left: 0;
   width: 100%;
-  top: calc(38px + var(--notice-band-height));
-  height: calc(100% - 38px - var(--notice-band-height));
+  top: calc(var(--titlebar-height) + var(--notice-band-height));
+  height: calc(100% - var(--titlebar-height) - var(--notice-band-height));
   border-radius: 12px;
 }
 /*
@@ -452,7 +455,7 @@ body:has(#notice-band) .workspace-surface {
 .modal-viewport {
   /* The trailing 36px on each end keeps the card off the window's full height;
      it read as too vertical when it stretched the whole way. */
-  padding-top: calc(38px + var(--notice-band-height) + 16px + 36px);
+  padding-top: calc(var(--titlebar-height) + var(--notice-band-height) + 16px + 36px);
   padding-bottom: calc(16px + 36px);
   /* Painted above the titlebar (z-110) so the dim covers it, which means this
      backdrop must subtract the titlebar's drag region itself -- see the
@@ -1138,8 +1141,8 @@ body {
 #minds-titlebar button {
   -webkit-app-region: no-drag;
 }
-/* Overlays that paint ABOVE the titlebar -- the workspace-switcher popover
- * (z-200) and the full-window modal / docked-options backdrops (z-110) -- must
+/* Overlays that paint ABOVE the titlebar -- the two switcher menus (z-200)
+ * and the full-window modal and flyout backdrops (z-110) -- must
  * subtract the titlebar strip's drag region, or a click in that top strip (the
  * empty backdrop above an app modal, or the raised icon strip standing in for
  * the titlebar's own icons) would drag the window instead of dismissing /
@@ -1148,15 +1151,36 @@ body {
  * declare no-drag.
  *
  * EVERY backdrop that can host the raised icon strip belongs here. The strip
- * is the only way to reach the other four surfaces while one is open, so a
+ * is the only way to reach the other flyouts while one is open, so a
  * backdrop left off this list makes those icons dead on macOS -- they paint,
  * they hover, and the click drags the window instead. */
-#sidebar-backdrop,
+#workspace-switcher-backdrop,
+#account-switcher-backdrop,
 #app-overlay-backdrop,
-#ws-options-backdrop,
+#settings-backdrop,
 #notifications-backdrop,
 #help-backdrop {
   -webkit-app-region: no-drag;
+}
+
+/*
+ * A filled select with its chevron drawn 8px in from the right edge: the
+ * browser's own sits hard against it once the select is filled. A grey stroke
+ * reads on the light and dark fills alike.
+ */
+.select-chevron {
+  appearance: none;
+  padding-right: 32px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23888' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m4 6 4 4 4-4'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 16px 16px;
+}
+
+/* The open workspace's colour dot on the bar, which is painted in that same
+   colour: tinted toward the bar's text, so the dot stands apart from it. */
+.workspace-swatch-on-bar {
+  background-color: color-mix(in srgb, var(--swatch-color) 75%, currentColor);
 }
 
 /* While a keystroke edits text, the pointer is hidden until it moves, so it

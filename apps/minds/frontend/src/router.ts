@@ -10,17 +10,15 @@ import { Shell } from "./views/shell/Shell";
 import {
   HUB_PAGES,
   accountHubRoute,
+  SETTINGS_PATH,
   isHubPage,
-  isWorkspaceOverlayPath,
   popoutFromPath,
   recoveryWorkspaceIdFromPath,
   workspaceDisplayIdFromPath,
-  workspaceSurfaceIdFromPath,
 } from "./views/shell/classify";
 import type { HubPage } from "./views/shell/classify";
 import type { ShellState } from "./views/shell/shell-state";
 import { DevStyleguide } from "./views/pages/DevStyleguide";
-import { AccountsPage } from "./views/pages/AccountsPage";
 import { AiKeysPage } from "./views/pages/AiKeysPage";
 import { ConsentPage } from "./views/pages/ConsentPage";
 import { CreateTemplatePage } from "./views/pages/CreateTemplatePage";
@@ -38,8 +36,7 @@ import { SharedLinkPage } from "./views/pages/SharedLinkPage";
 import { SharedWorkspacesPage } from "./views/pages/SharedWorkspacesPage";
 import { StartPage } from "./views/pages/StartPage";
 import { WorkspaceBackupsPage } from "./views/pages/WorkspaceBackupsPage";
-import { WorkspaceOptionsPage } from "./views/pages/WorkspaceOptionsPage";
-import { WorkspaceSettingsRedirect } from "./views/pages/WorkspaceSettingsRedirect";
+import { settingsQueryForLegacyOptions } from "./views/pages/settings/settings-route";
 import { RouteError } from "./views/pages/RouteError";
 
 interface RouteEntry {
@@ -64,18 +61,10 @@ const ROUTE_ENTRIES: RouteEntry[] = [
   { path: "/creating/:agentId", component: CreatingPage },
   { path: "/settings", component: SettingsPage },
   { path: "/settings/ai-keys", component: AiKeysPage },
-  { path: "/accounts", component: AccountsPage },
   // The workspace content surface (SPA twin of the deleted /_chrome wrapper).
   // Accepts agent- OR host-scoped ids: cold-start restore navigates with a
   // host-scoped id before the snapshot provides the alias mapping.
   { path: "/workspace/:workspaceId", component: LandingPage },
-  // Legacy URL: redirects into the options overlay's settings tab.
-  {
-    path: "/workspace/:agentId/settings",
-    component: WorkspaceSettingsRedirect,
-  },
-  // The options overlay: rendered by the Shell OVER the workspace surface.
-  { path: "/workspace/:agentId/options", component: WorkspaceOptionsPage },
   { path: "/workspace/:agentId/backups", component: WorkspaceBackupsPage },
   // A pulled-out workspace window in a desktop window of its own: the Shell
   // mounts the workspace surface in solo mode under the popout bar.
@@ -118,22 +107,49 @@ export function mountRouter(root: Element, shell: ShellState): void {
     };
   }
 
+  // The URLs of the Manage Accounts page and the docked workspace options
+  // panel, which Settings holds in their place. They were handed out (deep
+  // links, restored sessions, workspace templates), so each lands on its
+  // place in Settings, replacing its history entry.
+  // CLEANUP: see settingsQueryForLegacyOptions for when these can go.
+  const queryOf = (requestedPath: string): string => requestedPath.split("?")[1] ?? "";
+  resolvers["/accounts"] = {
+    onmatch(_args, requestedPath) {
+      const query = Object.fromEntries(new URLSearchParams(queryOf(requestedPath)));
+      m.route.set(SETTINGS_PATH, { ...query, tab: "accounts" }, { replace: true });
+    },
+  };
+  resolvers["/workspace/:agentId/options"] = {
+    onmatch(args, requestedPath) {
+      m.route.set(SETTINGS_PATH, settingsQueryForLegacyOptions(String(args.agentId), queryOf(requestedPath)), {
+        replace: true,
+      });
+    },
+  };
+  // The older spelling of the options panel's settings tab.
+  resolvers["/workspace/:agentId/settings"] = {
+    onmatch(args, requestedPath) {
+      const legacy = new URLSearchParams(queryOf(requestedPath));
+      legacy.set("tab", "settings");
+      m.route.set(SETTINGS_PATH, settingsQueryForLegacyOptions(String(args.agentId), legacy.toString()), {
+        replace: true,
+      });
+    },
+  };
+
   const wrap = (component: m.ComponentTypes): m.RouteResolver => ({
     onmatch: () => component,
     render(vnode) {
       const path = shell.currentRoutePath();
       const search = shell.currentRouteSearch();
-      // The surface id (bare workspace OR its options overlay) keeps the
-      // WorkspaceFrame mounted across overlay open/close, so opening Share /
-      // Settings never tears down and reloads the workspace iframe.
-      // A popout keeps its window's workspace surface mounted the same way.
+      // The workspace whose surface this route is. A flyout or modal over a
+      // workspace names it in ?workspace= instead, and the Shell keeps that
+      // frame mounted at the same position, so opening Settings never tears
+      // down and reloads the workspace iframe. A popout keeps its window's
+      // workspace surface mounted the same way.
       const workspaceParam =
-        workspaceSurfaceIdFromPath(path) ?? popoutFromPath(path)?.workspaceAnyId ?? null;
+        workspaceDisplayIdFromPath(path) ?? popoutFromPath(path)?.workspaceAnyId ?? null;
       shell.handleRouteChanged(path, search);
-      // The options panel an app-level modal was opened over: the same page as
-      // the routed one on the options route, so the Shell's single slot for it
-      // keeps one component instance (and its loaded models) across the open.
-      const panelPath = (shell.panelRouteBehindOverlay ?? "").split("?")[0];
       // The hub page an app-level modal was opened over, for the pages that
       // must stay painted behind it rather than be replaced by Home or by the
       // machine ?workspace= names (see ShellState.pageRouteBehindOverlay). It
@@ -145,16 +161,18 @@ export function mountRouter(root: Element, shell: ShellState): void {
         routePath: path,
         workspaceParam,
         content: vnode,
-        // The Home surface an app-level modal (settings/accounts/help) floats
+        // The Home surface a floating route (Settings, Get help) floats
         // over when no workspace is behind it; the router owns page identity.
         homeContent: m(LandingPage),
         behindContent:
           recoveryWorkspaceIdFromPath(pagePath) !== null
             ? m(RecoveryPage)
             : null,
-        optionsContent: isWorkspaceOverlayPath(panelPath)
-          ? m(WorkspaceOptionsPage)
-          : null,
+        // Settings, kept mounted behind the request popup opened from it: the
+        // same page as the routed one on the Settings route, so the Shell's
+        // slot for it keeps one component instance (and its loaded models)
+        // across the open.
+        settingsContent: shell.settingsRouteBehindOverlay !== null ? m(SettingsPage) : null,
       });
     },
   });

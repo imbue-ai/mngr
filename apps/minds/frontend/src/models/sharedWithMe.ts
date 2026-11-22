@@ -446,6 +446,15 @@ export function homeSharedRows(
   };
 }
 
+/** The shares the workspace switcher and Settings' picker list: the ones the account accepted, and its pasted
+ * links. An invitation is answered on the home page first. */
+export function listedSharedRows(
+  entries: readonly UiWorkspaceEntry[],
+): Pick<HomeSharedRows, "workspaceShares" | "sharedApps"> {
+  const { workspaceShares, sharedApps } = homeSharedRows(entries, new Set());
+  return { workspaceShares, sharedApps };
+}
+
 /** "just now", "5m ago", "2h ago", "3d ago", else the date; "" for no or an unreadable time. */
 export function relativeTimeLabel(iso: string, nowMs: number): string {
   if (!iso) return "";

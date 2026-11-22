@@ -1,8 +1,9 @@
-// The app-level settings sections: left nav + one panel each for
-// notifications, display, browser sign-ins, error reporting, updates, the master password,
-// and this computer (whether agents may run commands here). What an
+// The app-level settings sections, one panel each: notifications, display,
+// keyboard shortcuts, browser sign-ins, error reporting, updates, the master
+// password, and this computer (whether agents may run commands here). Settings'
+// Studio tab lists them in its rail (SettingsPage.ts) and draws the active one. What an
 // agent may reach is not here: credentials and grants belong to one machine
-// each, so they live on that machine's Permissions tab. Port of
+// each, so they live on that machine's Permissions page. Port of
 // templates/AppSettingsSections.jinja with the interactivity of
 // static/app_settings.js folded into the SettingsModel; the Updates panel is
 // desktop-only and has no jinja original.
@@ -15,11 +16,7 @@ import type {
   UpdateState,
   UpdateStatus,
 } from "../../../electron-bridge";
-import type {
-  MasterPasswordResult,
-  SettingsModel,
-  SettingsSection,
-} from "../../../models/settings";
+import type { MasterPasswordResult, SettingsModel } from "../../../models/settings";
 import { fallbackErrorSentence } from "../../../models/errors";
 import type { ErrorAction } from "../../../models/errors";
 import {
@@ -38,13 +35,13 @@ import { browserImportFailureNotice } from "../../components/UnreadableChromePro
 import type { NotificationStyle } from "../../../models/notificationsUi";
 import { electronBridge } from "../../../electron-bridge";
 import { Button } from "../../components/Button";
+import { KeyboardShortcutsSection } from "./KeyboardShortcutsSection";
 import { ErrorNotice } from "../../components/ErrorDisplay";
 import { InlineError } from "../../components/errorDesign";
 import { variantBesideErrors } from "../../components/variantBesideErrors";
 import { Modal } from "../../components/Modal";
 import { Notice } from "../../components/Notice";
 import { Spinner } from "../../components/Spinner";
-import { navEntryClass, splitPane } from "../../components/SplitPane";
 import {
   updateInstallingCopy,
   updateReadyCopy,
@@ -53,26 +50,6 @@ import { installTermsOf } from "../../shell/update-ready";
 import { thisComputerPanel } from "./ThisComputerSection";
 import { workspaceUpdateSettings } from "./WorkspaceUpdateSettings";
 import { settingsFailureLine } from "../../components/SettingsFailureLine";
-
-interface SectionsAttrs {
-  model: SettingsModel;
-}
-
-function navButton(
-  model: SettingsModel,
-  name: SettingsSection,
-  label: string,
-): m.Children {
-  return m(
-    "button",
-    {
-      type: "button",
-      class: navEntryClass(model.activeSection === name),
-      onclick: () => model.selectSection(name),
-    },
-    label,
-  );
-}
 
 const NOTIFICATION_STYLE_OPTIONS: {
   value: NotificationStyle;
@@ -302,7 +279,7 @@ function displayPanel(model: SettingsModel): m.Children {
               {
                 id: "display-zoom-select",
                 class:
-                  "h-[34px] px-2 rounded-md type-body bg-fill-subtle text-primary",
+                  "select-chevron h-[34px] pl-2 rounded-md type-body bg-fill-subtle text-primary",
                 value: String(percent),
                 onchange: (event: Event) =>
                   void model.setDisplayZoom(
@@ -496,7 +473,7 @@ function signInsPanel(model: SettingsModel): m.Children {
         {
           id: "sign-in-browser",
           class:
-            "h-[34px] px-2 rounded-md type-body bg-fill-subtle text-primary",
+            "select-chevron h-[34px] pl-2 rounded-md type-body bg-fill-subtle text-primary",
           value: overview.sign_in_browser_id ?? DEFAULT_BROWSER_VALUE,
           onchange: (event: Event) => {
             const value = (event.target as HTMLSelectElement).value;
@@ -517,7 +494,7 @@ function signInsPanel(model: SettingsModel): m.Children {
   ]);
 }
 
-interface MasterPasswordState {
+export interface MasterPasswordState {
   newPassword: string;
   confirmPassword: string;
 }
@@ -1155,59 +1132,26 @@ function updatesPanel(model: SettingsModel): m.Children {
   ]);
 }
 
-/** The grouped left nav + the active panel, in the same two-column pane every
- * machine's options tabs use, so the section list keeps its own scroller
- * instead of riding the card's and sliding off the top of it. */
-export function SettingsSections(): m.Component<SectionsAttrs> {
-  const masterPasswordState: MasterPasswordState = {
-    newPassword: "",
-    confirmPassword: "",
-  };
-  return {
-    view(vnode) {
-      const { model } = vnode.attrs;
-      const groups: "Other"[] = ["Other"];
-      return [
-        splitPane({
-          navLabel: "Settings sections",
-          nav: m(
-            "div",
-            { class: "flex flex-col gap-0.5" },
-            groups.flatMap((group, groupIdx) => [
-              m(
-                "p",
-                {
-                  class: `type-section text-tertiary px-2 mb-1${groupIdx > 0 ? " mt-4" : ""}`,
-                },
-                group,
-              ),
-              ...model.visibleSections
-                .filter((section) => section.group === group)
-                .map((section) =>
-                  navButton(model, section.name, section.label),
-                ),
-            ]),
-          ),
-          content: [
-            model.activeSection === "notifications"
-              ? notificationsPanel(model)
-              : null,
-            model.activeSection === "display" ? displayPanel(model) : null,
-            model.activeSection === "browser-import"
-              ? browserImportPanel(model)
-              : null,
-            model.activeSection === "error-reporting"
-              ? errorReportingPanel(model)
-              : null,
-            model.activeSection === "updates" ? updatesPanel(model) : null,
-            model.activeSection === "sign-ins" ? signInsPanel(model) : null,
-            model.activeSection === "backups"
-              ? masterPasswordPanel(model, masterPasswordState)
-              : null,
-            model.activeSection === "this-computer" ? thisComputerPanel(model) : null,
-          ],
-        }),
-      ];
-    },
-  };
+/** The panel of the model's active section. */
+export function studioSettingsPanel(model: SettingsModel, masterPasswordState: MasterPasswordState): m.Children {
+  switch (model.activeSection) {
+    case "notifications":
+      return notificationsPanel(model);
+    case "display":
+      return displayPanel(model);
+    case "keyboard-shortcuts":
+      return m(KeyboardShortcutsSection);
+    case "browser-import":
+      return browserImportPanel(model);
+    case "error-reporting":
+      return errorReportingPanel(model);
+    case "updates":
+      return updatesPanel(model);
+    case "sign-ins":
+      return signInsPanel(model);
+    case "backups":
+      return masterPasswordPanel(model, masterPasswordState);
+    case "this-computer":
+      return thisComputerPanel(model);
+  }
 }

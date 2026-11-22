@@ -1,7 +1,7 @@
 // The recovery card as a modal over a machine that is still on screen.
 //
 // It carries its own backdrop rather than the shared Modal so the dimming
-// starts BELOW the titlebar, exactly as the options overlay does: the home
+// starts BELOW the titlebar: the home
 // button, switcher and inbox stay reachable while the card is up, so a
 // machine that will not come back can never trap the window. The other
 // modals keep their full-window backdrops; nothing here generalizes to them.
@@ -63,7 +63,7 @@ export function RecoveryModal(): m.Component<RecoveryModalAttrs> {
         "div#recovery-modal-backdrop",
         {
           class:
-            "fixed left-0 right-0 top-[38px] bottom-0 z-[110] bg-black/20 " +
+            "fixed left-0 right-0 top-(--titlebar-height) bottom-0 z-[110] bg-black/20 " +
             "flex items-start justify-center p-4 pt-10",
           onclick: (event: MouseEvent) => {
             if (event.target === event.currentTarget) onClose();

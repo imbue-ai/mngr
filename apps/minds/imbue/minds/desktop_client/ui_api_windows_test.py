@@ -161,6 +161,11 @@ def test_route_account_names_a_workspace_routes_owner_from_the_records_by_either
 
     assert _route_account(client, f"/workspace/{agent_id}") == (200, {"account_id": "user-alice"})
     assert _route_account(client, f"/workspace/{host_id}/backups") == (200, {"account_id": "user-alice"})
+    # Settings floated over the workspace names it in the query alone.
+    assert _route_account(client, "/settings", f"workspace={agent_id}&tab=workspace") == (
+        200,
+        {"account_id": "user-alice"},
+    )
     # A workspace no record claims is the device's, and a hub route names its account outright.
     assert _route_account(client, f"/workspace/{AgentId.generate()}") == (200, {"account_id": "local"})
     assert _route_account(client, "/account/user-bob/create") == (200, {"account_id": "user-bob"})

@@ -1,6 +1,6 @@
 """Unit tests for the `/ui/ws` ``accounts`` frame.
 
-The titlebar's account switcher and Manage Accounts both render from this
+The titlebar's account switcher and Settings' Accounts tab both render from this
 frame, and both stay put while accounts change underneath them. The frame is
 what updates them, so these tests drive the account list directly and assert
 what the windows would be told.
@@ -95,7 +95,7 @@ def test_accounts_frame_lists_a_signed_out_account_whose_workspaces_are_still_he
 
 
 def test_accounts_frame_follows_a_sign_out(tmp_path: Path) -> None:
-    """After signing the last account out, neither the switcher nor Manage Accounts may still show it.
+    """After signing the last account out, neither the switcher nor Settings' Accounts tab may still show it.
 
     Sign-out drops the plugin's session and invalidates the identity cache; the
     frame is re-derived from that, so it flips to the signed-out shape.

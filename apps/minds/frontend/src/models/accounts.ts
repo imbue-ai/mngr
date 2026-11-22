@@ -1,6 +1,6 @@
 // The accounts: the signed-in ones, the signed-out ones whose workspaces are
 // still on this install, and the device entry, as the titlebar's account
-// switcher and Manage Accounts render them from the channel's accounts frame.
+// switcher and Settings' Accounts tab render them from the channel's accounts frame.
 // Which account THIS window shows is the shell's (ShellState.accountId); the
 // frame's own account_id is the server's echo of it.
 
@@ -15,6 +15,14 @@ export function accountLabelFor(
   entry: Pick<UiAccountEntry, "display_name" | "email" | "user_id">,
 ): string {
   return entry.display_name || entry.email || entry.user_id;
+}
+
+/** How the bar and its account menu name an account: its email, which never repeats across accounts as a
+ * display name can; else its display name, else its id. */
+export function accountEmailLabelFor(
+  entry: Pick<UiAccountEntry, "display_name" | "email" | "user_id">,
+): string {
+  return entry.email || entry.display_name || entry.user_id;
 }
 
 export class AccountsStore {
@@ -39,7 +47,17 @@ export class AccountsStore {
     return this.signedInAccount(accountId) !== null;
   }
 
-  /** What the switcher shows for `accountId`: the device's label, an account's name, or the id when nothing names it. */
+  /** What the bar shows for `accountId`: the device's label, an account's email, or the id when nothing names it. */
+  emailLabelFor(accountId: string): string {
+    if (accountId === LOCAL_PROFILE_USER_ID) return DEVICE_ACCOUNT_LABEL;
+    const known =
+      this.signedInAccount(accountId) ??
+      this.signedOutAccounts.find((account) => account.user_id === accountId) ??
+      null;
+    return known === null ? accountId : accountEmailLabelFor(known);
+  }
+
+  /** What a page shows for `accountId`: the device's label, an account's name, or the id when nothing names it. */
   labelFor(accountId: string): string {
     if (accountId === LOCAL_PROFILE_USER_ID) return DEVICE_ACCOUNT_LABEL;
     const known =

@@ -1,0 +1,1 @@
+`mngr imbue_cloud shares mobile-access-link` takes `--app-name`, the display name of the one app the emailed link opens. With it the message is about that app rather than the whole workspace, and `--link` is the app's own address; the connector refuses an app named without its link.

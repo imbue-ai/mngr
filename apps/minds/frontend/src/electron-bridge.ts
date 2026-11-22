@@ -161,6 +161,15 @@ interface MindsNativeSurface {
   // setting shipped lacks them, and the browser build scales with the browser.
   getDisplayZoom?(): Promise<number>;
   setDisplayZoom?(percent: number): Promise<number>;
+  // Keyboard shortcuts (Settings > Keyboard shortcuts). Optional: a preload from
+  // before the setting shipped lacks them, and the browser build has no main
+  // process to catch a key pressed inside the workspace.
+  getKeyboardShortcuts?(): Promise<KeyboardShortcuts>;
+  setWorkspaceSwitcherShortcut?(value: ShortcutChord | null | "default"): Promise<KeyboardShortcuts>;
+  captureShortcutChord?(): Promise<ShortcutCapture>;
+  cancelShortcutCapture?(): Promise<void>;
+  onToggleWorkspaceSwitcher?(callback: () => void): void;
+  onKeyboardShortcutsChanged?(callback: (shortcuts: KeyboardShortcuts) => void): void;
   // Which app version the previous launch ran. Optional: a preload from before
   // it lacks it, and the browser build has no app version of its own.
   getLaunchVersionChange?(): Promise<LaunchVersionChange>;
@@ -395,6 +404,49 @@ function native(): MindsNativeSurface | null {
   return window.mindsNative ?? null;
 }
 
+/** One key chord, as the main process records and matches it (electron/keyboard-shortcuts.js). */
+export interface ShortcutChord {
+  code: string;
+  key: string;
+  meta: boolean;
+  control: boolean;
+  alt: boolean;
+  shift: boolean;
+}
+
+/** One binding as Settings shows it. */
+export interface ShortcutBinding {
+  /** Null while the shortcut is turned off. */
+  chord: ShortcutChord | null;
+  /** What to show for it; null while it is off. */
+  label: string | null;
+  defaultLabel: string;
+  isDefault: boolean;
+}
+
+export interface KeyboardShortcuts {
+  workspaceSwitcher: ShortcutBinding;
+}
+
+/** What a capture resolves with: the chord pressed, or that it was cancelled. */
+export interface ShortcutCapture {
+  chord?: ShortcutChord;
+  cancelled?: boolean;
+}
+
+/** Whether the page runs on an Apple platform, whose command key is Cmd. */
+export function isApplePlatform(): boolean {
+  return typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+}
+
+/** The switcher's shortcut in a plain browser, which has no main process to rebind it: the platform's default. */
+export function isBrowserSwitcherChord(event: KeyboardEvent): boolean {
+  if (event.key.toLowerCase() !== "k" || event.altKey) return false;
+  return isApplePlatform()
+    ? event.metaKey && !event.ctrlKey && !event.shiftKey
+    : event.ctrlKey && event.shiftKey && !event.metaKey;
+}
+
 export const electronBridge = {
   get isDesktop(): boolean {
     return native() !== null;
@@ -525,6 +577,40 @@ export const electronBridge = {
    * null where the shell cannot scale windows. */
   async setDisplayZoom(percent: number): Promise<number | null> {
     return (await native()?.setDisplayZoom?.(percent)) ?? null;
+  },
+
+  /** Whether this chrome can rebind keyboard shortcuts: the desktop app, on a preload that knows how. */
+  get canConfigureShortcuts(): boolean {
+    return native()?.getKeyboardShortcuts !== undefined;
+  },
+  /** The bindings the main process holds; null where there is no main process to hold them. */
+  async getKeyboardShortcuts(): Promise<KeyboardShortcuts | null> {
+    return (await native()?.getKeyboardShortcuts?.()) ?? null;
+  },
+  /** Store a chord, turn the shortcut off (null), or restore the default. Rejects with main's own sentence when
+   * the chord cannot be used. */
+  async setWorkspaceSwitcherShortcut(value: ShortcutChord | null | "default"): Promise<KeyboardShortcuts | null> {
+    return (await native()?.setWorkspaceSwitcherShortcut?.(value)) ?? null;
+  },
+  /** The next chord pressed in this window, which main swallows; cancelled on Escape. */
+  async captureShortcutChord(): Promise<ShortcutCapture> {
+    return (await native()?.captureShortcutChord?.()) ?? { cancelled: true };
+  },
+  cancelShortcutCapture(): void {
+    void native()?.cancelShortcutCapture?.();
+  },
+  onToggleWorkspaceSwitcher(callback: () => void): void {
+    native()?.onToggleWorkspaceSwitcher?.(callback);
+  },
+  onKeyboardShortcutsChanged(callback: (shortcuts: KeyboardShortcuts) => void): void {
+    native()?.onKeyboardShortcutsChanged?.(callback);
+  },
+  /** What the workspace menu shows for the shortcut that opens it: main's binding in the desktop app (null while it
+   * is off), the fixed default in a browser. */
+  async workspaceSwitcherShortcutLabel(): Promise<string | null> {
+    const surface = native();
+    if (surface === null) return isApplePlatform() ? "⌘K" : "Ctrl+Shift+K";
+    return (await surface.getKeyboardShortcuts?.())?.workspaceSwitcher.label ?? null;
   },
 
   /** Whether this is the first launch into a new app version. False in the

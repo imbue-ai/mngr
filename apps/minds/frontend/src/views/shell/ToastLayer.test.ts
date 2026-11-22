@@ -230,11 +230,11 @@ describe("ToastLayer", () => {
 
   it("starts below the Reconnecting chip when it is visible", () => {
     const low = renderLayer(makeAttrs([entry("n1")])) as AnyVnode;
-    expect(classesOf(low)).toContain("top-[42px]");
+    expect(classesOf(low)).toContain("top-[calc(var(--titlebar-height)+4px)]");
     const dropped = renderLayer(
       makeAttrs([entry("n1")], { isReconnecting: true }),
     ) as AnyVnode;
-    expect(classesOf(dropped)).toContain("top-[74px]");
+    expect(classesOf(dropped)).toContain("top-[calc(var(--titlebar-height)+36px)]");
   });
 
   it("renders a plain list under prefers-reduced-motion", () => {

@@ -1,4 +1,4 @@
-"""Render the share panel in the frames of the B2 mock, plus the states the mock has none of.
+"""Render Settings' Sharing page in the frames of the B2 mock, plus the states the mock has none of.
 
 Each frame is a fixture state of the panel (``blueprint/share-panel/plan-share-panel.md``,
 "Frames to model state"). The built SPA bundle is served with the same fixture
@@ -142,9 +142,13 @@ ERIN_ROW: Final[str] = "email:erin@example.org"
 # shot taken during the turn catches a chevron at an angle it never rests at.
 _MARKER_TURN_MS: Final[int] = 300
 
-# The pane's right column, the one thing in it that scrolls: the content side of
-# the split pane, beside the nav ShareTab labels "Share targets".
-_PANE_SCROLLER: Final[str] = 'nav[aria-label="Share targets"] + div'
+# The page's column, the one thing in it that scrolls: the content side of
+# Settings' split pane, beside its rail.
+_PANE_SCROLLER: Final[str] = 'nav[aria-label="Settings"] + div'
+
+# Where the page is: Settings floated over the workspace, at Sharing.
+_SHARING_ROUTE: Final[str] = "/settings"
+_SHARING_QUERY: Final[str] = f"workspace={AGENT_ID}&tab=workspace&group=sharing&visual-diff=1"
 
 SAVING_TEXT: Final[str] = "Securely granting access"
 # What the stub's failed write answers with; the row keeps it behind "See details".
@@ -275,8 +279,8 @@ class ShareRouteStubs(MutableModel):
         if path == share_base:
             self._handle_share_state(route)
             return
-        if route.request.resource_type == "document" and path != f"/workspace/{AGENT_ID}/options":
-            # The workspace surface behind the panel iframes an origin that is
+        if route.request.resource_type == "document" and path != _SHARING_ROUTE:
+            # The workspace surface behind Settings iframes an origin that is
             # not here; without this its failure page reads through the backdrop.
             route.fulfill(status=200, content_type="text/html", body="<!doctype html><html><body></body></html>")
             return
@@ -374,13 +378,22 @@ def _wait_for_row(page: Page, key: str, needle: str, *, is_present: bool = True)
         raise SharePanelRenderError(f"Row {key} did not {wanted} {needle!r}; {said}") from exc
 
 
+def _open_access_list(page: Page) -> None:
+    """Unfold who has access, which starts folded so the sections under it stay in view."""
+    trigger = page.locator("#ws-share-access-trigger")
+    trigger.wait_for(state="visible", timeout=15000)
+    if trigger.get_attribute("aria-expanded") != "true":
+        trigger.click()
+        page.wait_for_timeout(_MARKER_TURN_MS)
+
+
 def _drive_first_open(page: Page) -> None:
-    page.wait_for_selector("#ws-share-empty")
+    page.wait_for_selector("#ws-share-invite")
     _hover_for_tooltip(page, "#ws-share-add-kind")
 
 
 def _drive_confirm(page: Page) -> None:
-    page.wait_for_selector("#ws-share-empty")
+    page.wait_for_selector("#ws-share-invite")
     page.click("#ws-share-publish-switch")
     page.wait_for_selector("#ws-share-publish-confirm")
 
@@ -407,6 +420,7 @@ def _drive_published(page: Page) -> None:
     of them. The whole sequence is also a race against the six-second highlight
     on the just-added row.
     """
+    _open_access_list(page)
     page.wait_for_selector(f'[data-grant-row="{CAROL_ROW}"]')
     _add_grant(page, "bob@example.org")
     _wait_for_row(page, BOB_ROW, SAVING_TEXT, is_present=False)
@@ -460,6 +474,7 @@ def _open_inherited(page: Page) -> None:
 
 def _select_app_pane(page: Page) -> None:
     page.click('[data-share-target="notes"]')
+    _open_access_list(page)
     page.wait_for_selector("#ws-share-inherited")
 
 
@@ -484,6 +499,7 @@ def _drive_long_list(page: Page) -> None:
     The wheel proves the right column scrolls rather than the pane growing; the
     capture is then taken where the mock draws it, thumb at the top.
     """
+    _open_access_list(page)
     page.wait_for_selector("#ws-share-grants")
     page.hover(_PANE_SCROLLER)
     page.mouse.wheel(0, 600)
@@ -607,7 +623,7 @@ def _panel_clip(page: Page) -> dict[str, float]:
     """
     box = page.evaluate(
         "() => {"
-        "  const boxes = [document.getElementById('ws-options-panel'),"
+        "  const boxes = [document.getElementById('settings-panel'),"
         "                 document.querySelector('.modal-viewport > div')]"
         "    .filter((el) => el !== null)"
         "    .map((el) => el.getBoundingClientRect());"
@@ -618,7 +634,7 @@ def _panel_clip(page: Page) -> dict[str, float]:
         "}"
     )
     if box is None:
-        raise SharePanelRenderError("the options panel is not on screen")
+        raise SharePanelRenderError("Settings is not on screen")
     # Flush with the card: the workspace chrome behind it (an update banner
     # across the surface) would otherwise show in the margin.
     left = max(float(box[0]), 0)
@@ -640,7 +656,7 @@ def _capture_frame(page: Page, frame: ShareFrame, port: int, output_dir: Path) -
     page.route("**/*", stubs.handle)
     try:
         page.goto(
-            f"http://127.0.0.1:{port}/workspace/{AGENT_ID}/options?tab=share&visual-diff=1",
+            f"http://127.0.0.1:{port}{_SHARING_ROUTE}?{_SHARING_QUERY}",
             wait_until="load",
             timeout=20000,
         )
@@ -661,7 +677,7 @@ def _capture(arguments: ShareRenderArguments) -> None:
         shutil.rmtree(serve_dir)
     serve_dir.mkdir(parents=True)
     (serve_dir / "_static").symlink_to(STATIC_DIR)
-    route = f"/workspace/{AGENT_ID}/options"
+    route = _SHARING_ROUTE
     index_path = serve_dir / "index.html"
     index_path.write_text(render_spa_index_html(build_spa_fixture_bootstrap()))
 

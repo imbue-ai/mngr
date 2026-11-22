@@ -78,7 +78,7 @@ function parsePopoutRoute(url) {
 // param), which stays mounted behind the overlay; null for any other route.
 // Mirrors overlayBehindWorkspaceId in frontend/src/views/shell/classify.ts;
 // keep the path set in sync.
-const OVERLAY_BEHIND_WORKSPACE_PATHS = new Set(['/help', '/inbox', '/create/template', '/settings/ai-keys']);
+const OVERLAY_BEHIND_WORKSPACE_PATHS = new Set(['/help', '/inbox', '/create/template', '/settings', '/settings/ai-keys']);
 
 function parseOverlayBehindWorkspaceId(url) {
   if (!url) return null;

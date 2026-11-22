@@ -1,10 +1,7 @@
-// Titlebar-context classification: which crumb/tab state the current route
+// Titlebar-context classification: which crumb state the current route
 // implies. Port of chrome.js's classifyContent, keyed on SPA routes instead
 // of content URLs (the swap engine's URL-sniffing is gone; the router is the
 // source of truth).
-
-import type { OptionsTab } from "../../models/workspaceOptions";
-import { toOptionsTab } from "../../models/workspaceOptions";
 
 export interface TitlebarContext {
   /** `start`: the first-run start flow, whose titlebar holds only the centered
@@ -13,25 +10,19 @@ export interface TitlebarContext {
    * carries the name and accent). */
   kind: "home" | "workspace" | "page" | "start" | "creating";
   workspaceAnyId: string | null;
-  activeTab: OptionsTab | null;
   pageLabel: string;
 }
 
 const HOME_CONTEXT: TitlebarContext = {
   kind: "home",
   workspaceAnyId: null,
-  activeTab: null,
   pageLabel: "",
 };
 
-function workspaceContext(
-  anyId: string,
-  activeTab: OptionsTab | null,
-): TitlebarContext {
+function workspaceContext(anyId: string): TitlebarContext {
   return {
     kind: "workspace",
     workspaceAnyId: anyId,
-    activeTab,
     pageLabel: "",
   };
 }
@@ -40,7 +31,6 @@ function pageContext(label: string): TitlebarContext {
   return {
     kind: "page",
     workspaceAnyId: null,
-    activeTab: null,
     pageLabel: label,
   };
 }
@@ -134,25 +124,19 @@ export function creatingAttemptIdFromPath(path: string): string | null {
 }
 
 /** The workspace id when `path` is the workspace content surface
- * (/workspace/<agent-or-host-id>, no sub-page suffix), else null. */
+ * (/workspace/<agent-or-host-id>, no sub-page suffix), else null. A sub-page
+ * that replaces the surface (/backups) returns null; a flyout or modal
+ * floating over the surface names it in `?workspace=` instead (see
+ * overlayBehindWorkspaceId). */
 export function workspaceDisplayIdFromPath(path: string): string | null {
   const match = path.match(new RegExp(`^/workspace/${ID_SEGMENT}$`, "i"));
   return match ? match[1] : null;
 }
 
-/** The workspace id when `path` keeps the workspace surface mounted: the bare
- * content surface OR the options overlay rendered on top of it. Sub-pages
- * that replace the surface (/settings, /backups) return null. */
-export function workspaceSurfaceIdFromPath(path: string): string | null {
-  const match = path.match(
-    new RegExp(`^/workspace/${ID_SEGMENT}(/options)?$`, "i"),
-  );
-  return match ? match[1] : null;
-}
-
 /** The workspace id when `path` is any of the workspace's own pages: the
- * content surface, the options overlay, or a sub-page that replaces the
- * surface (/settings, /backups). The route implies the workspace's account. */
+ * content surface, a sub-page that replaces it (/backups), or one of the
+ * legacy spellings that redirect into Settings (/options, /settings). The
+ * route implies the workspace's account. */
 export function workspacePageIdFromPath(path: string): string | null {
   const match = path.match(
     new RegExp(`^/workspace/${ID_SEGMENT}(/options|/settings|/backups)?$`, "i"),
@@ -166,52 +150,45 @@ export function recoveryWorkspaceIdFromPath(path: string): string | null {
   return match ? match[1] : null;
 }
 
-/** Whether `path` is the options overlay route (share + machine-settings
- * panel floating over the still-mounted workspace surface). */
-export function isWorkspaceOverlayPath(path: string): boolean {
-  return new RegExp(`^/workspace/${ID_SEGMENT}/options$`, "i").test(path);
-}
-
-/** App-level modal routes the Shell floats as a centered overlay over the
- * surface they were opened from (Imbue Studio settings, Accounts, Get help, the
- * request-review popup, and the AI-keys mint dialog)
- * instead of a full breadcrumbed page. The AI-keys mint dialog is
- * workspace-triggered ("Sign in with Imbue" inside a machine) and floats over
- * that machine, mirroring Get help. The request popup ("/inbox") hangs from
- * the titlebar's key tab rather than centering, but is otherwise the same
- * kind of route-driven overlay. (The bell's notification feed is a separate,
+/** App-level routes the Shell floats over the surface they were opened from
+ * instead of drawing as a page: Settings (hung from the bar's gear), Get help
+ * (hung from the bug button), the request-review popup and the AI-keys mint
+ * dialog (centered cards). (The bell's notification feed is a separate,
  * non-route overlay -- it is not in this Set -- see Shell.ts.) */
 const APP_OVERLAY_PATHS = new Set([
   "/settings",
-  "/accounts",
   "/help",
   "/inbox",
   "/settings/ai-keys",
 ]);
 
+/** Settings: the one overlay route with a slot of its own in the Shell, since it stays mounted behind the
+ * request popup opened from it. */
+export const SETTINGS_PATH = "/settings";
+
 export function isAppOverlayPath(path: string): boolean {
   return APP_OVERLAY_PATHS.has(path);
 }
 
-/** Whether `path` is one of the raised titlebar strip's own routed surfaces:
- * the docked options panel, the request popup, or Get help. (The bell's feed
- * is the strip's fourth surface but is local state, not a route.) A strip
- * switch REPLACES these routes' history entry rather than stacking on it, so
- * the surface being left is never one Back away under the new one. */
+/** Whether `path` is one of the bar's routed flyouts: Settings or Get help.
+ * (The feed and the two menus are flyouts too, but local state, not routes.)
+ * A switch between flyouts REPLACES these routes' history entry rather than
+ * stacking on it, so the flyout being left is never one Back away under the
+ * new one. */
 export function isTitlebarPopupRoutePath(path: string): boolean {
-  return isWorkspaceOverlayPath(path) || path === "/inbox" || path === "/help";
+  return path === SETTINGS_PATH || path === "/help";
 }
 
-/** The workspace kept mounted behind an app-overlay modal: the ?workspace= that
- * Get help, the request-review popup, the New workspace
- * template flow, and the AI-keys mint dialog forward, so those overlays float
- * over the live workspace they were opened from (kept mounted, no reload). The AI-keys dialog forwards
- * the machine's HOST id (the mint endpoint keys on it); the others forward the
- * agent id. Settings / Accounts are launched from Home and carry none, a popup
- * opened from Home carries none, and a template link with no machine open
- * redirects to the full create form -- so their overlay floats over Home /
- * never renders (returns null). */
+/** The workspace kept mounted behind a floating route: the ?workspace= that
+ * Settings, Get help, the request-review popup, the New workspace template
+ * flow, and the AI-keys mint dialog forward, so they float over the live
+ * workspace they were opened from (kept mounted, no reload). The AI-keys
+ * dialog forwards the machine's HOST id (the mint endpoint keys on it); the
+ * others forward the agent id. Opened from Home they carry none, and a
+ * template link with no machine open redirects to the full create form -- so
+ * their overlay floats over Home / never renders (returns null). */
 const OVERLAY_BEHIND_WORKSPACE_PATHS = new Set([
+  SETTINGS_PATH,
   "/help",
   "/inbox",
   "/create/template",
@@ -236,61 +213,46 @@ export function classifyRoute(routePath: string, search = ""): TitlebarContext {
   const path = hubPagePath(routePath);
   const displayId = workspaceDisplayIdFromPath(path);
   if (displayId !== null) {
-    return workspaceContext(displayId, null);
+    return workspaceContext(displayId);
   }
   // A popout wears its workspace's context (its accent above all); the
   // Shell draws the popout's own bar in place of the titlebar.
   const popout = popoutFromPath(path);
-  if (popout !== null) return workspaceContext(popout.workspaceAnyId, null);
-  let match = path.match(
-    new RegExp(`^/workspace/${ID_SEGMENT}/settings$`, "i"),
-  );
-  if (match) return workspaceContext(match[1], "settings");
-  match = path.match(new RegExp(`^/workspace/${ID_SEGMENT}/options$`, "i"));
-  if (match) {
-    // Same parse WorkspaceOptionsPage.requestedTab uses, so the highlighted
-    // titlebar button is always the pane the page renders.
-    return workspaceContext(
-      match[1],
-      toOptionsTab(new URLSearchParams(search).get("tab")),
-    );
-  }
-  match = path.match(new RegExp(`^/workspace/${ID_SEGMENT}/backups$`, "i"));
-  if (match) return workspaceContext(match[1], "settings");
+  if (popout !== null) return workspaceContext(popout.workspaceAnyId);
+  const backupsMatch = path.match(new RegExp(`^/workspace/${ID_SEGMENT}/backups$`, "i"));
+  if (backupsMatch) return workspaceContext(backupsMatch[1]);
   const destroyingId = destroyingWorkspaceIdFromPath(path);
-  if (destroyingId !== null) return workspaceContext(destroyingId, null);
+  if (destroyingId !== null) return workspaceContext(destroyingId);
   const recoveryId = recoveryWorkspaceIdFromPath(path);
-  if (recoveryId !== null) return workspaceContext(recoveryId, null);
+  if (recoveryId !== null) return workspaceContext(recoveryId);
   if (path === "/create/template") {
     // Over a machine the template stepper is a modal floating on that
     // machine's surface (its context + accent); with no machine it redirects to
     // the /create form, so it stays a plain New workspace page until that lands.
     const behind = overlayBehindWorkspaceId(path, search);
-    return behind !== null
-      ? workspaceContext(behind, null)
-      : pageContext("New workspace");
+    return behind !== null ? workspaceContext(behind) : pageContext("New workspace");
   }
   const creatingAttemptId = creatingAttemptIdFromPath(path);
   if (creatingAttemptId !== null) {
-    return { kind: "creating", workspaceAnyId: creatingAttemptId, activeTab: null, pageLabel: "" };
+    return { kind: "creating", workspaceAnyId: creatingAttemptId, pageLabel: "" };
   }
   if (path === "/create" || path.startsWith("/creating/")) {
     return pageContext("New workspace");
   }
   if (isAppOverlayPath(path)) {
-    // Imbue Studio settings / Accounts / Get help / the request popup / the AI-keys
-    // mint dialog float as a centered modal over the surface they were opened
-    // from; the titlebar keeps that surface's context (the workspace behind Get
-    // help / the popup / AI-keys, else Home) rather than a standalone page.
+    // Settings, Get help, the request popup and the AI-keys mint dialog float
+    // over the surface they were opened from; the titlebar keeps that
+    // surface's context (the workspace behind them, else Home) rather than a
+    // standalone page.
     const behind = overlayBehindWorkspaceId(path, search);
-    return behind !== null ? workspaceContext(behind, null) : HOME_CONTEXT;
+    return behind !== null ? workspaceContext(behind) : HOME_CONTEXT;
   }
   if (path === "/workspaces/destroyed")
     return pageContext("Recently destroyed");
   if (path === "/workspaces/shared") return pageContext("Shared workspaces");
   if (path === "/consent") return pageContext("Consent");
   if (path === "/start") {
-    return { kind: "start", workspaceAnyId: null, activeTab: null, pageLabel: "" };
+    return { kind: "start", workspaceAnyId: null, pageLabel: "" };
   }
   return HOME_CONTEXT;
 }

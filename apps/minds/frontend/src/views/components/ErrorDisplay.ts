@@ -157,11 +157,7 @@ export function updateAppActions(): ErrorAction[] {
     ? [
         {
           label: "Update Imbue Studio",
-          onclick: () =>
-            m.route.set(
-              "/settings",
-              getAppContext().shell.overlayQuery({ section: "updates" }),
-            ),
+          onclick: () => getAppContext().shell.openSettings({ tab: "studio", section: "updates" }),
         },
       ]
     : [];

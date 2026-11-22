@@ -78,6 +78,7 @@ from imbue.mngr_imbue_cloud.wire_types import BackupStorageMode
 from imbue.mngr_imbue_cloud.wire_types import InvitationOutcome
 from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyInfo
 from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyMaterial
+from imbue.mngr_imbue_cloud.wire_types import MobileAccessLinkOutcome
 from imbue.mngr_imbue_cloud.wire_types import PublishedPortInfo
 from imbue.mngr_imbue_cloud.wire_types import PublishedPortProtocol
 from imbue.mngr_imbue_cloud.wire_types import ShareGrantedVia
@@ -3432,6 +3433,33 @@ def test_list_invitation_outcomes_parses_each_entry(monkeypatch: pytest.MonkeyPa
 
     assert [entry.outcome for entry in outcomes] == [InvitationOutcome.INVITED, None]
     assert outcomes[1].joined_at is None
+
+
+def test_send_mobile_access_link_sends_only_the_fields_given_and_parses_the_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app_link = "https://world-of-nonsense-fs6k.host-abc.owner.us1.shares.example/"
+    bodies: list[dict[str, str]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/shares/host-abc/mobile-access-link"
+        bodies.append(_json.loads(request.content))
+        return httpx2.Response(
+            200,
+            json={"outcome": "sent", "recipient_email": "owner@example.com", "sent_at": "2026-09-30T12:00:00+00:00"},
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    for_app = client.send_mobile_access_link(
+        SecretStr("tok"), "host-abc", link=app_link, workspace_name="alpha", app_name="World of Nonsense"
+    )
+    client.send_mobile_access_link(SecretStr("tok"), "host-abc", link=None, workspace_name=None, app_name=None)
+
+    assert for_app.outcome is MobileAccessLinkOutcome.SENT
+    assert for_app.recipient_email == "owner@example.com"
+    assert bodies == [{"link": app_link, "workspace_name": "alpha", "app_name": "World of Nonsense"}, {}]
 
 
 def test_notification_preferences_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:

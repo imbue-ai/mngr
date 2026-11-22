@@ -26,6 +26,29 @@ interface ModalAttrs extends m.Attributes {
   backdrop?: ModalBackdrop;
 }
 
+/** One Modal on screen, and how it is put away (nothing, for one that must be answered). */
+interface OpenModal {
+  onClose: (() => void) | undefined;
+}
+
+// The Modals on screen, in the order they opened: the last is the one on top.
+const openModals: OpenModal[] = [];
+
+/** Whether any Modal is on screen: a dialog holds the window until it is answered, so a shortcut that would open
+ * something else under it has to stand down. */
+export function isAnyModalOpen(): boolean {
+  return openModals.length > 0;
+}
+
+/** Put the topmost Modal away, as a click on its backdrop would, reporting whether one was on screen. A Modal that
+ * cannot be dismissed still reports true: the key is its to ignore, not the surface underneath's to take. */
+export function dismissTopmostModal(): boolean {
+  const top = openModals[openModals.length - 1];
+  if (top === undefined) return false;
+  top.onClose?.();
+  return true;
+}
+
 /**
  * In-DOM overlay modal: fixed dimming backdrop centering an inner card.
  * The SPA port of Modal.jinja, with visibility driven by `isOpen` instead of
@@ -43,18 +66,20 @@ interface ModalAttrs extends m.Attributes {
  * scrolls the rest, so a tall card keeps its title and close X on screen.
  *
  * The backdrop sits above the titlebar (z-110, over its z-100) so the dim
- * covers the whole window rather than stopping at the 38px strip; style.css
+ * covers the whole window rather than stopping at the titlebar's strip; style.css
  * gives .modal-viewport the matching no-drag so clicks up there still land.
  */
 export function Modal(): m.Component<ModalAttrs> {
   let isPressStartedOnBackdrop = false;
   let isPressEndedOnBackdrop = false;
+  const openModal: OpenModal = { onClose: undefined };
   return {
     view(vnode) {
       const { isOpen, onClose, size = "sm", cardExtra = "", backdrop = "dim" } = vnode.attrs;
       if (!isOpen) {
         return null;
       }
+      openModal.onClose = onClose;
       return m(
         "div",
         {
@@ -87,6 +112,13 @@ export function Modal(): m.Component<ModalAttrs> {
             "cardExtra",
             "backdrop",
           ]),
+          oncreate: () => {
+            openModals.push(openModal);
+          },
+          onremove: () => {
+            const idx = openModals.indexOf(openModal);
+            if (idx !== -1) openModals.splice(idx, 1);
+          },
         },
         m(
           "div",

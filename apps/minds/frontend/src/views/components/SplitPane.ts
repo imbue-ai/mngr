@@ -1,13 +1,12 @@
 // The two-column pane: a list of sections on the left, the selected section's
 // panel on the right, each column scrolling on its own so the list stays in
-// view however far down the panel you read. Shared by the workspace options
-// panes (Permissions, Share workspace, Workspace settings) and the app-level Imbue Studio
-// settings modal.
+// view however far down the panel you read. Settings draws its three tabs in
+// it.
 //
 // The pane deliberately does NOT scroll as a whole -- one scroller around both
 // columns takes the nav down with the panel, which is the bug this exists to
-// prevent. It expects to sit in a height-bounded flex column (the docked
-// options card, or the app-overlay card's body), which is what makes
+// prevent. It expects to sit in a height-bounded flex column (Settings'
+// card), which is what makes
 // `flex-1 min-h-0` resolve to a real height and the columns' overflow bite.
 //
 // A plain function rather than an m.Component, matching serviceMark and the

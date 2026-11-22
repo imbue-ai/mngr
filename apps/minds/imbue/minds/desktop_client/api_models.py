@@ -595,8 +595,16 @@ class InvitationOutcomesResponse(FrozenModel):
     outcomes: tuple[InvitationOutcomeEntryResponse, ...] = Field(description="One entry per open user or email grant")
 
 
+class MobileAccessLinkRequest(ApiRequestModel):
+    """Body for being emailed a link: which of the workspace's share targets the link opens."""
+
+    app: str | None = Field(
+        default=None, description="The share target whose link to email; the whole workspace when absent"
+    )
+
+
 class MobileAccessLinkResponse(FrozenModel):
-    """How the request to be emailed a workspace's link ended."""
+    """How the request to be emailed a workspace's link, or one of its apps', ended."""
 
     outcome: str = Field(description="sent or failed")
     recipient_email: str = Field(default="", description="The signed-in account's own address the message went to")
@@ -1344,6 +1352,15 @@ class MachineSharingResponse(FrozenModel):
             "Set when the share status could not be read (UNREADABLE) or the account that owns the workspace "
             "is not signed in here (OWNER_SIGNED_OUT): ``enabled`` is then false but not known, and clients "
             "must not draw the workspace as unshared"
+        ),
+    )
+    is_connector_pending: bool = Field(
+        default=False,
+        description=(
+            "True on the document the local read answers: built from the workspace and this computer alone, "
+            "before Imbue Cloud has been asked. ``enabled`` then says only that the workspace holds share "
+            "materials, ``url`` is present only when Imbue Cloud has named the share's domain earlier in this "
+            "run, and the invitation outcomes and ``grants_synced`` are not known yet"
         ),
     )
     grants_synced: bool | None = Field(
