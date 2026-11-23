@@ -1,7 +1,8 @@
 """The journey's steps inside the launched Imbue Studio app, driven through its own UI.
 
 Every control here is the one a user presses: the landing page and its
-consent screen, the sign-in from Settings' Accounts tab, the create form, the
+consent screen, the first-run page's error-reporting checkbox and its way on
+without an account, the sign-in from Settings' Accounts tab, the create form, the
 desktop's launcher field, the home page's Stop and Start, Settings' Sharing page, and
 its General page's destroy.
 What the UI did is then confirmed by reading the app's own routes,
@@ -13,6 +14,9 @@ Two routes are called rather than driven through the chooser: the desktop's
 AI-key mint, and the workspace's adoption of the blob it mints. They are the
 routes behind the chooser's "Sign in with Imbue" lane; driving that lane's own
 controls is a follow-up recorded in the spec.
+
+A fresh install's sign-in is asked for rather than pressed: its first-run page
+is loaded with the shell's ``web-login=1`` param (``start_web_login`` says why).
 """
 
 import re
@@ -47,7 +51,7 @@ from imbue.minds.desktop_client.e2e_workspace_runner import workspace_coordinate
 from imbue.minds.smoke_tests.data_types import StudioAppSession
 from imbue.minds.smoke_tests.primitives import SmokeAppError
 
-# The pages a fresh app lands on: the start flow, the consent screen that can
+# The pages a fresh app lands on: the first-run sign-in page, the consent screen that can
 # precede it, the landing list of an install with workspaces, or a workspace.
 LANDING_SELECTORS: Final[tuple[str, ...]] = (
     "#start-flow",
@@ -57,11 +61,14 @@ LANDING_SELECTORS: Final[tuple[str, ...]] = (
 )
 _CONSENT_CONTINUE: Final[str] = "#consent-continue"
 _START_FLOW: Final[str] = "#start-flow"
-# The start flow (``StartPage.ts``): its answer buttons carry their choice in
-# ``data-answer``; the way in for someone who already has a workspace is the
-# start titlebar's log-in.
-_REPORTING_DECLINE: Final[str] = '[data-answer="reporting-no"]'
-_EXISTING_LOGIN_BUTTON: Final[str] = "#start-log-in"
+# The first-run sign-in page (``StartPage.ts``): its error-reporting checkbox, which starts
+# checked, and "Use without an account", which records the checkbox and opens the create form.
+_REPORTING_CHECKBOX: Final[str] = "#start-reporting-checkbox"
+_WITHOUT_ACCOUNT_BUTTON: Final[str] = "#start-without-account"
+_FIRST_RUN_CREATE_FORM: Final[str] = "#start-create-form"
+_CONSENT_API_PATH: Final[str] = "/ui/api/onboarding/consent"
+# The first-run page with the param the app's shell hands a window to make it start the browser sign-in.
+_FIRST_RUN_WEB_LOGIN_PATH: Final[str] = "/start?web-login=1"
 # Settings' Accounts tab and its rail's Add account, and the web-login modal's copy of the sign-in URL.
 _ACCOUNTS_PATH: Final[str] = "/settings?tab=accounts"
 _ADD_ACCOUNT_BUTTON: Final[str] = 'button:has-text("Add account")'
@@ -202,23 +209,42 @@ def wait_for_landing_page(session: StudioAppSession) -> str:
 
 
 def start_web_login(session: StudioAppSession, landed_on: str) -> str:
-    """Open the app's web-login flow the way the page it landed on offers it; return the hosted sign-in URL.
+    """Open the app's web-login flow the way the page it landed on allows; return the hosted sign-in URL.
 
-    A fresh install is in its start flow, whose title bar offers "Already set up? Log in"
-    throughout; an install past onboarding signs in from Settings' Accounts tab.
+    An install past onboarding signs in from Settings' Accounts tab. A fresh install is on its first-run
+    sign-in page, whose own Sign in starts the account's first workspace by itself once the sign-in lands,
+    while the run creates one it names and configures. Settings is out of reach there (the home page behind
+    it sends such an install back to the first-run page), so the run asks for the sign-in the way the app's
+    shell asks a window for one.
     """
     if landed_on == _START_FLOW:
-        return _start_web_login_from_start_flow(session)
+        _decline_reporting_on_first_run_page(session)
+        return _start_web_login_from_first_run_page(session)
     return _start_web_login_from_accounts_page(session)
 
 
-def _start_web_login_from_start_flow(session: StudioAppSession) -> str:
-    """Decline error reporting (a test run is not a user's install), then take the existing-login way out."""
+def _decline_reporting_on_first_run_page(session: StudioAppSession) -> None:
+    """Untick error reporting (a test run is not a user's install) and take "Use without an account", which records it."""
     page = session.page
-    page.wait_for_selector(_REPORTING_DECLINE, state="visible", timeout=_PAGE_TIMEOUT_MS)
-    page.click(_REPORTING_DECLINE)
-    page.wait_for_selector(_EXISTING_LOGIN_BUTTON, state="visible", timeout=_PAGE_TIMEOUT_MS)
-    page.click(_EXISTING_LOGIN_BUTTON)
+    page.wait_for_selector(_REPORTING_CHECKBOX, state="visible", timeout=_PAGE_TIMEOUT_MS)
+    page.uncheck(_REPORTING_CHECKBOX)
+    # The page posts the answer without waiting for it, and the sign-in loads the page afresh next.
+    with page.expect_response(
+        lambda response: urlsplit(response.url).path == _CONSENT_API_PATH, timeout=_PAGE_TIMEOUT_MS
+    ) as consent_response:
+        page.click(_WITHOUT_ACCOUNT_BUTTON)
+    if not consent_response.value.ok:
+        raise SmokeAppError(
+            f"The app answered {consent_response.value.status} to the first-run page's error-reporting answer."
+        )
+    page.wait_for_selector(_FIRST_RUN_CREATE_FORM, state="attached", timeout=_PAGE_TIMEOUT_MS)
+    logger.info("Error reporting is declined on the first-run page")
+
+
+def _start_web_login_from_first_run_page(session: StudioAppSession) -> str:
+    """Load the first-run page with the shell's sign-in param, which opens the web-login modal over it."""
+    page = session.page
+    page.goto(f"{session.backend_origin}{_FIRST_RUN_WEB_LOGIN_PATH}", wait_until="domcontentloaded")
     return _wait_for_web_login_url(page)
 
 

@@ -403,9 +403,13 @@ the resource guards' shim directory on `PATH` are dropped, and
 `STUDIO_ROOTS_OVERRIDE`, `MINDS_ROOT_NAME`, the client config and `DISPLAY` are set
 explicitly. The `BROWSER` it is given is a no-op, so its web-login never
 reaches the operator's own browser (which would hand whatever account is
-signed in there to the app); the suite opens the hosted sign-in URL from the
-start flow's title-bar "Already set up? Log in" and completes it in its own
-headless Chromium.
+signed in there to the app); on a fresh install the suite unticks the
+first-run page's "Help improve Studio" and takes "Use without an account",
+which records the answer, then loads that page with the shell's `web-login=1`
+param (the page's own Sign in would start the account's first workspace by
+itself, and the journey creates one it names; Settings cannot be opened before
+onboarding is complete), and completes the hosted sign-in the modal offers in
+its own headless Chromium.
 
 The workspace is created in the region the form already points at, which is
 the app's own choice for where this machine's workspaces run; a run therefore
