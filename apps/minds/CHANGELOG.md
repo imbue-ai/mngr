@@ -6,6 +6,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [minds-v0.10.6] - 2026-11-22
+
+A patch release over 0.10.5 that carries everything merged to `main` since 0.10.4, pinning workspace template `minds-v0.10.6`. It carries the new first run (a sign-in page, a first Imbue Cloud workspace that starts on sign-in, and a welcome with start suggestions), chat suggestions with their workspace settings, the redesigned home page and top bar, one Settings in place of the accounts page and the options panel, Shared with me, experimental connectors, per-workspace microphone permission, and resource warnings for the computer Studio runs on.
+Workspace changes in this release: https://github.com/imbue-ai/default-workspace-template/blob/minds-v0.10.6/CHANGELOG.md
+
 ### Added
 
 - Added: Agents can ask for a `custom-service` connection to be proxied through the desktop with `"proxy": true`; the approval dialog shows the **Proxy through my desktop** switch, and approving creates, grants and routes the connection in one change.
