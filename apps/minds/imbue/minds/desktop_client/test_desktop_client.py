@@ -2086,10 +2086,23 @@ def test_help_assist_tells_the_user_what_a_refusing_machine_said(tmp_path: Path)
     assert "outer SSH unreachable" not in body["detail"]
 
 
-def test_help_report_requires_description(tmp_path: Path) -> None:
+def test_help_report_requires_a_description_or_error_details(tmp_path: Path) -> None:
     client, _ = _create_test_client_with_stores(tmp_path)
-    response = client.post("/help/report", json={"description": "  "})
+    response = client.post("/help/report", json={"description": "  ", "error_details": "  "})
     assert response.status_code == 400
+
+
+def test_help_report_sent_from_an_error_needs_no_description(tmp_path: Path) -> None:
+    """A report opened from an error can go out on the error's details alone, titled by their first line."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    details = "Could not sign in to mcp.example.com, so the connection was not granted.\n\nHTTP 502"
+    with capturing_sentry_client() as captured_events:
+        response = client.post("/help/report", json={"description": "", "error_details": details})
+    assert response.status_code == 200
+    assert captured_events[0]["message"] == (
+        "[bug report] Could not sign in to mcp.example.com, so the connection was not granted."
+    )
+    assert _submitted_report(captured_events[0])["error_details"] == details
 
 
 def test_help_report_accepts_a_description(tmp_path: Path) -> None:

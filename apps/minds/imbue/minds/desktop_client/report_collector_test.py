@@ -74,11 +74,11 @@ def _submitted_bug_report(event: Event) -> dict[str, Any]:
 
 
 def test_report_title_uses_trimmed_first_line() -> None:
-    assert _report_title("  first line  \nsecond line") == "[bug report] first line"
+    assert _report_title("  first line  \nsecond line", "") == "[bug report] first line"
 
 
 def test_report_title_falls_back_when_empty() -> None:
-    assert _report_title("   \n  ") == "[bug report] (no description)"
+    assert _report_title("   \n  ", "") == "[bug report] (no description)"
 
 
 def test_build_bug_report_always_includes_basics_and_description() -> None:

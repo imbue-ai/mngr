@@ -56,4 +56,28 @@ describe("requestDetailView", () => {
       { label: "Deny", id: "permissions-deny-btn", isDestructive: true },
     ]);
   });
+
+  it("addresses a bug report about a request it can't show to the workspace the request came from", () => {
+    const model = new InboxModel();
+    model.cards = [
+      {
+        id: "evt-a",
+        kind_label: "Permission",
+        ws_name: "alpha",
+        display_name: "AWS",
+        accent: "",
+        workspace_agent_id: "agent-alpha",
+      },
+    ];
+    model.selectedId = "evt-a";
+
+    const unshowable = [
+      requestDetailView(model, { kind: "unsupported", message: "Unsupported request type" }),
+      requestDetailView(model, { kind: "unknown_scope", request_id: "evt-a", scope: "zzz-api" }),
+    ];
+
+    expect(
+      unshowable.map((view) => collectVnodes(view).find((vnode) => vnode.tag === ErrorNotice)?.attrs?.workspaceAgentId),
+    ).toEqual(["agent-alpha", "agent-alpha"]);
+  });
 });

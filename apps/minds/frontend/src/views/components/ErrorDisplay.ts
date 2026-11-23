@@ -83,7 +83,8 @@ export function detailsPanel(id: string, details: string): m.Children {
 
 interface ReportBugButtonAttrs {
   error: UserFacingError;
-  /** The workspace the error is about, so the report can be scoped to it. */
+  /** The workspace the error is about, so the report collects from it.
+   * Omitted, the report collects from the workspace on screen. */
   workspaceAgentId?: string | null;
   /** Runs before the report form opens (a dialog closing itself). */
   beforeOpen?: () => void;

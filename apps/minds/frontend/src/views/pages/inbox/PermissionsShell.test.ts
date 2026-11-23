@@ -362,6 +362,26 @@ describe("PermissionsShell manual credentials", () => {
     expect(closed).toBe(true);
   });
 
+  it("addresses a failed approval's bug report to the workspace the request came from", () => {
+    const model = modelWithDetail(MANUAL_DETAIL);
+    model.cards = [
+      {
+        id: "evt-a",
+        kind_label: "Permission",
+        ws_name: "alpha",
+        display_name: "AWS",
+        accent: "",
+        workspace_agent_id: "agent-alpha",
+      },
+    ];
+    model.selectedId = "evt-a";
+    model.approvalError = { message: "Could not sign in to AWS.", details: "HTTP 502" };
+
+    const notice = renderShell(model).find((node) => node.tag === ErrorNotice);
+
+    expect(notice?.attrs?.workspaceAgentId).toBe("agent-alpha");
+  });
+
   it("puts what latchkey said about refused credentials behind See details", () => {
     const model = modelWithDetail(MANUAL_DETAIL);
     model.manualCredentialsFeedback = {

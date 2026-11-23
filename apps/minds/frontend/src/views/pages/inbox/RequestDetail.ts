@@ -46,6 +46,7 @@ export function requestDetailView(model: InboxModel, detail: InboxDetail): m.Chi
           details: `Scope '${detail.scope}' is not in the catalog.`,
         },
         actions: [{ label: "Deny", id: "permissions-deny-btn", isDestructive: true, onclick: () => model.deny() }],
+        workspaceAgentId: model.workspaceAgentIdOf(model.selectedId),
       });
     case "unsupported":
       // No handler owns this request, so a Deny would reach the same dead end; Close is the way out.
@@ -53,6 +54,7 @@ export function requestDetailView(model: InboxModel, detail: InboxDetail): m.Chi
         id: "permissions-unsupported",
         error: { message: fallbackErrorSentence(UNSHOWABLE_WHAT_FAILED, { isRetryable: false }), details: detail.message },
         actions: [{ label: "Close", onclick: () => model.close() }],
+        workspaceAgentId: model.workspaceAgentIdOf(model.selectedId),
       });
     case "unavailable":
       return m("div", { class: "flex flex-col items-center justify-center gap-2 py-8 text-center" }, [

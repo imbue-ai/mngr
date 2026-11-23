@@ -527,12 +527,23 @@ export class InboxModel {
     // just signed in is one the next dialog can pick), so the warms are spent
     // rather than trusted: the next open fetches afresh.
     forgetWarmedRequestDetails();
-    const card = this.cards.find((entry) => entry.id === requestId) ?? null;
-    const agentId =
-      card !== null && card.workspace_agent_id !== ""
-        ? card.workspace_agent_id
-        : null;
-    this.options.onResolved?.({ requestId, agentId, verdict });
+    this.options.onResolved?.({
+      requestId,
+      agentId: this.workspaceAgentIdOf(requestId),
+      verdict,
+    });
+  }
+
+  /** The workspace a request belongs to, read from its card; null when the
+   * request has no card or its workspace could not be resolved. */
+  workspaceAgentIdOf(requestId: string | null): string | null {
+    const card =
+      requestId === null
+        ? null
+        : (this.cards.find((entry) => entry.id === requestId) ?? null);
+    return card !== null && card.workspace_agent_id !== ""
+      ? card.workspace_agent_id
+      : null;
   }
 
   async loadList(): Promise<void> {

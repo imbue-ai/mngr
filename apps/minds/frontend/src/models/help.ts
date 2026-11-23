@@ -25,9 +25,9 @@ export interface HelpLaunchContext {
   /** What an error display attached when its "Report a bug" opened this
    * form: the sentence the user saw and everything under it; "" for none. */
   errorDetails: string;
-  /** The workspace that error was about, when the form is not floating over
-   * it: the report still collects from it, but the route names no workspace,
-   * so its frame is not mounted in place of the page the error was on. */
+  /** The workspace that error was about, when it is not the one the form
+   * floats over: the report collects from it, while the route keeps naming
+   * the surface behind the form. "" when the error is about that surface. */
   errorWorkspaceAgentId: string;
 }
 
@@ -176,7 +176,7 @@ export class HelpModel {
   agentError: UserFacingError | null = null;
   agentErrorReason: AssistChatFailureReason | null = null;
   sentEventId: string | null = null;
-  isAttachedDetailsOpen = false;
+  isAttachedDetailsOpen = true;
   isReportIdCopied = false;
   private copyFlashTimer: ReturnType<typeof setTimeout> | null = null;
   isSubmitBusy = false;
@@ -233,10 +233,16 @@ export class HelpModel {
     this.options.redraw?.();
   }
 
-  /** The workspace the report collects from: the one the form floats over,
-   * else the one the error that opened it was about; "" for none. */
+  /** The workspace the report collects from: the one the error that opened
+   * it was about, else the one the form floats over; "" for none. */
   get reportWorkspaceAgentId(): string {
-    return this.launch.workspaceAgentId || this.launch.errorWorkspaceAgentId;
+    return this.launch.errorWorkspaceAgentId || this.launch.workspaceAgentId;
+  }
+
+  /** An error's attached details say what happened on their own, so the
+   * user's own words are an addition rather than a requirement. */
+  get isDescriptionOptional(): boolean {
+    return this.launch.errorDetails !== "";
   }
 
   /** Submitting starts an agent chat rather than sending a report. An
@@ -332,7 +338,7 @@ export class HelpModel {
     // not fire a duplicate request.
     if (this.isSubmitBusy) return;
     const description = this.description.trim();
-    if (!description) {
+    if (!description && !this.isDescriptionOptional) {
       this.statusMessage = "Please describe the problem first.";
       this.isStatusError = true;
       this.redraw();
@@ -352,9 +358,9 @@ export class HelpModel {
     const outcome = await startAssistChat(
       {
         workspaceAgentId: this.launch.workspaceAgentId,
-        description: this.launch.errorDetails
-          ? `${description}\n\n${this.launch.errorDetails}`
-          : description,
+        description: [description, this.launch.errorDetails]
+          .filter((part) => part !== "")
+          .join("\n\n"),
       },
       this.fetcher(),
     );

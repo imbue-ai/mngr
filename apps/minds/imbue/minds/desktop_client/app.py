@@ -787,9 +787,12 @@ def _handle_help_report() -> Response:
             content='{"error": "Request body must be a JSON object"}',
             media_type="application/json",
         )
-    if not str(body.get("description", "")).strip():
+    # A report opened from an error carries that error's details, which say what happened on their own.
+    if not str(body.get("description", "")).strip() and not str(body.get("error_details") or "").strip():
         return make_response(
-            status_code=400, content='{"error": "A description is required"}', media_type="application/json"
+            status_code=400,
+            content='{"error": "A description or error details are required"}',
+            media_type="application/json",
         )
 
     event_id = submit_report_with_attachments(body=body, state=get_state())

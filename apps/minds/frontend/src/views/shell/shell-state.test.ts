@@ -2274,6 +2274,51 @@ describe("ShellState.openHelpForError", () => {
     expect(launch?.errorWorkspaceAgentId).toBe(WORKSPACE_ID);
   });
 
+  it("keeps the workspace behind the form when an error naming none is reported from a popup over it", () => {
+    // The workspace the popup floats over stays mounted behind the form and is
+    // what the report collects from.
+    const shell = makeShell();
+    land(shell, `/inbox?selected=evt-a&workspace=${WORKSPACE_ID}&account=local`);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    shell.openHelpForError(ERROR, null);
+
+    expect(routeSet).toHaveBeenCalledWith(
+      "/help",
+      expect.objectContaining({ workspace: WORKSPACE_ID, account: "local" }),
+      { replace: true },
+    );
+    expect(takePendingHelpLaunch()).toMatchObject({
+      workspaceAgentId: WORKSPACE_ID,
+      errorWorkspaceAgentId: "",
+    });
+  });
+
+  it("keeps the workspace on screen behind the form while collecting from the other workspace the error names", () => {
+    const otherWorkspaceId = "agent-cd34";
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    shell.openHelpForError(ERROR, otherWorkspaceId);
+
+    // No agent help: it would start in the workspace on screen, which the
+    // error is not about.
+    expect(routeSet).toHaveBeenCalledWith(
+      "/help",
+      { workspace: WORKSPACE_ID, assist: "0", account: "local" },
+      undefined,
+    );
+    expect(takePendingHelpLaunch()).toMatchObject({
+      workspaceAgentId: WORKSPACE_ID,
+      errorWorkspaceAgentId: otherWorkspaceId,
+    });
+  });
+
   it("scopes the report from the workspace's recovery page, which stays painted behind the form", () => {
     const shell = makeShell();
     land(shell, `/agents/${WORKSPACE_ID}/recovery`);

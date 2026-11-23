@@ -62,14 +62,20 @@ describe("HelpPage report form", () => {
     );
   });
 
-  it("shows what an error attached, collapsed, only on a report that carries some", () => {
+  it("leads with what an error attached, open, only on a report that carries some", () => {
     setPendingHelpLaunch({ workspaceAgentId: "", errorDetails: "HTTP 502\nboom" });
     const withDetails = collectVnodes(
       formPhase(new HelpModel({ storage: memoryStorage() })),
     );
+    expect(findById(withDetails, "help-attached-details")?.attrs?.isOpen).toBe(
+      true,
+    );
+    // Above the description, which only adds to what is already attached.
     expect(
-      withDetails.some((node) => node.attrs?.id === "help-attached-details"),
-    ).toBe(true);
+      withDetails.findIndex((node) => node.attrs?.id === "help-attached-details"),
+    ).toBeLessThan(
+      withDetails.findIndex((node) => node.attrs?.id === "help-description"),
+    );
 
     const withoutDetails = renderForm("");
     expect(
@@ -91,6 +97,21 @@ describe("HelpPage report form", () => {
 
     model.mode = "agent";
     expect(disclosureLabel()).toBe("Details the agent will see");
+  });
+
+  it("says agent help is withheld for an error about another workspace, not that the one on screen is down", () => {
+    setPendingHelpLaunch({
+      workspaceAgentId: "agent-on-screen",
+      isAssistAvailable: false,
+      errorDetails: "HTTP 502",
+      errorWorkspaceAgentId: "agent-1",
+    });
+    const text = allText(
+      formPhase(new HelpModel({ storage: memoryStorage() })),
+    );
+
+    expect(text).toContain("Not offered for an error about another workspace.");
+    expect(text).not.toContain("Available once this workspace is responding.");
   });
 
   it("hides both diagnostics checkboxes when the report is not scoped to a machine", () => {

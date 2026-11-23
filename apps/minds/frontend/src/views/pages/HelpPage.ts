@@ -22,6 +22,17 @@ import { Icon16 } from "../components/Icon";
 import { machineVerdict } from "../components/MachineVerdict";
 import { Spinner } from "../components/Spinner";
 
+function agentHelpNote(model: HelpModel): string {
+  if (model.launch.isAssistAvailable)
+    return "Opens a new chat in this workspace that diagnoses the issue and fixes what it can.";
+  if (!model.launch.workspaceAgentId) return "Open a workspace to use this.";
+  // The agent would start in the workspace on screen, not the one the error
+  // is about.
+  if (model.launch.errorWorkspaceAgentId)
+    return "Not offered for an error about another workspace.";
+  return "Available once this workspace is responding.";
+}
+
 function modeChoice(model: HelpModel): m.Children {
   if (model.launch.isAgentReport) return null;
   const isAssistAvailable = model.launch.isAssistAvailable;
@@ -52,11 +63,7 @@ function modeChoice(model: HelpModel): m.Children {
           m(
             "span",
             { class: "block type-helper text-tertiary" },
-            isAssistAvailable
-              ? "Opens a new chat in this workspace that diagnoses the issue and fixes what it can."
-              : model.launch.workspaceAgentId
-                ? "Available once this workspace is responding."
-                : "Open a workspace to use this.",
+            agentHelpNote(model),
           ),
         ]),
       ],
@@ -169,13 +176,14 @@ function withheldDiagnosticsWarning(model: HelpModel): m.Children {
   );
 }
 
-/** What an error's "Report a bug" attached, collapsed: the report (or, in
- * agent mode, the agent's chat) carries it whether or not it is opened. */
+/** What an error's "Report a bug" attached, open and ahead of the description
+ * so it reads as already filled in: the report (or, in agent mode, the
+ * agent's chat) carries it whether or not it is opened. */
 function attachedErrorDetails(model: HelpModel): m.Children {
   if (!model.launch.errorDetails) return null;
   return m(
     "div",
-    { class: "mt-3" },
+    { class: "mb-4" },
     m(
       Disclosure,
       {
@@ -195,6 +203,14 @@ function attachedErrorDetails(model: HelpModel): m.Children {
       machineVerdict(model.launch.errorDetails),
     ),
   );
+}
+
+function descriptionPlaceholder(model: HelpModel): string {
+  if (!model.isDescriptionOptional)
+    return "Describe the problem you ran into...";
+  return model.isAgentHelp
+    ? "Add anything else the agent should know, or just start it."
+    : "Add anything else you noticed, or just send the report.";
 }
 
 export function formPhase(model: HelpModel): m.Children {
@@ -219,26 +235,31 @@ export function formPhase(model: HelpModel): m.Children {
           "Here's how we can help:",
         ),
     modeChoice(model),
+    attachedErrorDetails(model),
     m(
       "label",
       {
         class: "block type-label text-secondary mb-1",
         for: "help-description",
       },
-      "What happened?",
+      model.isDescriptionOptional
+        ? [
+            "Anything else to add? ",
+            m("span", { class: "text-tertiary" }, "(optional)"),
+          ]
+        : "What happened?",
     ),
     m("textarea", {
       id: "help-description",
       rows: 4,
       class:
         "w-full rounded-md border border-default bg-surface-primary p-2 type-body text-primary",
-      placeholder: "Describe the problem you ran into...",
+      placeholder: descriptionPlaceholder(model),
       value: model.description,
       oninput: (event: Event) => {
         model.description = (event.target as HTMLTextAreaElement).value;
       },
     }),
-    attachedErrorDetails(model),
     !model.isAgentHelp
       ? m("div", [
           m("div", { class: "flex flex-col gap-2 mt-4" }, [

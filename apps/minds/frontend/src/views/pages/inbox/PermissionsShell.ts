@@ -257,6 +257,9 @@ export function PermissionsShell(): m.Component<PermissionsShellAttrs> {
                 error: model.approvalError,
                 actions: approvalErrorActions(model),
                 isBugReportOffered: model.isApprovalErrorReportable,
+                // The popup can show a request from a workspace other than the
+                // one it floats over; the report is about the request's.
+                workspaceAgentId: model.workspaceAgentIdOf(model.selectedId),
               }),
             )
           : null,

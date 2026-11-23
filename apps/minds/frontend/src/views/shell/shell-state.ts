@@ -2113,13 +2113,13 @@ export class ShellState {
    * Open the report form for an error the user was just shown, with the
    * error's sentence and details attached.
    *
-   * The report is scoped to `workspaceAgentId` -- so it can collect that
-   * workspace's logs -- only where scoping leaves the surface alone: the
-   * workspace is the one on screen, or the page on screen is its recovery
-   * page (kept painted behind the form). Anywhere else the route's
-   * ?workspace= would mount that workspace's frame in place of the page the
-   * error was on, so the route names no workspace and the launch carries the
-   * one the report still collects from.
+   * What stays behind the form and what the report is about are separate.
+   * The surface behind is always the one on screen: the displayed workspace
+   * (the route names it, keeping its frame mounted), or the recovery page kept
+   * painted, or a hub page when neither. The report collects from
+   * `workspaceAgentId` when the error names a workspace, else from the one on
+   * screen. Help with an agent is offered only when the two are the same
+   * workspace, so a helper never starts in a workspace the error is not about.
    */
   openHelpForError(
     error: UserFacingError,
@@ -2132,20 +2132,28 @@ export class ShellState {
     const recoveryId = recoveryWorkspaceIdFromPath(
       (this.pageRouteBehindOverlay ?? path).split("?")[0],
     );
-    const isScoped =
-      workspaceAgentId !== null &&
-      (workspaceAgentId === this.displayedWorkspaceAgentId() ||
-        (recoveryId !== null &&
-          this.stores.workspaces.toAgentScopedId(recoveryId) ===
-            workspaceAgentId));
+    const behindAgentId =
+      this.displayedWorkspaceAgentId() ??
+      (recoveryId !== null
+        ? this.stores.workspaces.toAgentScopedId(recoveryId)
+        : null);
+    const reportAgentId = workspaceAgentId ?? behindAgentId;
+    const isReportAboutBehind = reportAgentId === behindAgentId;
     setPendingHelpLaunch({
-      workspaceAgentId: isScoped ? workspaceAgentId : "",
+      workspaceAgentId: behindAgentId ?? "",
       errorDetails: bugReportTextFor(error),
-      errorWorkspaceAgentId: isScoped ? "" : (workspaceAgentId ?? ""),
+      errorWorkspaceAgentId: isReportAboutBehind ? "" : (reportAgentId ?? ""),
     });
     m.route.set(
       "/help",
-      this.overlayQuery(isScoped ? this.scopedHelpQuery(workspaceAgentId) : {}),
+      this.overlayQuery(
+        behindAgentId === null
+          ? {}
+          : {
+              ...this.scopedHelpQuery(behindAgentId),
+              ...(isReportAboutBehind ? {} : { assist: "0" }),
+            },
+      ),
       isTitlebarPopupRoutePath(path) ? { replace: true } : undefined,
     );
   }

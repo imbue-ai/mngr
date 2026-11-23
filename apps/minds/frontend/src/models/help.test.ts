@@ -114,6 +114,62 @@ describe("HelpModel", () => {
     });
   });
 
+  it("sends a report opened from an error on the error's details alone", async () => {
+    setPendingHelpLaunch({
+      workspaceAgentId: "agent-1",
+      errorDetails: "Could not sign in to mcp.example.com.\n\nHTTP 502",
+    });
+    const { calls, fetcher } = recordingFetcher({
+      ok: true,
+      event_id: "abc123",
+    });
+    const model = new HelpModel({ storage: memoryStorage(), fetcher });
+
+    await model.submit();
+
+    expect(calls[0].url).toBe("/help/report");
+    expect(calls[0].body).toMatchObject({
+      description: "",
+      error_details: "Could not sign in to mcp.example.com.\n\nHTTP 502",
+    });
+    expect(model.phase).toBe("sent");
+  });
+
+  it("starts agent help on an error's details alone", async () => {
+    setPendingHelpLaunch({
+      workspaceAgentId: "agent-1",
+      isAssistAvailable: true,
+      errorDetails: "HTTP 500\nrename failed",
+    });
+    const { calls, fetcher } = recordingFetcher({ ok: true });
+    const model = new HelpModel({ storage: memoryStorage(), fetcher });
+    model.mode = "agent";
+
+    await model.submit();
+
+    expect(calls[0].body).toEqual({
+      description: "HTTP 500\nrename failed",
+      workspace_agent_id: "agent-1",
+    });
+  });
+
+  it("collects from the workspace the error named rather than the one the form floats over", async () => {
+    setPendingHelpLaunch({
+      workspaceAgentId: "agent-on-screen",
+      errorDetails: "HTTP 502",
+      errorWorkspaceAgentId: "agent-1",
+    });
+    const { calls, fetcher } = recordingFetcher({
+      ok: true,
+      event_id: "abc123",
+    });
+    const model = new HelpModel({ storage: memoryStorage(), fetcher });
+
+    await model.submit();
+
+    expect(calls[0].body).toMatchObject({ workspace_agent_id: "agent-1" });
+  });
+
   it("requires a description before submitting", async () => {
     const model = new HelpModel({ storage: memoryStorage() });
     await model.submit();

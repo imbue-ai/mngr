@@ -89,9 +89,10 @@ def parse_attachment_flags(body: Mapping[str, Any]) -> tuple[bool, bool]:
     )
 
 
-def _report_title(description: str) -> str:
-    """Derive a concise Sentry event title from the user's description (its trimmed first line)."""
-    stripped = description.strip()
+def _report_title(description: str, error_details: str) -> str:
+    """Derive a concise Sentry event title: the trimmed first line of the user's description, else of the
+    error details the report was opened with (a report sent from an error may carry no description)."""
+    stripped = description.strip() or error_details.strip()
     first_line = stripped.splitlines()[0] if stripped else ""
     title = first_line[:_REPORT_TITLE_MAX_LENGTH].strip()
     return f"[bug report] {title}" if title else "[bug report] (no description)"
@@ -259,7 +260,7 @@ def submit_bug_report(
         error_details=error_details,
     )
     return submit_manual_bug_report(
-        title=_report_title(description),
+        title=_report_title(description, error_details),
         description=description,
         report=report,
         logs_folder=logs_folder,
@@ -613,7 +614,7 @@ def submit_report_with_attachments(*, body: Mapping[str, Any], state: DesktopCli
     strand. The report is filed before any collection runs, so the user has
     their id in about a second. Remote access remains opt-in (Imbue does not
     look into a workspace without consent); the caller is responsible for
-    validating that a description is present.
+    validating that a description or an error's details are present.
 
     The archive's S3 key is reserved BEFORE the event is captured, because a
     Sentry event is immutable once sent -- there is no attaching a pointer to
