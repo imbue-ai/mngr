@@ -12,6 +12,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Claude common-transcript agent steps carry the claude session id as `extra.harness_session_id`, joinable to an LLM proxy's per-request log.
 - Added: A blocking unrecognized Claude Code dialog logs a warning with the installed claude version, its pin, and the dialog's shape (never its text).
 - Added: claude agents record `turn_end`: `COMPLETED` at `Stop`, `FAILED` at `StopFailure` (with its `error` as `native_type`), `INTERRUPTED` when an Esc is healed; existing agents need `mngr c <name> --reuse --update`.
+- Added: `mngr upgrade` supports interactive claude agents, rewriting their `commands/` scripts and mngr's own hooks while keeping other settings; agents whose hooks predate mngr's separate hooks file are skipped until `mngr create NAME --reuse --update`.
 
 ### Changed
 

@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-22
+
+`mngr upgrade` covers interactive claude agents, whether they share the user's Claude config dir or have their own. It rewrites the agent's `commands/` scripts and mngr's own hooks in the settings file it loads, keeping every other key, every hook mngr did not write and the agent's own options: the auto-allow and credential-sync hooks and the optional scripts are rewritten only where it has them.
+
+- An agent created before mngr kept its hooks in a file of its own is skipped until `mngr create NAME --reuse --update` re-creates it; first remove the hooks mngr left in `.claude/settings.local.json` in its work dir.
+
+- A launch command stored before 2026-07-28 now also clears the `claude_main_pid` claim when the agent starts.
+
 ## 2026-11-19
 
 The Claude common transcript (what `mngr transcript` prints and ATIF readers consume) files the progress updates Claude 5 models write between tool calls as the step's `message`, beside its text. The API returns each as a thinking block, so they used to land in `reasoning_content` and print as "(thinking)". Blocks whose signature marks them as reasoning stay in `reasoning_content`.
