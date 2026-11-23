@@ -7,6 +7,9 @@ export type ModalSize = "sm" | "md" | "lg" | "xl";
 /** What the modal does to the page behind it: ``dim`` darkens it; ``wash`` fades it into the first run's cream. */
 export type ModalBackdrop = "dim" | "wash";
 
+/** What the card is drawn as: ``surface`` is the app's white card; ``first-run`` is the first run's cream and brown ink. */
+export type ModalCard = "surface" | "first-run";
+
 // The card's ONLY max-w-* class, picked here rather than passed in cardExtra:
 // two competing max-w-* utilities are decided by their order in the generated
 // stylesheet (where .max-w-sm follows .max-w-md, so the narrower one wins),
@@ -24,6 +27,7 @@ interface ModalAttrs extends m.Attributes {
   size?: ModalSize;
   cardExtra?: string;
   backdrop?: ModalBackdrop;
+  card?: ModalCard;
 }
 
 /** One Modal on screen, and how it is put away (nothing, for one that must be answered). */
@@ -75,7 +79,14 @@ export function Modal(): m.Component<ModalAttrs> {
   const openModal: OpenModal = { onClose: undefined };
   return {
     view(vnode) {
-      const { isOpen, onClose, size = "sm", cardExtra = "", backdrop = "dim" } = vnode.attrs;
+      const {
+        isOpen,
+        onClose,
+        size = "sm",
+        cardExtra = "",
+        backdrop = "dim",
+        card = "surface",
+      } = vnode.attrs;
       if (!isOpen) {
         return null;
       }
@@ -111,6 +122,7 @@ export function Modal(): m.Component<ModalAttrs> {
             "size",
             "cardExtra",
             "backdrop",
+            "card",
           ]),
           oncreate: () => {
             openModals.push(openModal);
@@ -124,8 +136,9 @@ export function Modal(): m.Component<ModalAttrs> {
           "div",
           {
             class:
-              "bg-surface-primary rounded-lg shadow-overlay w-full mx-4 overflow-hidden " +
-              (backdrop === "wash" ? "" : "border border-default ") +
+              (card === "first-run" ? "first-run-card " : "bg-surface-primary ") +
+              "rounded-lg shadow-overlay w-full mx-4 overflow-hidden " +
+              (card === "first-run" || backdrop === "wash" ? "" : "border border-default ") +
               MODAL_SIZES[size] +
               " flex max-h-full flex-col " +
               cardExtra,

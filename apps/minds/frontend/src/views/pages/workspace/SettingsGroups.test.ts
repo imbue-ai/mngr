@@ -29,9 +29,10 @@ import {
   workspaceOptionsData,
 } from "../../../testing";
 import { CopyField } from "../../components/Layout";
+import type { WorkspaceOwnSettingsGroup } from "../settings/settings-route";
 import { BackupGroup } from "./BackupGroup";
-import type { WorkspaceOwnSettingsGroup } from "./SettingsGroups";
 import { WorkspaceSettingsGroup, updatesNavDot } from "./SettingsGroups";
+import { SuggestionsGroup } from "./SuggestionsGroup";
 import { UpdatesGroup } from "./UpdatesGroup";
 
 // Two machines, one without backups: the pane's state must be keyed on which
@@ -189,7 +190,11 @@ describe("a workspace's settings pages", () => {
 
     const general = collectVnodes(draw(BACKED, "general"));
     expect(general.some((vnode) => attrsOf(vnode).id === "account-section")).toBe(true);
-    expect(general.some((vnode) => vnode.tag === BackupGroup || vnode.tag === UpdatesGroup)).toBe(false);
+    expect(
+      general.some(
+        (vnode) => vnode.tag === BackupGroup || vnode.tag === UpdatesGroup || vnode.tag === SuggestionsGroup,
+      ),
+    ).toBe(false);
 
     const backup = collectVnodes(draw(BACKED, "backup"));
     expect(backup.filter((vnode) => vnode.tag === BackupGroup).map((vnode) => attrsOf(vnode).agentId)).toEqual([
@@ -202,8 +207,14 @@ describe("a workspace's settings pages", () => {
       BACKED,
     ]);
 
+    const suggestions = collectVnodes(draw(BACKED, "suggestions"));
+    expect(
+      suggestions.filter((vnode) => vnode.tag === SuggestionsGroup).map((vnode) => attrsOf(vnode)),
+    ).toEqual([{ agentId: BACKED }]);
+    expect(suggestions.some((vnode) => attrsOf(vnode).id === "account-section")).toBe(false);
+
     // The list of pages is Settings' rail's.
-    for (const page of [general, backup, updates]) {
+    for (const page of [general, backup, updates, suggestions]) {
       expect(page.some((vnode) => vnode.tag === "nav")).toBe(false);
       expect(page.some((vnode) => attrsOf(vnode)["data-settings-group"] !== undefined)).toBe(false);
     }

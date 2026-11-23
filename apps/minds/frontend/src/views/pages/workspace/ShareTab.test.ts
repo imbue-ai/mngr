@@ -47,6 +47,7 @@ import {
   NO_RESPONSE_SENTENCE,
   fallbackErrorSentence,
 } from "../../../models/errors";
+import { CoachBubble } from "../../components/CoachBubble";
 import { Modal } from "../../components/Modal";
 import { Skeleton, SkeletonRegion } from "../../components/Skeleton";
 import { Spinner } from "../../components/Spinner";
@@ -4429,3 +4430,134 @@ async function assistDescriptionSentBy(action: { onclick: () => void }): Promise
   const init = assist.mock.calls[0]?.[1];
   return String((JSON.parse(String(init?.body)) as { description?: string }).description);
 }
+
+describe("ShareTab mobile access coach bubble", () => {
+  const BUBBLE_ID = "ws-share-mobile-link-coach";
+
+  function bubbleOf(root: unknown): AnyVnode | undefined {
+    return byId(root, BUBBLE_ID);
+  }
+
+  function pressMobileLink(root: unknown): void {
+    (
+      attrsOf(byId(root, "ws-share-mobile-link-btn") as AnyVnode)
+        .onclick as () => void
+    )();
+  }
+
+  it("points a bubble at the control when the panel was opened with the mark", async () => {
+    const share = await publishedPanel();
+    share.showCoachMark("mobile-access");
+
+    const bubble = bubbleOf(renderTab(share)) as AnyVnode;
+
+    expect(bubble.tag).toBe(CoachBubble);
+    expect(attrsOf(bubble).text).toBe("Use this to open Studio on your phone.");
+    // Inside the control, beside the button it points at.
+    expect(
+      bubbleOf(byId(renderTab(share), "ws-share-mobile-link")),
+    ).toBeDefined();
+    const drawn = bubbleOf(renderTabDeep(share));
+    expect(allText(drawn)).toBe(
+      "Use this to open Studio on your phone. Got it",
+    );
+  });
+
+  it("draws no bubble for a panel opened without the mark", async () => {
+    const share = await publishedPanel();
+
+    expect(share.coachMark).toBeNull();
+    expect(bubbleOf(renderTab(share))).toBeUndefined();
+  });
+
+  it("takes the bubble down on its button, and redraws", async () => {
+    const redraw = vi.fn();
+    const share = await publishedPanel({}, { redraw });
+    share.showCoachMark("mobile-access");
+    redraw.mockClear();
+
+    (attrsOf(bubbleOf(renderTab(share)) as AnyVnode).onDismiss as () => void)();
+
+    expect(bubbleOf(renderTab(share))).toBeUndefined();
+    expect(redraw).toHaveBeenCalledTimes(1);
+  });
+
+  it("takes the bubble down when the control it points at is pressed", async () => {
+    const share = await publishedPanel();
+    share.showCoachMark("mobile-access");
+
+    pressMobileLink(renderTab(share));
+
+    expect(bubbleOf(renderTab(share))).toBeUndefined();
+    expect(share.mobileLinkState.state).toBe("sending");
+  });
+
+  it("points at the control while sharing is off and it is dimmed, and a press there answers the bubble too", async () => {
+    const share = await readyPanel();
+    share.showCoachMark("mobile-access");
+
+    const root = renderTab(share);
+
+    expect(
+      attrsOf(byId(root, "ws-share-mobile-link-btn") as AnyVnode)[
+        "aria-disabled"
+      ],
+    ).toBe("true");
+    expect(bubbleOf(root)).toBeDefined();
+    pressMobileLink(root);
+    expect(bubbleOf(renderTab(share))).toBeUndefined();
+    expect(share.mobileLinkState.state).toBe("idle");
+  });
+
+  it("points at the control on an app's page too, where it emails the app's link", async () => {
+    const share = await publishedPanel();
+    share.showCoachMark("mobile-access");
+    share.selectTarget("web");
+
+    expect(bubbleOf(byId(renderTab(share), "ws-share-mobile-link"))).toBeDefined();
+
+    share.selectTarget(WHOLE);
+    expect(bubbleOf(byId(renderTab(share), "ws-share-mobile-link"))).toBeDefined();
+  });
+
+  it("points at the control while the sharing document is still being read", async () => {
+    let answer: (result: RequestResult) => void = () => undefined;
+    const share = new SharePanelModel(
+      sharePanelOptions({
+        fetchJson: () =>
+          new Promise<RequestResult>((resolve) => {
+            answer = resolve;
+          }),
+      }),
+    );
+    const loading = share.load();
+    share.showCoachMark("mobile-access");
+
+    expect(bubbleOf(byId(renderTab(share), "ws-share-mobile-link"))).toBeDefined();
+
+    answer({
+      ok: true,
+      status: 200,
+      body: {
+        enabled: false,
+        url: null,
+        grants: {
+          workspace: { emails: [], email_domains: [] },
+          services: {},
+        },
+      },
+    });
+    await loading;
+    expect(bubbleOf(byId(renderTab(share), "ws-share-mobile-link"))).toBeDefined();
+  });
+
+  it("asks for a redraw only when there is a bubble to take down", async () => {
+    const redraw = vi.fn();
+    const share = await publishedPanel({}, { redraw });
+    redraw.mockClear();
+
+    share.dismissCoachMark();
+
+    expect(redraw).not.toHaveBeenCalled();
+  });
+});

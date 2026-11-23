@@ -72,6 +72,7 @@ from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
 from imbue.minds.desktop_client.wallpaper_cache import WallpaperCache
 from imbue.minds.desktop_client.wallpaper_cache import WallpaperRefresher
+from imbue.minds.desktop_client.welcome_chat import ChatAppForwardRoute
 from imbue.minds.desktop_client.welcome_chat import WelcomeChatSeeder
 from imbue.minds.desktop_client.workspace_color_writes import WorkspaceColorWrites
 from imbue.minds.desktop_client.workspace_diagnostics import WorkspaceCollectionQueue
@@ -116,6 +117,14 @@ class DesktopClientState(MutableModel):
         default=None,
         frozen=True,
         description="Seeds each new workspace's welcome chat once, with or without the creation page",
+    )
+    chat_app_route: ChatAppForwardRoute | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Reaches a workspace's chat app through mngr forward, for the settings that live only there; "
+            "None without a forward to reach it through"
+        ),
     )
     imbue_cloud_cli: ImbueCloudCli | None = Field(
         default=None, frozen=True, description="imbue_cloud plugin CLI wrapper"

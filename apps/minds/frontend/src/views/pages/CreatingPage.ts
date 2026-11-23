@@ -11,9 +11,8 @@
 // line introducing it, between the setup line and the loading box.
 //
 // A first-run create (the sign-in page's, models/firstRun.ts) shows the welcome
-// instead (specs/ftue-onboarding-v2): "Welcome, <name>!", the studio-type
-// question, and the build's progress under it; when the workspace is ready the
-// user presses Continue, and what they picked goes to the workspace for the agent.
+// instead (specs/ftue-onboarding-v2): "Welcome, <name>!" and the build's
+// progress under it; when the workspace is ready the user presses Continue.
 //
 // The whole conversation is handed over as the new workspace's first chat
 // (models/welcomeChat.ts) as soon as the page knows the attempt's settings, so
@@ -47,7 +46,7 @@ import {
 } from "../../models/creationTranscript";
 import type { ErrorAction, UserFacingError } from "../../models/errors";
 import { errorFromResponse, fallbackErrorSentence } from "../../models/errors";
-import { firstRun, studioTypeLine } from "../../models/firstRun";
+import { firstRun } from "../../models/firstRun";
 import { firstRunCover } from "../../models/firstRunCover";
 import {
   FLOW_THINK_MS,
@@ -137,8 +136,6 @@ interface CreatingState {
   progressTimer: ReturnType<typeof setInterval> | null;
   /** Whether this window's sign-in page sent the create: the page shows the welcome instead of the transcript. */
   isFirstRun: boolean;
-  /** Whether the studio-type question's "Something else" field is open. */
-  isSomethingElseOpen: boolean;
   /** Set once the first-run entry began: the workspace loads under the shell's cover from then on. */
   isFirstRunEntryStarted: boolean;
 }
@@ -218,7 +215,6 @@ function freshState(createAttemptId: string): CreatingState {
     isShowcaseLightboxOpen: false,
     progressTimer: null,
     isFirstRun: firstRun.isFirstRunCreate(createAttemptId),
-    isSomethingElseOpen: false,
     isFirstRunEntryStarted: false,
   };
 }
@@ -281,9 +277,7 @@ export const CreatingPage: m.ClosureComponent = () => {
   function handOverWelcomeChat(): Promise<string | null> {
     const request = state.detail?.live?.request;
     if (request === undefined || request === null) return Promise.resolve(null);
-    const body = state.isFirstRun
-      ? firstRunWelcomeChatBody(studioTypeLine(firstRun.studioTypes))
-      : welcomeChatBody(request, isShowcaseShown());
+    const body = state.isFirstRun ? firstRunWelcomeChatBody() : welcomeChatBody(request, isShowcaseShown());
     return postWelcomeChat(state.createAttemptId, body).then(
       (chatId) => (chatId === "" ? null : chatId),
       (error: unknown) => {
@@ -816,28 +810,23 @@ export const CreatingPage: m.ClosureComponent = () => {
     return [...summary, ...liveTurns(request ?? null, workspaceName)];
   }
 
-  /** Hand the picks over again while the workspace is still being built: the latest hand-over is the one seeded. */
-  function onStudioTypesChanged(): void {
-    if (!state.isDone) void handOverWelcomeChat();
-  }
-
   /**
-   * A first-run create is done: hand the answer over, and once the workspace has it (which is what tells it this
-   * is a first run) load the workspace under the shell's cover, which carries this welcome on and offers Continue
-   * only when the workspace has its provider page up.
+   * A first-run create is done: once the workspace has its seed (which is what tells it this is a first run),
+   * load the workspace under the shell's cover, which carries this welcome on and offers Continue only when the
+   * workspace has its provider page up.
    */
   function beginFirstRunEntry(redirectUrl: string): void {
     const own = state;
     own.isFirstRunEntryStarted = true;
     void handOverWelcomeChat().then(() => {
       if (state !== own || own.isStopped) return;
-      firstRunCover.raise(own.createAttemptId, own.isSomethingElseOpen);
+      firstRunCover.raise(own.createAttemptId);
       void awaitWelcomeChatOnScreen(redirectUrl).then(() => firstRunCover.markReady(own.createAttemptId));
       enterWorkspaceFromRedirect(redirectUrl);
     });
   }
 
-  /** Under the question: the build's progress, its failure, or the ready line and Continue. */
+  /** Under the greeting: the build's progress, or its failure. */
   function welcomeStatus(): m.Children {
     const request = state.detail?.live?.request ?? null;
     const workspaceName = state.detail?.live?.workspace_name ?? "";
@@ -887,18 +876,9 @@ export const CreatingPage: m.ClosureComponent = () => {
     ]);
   }
 
-  /** A first-run create: the welcome, the studio-type question, and the build under it. */
+  /** A first-run create: the welcome, and the build under it. */
   function welcomeView(): m.Children {
-    return firstRunWelcome({
-      id: "creating",
-      attemptId: state.createAttemptId,
-      isOtherOpen: state.isSomethingElseOpen,
-      setOtherOpen: (isOpen) => {
-        state.isSomethingElseOpen = isOpen;
-      },
-      onChanged: onStudioTypesChanged,
-      status: welcomeStatus(),
-    });
+    return firstRunWelcome({ id: "creating", attemptId: state.createAttemptId, status: welcomeStatus() });
   }
 
   /** Leave `state` behind: the page is being removed, or a later attempt is taking it over. */

@@ -31,6 +31,7 @@ SINGLE_INK_MARKS: Final[frozenset[str]] = frozenset(
         "discord",
         "dropbox",
         "github",
+        "hubspot",
         "linear",
         "linktree-mcp",
         "ngrok",
@@ -58,7 +59,9 @@ DARK_SURFACE_VARIANT_SERVICES: Final[frozenset[str]] = frozenset(
 )
 
 _PAINT_ATTR_RE: Final[re.Pattern[str]] = re.compile(r'(?:fill|stroke|stop-color)="([^"]+)"')
-_HEX_RE: Final[re.Pattern[str]] = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+# The paint values that name no color of their own: no paint at all, and a reference to a gradient, whose stops
+# name the colors.
+_NON_COLOR_PAINT_RE: Final[re.Pattern[str]] = re.compile(r"^(?:none|url\(.*\))$")
 # Elements that paint, and so fall back to black when nothing gives them a fill.
 _PAINTING_TAGS: Final[frozenset[str]] = frozenset({"path", "circle", "ellipse", "rect", "polygon", "polyline", "line"})
 
@@ -68,8 +71,8 @@ def _mark_paths() -> tuple[Path, ...]:
 
 
 def _declared_inks(text: str) -> frozenset[str]:
-    """The literal colors named by a paint attribute, lowercased."""
-    return frozenset(value.lower() for value in _PAINT_ATTR_RE.findall(text) if _HEX_RE.match(value))
+    """The literal colors named by a paint attribute, lowercased: a hex value, or a color keyword such as ``red``."""
+    return frozenset(value.lower() for value in _PAINT_ATTR_RE.findall(text) if not _NON_COLOR_PAINT_RE.match(value))
 
 
 def _has_unfilled_painting_element(element: ElementTree.Element, inherited_fill: str | None) -> bool:

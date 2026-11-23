@@ -1289,8 +1289,7 @@ body.first-run-chrome #minds-titlebar {
   background: rgb(from var(--first-run-ink) r g b / 0.06);
 }
 .first-run-button:focus-visible,
-.first-run-link:focus-visible,
-.studio-type-pill:focus-visible {
+.first-run-link:focus-visible {
   outline: 2px solid var(--first-run-ink);
   outline-offset: 3px;
 }
@@ -1322,6 +1321,27 @@ body.first-run-chrome #minds-titlebar {
 .modal-backdrop-wash {
   background-color: rgb(from var(--first-run-ground) r g b / 0.9);
 }
+/* A modal card that belongs to the first run (the sign-in's): the pages' cream and brown ink in place of the app's
+   white card, in either theme. The ink-drawn tokens are declared again here because they resolve where they are
+   declared. */
+.first-run-card {
+  --c-ink: var(--first-run-ink);
+  --c-text-primary: var(--c-ink);
+  --c-text-secondary: rgb(from var(--c-ink) r g b / 0.8);
+  --c-text-tertiary: rgb(from var(--c-ink) r g b / 0.65);
+  --c-text-inverse-primary: var(--first-run-ground);
+  --c-border-subtle: rgb(from var(--c-ink) r g b / 0.1);
+  --c-border-default: rgb(from var(--c-ink) r g b / 0.17);
+  --c-border-strong: rgb(from var(--c-ink) r g b / 0.25);
+  --c-border-stronger: rgb(from var(--c-ink) r g b / 0.4);
+  --c-surface-inverse: var(--c-ink);
+  --c-fill-subtle: rgb(from var(--c-ink) r g b / 0.04);
+  --c-fill-hover: rgb(from var(--c-ink) r g b / 0.06);
+  --c-fill-active: rgb(from var(--c-ink) r g b / 0.1);
+  border: 1px solid var(--first-run-line);
+  background: var(--first-run-ground);
+  color: var(--c-ink);
+}
 .first-run-bar {
   background: var(--first-run-line);
 }
@@ -1341,84 +1361,8 @@ body.first-run-chrome #minds-titlebar {
   from { background-position: 0% 50%; }
   to { background-position: 100% 50%; }
 }
-/*
- * The studio-type pills: an outline in the category's colour at rest; picked, filled, lifted a little, with a
- * check in the left padding. The 2px border is always there, so a pick never changes the pill's size.
- */
-.studio-type-pill {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  height: 50px;
-  border: 2px solid var(--pill-line);
-  border-radius: 9999px;
-  color: var(--pill-line);
-  background: transparent;
-  font-size: 18px;
-  font-weight: 600;
-  line-height: 1;
-  white-space: nowrap;
-  cursor: pointer;
-  user-select: none;
-  transition: background-color 200ms, color 200ms, box-shadow 200ms, scale 200ms;
-}
-.studio-type-pill:hover {
-  scale: 1.03;
-}
-.studio-type-pill[aria-pressed="true"],
-.studio-type-pill--field[data-filled="true"] {
-  background: var(--pill-fill);
-  border-color: var(--pill-fill);
-  color: var(--pill-ink);
-}
-.studio-type-pill[aria-pressed="true"] {
-  scale: 1.05;
-  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.12);
-}
-.studio-type-check {
-  position: absolute;
-  left: 13px;
-  top: 50%;
-  opacity: 0;
-  transform: translateY(-50%) scale(0.6);
-  transition: opacity 200ms, transform 200ms;
-}
-.studio-type-pill[aria-pressed="true"] .studio-type-check {
-  opacity: 1;
-  transform: translateY(-50%) scale(1);
-}
-.studio-type-label {
-  transition: transform 200ms;
-}
-.studio-type-pill[aria-pressed="true"] .studio-type-label {
-  transform: translateX(9px);
-}
-.studio-type-pill--field {
-  cursor: text;
-}
-.studio-type-pill--field input {
-  color: inherit;
-}
-.studio-type-pill--field input::placeholder {
-  color: rgba(73, 34, 34, 0.45);
-}
-.studio-type-pill--work { --pill-fill: #8eafcb; --pill-ink: #0b292b; --pill-line: #3d79ad; }
-.studio-type-pill--personal { --pill-fill: #cecd0c; --pill-ink: #0b292b; --pill-line: #7f7d00; }
-.studio-type-pill--creative { --pill-fill: #d26645; --pill-ink: #fcefd4; --pill-line: #b4502f; }
-.studio-type-pill--entertainment { --pill-fill: #e4999a; --pill-ink: #492222; --pill-line: #b85f61; }
-.studio-type-pill--other { --pill-fill: #492222; --pill-ink: #fcefd4; --pill-line: #492222; }
 @media (prefers-reduced-motion: reduce) {
   .first-run-reimagine {
     animation: none;
-  }
-  .studio-type-pill,
-  .studio-type-check,
-  .studio-type-label {
-    transition: none;
-  }
-  .studio-type-pill:hover,
-  .studio-type-pill[aria-pressed="true"] {
-    scale: 1;
   }
 }

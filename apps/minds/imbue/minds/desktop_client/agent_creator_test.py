@@ -230,6 +230,21 @@ def test_create_event_capture_records_error_class_from_jsonl_error_event() -> No
     assert capture.canonical_agent_id is None
 
 
+def test_create_event_capture_says_when_the_created_event_arrives_and_not_before() -> None:
+    """The create's progress bar begins its closing step on this call, ahead of the mngr process exiting."""
+    calls: list[str] = []
+    capture = _CreateEventCapture(on_created=lambda: calls.append("created"))
+
+    capture('{"event": "progress", "kind": "started", "step": "preparing", "label": "Preparing"}', is_stdout=True)
+    capture("Creating the host...", is_stdout=True)
+    assert calls == []
+
+    capture('{"event": "created", "agent_id": "agent-0123456789abcdef0123456789abcdef", "host_id": "host-1"}', True)
+
+    assert calls == ["created"]
+    assert capture.canonical_host_id == "host-1"
+
+
 def test_create_event_capture_consumes_progress_lines_and_forwards_everything_else() -> None:
     """Progress reports feed the bar and stay out of the human log; ordinary lines and other events still reach it."""
     forwarded: list[tuple[str, bool]] = []

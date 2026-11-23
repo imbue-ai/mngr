@@ -8,7 +8,9 @@ nested under the desktop's own step for the ``mngr create`` call. The bar's
 percent is the expected-duration-weighted share of completed work, so a step
 that usually takes a minute owns a minute's worth of bar; within a running step
 the fraction comes from its counter when it has one and from the time elapsed
-against its expected duration otherwise. The percent never moves backwards and
+against its expected duration otherwise: four fifths of its share at the
+expected time, then ever closer to the whole without reaching it, so a step
+that runs long keeps the bar moving. The percent never moves backwards and
 never reaches 100 before the operation is done.
 
 The remaining time is said coarsely and errs long: a step that has run past
@@ -48,12 +50,15 @@ from imbue.mngr.utils.progress import ProgressStep
 # already taken on top of it, so an overrunning step never reads as nearly done:
 # its remaining time grows with its overrun instead of decaying to nothing.
 _OVERRUN_MARGIN: Final[float] = 0.5
-# A running step with no counter reads as done in proportion to its elapsed time
-# up to this fraction of its expectation, which is where the overrun margin
-# takes over, and holds there until it completes.
-_LINEAR_FRACTION: Final[float] = 1 / (1 + _OVERRUN_MARGIN)
+# How done a running step with no counter reads when it has run for exactly its
+# expected time. It gets there in proportion to its elapsed time; past it, each
+# further expected time halves what is left up to the most a running step reads.
+_FRACTION_AT_EXPECTED_TIME: Final[float] = 0.8
 # No running step ever reads as more than this done: only its completion says so.
 _MAX_RUNNING_FRACTION: Final[float] = 0.99
+# How far ahead of a snapshot the page may extrapolate the bar: the rate and the
+# cap describe the running step's reading over the next this many seconds.
+_EXTRAPOLATION_SECONDS: Final[float] = 5.0
 # The least any step weighs: a step this device measured at nothing (its reporter
 # rounds a sub-millisecond step to 0) must still be a positive weight to divide by.
 _MIN_EXPECTED_SECONDS: Final[float] = 0.1
@@ -168,9 +173,17 @@ def _timed_remaining(elapsed_seconds: float, expected_seconds: float) -> float:
 
 @pure
 def _timed_fraction(elapsed_seconds: float, expected_seconds: float) -> float:
-    """How far along a step with no counter reads: its elapsed share of the time it is now expected to take."""
-    remaining = _timed_remaining(elapsed_seconds, expected_seconds)
-    return elapsed_seconds / (elapsed_seconds + remaining) if elapsed_seconds + remaining > 0 else 0.0
+    """How far along a step with no counter reads after ``elapsed_seconds`` of an expected ``expected_seconds``.
+
+    In proportion to the time elapsed up to the expected time, and from there
+    half of what is left for every further expected time: a step that runs
+    long never stops moving and never reads as done.
+    """
+    if elapsed_seconds <= expected_seconds:
+        return _FRACTION_AT_EXPECTED_TIME * max(0.0, elapsed_seconds) / expected_seconds
+    overrun_in_expected_times = (elapsed_seconds - expected_seconds) / expected_seconds
+    left_at_expected_time = _MAX_RUNNING_FRACTION - _FRACTION_AT_EXPECTED_TIME
+    return _MAX_RUNNING_FRACTION - left_at_expected_time * 0.5**overrun_in_expected_times
 
 
 class OperationProgressTracker(MutableModel):
@@ -420,17 +433,20 @@ class OperationProgressTracker(MutableModel):
         return (running, own_share) if leaf is None else (leaf, leaf_share)
 
     def _rate_and_cap(self, leaf: _StepNode | None, leaf_share: float, now: float) -> tuple[float, float]:
-        """How fast the bar should grow before the next poll, and where that growth must stop."""
+        """How fast the bar should grow before the next poll, and where that growth must stop.
+
+        Both follow the running step's own reading over the next few seconds.
+        That reading never speeds up, so a bar extrapolated along the rate up
+        to the cap is never ahead of what a later snapshot will say.
+        """
         if leaf is None or leaf.started_at is None or leaf.total:
             return 0.0, self._highest_percent
         expected = self._expected(leaf)
         elapsed = now - leaf.started_at
-        linear_span = _LINEAR_FRACTION * expected
-        if elapsed >= linear_span:
-            return 0.0, self._highest_percent
-        rate = 100.0 * leaf_share / expected
-        cap = self._highest_percent + 100.0 * leaf_share * (_LINEAR_FRACTION - elapsed / expected)
-        return rate, min(cap, _MAX_RUNNING_FRACTION * 100.0)
+        growth = _timed_fraction(elapsed + _EXTRAPOLATION_SECONDS, expected) - _timed_fraction(elapsed, expected)
+        percent_growth = 100.0 * leaf_share * growth
+        cap = min(self._highest_percent + percent_growth, _MAX_RUNNING_FRACTION * 100.0)
+        return percent_growth / _EXTRAPOLATION_SECONDS, cap
 
     def _shown_eta_bucket_with_hysteresis(self, remaining_seconds: float, now: float) -> int:
         bucket = _eta_bucket(remaining_seconds)
@@ -510,6 +526,43 @@ class TrackerEventSink(MutableModel):
 
     def __call__(self, event: ProgressEvent) -> None:
         self.tracker.apply_event(event, self.default_parent_id)
+
+
+class BracketedCommandEventSink(MutableModel):
+    """Feeds one mngr command's progress into a tracker under a parent step, between two steps of the caller's own.
+
+    The command cannot report the time it takes to start (its reporting has not
+    run yet), nor what its caller does once it has answered, and a parent step
+    reads only from its children: the opening step runs from ``start`` until
+    the command's first event, and the closing step from ``note_command_answered``
+    until the parent is completed. Both are added to every plan the command
+    announces for the parent, since the latest plan for a parent wins.
+    """
+
+    tracker: OperationProgressTracker = Field(frozen=True, description="The tracker the events land in")
+    parent_id: str = Field(frozen=True, description="The step the command's top-level steps nest under")
+    opening_step: ProgressStep = Field(frozen=True, description="The step that covers the command starting up")
+    closing_step: ProgressStep = Field(
+        frozen=True, description="The step that covers the caller's work after the command has answered"
+    )
+    _is_command_heard: bool = PrivateAttr(default=False)
+
+    def start(self) -> None:
+        """Begin the opening step: the caller has started on the work the parent step stands for."""
+        self.tracker.start_step(str(self.opening_step.step_id), self.opening_step.label, self.parent_id, None)
+
+    def __call__(self, event: ProgressEvent) -> None:
+        if not self._is_command_heard:
+            self._is_command_heard = True
+            self.tracker.complete_step(str(self.opening_step.step_id))
+        if event.kind is ProgressEventKind.PLAN and event.parent_id is None:
+            self.tracker.announce_plan((self.opening_step, *event.steps, self.closing_step), self.parent_id)
+            return
+        self.tracker.apply_event(event, self.parent_id)
+
+    def note_command_answered(self) -> None:
+        """Begin the closing step: the command has said it is done, and the caller's own work follows."""
+        self.tracker.start_step(str(self.closing_step.step_id), self.closing_step.label, self.parent_id, None)
 
 
 # The event types the workspace template's bootstrap writes, one line per step it runs.

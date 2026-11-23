@@ -48,6 +48,7 @@ from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import info_span
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.agent_creator import MNGR_FORWARD_SCHEME
 from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
@@ -97,13 +98,12 @@ class WelcomeChatRequest(FrozenModel):
     """The body the creation page posts once the workspace is ready: the chat's name and its turns.
 
     A first-run create (``is_first_run``) sends no turns: the workspace plays its own arrival in
-    the chat, and ``context`` carries what the user said about themselves for the agent.
+    the chat.
     """
 
     title: str = Field(default="", description="The chat's display name; empty lets the chat app number it")
     turns: tuple[WelcomeChatTurn, ...] = Field(default=(), description="The conversation so far, in order")
     is_first_run: bool = Field(default=False, description="Whether the workspace plays its first-run arrival here")
-    context: str = Field(default="", description="What the user told the first run, for the agent; never shown")
 
     @model_validator(mode="after")
     def _require_turns_unless_first_run(self) -> "WelcomeChatRequest":
@@ -112,9 +112,9 @@ class WelcomeChatRequest(FrozenModel):
         return self
 
     def seed_body(self) -> dict[str, object]:
-        """The body the chat app's seed route takes. The first-run fields go only to a template that plays the
+        """The body the chat app's seed route takes. The first-run flag goes only to a template that plays the
         arrival, so any other seed keeps the body every template's seed route accepts."""
-        exclude = None if self.is_first_run else {"is_first_run", "context"}
+        exclude = None if self.is_first_run else {"is_first_run"}
         return self.model_dump(mode="json", exclude=exclude)
 
 
@@ -180,7 +180,7 @@ def seed_welcome_chat(
 
 
 class ChatAppForwardRoute(FrozenModel):
-    """How the desktop posts to a workspace's chat app through ``mngr forward``: the proxy's port and a client for it."""
+    """How the desktop reaches a workspace's chat app through ``mngr forward``: the proxy's port and a client for it."""
 
     forward_port: int = Field(description="The port the ``mngr forward`` proxy listens on, on loopback")
     make_client: Callable[[], httpx2.Client] = Field(
@@ -193,6 +193,16 @@ class ChatAppForwardRoute(FrozenModel):
     retry_interval_seconds: float = Field(
         default=FORWARD_SEED_RETRY_INTERVAL_SECONDS, description="The wait between those retries"
     )
+
+    def chat_app_url(self, path: str) -> str:
+        """The proxy's URL for a chat app path; which workspace's chat app rides the ``Host`` header."""
+        return f"{MNGR_FORWARD_SCHEME}://127.0.0.1:{self.forward_port}{path}"
+
+
+@pure
+def chat_app_forward_host(workspace_agent_id: AgentId) -> str:
+    """The ``Host`` the proxy routes to the workspace's chat app."""
+    return f"{CHAT_SERVICE_NAME}.{workspace_agent_id}.localhost"
 
 
 def make_chat_app_forward_route(forward_port: int, preauth_cookie: str, ca_cert_path: Path) -> ChatAppForwardRoute:
@@ -220,7 +230,7 @@ class _SeedNotDeliverableYetError(MindError):
     """The forward could not route the seed yet, or the chat app was not ready for it; nothing acted on it."""
 
 
-def _answer_detail(response: httpx2.Response) -> str:
+def forward_answer_detail(response: httpx2.Response) -> str:
     """The ``detail`` of a JSON error answer (the chat app's own words), else the bare status."""
     try:
         body = response.json()
@@ -231,7 +241,7 @@ def _answer_detail(response: httpx2.Response) -> str:
     return f"HTTP {response.status_code}"
 
 
-def _describe_transport_failure(error: httpx2.TransportError) -> str:
+def describe_forward_transport_failure(error: httpx2.TransportError) -> str:
     # httpx2 leaves several transport errors without a message, so the class name is all there is then.
     message = str(error)
     return f"{type(error).__name__}: {message}" if message else type(error).__name__
@@ -242,11 +252,11 @@ def _post_seed(client: httpx2.Client, url: str, host: str, body: dict[str, objec
     try:
         response = client.post(url, headers={"Host": host}, json=body)
     except (httpx2.ConnectError, httpx2.ConnectTimeout) as e:
-        raise _SeedNotDeliverableYetError(_describe_transport_failure(e)) from e
+        raise _SeedNotDeliverableYetError(describe_forward_transport_failure(e)) from e
     # Both the forward (no route to the chat app yet, or the app not listening) and the chat app (its
     # agent list not read yet) answer 503 for a request nothing acted on.
     if response.status_code == 503:
-        raise _SeedNotDeliverableYetError(_answer_detail(response))
+        raise _SeedNotDeliverableYetError(forward_answer_detail(response))
     return response
 
 
@@ -262,8 +272,8 @@ def seed_welcome_chat_through_forward(
     to ``mngr exec``. Sending it again that way cannot open a second chat: the chat app refuses a
     seed whose name is taken.
     """
-    url = f"{MNGR_FORWARD_SCHEME}://127.0.0.1:{route.forward_port}{CHAT_SEED_PATH}"
-    host = f"{CHAT_SERVICE_NAME}.{workspace_agent_id}.localhost"
+    url = route.chat_app_url(CHAT_SEED_PATH)
+    host = chat_app_forward_host(workspace_agent_id)
     body = welcome_chat.seed_body()
     try:
         for attempt in Retrying(
@@ -277,7 +287,7 @@ def seed_welcome_chat_through_forward(
     except _SeedNotDeliverableYetError as e:
         return ForwardSeedAttempt(unavailable_reason=f"not delivered within {route.window_seconds:g}s: {e}")
     except httpx2.TransportError as e:
-        return ForwardSeedAttempt(unavailable_reason=f"the request failed: {_describe_transport_failure(e)}")
+        return ForwardSeedAttempt(unavailable_reason=f"the request failed: {describe_forward_transport_failure(e)}")
     status = response.status_code
     if 200 <= status < 300:
         try:
@@ -290,9 +300,11 @@ def seed_welcome_chat_through_forward(
         return ForwardSeedAttempt(outcome=WelcomeChatOutcome(failure_detail="the chat app answered without a chat id"))
     if status in (400, 409):
         return ForwardSeedAttempt(
-            outcome=WelcomeChatOutcome(failure_detail=f"the chat app refused the seed: {_answer_detail(response)}")
+            outcome=WelcomeChatOutcome(
+                failure_detail=f"the chat app refused the seed: {forward_answer_detail(response)}"
+            )
         )
-    return ForwardSeedAttempt(unavailable_reason=f"the forward answered {_answer_detail(response)}")
+    return ForwardSeedAttempt(unavailable_reason=f"the forward answered {forward_answer_detail(response)}")
 
 
 def _seed_through_route(
@@ -331,7 +343,6 @@ class WelcomeChatSeeder(MutableModel):
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _held_by_attempt: dict[CreateAttemptId, WelcomeChatRequest] = PrivateAttr(default_factory=dict)
     _seed_by_attempt: dict[CreateAttemptId, Future[WelcomeChatOutcome]] = PrivateAttr(default_factory=dict)
-    _seeded_by_attempt: dict[CreateAttemptId, WelcomeChatRequest] = PrivateAttr(default_factory=dict)
 
     def hold(self, create_attempt_id: CreateAttemptId, welcome_chat: WelcomeChatRequest) -> None:
         """Keep the attempt's conversation for its seed; the latest one handed over is the one seeded."""
@@ -345,35 +356,9 @@ class WelcomeChatSeeder(MutableModel):
     def seed(
         self, create_attempt_id: CreateAttemptId, workspace_agent_id: AgentId, welcome_chat: WelcomeChatRequest
     ) -> WelcomeChatOutcome:
-        """Seed the finished attempt's workspace now, or wait for the seed already under way, and answer its outcome.
-
-        A first-run conversation that changed since it was seeded (the user said more about themselves between the
-        workspace finishing and their entering it) is handed over once more: the workspace keeps the chat and
-        takes the new answer.
-        """
+        """Seed the finished attempt's workspace now, or wait for the seed already under way, and answer its outcome."""
         self.hold(create_attempt_id, welcome_chat)
-        outcome = self._seed_once(create_attempt_id, workspace_agent_id)
-        with self._lock:
-            is_stale = (
-                outcome.is_seeded
-                and welcome_chat.is_first_run
-                and self._seeded_by_attempt.get(create_attempt_id) != welcome_chat
-            )
-        if not is_stale:
-            return outcome
-        address = build_agent_address(workspace_agent_id, self.backend_resolver)
-        updated = self._deliver(workspace_agent_id, address, welcome_chat)
-        if not updated.is_seeded:
-            # The chat is there; only the newer answer did not arrive.
-            logger.warning(
-                "Could not update the welcome chat for create attempt {}: {}",
-                create_attempt_id,
-                updated.failure_detail,
-            )
-            return outcome
-        with self._lock:
-            self._seeded_by_attempt[create_attempt_id] = welcome_chat
-        return updated
+        return self._seed_once(create_attempt_id, workspace_agent_id)
 
     def seed_held(self, create_attempt_id: CreateAttemptId, workspace_agent_id: AgentId) -> None:
         """The agent creator's done hook: seed the conversation the page handed over, if it handed one over."""
@@ -395,8 +380,6 @@ class WelcomeChatSeeder(MutableModel):
             outcome = self._deliver(workspace_agent_id, address, welcome_chat)
         if outcome.is_seeded:
             logger.debug("Seeded welcome chat {} for create attempt {}", outcome.chat_id, create_attempt_id)
-            with self._lock:
-                self._seeded_by_attempt[create_attempt_id] = welcome_chat
         else:
             logger.warning(
                 "Could not seed the welcome chat for create attempt {} in workspace {}: {}",

@@ -4,10 +4,7 @@ import {
   FirstRunRecord,
   SIGN_IN_STAGE,
   accountOf,
-  MAX_STUDIO_TYPE_PICKS,
   cancelSignIn,
-  describeStudioType,
-  emptyStudioTypeAnswer,
   firstNameOf,
   landAccount,
   noteResend,
@@ -16,8 +13,6 @@ import {
   settleLanding,
   settleVerification,
   startSignIn,
-  studioTypeLine,
-  toggleStudioType,
   welcomeHeading,
 } from "./firstRun";
 
@@ -87,48 +82,13 @@ describe("the welcome's greeting", () => {
   });
 });
 
-describe("the studio-type answer", () => {
-  it("toggles picks and says them in the offer's order, with the user's own words last", () => {
-    let answer = emptyStudioTypeAnswer();
-    expect(studioTypeLine(answer)).toBe("");
-    answer = toggleStudioType(answer, "writing");
-    answer = toggleStudioType(answer, "knowledge");
-    answer = toggleStudioType(answer, "music");
-    answer = toggleStudioType(answer, "music");
-    expect(answer.pickedIds).toEqual(["writing", "knowledge"]);
-    expect(studioTypeLine(describeStudioType(answer, "  a garden planner "))).toBe(
-      "I want to use Studio for: Knowledge work, Writing, a garden planner.",
-    );
-  });
-
-  it("keeps at most three picks, the oldest giving way to the newest", () => {
-    let answer = emptyStudioTypeAnswer();
-    for (const id of ["writing", "knowledge", "music", "film"]) answer = toggleStudioType(answer, id);
-    expect(answer.pickedIds).toHaveLength(MAX_STUDIO_TYPE_PICKS);
-    expect(answer.pickedIds).toEqual(["knowledge", "music", "film"]);
-  });
-
-  it("counts the user's own words as a pick that is never the one dropped", () => {
-    let answer = emptyStudioTypeAnswer();
-    for (const id of ["writing", "knowledge", "music"]) answer = toggleStudioType(answer, id);
-    answer = describeStudioType(answer, "art");
-    expect(answer).toEqual({ pickedIds: ["knowledge", "music"], otherText: "art" });
-    answer = toggleStudioType(answer, "sales");
-    expect(answer).toEqual({ pickedIds: ["music", "sales"], otherText: "art" });
-    // Clearing the words frees their place without bringing a dropped pill back.
-    expect(describeStudioType(answer, " ").pickedIds).toEqual(["music", "sales"]);
-  });
-});
-
 describe("FirstRunRecord", () => {
-  it("names only the create the sign-in page sent, and starts each with no picks", () => {
+  it("names only the create the sign-in page sent", () => {
     const record = new FirstRunRecord();
     expect(record.isFirstRunCreate("")).toBe(false);
-    record.studioTypes = toggleStudioType(record.studioTypes, "film");
     record.noteCreate("attempt-1", ACCOUNT);
     expect(record.isFirstRunCreate("attempt-1")).toBe(true);
     expect(record.isFirstRunCreate("attempt-2")).toBe(false);
     expect(record.account).toBe(ACCOUNT);
-    expect(record.studioTypes).toEqual(emptyStudioTypeAnswer());
   });
 });

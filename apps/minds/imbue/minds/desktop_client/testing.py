@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 from typing import Final
 
+import httpx2
 import pytest
 from cheroot import wsgi
 from cryptography.hazmat.primitives import serialization
@@ -123,6 +124,7 @@ from imbue.minds.desktop_client.update_program_stubs_testing import STUB_MNGR_SO
 from imbue.minds.desktop_client.update_program_stubs_testing import STUB_TOOL_SOURCE
 from imbue.minds.desktop_client.update_status import UpdateRunStatus
 from imbue.minds.desktop_client.update_status import UpdateVerdict
+from imbue.minds.desktop_client.welcome_chat import ChatAppForwardRoute
 from imbue.minds.desktop_client.workspace_facts_cache import WorkspaceFactsCache
 from imbue.minds.desktop_client.workspace_program_command import build_workspace_program_archive
 from imbue.minds.desktop_client.workspace_program_command import extract_marker_json
@@ -2204,4 +2206,34 @@ def materialize_cached_release(
         clone_dir=clone_dir,
         stall_timeout_seconds=stall_timeout_seconds,
         on_waiting=lambda: waits_out.append("waited"),
+    )
+
+
+FAKE_FORWARD_PORT: Final[int] = 8421
+
+ForwardHandler = Callable[[httpx2.Request], httpx2.Response]
+
+
+def answering_forward(*answers: httpx2.Response | Exception) -> tuple[list[httpx2.Request], ForwardHandler]:
+    """A forward that answers each request with the next of ``answers`` (the last one repeats), and what it was sent."""
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        answer = answers[min(len(requests), len(answers)) - 1]
+        if isinstance(answer, Exception):
+            raise answer
+        # A fresh copy: a response's body stream is consumed by the client that reads it.
+        return httpx2.Response(answer.status_code, headers=answer.headers, content=answer.content)
+
+    return requests, handler
+
+
+def make_fake_chat_app_forward_route(handler: ForwardHandler, window_seconds: float = 30.0) -> ChatAppForwardRoute:
+    """The route to a workspace's chat app with ``handler`` standing in for the proxy; its retries do not wait."""
+    return ChatAppForwardRoute(
+        forward_port=FAKE_FORWARD_PORT,
+        make_client=lambda: httpx2.Client(transport=httpx2.MockTransport(handler), follow_redirects=False),
+        window_seconds=window_seconds,
+        retry_interval_seconds=0.0,
     )

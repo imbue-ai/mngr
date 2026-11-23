@@ -378,6 +378,16 @@ type LoadProblem =
   | { readonly kind: "request"; readonly outcome: RequestOutcome }
   | { readonly kind: "grants_unknown" };
 
+/** The controls of the Sharing page a bubble can be asked to point at: the
+ * embed contract's `coachMark` values this chrome draws. */
+export const SHARE_COACH_MARKS = ["mobile-access"] as const;
+export type ShareCoachMark = (typeof SHARE_COACH_MARKS)[number];
+
+/** The mark a name spells, or null for a name this pane does not know. */
+export function findShareCoachMark(raw: unknown): ShareCoachMark | null {
+  return SHARE_COACH_MARKS.find((mark) => mark === raw) ?? null;
+}
+
 export class SharePanelModel {
   loadStatus: ShareLoadStatus = "idle";
   machineUrl: string | null = null;
@@ -395,6 +405,9 @@ export class SharePanelModel {
   /** The link never answered within the readiness wait. */
   isLinkDeadlinePassed = false;
   currentTarget: string;
+  /** The control a bubble points at, for the request that opened the panel
+   * with one; null when none was asked for, and once it has been dismissed. */
+  coachMark: ShareCoachMark | null = null;
   /** Merged from every sharing response and every resolved address. */
   identities: Record<string, IdentityRecord> = {};
   /** The rows of each target: the whole workspace under its service name,
@@ -992,6 +1005,16 @@ export class SharePanelModel {
     this.currentTarget = target;
     if (this.loadStatus === "load_failed") void this.load();
     this.syncReadinessPolling();
+  }
+
+  showCoachMark(mark: ShareCoachMark): void {
+    this.coachMark = mark;
+  }
+
+  dismissCoachMark(): void {
+    if (this.coachMark === null) return;
+    this.coachMark = null;
+    this.redraw();
   }
 
   /** Give the workspace an address on the internet. Admits nobody by itself. */

@@ -71,9 +71,9 @@ from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
 from imbue.minds.desktop_client.connections.primitives import IMBUE_CLOUD_PROVIDER_NAME_PREFIX
 from imbue.minds.desktop_client.connections.primitives import backend_for_connection_instance_name
 from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provider_name_for_user
+from imbue.minds.desktop_client.create_progress import BracketedCommandEventSink
 from imbue.minds.desktop_client.create_progress import OperationProgressSnapshot
 from imbue.minds.desktop_client.create_progress import OperationProgressTracker
-from imbue.minds.desktop_client.create_progress import TrackerEventSink
 from imbue.minds.desktop_client.create_progress import apply_bootstrap_event_lines
 from imbue.minds.desktop_client.create_progress_history import ProgressHistoryStore
 from imbue.minds.desktop_client.create_progress_history import create_scope
@@ -1157,6 +1157,15 @@ _DESKTOP_STEP_LABELS: Final[dict[ProgressStepId, str]] = {
     _MNGR_CREATE_STEP: "Installing your tools",
     _READY_STEP: "Almost there",
 }
+# The desktop's own work inside the ``mngr create`` step, on either side of the steps mngr reports: until mngr's
+# first report (its process starting up, and what the desktop prepares before spawning it), and from its ``created``
+# event until the readiness wait begins (the desktop's bookkeeping for the new workspace).
+_MNGR_STARTING_STEP: Final[ProgressStep] = ProgressStep(
+    step_id=ProgressStepId("mngr_create.starting"), label="Starting up"
+)
+_MNGR_FINISHING_STEP: Final[ProgressStep] = ProgressStep(
+    step_id=ProgressStepId("mngr_create.finishing"), label="Finishing up"
+)
 # How long the bootstrap tail gets to exit on SIGTERM before it is killed, and the
 # bound on stopping it once the readiness wait ends; the stop must outlast the
 # grace, or terminating the tail raises while the kill is still pending.
@@ -1910,6 +1919,10 @@ class _CreateEventCapture(MutableModel):
         default=None,
         description="Receives each ``progress`` event mngr streams (its plan and step reports), parsed",
     )
+    on_created: Callable[[], None] | None = Field(
+        default=None,
+        description="Called when the ``created`` event is seen: mngr's own work is done, though its process may run on",
+    )
 
     def __call__(self, line: str, is_stdout: bool) -> None:
         event = _parse_jsonl_event(line) if is_stdout else None
@@ -1943,6 +1956,8 @@ class _CreateEventCapture(MutableModel):
         host_id_raw = event.get("host_id")
         if isinstance(host_id_raw, str) and host_id_raw:
             self.canonical_host_id = host_id_raw
+        if self.on_created is not None:
+            self.on_created()
 
 
 def run_mngr_create(
@@ -1970,6 +1985,7 @@ def run_mngr_create(
     *,
     parent_cg: ConcurrencyGroup | None = None,
     on_progress: Callable[[ProgressEvent], None] | None = None,
+    on_created: Callable[[], None] | None = None,
 ) -> tuple[AgentId, HostId]:
     """Create an mngr agent via ``mngr create --format jsonl``.
 
@@ -2021,7 +2037,7 @@ def run_mngr_create(
         create_attempt_id_label=create_attempt_id_label,
     )
 
-    capture = _CreateEventCapture(inner_on_output=on_output, on_progress=on_progress)
+    capture = _CreateEventCapture(inner_on_output=on_output, on_progress=on_progress, on_created=on_created)
     cg = _make_child_cg("mngr-create", parent_cg)
     # The Vault fallback for the private-pin credential is an operator convenience:
     # the same opt-in that routes the create form at a local template worktree.
@@ -2235,6 +2251,8 @@ class _MngrCreateAttemptParams(FrozenModel):
     on_output: OutputCallback
     # Receives mngr's parsed progress events, nested by the caller under its own create step.
     on_progress: Callable[[ProgressEvent], None]
+    # Called when mngr reports the agent created, ahead of its process exiting.
+    on_created: Callable[[], None]
     latchkey_env: Mapping[str, str] | None
     # The owning account's user id (names the imbue_cloud account instance), or None for a private workspace.
     account_id: str | None
@@ -2304,6 +2322,7 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         create_attempt_id_label=params.create_attempt_id_label,
         parent_cg=params.parent_cg,
         on_progress=params.on_progress,
+        on_created=params.on_created,
     )
 
 
@@ -3210,6 +3229,13 @@ class AgentCreator(MutableModel):
                 with self._lock:
                     self._statuses[cid_str] = AgentCreateAttemptStatus.CREATING_WORKSPACE
                 tracker.start_step(_MNGR_CREATE_STEP, _DESKTOP_STEP_LABELS[_MNGR_CREATE_STEP], None, None)
+                mngr_progress = BracketedCommandEventSink(
+                    tracker=tracker,
+                    parent_id=str(_MNGR_CREATE_STEP),
+                    opening_step=_MNGR_STARTING_STEP,
+                    closing_step=_MNGR_FINISHING_STEP,
+                )
+                mngr_progress.start()
 
                 # Pre-create the shared latchkey gateway password and a
                 # per-host permissions-override JWT before invoking
@@ -3299,7 +3325,8 @@ class AgentCreator(MutableModel):
                     host_name=parsed_host,
                     display_name=display_name or str(parsed_host),
                     on_output=emit_log,
-                    on_progress=TrackerEventSink(tracker=tracker, default_parent_id=str(_MNGR_CREATE_STEP)),
+                    on_progress=mngr_progress,
+                    on_created=mngr_progress.note_command_answered,
                     latchkey_env=latchkey_setup.env,
                     account_id=account_id or None,
                     repo_source=repo_source,

@@ -6,8 +6,10 @@ import { ShellState } from "../../shell/shell-state";
 import {
   OWNER_SECTION_ID,
   SETTINGS_TABS,
+  WORKSPACE_OWN_SETTINGS_GROUPS,
   WORKSPACE_SETTINGS_GROUPS,
   currentSettingsPlace,
+  findWorkspaceOwnSettingsGroup,
   ownerSectionQuery,
   parseSettingsPlace,
   rememberSettingsPlace,
@@ -28,6 +30,7 @@ const NOWHERE: SettingsPlace = {
   group: null,
   permSection: null,
   shareTarget: null,
+  shareCoachMark: null,
   behindWorkspace: null,
   isOwnerSectionAsked: false,
 };
@@ -61,7 +64,8 @@ describe("parseSettingsPlace", () => {
     expect(
       parseSettingsPlace(
         "tab=workspace&section=display&settings_account=user-1&settings_workspace=agent-cd34&app=web" +
-          `&group=sharing&perm_section=waiting&share_target=terminal&workspace=${AGENT}&focus=owner`,
+          `&group=sharing&perm_section=waiting&share_target=terminal&coach=mobile-access&workspace=${AGENT}` +
+          "&focus=owner",
       ),
     ).toEqual({
       tab: "workspace",
@@ -72,16 +76,33 @@ describe("parseSettingsPlace", () => {
       group: "sharing",
       permSection: "waiting",
       shareTarget: "terminal",
+      shareCoachMark: "mobile-access",
       behindWorkspace: AGENT,
       isOwnerSectionAsked: true,
     });
   });
 
-  it("accepts each of the three tabs and each of the five groups, and no others", () => {
+  it("accepts each of the three tabs and each of the six groups, and no others", () => {
     expect(SETTINGS_TABS).toEqual(["studio", "accounts", "workspace"]);
     for (const tab of SETTINGS_TABS) expect(parseSettingsPlace(`tab=${tab}`).tab).toBe(tab);
-    expect(WORKSPACE_SETTINGS_GROUPS).toEqual(["general", "permissions", "sharing", "backup", "updates"]);
+    expect(WORKSPACE_SETTINGS_GROUPS).toEqual([
+      "general",
+      "permissions",
+      "sharing",
+      "backup",
+      "updates",
+      "suggestions",
+    ]);
     for (const group of WORKSPACE_SETTINGS_GROUPS) expect(parseSettingsPlace(`group=${group}`).group).toBe(group);
+  });
+
+  it("finds a page of a workspace's own settings by its name, and none in anything else", () => {
+    expect(WORKSPACE_OWN_SETTINGS_GROUPS).toEqual(["general", "backup", "updates", "suggestions"]);
+    for (const group of WORKSPACE_OWN_SETTINGS_GROUPS) expect(findWorkspaceOwnSettingsGroup(group)).toBe(group);
+    // Permissions and Sharing are rail entries, but not pages a workspace asks for by this name.
+    for (const raw of ["permissions", "sharing", "account", "Suggestions", "", undefined, 4]) {
+      expect(findWorkspaceOwnSettingsGroup(raw), String(raw)).toBeNull();
+    }
   });
 
   it("reads a tab it does not know as no tab, leaving the default to the page", () => {
@@ -100,7 +121,8 @@ describe("parseSettingsPlace", () => {
   it("reads an empty value as an absent one", () => {
     expect(
       parseSettingsPlace(
-        "tab=&section=&settings_account=&settings_workspace=&app=&group=&perm_section=&share_target=&workspace=&focus=",
+        "tab=&section=&settings_account=&settings_workspace=&app=&group=&perm_section=&share_target=&coach=" +
+          "&workspace=&focus=",
       ),
     ).toEqual(NOWHERE);
   });

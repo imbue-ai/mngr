@@ -223,6 +223,17 @@ they draw from the `/ui/ws` channel's ``workspaces`` frame: each live owned entr
     (`wallpaper_cache.py`) and answers 202 at once. A workspace shared with an account here is
     refused by the shared-with-me gate (`403 not_owned`), as every owner route is.
 
+`/ui/api/workspaces/<agent_id>/suggestion-settings` (GET and PUT, `ui_api_suggestion_settings.py`, requires the session):
+    Settings' Suggestions page for a workspace (`specs/chat-suggestions/spec.md`). The two switches
+    (`is_next_step_suggestions_enabled`, `is_new_chat_suggestions_enabled`) live only in the workspace's chat app, so each request is
+    passed on to that app's own origin through the forward, by the route the welcome chat's seed
+    takes: GET reads its `GET /api/settings`, PUT sends the switches the body names (at least one;
+    400 otherwise) to its `PUT /api/settings/suggestions`. Both answer the two switches. A
+    workspace that gave no usable answer is `502` with `code: UNREACHABLE`; a chat app from before
+    the switches (a 404 or 405, or settings without them) is `502` with `code: UNSUPPORTED`. 503 on
+    an app with no forward to reach through, and `403 not_owned` for a workspace shared with an
+    account here.
+
 `[<service>.]agent-<hex>.localhost:PORT/*` (workspace-origin catch-all, requires auth):
     a host-header middleware and a catch-all WebSocket route recognize
     `[<service>.]agent-<hex>.localhost(:port)` hosts and byte-forward the

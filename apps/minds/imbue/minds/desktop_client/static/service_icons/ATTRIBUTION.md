@@ -18,9 +18,9 @@ text as shipped with the set is at
 
 Icons used, unmodified: `google-docs`, `google-sheets`, `google-slides`,
 `google-contacts`, `yelp`, `stripe`, `coolify`, `cal-com`, `fastmail`,
-`strava`, `ticktick`, `trello`, `amazon-web-services-light`, `cal-com-light`,
-`github-light`, `linear-light`, `sentry-light`, `tailscale-light`,
-`umami-light`.
+`instagram`, `strava`, `ticktick`, `trello`, `amazon-web-services-light`,
+`cal-com-light`, `github-light`, `linear-light`, `sentry-light`,
+`tailscale-light`, `umami-light`.
 
 ## SVG Logos — CC0 1.0
 
@@ -39,16 +39,17 @@ Icons used, unmodified: `airtable`, `asana-icon`, `atlassian`, `aws`,
 `linear-icon`, `mailchimp-freddie`, `neon-icon`, `netlify-icon`,
 `notion-icon`, `openrouter-icon`, `paypal`, `posthog-icon`, `sentry-icon`,
 `slack-icon`, `spotify-icon`, `supabase-icon`, `tailscale`, `telegram`,
-`todoist-icon`, `zoom-icon`.
+`todoist-icon`, `youtube-icon`, `zoom-icon`.
 
 ## simple-icons — CC0 1.0
 
 Source: <https://github.com/simple-icons/simple-icons>, npm package v13.21.0.
-Dedicated to the public domain under CC0 1.0. Five marks come from this set,
-`calendly`, `umami`, `linktree`, `webflow` and `wix`, because neither
-set above carries a color symbol for those brands (SVG Logos has Webflow and
-Wix only as wordmarks). Each carries an explicit `fill` naming the brand color
-simple-icons records for it; the path data is unchanged.
+Dedicated to the public domain under CC0 1.0. Six marks come from this set,
+`calendly`, `umami`, `linktree`, `webflow`, `wix` and `hubspot`, because
+neither set above carries a color symbol for those brands (SVG Logos has
+Webflow, Wix and HubSpot only as wordmarks). Each carries an explicit `fill`
+naming the brand color simple-icons records for it; the path data is
+unchanged.
 
 ## Vendor brand kits
 

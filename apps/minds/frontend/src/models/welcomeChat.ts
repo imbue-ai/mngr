@@ -6,7 +6,7 @@
 // renders; the toggles become <details> blocks, which it allows.
 //
 // A first-run create (specs/ftue-onboarding-v2) sends no turns: the workspace plays its own
-// arrival in the chat, and the body carries only what the user told the welcome, for the agent.
+// arrival in the chat (specs/chat-suggestions), and the body only says that it is one.
 
 import type { CreateAttemptRequestSummary } from "./create";
 import {
@@ -39,8 +39,6 @@ export interface WelcomeChatBody {
   turns: WelcomeChatTurn[];
   /** Whether the workspace plays its first-run arrival in the chat instead of showing turns. */
   is_first_run?: boolean;
-  /** What the user told the first run, for the agent; the chat never shows it. */
-  context?: string;
 }
 
 /** What the seeded chat is called in the workspace. */
@@ -107,9 +105,9 @@ export function welcomeChatBody(request: CreateAttemptRequestSummary, isShowcase
   };
 }
 
-/** A first-run create's chat: no turns, the arrival flag, and the user's own words about their studio. */
-export function firstRunWelcomeChatBody(context: string): WelcomeChatBody {
-  return { title: WELCOME_CHAT_TITLE, turns: [], is_first_run: true, context };
+/** A first-run create's chat: no turns, and the arrival flag. */
+export function firstRunWelcomeChatBody(): WelcomeChatBody {
+  return { title: WELCOME_CHAT_TITLE, turns: [], is_first_run: true };
 }
 
 /**

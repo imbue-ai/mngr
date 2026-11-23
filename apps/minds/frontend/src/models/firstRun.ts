@@ -1,9 +1,8 @@
 // The first run (specs/ftue-onboarding-v2): sign in, then the cloud workspace
-// starts at once while the welcome asks what kind of studio the user wants.
-// This module holds the sign-in page's stage as a pure reducer, the studio
-// types the welcome offers, and the one window-wide record that carries what
-// the sign-in page learned (who signed in, which create it sent) over to the
-// creation page and from there into the new workspace's first chat.
+// starts at once while the welcome greets the user. This module holds the
+// sign-in page's stage as a pure reducer and the one window-wide record that
+// carries what the sign-in page learned (who signed in, which create it sent)
+// over to the creation page.
 
 import type { ResendOutcome } from "./emailVerification";
 
@@ -100,75 +99,6 @@ export function welcomeHeading(firstName: string): string {
   return firstName === "" ? "Welcome!" : `Welcome, ${firstName}!`;
 }
 
-export type StudioTypeCategory = "work" | "personal" | "creative" | "entertainment";
-
-export interface StudioType {
-  id: string;
-  label: string;
-  category: StudioTypeCategory;
-}
-
-/** In a mixed order on purpose: the category's colour carries the grouping. */
-export const STUDIO_TYPES: readonly StudioType[] = [
-  { id: "knowledge", label: "Knowledge work", category: "work" },
-  { id: "gaming", label: "Gaming", category: "entertainment" },
-  { id: "writing", label: "Writing", category: "creative" },
-  { id: "personal", label: "Personal", category: "personal" },
-  { id: "sales", label: "Sales", category: "work" },
-  { id: "film", label: "Film", category: "creative" },
-  { id: "music", label: "Music", category: "entertainment" },
-  { id: "education", label: "Education", category: "personal" },
-  { id: "operations", label: "Operations", category: "work" },
-  { id: "game-dev", label: "Game development", category: "creative" },
-  { id: "archival", label: "Data archival", category: "personal" },
-  { id: "marketing", label: "Marketing", category: "work" },
-  { id: "entertainment", label: "Entertainment", category: "entertainment" },
-  { id: "creative", label: "Creative", category: "creative" },
-  { id: "recruiting", label: "Recruiting", category: "work" },
-];
-
-/** At most this many picks, the user's own words (once given) counting as one. */
-export const MAX_STUDIO_TYPE_PICKS = 3;
-
-/** What the user said they want their studio for: the picked types, oldest first, and their own words if they gave any. */
-export interface StudioTypeAnswer {
-  pickedIds: string[];
-  otherText: string;
-}
-
-export function emptyStudioTypeAnswer(): StudioTypeAnswer {
-  return { pickedIds: [], otherText: "" };
-}
-
-/** Keep the picks within the limit: the oldest pills give way to the newest; the user's own words take a place but are never dropped. */
-function withinLimit(pickedIds: string[], otherText: string): string[] {
-  const room = MAX_STUDIO_TYPE_PICKS - (otherText.trim() !== "" ? 1 : 0);
-  return pickedIds.length > room ? pickedIds.slice(pickedIds.length - room) : pickedIds;
-}
-
-export function toggleStudioType(answer: StudioTypeAnswer, id: string): StudioTypeAnswer {
-  const pickedIds = answer.pickedIds.includes(id)
-    ? answer.pickedIds.filter((picked) => picked !== id)
-    : withinLimit([...answer.pickedIds, id], answer.otherText);
-  return { ...answer, pickedIds };
-}
-
-/** Giving their own words makes them a pick, so it may push the oldest pill out. */
-export function describeStudioType(answer: StudioTypeAnswer, otherText: string): StudioTypeAnswer {
-  return { pickedIds: withinLimit(answer.pickedIds, otherText), otherText };
-}
-
-/**
- * The answer as one line for the agent, or "" when nothing was picked or said.
- * Labels keep the offer's order, so the line reads the same however they were clicked.
- */
-export function studioTypeLine(answer: StudioTypeAnswer): string {
-  const labels = STUDIO_TYPES.filter((type) => answer.pickedIds.includes(type.id)).map((type) => type.label);
-  const other = answer.otherText.trim();
-  if (other !== "") labels.push(other);
-  return labels.length === 0 ? "" : `I want to use Studio for: ${labels.join(", ")}.`;
-}
-
 /**
  * What the sign-in page hands the creation page: the create it sent and the
  * account it sent it under. One per window; a create submitted elsewhere
@@ -178,12 +108,10 @@ export function studioTypeLine(answer: StudioTypeAnswer): string {
 export class FirstRunRecord {
   createAttemptId = "";
   account: FirstRunAccount | null = null;
-  studioTypes: StudioTypeAnswer = emptyStudioTypeAnswer();
 
   noteCreate(createAttemptId: string, account: FirstRunAccount | null): void {
     this.createAttemptId = createAttemptId;
     this.account = account;
-    this.studioTypes = emptyStudioTypeAnswer();
   }
 
   isFirstRunCreate(createAttemptId: string): boolean {

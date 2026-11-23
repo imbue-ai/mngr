@@ -73,13 +73,8 @@ describe("welcomeChatBody", () => {
 });
 
 describe("firstRunWelcomeChatBody", () => {
-  it("sends no turns, flags the arrival, and carries the user's words for the agent", () => {
-    expect(firstRunWelcomeChatBody("I want to use Studio for: Writing.")).toEqual({
-      title: "Welcome",
-      turns: [],
-      is_first_run: true,
-      context: "I want to use Studio for: Writing.",
-    });
+  it("sends no turns and flags the arrival", () => {
+    expect(firstRunWelcomeChatBody()).toEqual({ title: "Welcome", turns: [], is_first_run: true });
   });
 });
 

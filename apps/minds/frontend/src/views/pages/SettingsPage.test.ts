@@ -1055,7 +1055,7 @@ describe("Settings › Workspace & apps: one of the account's own workspaces", (
   }
 
   describe("the rail", () => {
-    it("lists General, Permissions, Sharing, Backup, and Updates, on General", () => {
+    it("lists General, Permissions, Sharing, Backup, Updates, and Suggestions, on General", () => {
       const view = openSettings(ON_ALPHA).draw();
 
       expect(railEntries(view, "data-settings-group")).toEqual([
@@ -1064,6 +1064,7 @@ describe("Settings › Workspace & apps: one of the account's own workspaces", (
         ["sharing", false],
         ["backup", false],
         ["updates", false],
+        ["suggestions", false],
       ]);
       expect(withAttr(pane(view).rail, "data-settings-group").map((entry) => allText(entry))).toEqual([
         "General",
@@ -1071,6 +1072,7 @@ describe("Settings › Workspace & apps: one of the account's own workspaces", (
         "Sharing",
         "Backup",
         "Updates",
+        "Suggestions",
       ]);
     });
 
@@ -1203,9 +1205,9 @@ describe("Settings › Workspace & apps: one of the account's own workspaces", (
     });
   });
 
-  describe("General, Backup, and Updates", () => {
+  describe("General, Backup, Updates, and Suggestions", () => {
     it("mounts the group's page on the workspace's options, once they have loaded", async () => {
-      for (const group of ["general", "backup", "updates"] as const) {
+      for (const group of ["general", "backup", "updates", "suggestions"] as const) {
         const harness = openSettings(`${ON_ALPHA}&group=${group}`);
 
         const loading = harness.draw();
@@ -1594,6 +1596,107 @@ describe("Settings › Workspace & apps: one of the account's own workspaces", (
         click(railEntry(view, "data-settings-group", "sharing"));
 
         expect(currentTarget(harness)).toBe("docs");
+      });
+    });
+
+    describe("the bubble an arrival asks for with the URL's coach", () => {
+      function shareModel(harness: Harness): SharePanelModel {
+        return attrsOf(sharePage(harness.draw())).share as SharePanelModel;
+      }
+
+      it("holds the param until the share model exists, then hands the mark over and takes it out of the URL", async () => {
+        const harness = openSettings(`${ON_ALPHA}&group=sharing&coach=mobile-access`);
+        harness.draw();
+        harness.draw();
+        expect(queryOf(harness.route.current).coach).toBe("mobile-access");
+        expect(harness.routeWrites).toEqual([]);
+        await settle();
+
+        expect(shareModel(harness).coachMark).toBe("mobile-access");
+        expect(queryOf(harness.route.current)).toEqual({
+          account: ALICE.user_id,
+          workspace: ALPHA,
+          tab: "workspace",
+          group: "sharing",
+        });
+        expect(harness.routeWrites.map((write) => write.options)).toEqual([{ replace: true }]);
+      });
+
+      it("asks once per request, however many draws pass before the removal lands", async () => {
+        const harness = openSettings(`${ON_ALPHA}&group=sharing&coach=mobile-access`);
+        const stale = harness.route.current;
+        const share = attrsOf(sharePage(await drawLoaded(harness))).share as SharePanelModel;
+        share.dismissCoachMark();
+        // A route set does not land synchronously: draws in between still read the param.
+        const written = harness.route.current;
+        harness.route.current = stale;
+        harness.draw();
+        harness.draw();
+        harness.route.current = written;
+        harness.draw();
+
+        expect(share.coachMark).toBeNull();
+        expect(harness.routeWrites).toHaveLength(1);
+      });
+
+      it("asks again when the same link lands again", async () => {
+        const harness = openSettings(`${ON_ALPHA}&group=sharing&coach=mobile-access`);
+        await drawLoaded(harness);
+        const share = shareModel(harness);
+        share.dismissCoachMark();
+        harness.draw();
+
+        harness.route.current = `${ON_ALPHA}&group=sharing&coach=mobile-access`;
+
+        expect(shareModel(harness)).toBe(share);
+        expect(share.coachMark).toBe("mobile-access");
+        expect(queryOf(harness.route.current).coach).toBeUndefined();
+      });
+
+      it("draws none when Settings is opened without the param", async () => {
+        const harness = openSettings(`${ON_ALPHA}&group=sharing`);
+        await drawLoaded(harness);
+
+        expect(shareModel(harness).coachMark).toBeNull();
+        expect(harness.routeWrites).toEqual([]);
+      });
+
+      it("drops a mark Sharing does not know, still taking it out of the URL", async () => {
+        const harness = openSettings(`${ON_ALPHA}&group=sharing&coach=a-mark-from-a-newer-workspace`);
+        await drawLoaded(harness);
+
+        expect(shareModel(harness).coachMark).toBeNull();
+        expect(queryOf(harness.route.current).coach).toBeUndefined();
+      });
+
+      it("takes the mark out and clears a target it does not know in one write", async () => {
+        // Two writes in a row would each be computed from the route as it was, and one would undo the other.
+        const harness = openSettings(`${ON_ALPHA}&group=sharing&share_target=retired-app&coach=mobile-access`);
+        await drawLoaded(harness);
+
+        expect(shareModel(harness).coachMark).toBe("mobile-access");
+        expect(queryOf(harness.route.current)).toEqual({
+          account: ALICE.user_id,
+          workspace: ALPHA,
+          tab: "workspace",
+          group: "sharing",
+        });
+        expect(harness.routeWrites).toHaveLength(1);
+      });
+
+      it("lets go of the mark with the workspace's models, as a change of pick or a close of Settings drops them", async () => {
+        const harness = openSettings(`${ON_ALPHA}&group=sharing&coach=mobile-access`);
+        const view = await drawLoaded(harness);
+        const alphaShare = shareModel(harness);
+        expect(alphaShare.coachMark).toBe("mobile-access");
+
+        pick(view, BRAVO);
+        await drawLoaded(harness);
+        pick(harness.draw(), ALPHA);
+        await drawLoaded(harness);
+
+        expect(shareModel(harness)).not.toBe(alphaShare);
+        expect(shareModel(harness).coachMark).toBeNull();
       });
     });
   });

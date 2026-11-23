@@ -46,6 +46,7 @@ from imbue.minds.desktop_client.ui_api_profile import register_profile_routes
 from imbue.minds.desktop_client.ui_api_provider_relay import register_provider_relay_routes
 from imbue.minds.desktop_client.ui_api_settings import register_settings_routes
 from imbue.minds.desktop_client.ui_api_shared_with_me import register_shared_with_me_routes
+from imbue.minds.desktop_client.ui_api_suggestion_settings import register_suggestion_settings_routes
 from imbue.minds.desktop_client.ui_api_updates import register_update_routes
 from imbue.minds.desktop_client.ui_api_users import register_user_routes
 from imbue.minds.desktop_client.ui_api_windows import register_window_routes
@@ -339,6 +340,7 @@ def create_ui_blueprint() -> Blueprint:
     register_window_routes(blueprint)
     register_shared_with_me_routes(blueprint)
     register_workspace_asset_routes(blueprint)
+    register_suggestion_settings_routes(blueprint)
     if get_profiler().is_enabled:
         register_profile_routes(blueprint)
     return blueprint

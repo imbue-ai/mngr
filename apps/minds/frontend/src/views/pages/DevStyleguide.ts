@@ -2,6 +2,7 @@ import m from "mithril";
 import { Badge } from "../components/Badge";
 import { Button, ButtonLink, ButtonSubmit } from "../components/Button";
 import { Card } from "../components/Card";
+import { CoachBubble } from "../components/CoachBubble";
 import { ColorSwatch } from "../components/ColorSwatch";
 import { CopyField, SectionHeader } from "../components/Layout";
 import {
@@ -142,6 +143,7 @@ function tocLink(
  */
 export function DevStyleguide(): m.Component {
   let isModalOpen = false;
+  let isCoachBubbleShown = true;
   let isDark = false;
   // Scrollspy: the TOC entry whose section is nearest the top of the scroll
   // viewport reads at full strength (styleguide-toc-link[aria-current]). We
@@ -979,6 +981,28 @@ export function DevStyleguide(): m.Component {
                   ],
                 ),
               ],
+            },
+            {
+              id: "coach-bubble",
+              toc: "Coach bubble",
+              title: "Coach bubble",
+              desc: "Points at a control the reader was just led to; drawn inside a relative wrapper around the control, below it when there is room and above otherwise.",
+              // The bubble is out of flow, so the demo reserves the room it lands in.
+              body: m("div", { class: "pb-24" }, [
+                m("span", { class: "relative inline-flex" }, [
+                  m(
+                    Button,
+                    { onclick: () => (isCoachBubbleShown = !isCoachBubbleShown) },
+                    "A control",
+                  ),
+                  isCoachBubbleShown
+                    ? m(CoachBubble, {
+                        text: "Use this to do the thing it does.",
+                        onDismiss: () => (isCoachBubbleShown = false),
+                      })
+                    : null,
+                ]),
+              ]),
             },
             {
               id: "section-headers",

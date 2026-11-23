@@ -30,7 +30,7 @@
 // types, or by adding optional fields to an existing type. CONTRACT_VERSION
 // below tracks doc revisions only.
 
-export const CONTRACT_VERSION = "17";
+export const CONTRACT_VERSION = "19";
 
 // workspace -> embedder: open the shell's permission-request modal focused on
 // one request. Payload: { requestId }.
@@ -50,7 +50,11 @@ export const OPEN_AI_KEYS_PAGE = "minds:open-ai-keys-page";
 export const BRING_APP_TO_FRONT = "minds:bring-app-to-front";
 // workspace -> embedder: open the shell's Settings on the workspace's Sharing,
 // at that app's page, or at the whole workspace's when no app is named.
-// Payload: { serviceName? }.
+// Payload: { serviceName?, coachMark? }. `coachMark` names one control of
+// Sharing for the chrome to point a bubble at: "mobile-access", the control
+// that emails a link for a phone. Any other value is ignored and Sharing
+// opens with no bubble. Sent with a `coachMark` only to an embedder that said
+// `showsCoachMarks` with EMBEDDER_CAPABILITIES.
 export const OPEN_SHARE_SETTINGS = "minds:open-share-settings";
 // workspace -> embedder: this document's endpoint is listening, so anything
 // the embedder held for it can be sent now. Payload: { opensLinks?,
@@ -138,6 +142,12 @@ export const OPEN_EXTERNAL = "minds:open-external";
 // folders from this computer and turns syncing on. Payload: {}. Sent only to
 // an embedder that said `opensLocalFiles` with EMBEDDER_CAPABILITIES.
 export const OPEN_LOCAL_FILES = "minds:open-local-files";
+// workspace -> embedder: open the shell's Settings on one page of the
+// workspace's own settings. Payload: { group? }: the page's name
+// (WORKSPACE_SETTINGS_GROUP_PATTERN); absent, or a name the chrome does not
+// know, opens General. Sent only to an embedder that said
+// `opensWorkspaceSettings` with EMBEDDER_CAPABILITIES. Fire-and-forget (no ack).
+export const OPEN_WORKSPACE_SETTINGS = "minds:open-workspace-settings";
 // workspace -> embedder: pulse a ring around one of the chrome's own controls
 // while the workspace's tour talks about it, or clear the ring. Payload:
 // { anchor }, one of CHROME_ANCHORS or null to clear. Fire-and-forget; a
@@ -186,15 +196,20 @@ export const FOCUS_CHAT = "minds:focus-chat";
 export const PROVIDER_SIGN_IN_ACK = "minds:provider-sign-in-ack";
 // embedder -> workspace: what this chrome can do, sent right after
 // WORKSPACE_READY. Payload: { canPopOut, opensExternalLinks?,
-// opensCustomSchemeLinks?, opensLocalFiles?, immersive?, washesFirstRunExit? }:
-// `opensExternalLinks: true` says it takes OPEN_EXTERNAL, `opensCustomSchemeLinks:
-// true` that it takes custom-scheme links there too, `opensLocalFiles: true` that
-// it takes OPEN_LOCAL_FILES, `immersive: true` that it takes IMMERSIVE_REQUEST,
-// and `washesFirstRunExit: true` that it covers the window in the workspace's
-// color on FIRST_RUN_PROVIDER_STEP's end (see FIRST_RUN_EXIT_COVER_MS). A
-// workspace that never receives it (an older chrome, a plain browser) keeps
-// its pull-out gesture off, opens external links itself, offers no way to
-// reach the Local files settings, and never asks for immersive mode.
+// opensCustomSchemeLinks?, opensLocalFiles?, immersive?, washesFirstRunExit?,
+// opensWorkspaceSettings?, showsCoachMarks? }: `opensExternalLinks: true` says
+// it takes OPEN_EXTERNAL, `opensCustomSchemeLinks: true` that it takes
+// custom-scheme links there too, `opensLocalFiles: true` that it takes
+// OPEN_LOCAL_FILES, `immersive: true` that it takes IMMERSIVE_REQUEST,
+// `washesFirstRunExit: true` that it covers the window in the workspace's
+// color on FIRST_RUN_PROVIDER_STEP's end (see FIRST_RUN_EXIT_COVER_MS),
+// `opensWorkspaceSettings: true` that it takes OPEN_WORKSPACE_SETTINGS, and
+// `showsCoachMarks: true` that it draws the bubble OPEN_SHARE_SETTINGS's
+// `coachMark` asks for. A workspace that never receives it (an older chrome, a
+// plain browser) keeps its pull-out gesture off, opens external links itself,
+// offers no way to reach the Local files settings or the workspace settings,
+// never asks for immersive mode, and offers no suggestion that needs the
+// chrome to draw.
 export const EMBEDDER_CAPABILITIES = "minds:embedder-capabilities";
 // embedder -> workspace: return a pulled-out window to the desktop, shown and
 // raised. Payload: { windowId, frame? }; `frame` ({ x, y, width, height } in
@@ -266,6 +281,10 @@ export const HOST_ID_PATTERN = /^host-[a-f0-9]{1,64}$/i;
 // Superset (plus a length cap) of the canonical registry rule, mngr_latchkey's
 // SERVICE_NAME_PATTERN; an alignment test keeps the two in step.
 export const SERVICE_NAME_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+// The name of a page of a workspace's own settings, as the chrome's Settings
+// spells it (`general`, `suggestions`): lowercase words joined by hyphens. The embedder
+// puts it in the route it opens, so only this shape is accepted.
+export const WORKSPACE_SETTINGS_GROUP_PATTERN = /^[a-z-]{1,32}$/;
 // Sign-in flow ids are chat-app-issued (uuid hex). Same conservative shape as
 // request ids: the embedder builds a URL path from the id.
 export const FLOW_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
@@ -374,6 +393,7 @@ const WORKSPACE_TO_EMBEDDER_VALIDATORS = {
     return true;
   },
   [OPEN_SHARE_SETTINGS]: function (data) {
+    // `coachMark` is not checked: a mark this chrome does not know still opens Sharing.
     return data.serviceName === undefined || (typeof data.serviceName === 'string' && SERVICE_NAME_PATTERN.test(data.serviceName));
   },
   [WORKSPACE_READY]: function (data) {
@@ -425,6 +445,9 @@ const WORKSPACE_TO_EMBEDDER_VALIDATORS = {
   [OPEN_LOCAL_FILES]: function () {
     return true;
   },
+  [OPEN_WORKSPACE_SETTINGS]: function (data) {
+    return data.group === undefined || (typeof data.group === 'string' && WORKSPACE_SETTINGS_GROUP_PATTERN.test(data.group));
+  },
   [HIGHLIGHT_CHROME]: function (data) {
     return data.anchor === null || CHROME_ANCHORS.indexOf(data.anchor) !== -1;
   },
@@ -462,7 +485,9 @@ const EMBEDDER_TO_WORKSPACE_VALIDATORS = {
       isOptionalBoolean(data.opensCustomSchemeLinks) &&
       isOptionalBoolean(data.opensLocalFiles) &&
       isOptionalBoolean(data.immersive) &&
-      isOptionalBoolean(data.washesFirstRunExit)
+      isOptionalBoolean(data.washesFirstRunExit) &&
+      isOptionalBoolean(data.opensWorkspaceSettings) &&
+      isOptionalBoolean(data.showsCoachMarks)
     );
   },
   [REATTACH_WINDOW]: function (data) {

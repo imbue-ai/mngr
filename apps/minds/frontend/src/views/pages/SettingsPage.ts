@@ -3,8 +3,9 @@
 //
 // - Studio: the app's own sections (Notifications, Display, Updates...).
 // - Accounts: one entry per signed-in account (its plan, usage and log-out).
-// - Workspace & apps: a workspace's General, Permissions, Sharing, Backup and
-//   Updates, or the About page of a workspace or app shared with the account.
+// - Workspace & apps: a workspace's General, Permissions, Sharing, Backup,
+//   Updates and Suggestions, or the About page of a workspace or app shared
+//   with the account.
 //   A picker at the top of the rail says which; it changes what Settings
 //   shows, not what the window shows.
 //
@@ -22,6 +23,7 @@ import { AccountsDetailModel } from "../../models/accountsDetail";
 import type { ErrorAction } from "../../models/errors";
 import { errorFromException } from "../../models/errors";
 import type { SettingsSection } from "../../models/settings";
+import { findShareCoachMark } from "../../models/sharePanel";
 import { SettingsModel } from "../../models/settings";
 import type { SharedApp, SharedEntry } from "../../models/sharedWithMe";
 import { isSharedEntry, listedSharedRows, ownedWorkspaceEntries, ownerLabel } from "../../models/sharedWithMe";
@@ -56,6 +58,7 @@ const WORKSPACE_ENTRIES: readonly { id: WorkspaceGroupName; icon: IconName; labe
   { id: "sharing", icon: "share", label: "Sharing" },
   { id: "backup", icon: "cloud", label: "Backup" },
   { id: "updates", icon: "restart", label: "Updates" },
+  { id: "suggestions", icon: "message-square", label: "Suggestions" },
 ];
 
 /** Between a row's id and an app's name, in the picker's value for an app shared with the account. */
@@ -163,6 +166,8 @@ export function SettingsPage(): m.Component {
   // The `share_target` last applied to the share model: only a CHANGE in the param selects, so the page's own
   // moves between targets (its app tiles) are not fought by an unchanged one.
   let appliedShareTarget: string | null = null;
+  // The `coach` value last handed to the share model.
+  let appliedShareCoachMark: string | null = null;
 
   function dropWorkspaceModels(): void {
     if (permissions !== null) getAppContext().shell.unregisterWaitingRequestList(permissions);
@@ -170,6 +175,7 @@ export function SettingsPage(): m.Component {
     workspaceModel = null;
     permissions = null;
     appliedShareTarget = null;
+    appliedShareCoachMark = null;
   }
 
   /** The models of the owned workspace `agentId`, made on first use and swapped when the pick changes. */
@@ -194,11 +200,18 @@ export function SettingsPage(): m.Component {
     return { model: workspaceModel, permissions };
   }
 
-  /** Keep the share model's target and the URL's `share_target` saying the same thing: a changed param selects,
-   * and a target the page moved to on its own is written back. */
-  function syncShareTarget(model: WorkspaceOptionsModel, place: SettingsPlace): void {
+  /** Keep the share model and the URL saying the same thing, in one write.
+   *
+   * `share_target`: a changed param selects, and a target the page moved to on its own is written back.
+   *
+   * `coach`: one request for a bubble, not a place. It is handed to the share model and taken out of the URL,
+   * so the same link landing again asks again, and a reload or a later open of Settings draws none. Only a
+   * CHANGE in the param acts, since the removal does not land synchronously; a mark Sharing does not know is
+   * dropped. */
+  function syncSharePlace(model: WorkspaceOptionsModel, place: SettingsPlace): void {
     const share = model.share;
     if (share === null) return;
+    const changes: Record<string, string | null> = {};
     if (place.shareTarget !== appliedShareTarget) {
       appliedShareTarget = place.shareTarget;
       share.selectTarget(place.shareTarget ?? share.wholeService);
@@ -206,8 +219,17 @@ export function SettingsPage(): m.Component {
     const current = share.currentTarget === share.wholeService ? null : share.currentTarget;
     if (current !== appliedShareTarget) {
       appliedShareTarget = current;
-      rememberSettingsPlace({ share_target: current });
+      changes.share_target = current;
     }
+    if (place.shareCoachMark !== appliedShareCoachMark) {
+      appliedShareCoachMark = place.shareCoachMark;
+      if (place.shareCoachMark !== null) {
+        const mark = findShareCoachMark(place.shareCoachMark);
+        if (mark !== null) share.showCoachMark(mark);
+        changes.coach = null;
+      }
+    }
+    rememberSettingsPlace(changes);
   }
 
   function studioRail(section: SettingsSection): m.Children {
@@ -498,7 +520,7 @@ export function SettingsPage(): m.Component {
           const agentId = picked.entry.id;
           const group = place.group ?? "general";
           const { model, permissions: currentPermissions } = modelsFor(agentId);
-          syncShareTarget(model, place);
+          syncSharePlace(model, place);
           // Every channel `requests` frame redraws mithril, so reconciling here keeps the waiting list live without
           // a subscription of its own -- and it has to be here rather than in the page, because Settings stays
           // mounted under the request popup and the page is never re-created on the way back.

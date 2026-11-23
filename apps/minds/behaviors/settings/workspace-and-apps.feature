@@ -67,9 +67,9 @@ Feature: The Workspace & apps tab
       | its owner stopped sharing it with the account   |
 
   @own-workspace-rail
-  Scenario: One of the account's own workspaces has five entries
+  Scenario: One of the account's own workspaces has six entries
     Given the pick is one of the account's own workspaces
-    Then the rail under the picker lists General, Permissions, Sharing, Backup, and Updates
+    Then the rail under the picker lists General, Permissions, Sharing, Backup, Updates, and Suggestions
     And it opens on General unless the address names another
 
   @nested-entries
@@ -107,7 +107,7 @@ Feature: The Workspace & apps tab
   @unreadable-settings
   Scenario: A workspace whose settings cannot be read says so and can be tried again
     Given the pick is a workspace of the account's own whose settings cannot be read
-    Then its General, Sharing, Backup, and Updates pages show a notice that the settings could not be loaded, with "Try again"
+    Then its General, Sharing, Backup, Updates, and Suggestions pages show a notice that the settings could not be loaded, with "Try again"
     And its Permissions page reports its own state independently
 
   @shared-pick-rail

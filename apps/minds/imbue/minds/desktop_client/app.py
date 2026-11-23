@@ -228,6 +228,7 @@ from imbue.minds.desktop_client.wallpaper_cache import WALLPAPER_FETCH_TIMEOUT_S
 from imbue.minds.desktop_client.wallpaper_cache import WallpaperCache
 from imbue.minds.desktop_client.wallpaper_cache import WallpaperRefresher
 from imbue.minds.desktop_client.webdav import create_webdav_app
+from imbue.minds.desktop_client.welcome_chat import ChatAppForwardRoute
 from imbue.minds.desktop_client.welcome_chat import WelcomeChatSeeder
 from imbue.minds.desktop_client.workspace_apps import resolve_workspace_apps
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
@@ -3071,6 +3072,7 @@ def create_desktop_client(
     notification_dispatcher: NotificationDispatcher | None = None,
     paths: InstallationPaths | None = None,
     welcome_chat_seeder: WelcomeChatSeeder | None = None,
+    chat_app_route: ChatAppForwardRoute | None = None,
     minds_config: MindsConfig | None = None,
     client_env_config: ClientEnvConfig | None = None,
     envelope_stream_consumer: EnvelopeStreamConsumer | None = None,
@@ -3362,6 +3364,7 @@ def create_desktop_client(
                 mngr_caller=mngr_caller or get_default_mngr_caller(), backend_resolver=backend_resolver
             )
         ),
+        chat_app_route=chat_app_route,
         imbue_cloud_cli=imbue_cloud_cli,
         notification_dispatcher=notification_dispatcher,
         api_v1_paths=paths,

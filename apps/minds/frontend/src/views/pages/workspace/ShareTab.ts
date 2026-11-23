@@ -20,6 +20,7 @@ import {
 import { webLogin } from "../../../models/webLogin";
 import { shareTargetIconMarkup } from "../../components/appIcon";
 import { Button } from "../../components/Button";
+import { CoachBubble } from "../../components/CoachBubble";
 import { Collapsible } from "../../components/Collapsible";
 import { Select, TextInput } from "../../components/FormControls";
 import { Icon16 } from "../../components/Icon";
@@ -140,6 +141,8 @@ const MOBILE_LINK_OFF_TOOLTIP =
   "Enable sharing and web access to access this link on mobile";
 const MOBILE_LINK_NO_APP_LINK_TOOLTIP =
   "This app gets its link the first time it starts.";
+
+const MOBILE_LINK_COACH_TEXT = "Use this to open Studio on your phone.";
 
 const SYNC_PENDING_NOTICE =
   "The permissions have not reached Imbue Cloud yet, so nobody can be " +
@@ -1805,19 +1808,33 @@ function renderMobileLinkControl(share: SharePanelModel): m.Children {
   return m(
     "div",
     // A flex box, so the button is laid out as its item rather than on a line: a line box would stand a
-    // fraction of a pixel taller than the button and lift its bottom edge off the code's.
-    { id: "ws-share-mobile-link", class: "shrink-0 flex" },
-    m(
-      Button,
-      {
-        id: "ws-share-mobile-link-btn",
-        variant: "secondary",
-        size: "xs",
-        ...offAttrs,
-        onclick: () => void share.sendMobileAccessLink(),
-      },
-      [m(Icon16, { name: "mail" }), MOBILE_LINK_LABEL],
-    ),
+    // fraction of a pixel taller than the button and lift its bottom edge off the code's. The bubble hangs
+    // from this box, which is as tall as the button and starts where it does.
+    { id: "ws-share-mobile-link", class: "relative shrink-0 flex" },
+    [
+      m(
+        Button,
+        {
+          id: "ws-share-mobile-link-btn",
+          variant: "secondary",
+          size: "xs",
+          ...offAttrs,
+          onclick: () => {
+            // A press answers the bubble, whether or not the link can be sent.
+            share.dismissCoachMark();
+            void share.sendMobileAccessLink();
+          },
+        },
+        [m(Icon16, { name: "mail" }), MOBILE_LINK_LABEL],
+      ),
+      share.coachMark === "mobile-access"
+        ? m(CoachBubble, {
+            id: "ws-share-mobile-link-coach",
+            text: MOBILE_LINK_COACH_TEXT,
+            onDismiss: () => share.dismissCoachMark(),
+          })
+        : null,
+    ],
   );
 }
 

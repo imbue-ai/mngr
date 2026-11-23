@@ -124,7 +124,14 @@ export function WebLoginModal(): m.Component<WebLoginModalAttrs> {
       return m(
         Modal,
         // lg, not the default sm: the sign-in URL is long.
-        { isOpen: true, size: "lg", onClose: () => webLogin.dismiss(), backdrop: vnode.attrs.backdrop },
+        {
+          isOpen: true,
+          size: "lg",
+          onClose: () => webLogin.dismiss(),
+          backdrop: vnode.attrs.backdrop,
+          // Over a first-run page the sign-in is part of the first run, so it wears its cream.
+          card: vnode.attrs.backdrop === "wash" ? "first-run" : "surface",
+        },
         m("h2", { class: "type-heading mb-2" }, isDone ? "You're signed in" : "Sign in to Imbue"),
         webLogin.message && !isDone
           ? m("p", { class: "type-body text-secondary mb-4" }, webLogin.message)

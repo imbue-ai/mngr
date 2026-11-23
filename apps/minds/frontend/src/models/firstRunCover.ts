@@ -8,8 +8,6 @@ export interface FirstRunCoverState {
   createAttemptId: string;
   /** The workspace under the cover has its provider ask (or, failing that, its chat) on screen. */
   isReady: boolean;
-  /** Whether the "Something else" field is open, carried over from the creation page. */
-  isOtherOpen: boolean;
 }
 
 export class FirstRunCoverModel {
@@ -20,8 +18,8 @@ export class FirstRunCoverModel {
     this.redraw = redraw;
   }
 
-  raise(createAttemptId: string, isOtherOpen: boolean): void {
-    this.state = { createAttemptId, isReady: false, isOtherOpen };
+  raise(createAttemptId: string): void {
+    this.state = { createAttemptId, isReady: false };
     this.redraw();
   }
 

@@ -5,6 +5,7 @@ from datetime import timezone
 
 import pytest
 
+from imbue.minds.desktop_client.create_progress import BracketedCommandEventSink
 from imbue.minds.desktop_client.create_progress import ETA_SHORTEN_HOLD_SECONDS
 from imbue.minds.desktop_client.create_progress import OperationProgressTracker
 from imbue.minds.desktop_client.create_progress import ProgressStepStatus
@@ -12,6 +13,8 @@ from imbue.minds.desktop_client.create_progress import apply_bootstrap_event_lin
 from imbue.minds.desktop_client.create_progress import parse_bootstrap_event_timestamp
 from imbue.minds.desktop_client.create_progress import remaining_text_for
 from imbue.mngr.primitives import ProgressStepId
+from imbue.mngr.utils.progress import ProgressEvent
+from imbue.mngr.utils.progress import ProgressEventKind
 from imbue.mngr.utils.progress import ProgressStep
 from imbue.mngr.utils.progress import parse_progress_event
 
@@ -56,20 +59,24 @@ def test_percent_is_the_expected_duration_weighted_share_of_completed_steps() ->
     assert [step.status for step in tracker.snapshot().steps] == [ProgressStepStatus.DONE] * 3
 
 
-def test_running_step_without_a_counter_reads_linearly_then_holds_and_never_claims_completion() -> None:
+def test_running_step_without_a_counter_reads_four_fifths_at_its_expected_time_and_then_keeps_creeping() -> None:
     clock = _FakeClock()
     tracker = _tracker(clock, only=100.0)
     tracker.announce_plan(_plan(("only", "Only step")), None)
     tracker.start_step("only", "Only step", None, None)
 
-    clock.now += 40
+    clock.now += 50
     assert tracker.snapshot().percent == pytest.approx(40.0)
-    # Two thirds of the way through its expectation the overrun margin takes
-    # over, and the bar holds there rather than creeping toward done.
-    clock.now += 40
-    assert tracker.snapshot().percent == pytest.approx(66.7, abs=0.1)
-    clock.now += 1000
-    assert tracker.snapshot().percent == pytest.approx(66.7, abs=0.1)
+    clock.now += 50
+    assert tracker.snapshot().percent == pytest.approx(80.0)
+    # Past its expected time each further expected time halves what is left up to 99.
+    clock.now += 100
+    assert tracker.snapshot().percent == pytest.approx(89.5)
+    clock.now += 100
+    assert tracker.snapshot().percent == pytest.approx(94.25)
+    clock.now += 100_000
+    assert tracker.snapshot().percent == pytest.approx(99.0)
+    assert tracker.snapshot().percent < 100.0
 
 
 def test_a_step_learned_at_zero_seconds_still_snapshots_while_it_runs() -> None:
@@ -92,7 +99,7 @@ def test_percent_never_moves_backwards_even_when_a_step_restarts() -> None:
     tracker.start_step("first", "First", None, None)
     clock.now += 6
     before = tracker.snapshot().percent
-    assert before == pytest.approx(30.0)
+    assert before == pytest.approx(24.0)
 
     tracker.start_step("first", "First", None, None)
 
@@ -199,7 +206,7 @@ def _children_statuses(tracker: OperationProgressTracker, parent_id: str) -> lis
     return [(child.step_id, child.status) for child in parent.children]
 
 
-def test_rate_and_cap_let_a_client_extrapolate_only_through_the_running_step() -> None:
+def test_rate_and_cap_let_a_client_extrapolate_a_few_seconds_along_the_running_step() -> None:
     clock = _FakeClock()
     tracker = _tracker(clock, first=50.0, second=50.0)
     tracker.announce_plan(_plan(("first", "First"), ("second", "Second")), None)
@@ -207,11 +214,18 @@ def test_rate_and_cap_let_a_client_extrapolate_only_through_the_running_step() -
 
     snapshot = tracker.snapshot()
 
-    # The first step owns half the bar and reads linearly over 50s, so the bar
-    # grows at one percent per second and may be extrapolated to two thirds of
-    # its share, where the overrun margin takes over.
-    assert snapshot.percent_per_second == pytest.approx(1.0)
-    assert snapshot.percent_cap == pytest.approx(100 / 3)
+    # The first step owns half the bar and reads four fifths of it over its 50s,
+    # so the bar grows at 0.8 percent per second, and may be drawn 5s ahead.
+    assert snapshot.percent_per_second == pytest.approx(0.8)
+    assert snapshot.percent_cap == pytest.approx(4.0)
+
+    # A step that has outrun its expectation still moves, slower, and stays short of its share.
+    clock.now += 100
+    overrunning = tracker.snapshot()
+    assert overrunning.percent == pytest.approx(44.75)
+    assert 0.0 < overrunning.percent_per_second < 0.8
+    assert overrunning.percent < overrunning.percent_cap < 50.0
+
     tracker.start_step("second", "Second", None, 4)
     counted = tracker.snapshot()
     assert counted.percent_per_second == 0.0
@@ -280,7 +294,7 @@ def test_a_step_that_overruns_its_expectation_is_read_as_needing_half_again_what
 
     # 400s into a 30s expectation: at least 200s more, not "almost there".
     assert snapshot.remaining_text == "4 minutes left"
-    assert snapshot.percent == pytest.approx(66.7, abs=0.1)
+    assert snapshot.percent == pytest.approx(99.0, abs=0.1)
 
 
 def test_a_counted_step_is_never_read_as_faster_than_its_observed_pace() -> None:
@@ -443,4 +457,98 @@ def test_bootstrap_event_lines_nest_under_the_wait_step_and_keep_the_bootstrap_t
     # The sync step's duration is the bootstrap's own 8.75s, not the 100s that passed on this side.
     assert [(duration.step_id, duration.seconds) for duration in tracker.drain_durations()] == [
         ("bootstrap.sync_venv", 8.75)
+    ]
+
+
+_OPENING = ProgressStep(step_id=ProgressStepId("create.starting"), label="Starting up")
+_CLOSING = ProgressStep(step_id=ProgressStepId("create.finishing"), label="Finishing up")
+
+
+def _bracketed_sink(tracker: OperationProgressTracker) -> BracketedCommandEventSink:
+    tracker.announce_plan(_plan(("create", "Creating"), ("ready", "Waiting")), None)
+    tracker.start_step("create", "Creating", None, None)
+    return BracketedCommandEventSink(tracker=tracker, parent_id="create", opening_step=_OPENING, closing_step=_CLOSING)
+
+
+def _command_plan(*step_ids: str) -> ProgressEvent:
+    return ProgressEvent(
+        kind=ProgressEventKind.PLAN, steps=tuple(_plan(*((step_id, step_id) for step_id in step_ids)))
+    )
+
+
+def _command_step(kind: ProgressEventKind, step_id: str) -> ProgressEvent:
+    return ProgressEvent(kind=kind, step_id=ProgressStepId(step_id), label=step_id)
+
+
+def test_the_opening_step_runs_until_the_command_is_first_heard_and_keeps_the_bar_moving_meanwhile() -> None:
+    clock = _FakeClock()
+    tracker = _tracker(
+        clock, create=20.0, ready=20.0, **{"create.starting": 10.0, "create.finishing": 2.0, "host": 8.0}
+    )
+    sink = _bracketed_sink(tracker)
+    sink.start()
+
+    # The command has said nothing yet: the opening step is what moves the bar, and names itself.
+    clock.now += 10
+    waiting = tracker.snapshot()
+    assert waiting.current_label == "Starting up"
+    assert waiting.percent == pytest.approx(100 * 0.5 * (10.0 * 0.8) / 20.0)
+    assert waiting.percent_per_second > 0.0
+
+    sink(_command_plan("host"))
+
+    assert _children_statuses(tracker, "create") == [
+        ("create.starting", ProgressStepStatus.DONE),
+        ("host", ProgressStepStatus.PENDING),
+        ("create.finishing", ProgressStepStatus.PENDING),
+    ]
+    # Its plan arriving does not pull the bar back: the opening step is now wholly done.
+    assert tracker.snapshot().percent == pytest.approx(25.0)
+    assert [(duration.step_id, duration.seconds) for duration in tracker.drain_durations()] == [
+        ("create.starting", pytest.approx(10.0))
+    ]
+
+
+def test_the_closing_step_runs_from_the_commands_answer_until_its_parent_is_done() -> None:
+    clock = _FakeClock()
+    tracker = _tracker(
+        clock, create=20.0, ready=20.0, **{"create.starting": 10.0, "create.finishing": 2.0, "host": 8.0}
+    )
+    sink = _bracketed_sink(tracker)
+    sink.start()
+    sink(_command_plan("host"))
+    sink(_command_step(ProgressEventKind.STARTED, "host"))
+    clock.now += 8
+    sink(_command_step(ProgressEventKind.COMPLETED, "host"))
+    tracker.drain_durations()
+
+    sink.note_command_answered()
+    clock.now += 3
+    running = tracker.snapshot()
+    assert running.current_label == "Finishing up"
+    assert running.percent_per_second > 0.0
+
+    tracker.start_step("ready", "Waiting", None, None)
+
+    assert _children_statuses(tracker, "create")[-1] == ("create.finishing", ProgressStepStatus.DONE)
+    durations = {duration.step_id: duration.seconds for duration in tracker.drain_durations()}
+    assert durations["create.finishing"] == pytest.approx(3.0)
+
+
+def test_a_plan_the_command_announces_again_keeps_both_bracketing_steps() -> None:
+    clock = _FakeClock()
+    tracker = _tracker(clock, create=20.0, ready=20.0)
+    sink = _bracketed_sink(tracker)
+    sink.start()
+    sink(_command_plan("host"))
+    sink(_command_step(ProgressEventKind.STARTED, "host"))
+
+    # A second run of the command (a fallback after the first failed) plans its steps afresh.
+    sink(_command_plan("host", "rebuild"))
+
+    assert _children_statuses(tracker, "create") == [
+        ("create.starting", ProgressStepStatus.DONE),
+        ("host", ProgressStepStatus.RUNNING),
+        ("rebuild", ProgressStepStatus.PENDING),
+        ("create.finishing", ProgressStepStatus.PENDING),
     ]

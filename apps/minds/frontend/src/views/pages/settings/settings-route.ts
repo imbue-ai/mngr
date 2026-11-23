@@ -12,14 +12,31 @@ export type SettingsTab = "studio" | "accounts" | "workspace";
 export const SETTINGS_TABS: readonly SettingsTab[] = ["studio", "accounts", "workspace"];
 
 /** An entry of the Workspace & apps rail for one of the account's own workspaces. */
-export type WorkspaceSettingsGroup = "general" | "permissions" | "sharing" | "backup" | "updates";
+export type WorkspaceSettingsGroup = "general" | "permissions" | "sharing" | "backup" | "updates" | "suggestions";
 export const WORKSPACE_SETTINGS_GROUPS: readonly WorkspaceSettingsGroup[] = [
   "general",
   "permissions",
   "sharing",
   "backup",
   "updates",
+  "suggestions",
 ];
+
+/** The rail's entries that are pages of a workspace's own settings (SettingsGroups.ts draws them), and so the
+ * ones a workspace may ask for by name (the embed contract's `minds:open-workspace-settings`). Permissions and
+ * Sharing are opened by messages of their own. */
+export const WORKSPACE_OWN_SETTINGS_GROUPS = [
+  "general",
+  "backup",
+  "updates",
+  "suggestions",
+] as const satisfies readonly WorkspaceSettingsGroup[];
+export type WorkspaceOwnSettingsGroup = (typeof WORKSPACE_OWN_SETTINGS_GROUPS)[number];
+
+/** The page a name spells, or null for a name that is no page of a workspace's own settings. */
+export function findWorkspaceOwnSettingsGroup(raw: unknown): WorkspaceOwnSettingsGroup | null {
+  return WORKSPACE_OWN_SETTINGS_GROUPS.find((group) => group === raw) ?? null;
+}
 
 /** The General page's section for the workspace's account. */
 export const OWNER_SECTION_ID = "account-section";
@@ -38,6 +55,9 @@ export interface SettingsPlace {
   group: WorkspaceSettingsGroup | null;
   permSection: string | null;
   shareTarget: string | null;
+  /** The control of Sharing the arrival asked a bubble for, as the URL spells it. One request, not a place:
+   * Settings takes it out of the URL as it hands it to the page. */
+  shareCoachMark: string | null;
   /** The workspace Settings floats over. */
   behindWorkspace: string | null;
   /** Whether the arrival asked for the workspace's account: General scrolls its Owner section into view. */
@@ -61,6 +81,7 @@ export function parseSettingsPlace(search: string): SettingsPlace {
     group: WORKSPACE_SETTINGS_GROUPS.find((candidate) => candidate === group) ?? null,
     permSection: nonEmpty(params.get("perm_section")),
     shareTarget: nonEmpty(params.get("share_target")),
+    shareCoachMark: nonEmpty(params.get("coach")),
     behindWorkspace: nonEmpty(params.get("workspace")),
     isOwnerSectionAsked: params.get("focus") === "owner",
   };

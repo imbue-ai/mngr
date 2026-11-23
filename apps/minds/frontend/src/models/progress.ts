@@ -5,8 +5,9 @@
 // The server owns the arithmetic: its percent is the expected-duration-weighted
 // share of completed steps and never decreases. Between polls the page
 // extrapolates along the rate the server gave, but only up to the cap, which is
-// where the running step's linear easing ends; past that only the next poll
-// moves the bar. Keep in sync with create_progress.py.
+// as far as the server expects the running step to carry the bar in the next
+// few seconds; past that only the next poll moves the bar. Keep in sync with
+// create_progress.py.
 
 export type ProgressStepStatus = "PENDING" | "RUNNING" | "DONE";
 

@@ -621,8 +621,8 @@ test('embedder endpoint never honours an open-link, which only travels to the wo
   assert.deepStrictEqual(seen, []);
 });
 
-test('the contract is at version 17', () => {
-  assert.strictEqual(contract.CONTRACT_VERSION, '17');
+test('the contract is at version 19', () => {
+  assert.strictEqual(contract.CONTRACT_VERSION, '19');
 });
 
 test('embedder endpoint takes an immersive request only with a window id and a boolean on', () => {
@@ -719,6 +719,113 @@ test('workspace endpoint never honours an open-local-files, which only travels t
   });
   win.deliver({ source: parentWin, origin: 'http://chrome', data: { type: contract.OPEN_LOCAL_FILES } });
   assert.deepStrictEqual(seen, []);
+});
+
+test('embedder endpoint takes an open-workspace-settings ask with no group or a well-shaped one', () => {
+  const frameWin = makeWindowDouble();
+  const seen = [];
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    isExpectedOrigin: () => true,
+    handlers: { [contract.OPEN_WORKSPACE_SETTINGS]: (msg) => seen.push(msg.group) },
+  });
+  const deliver = (payload) =>
+    win.deliver({
+      source: frameWin,
+      origin: 'https://agent-1.localhost',
+      data: { type: contract.OPEN_WORKSPACE_SETTINGS, ...payload },
+    });
+  deliver({});
+  deliver({ group: 'suggestions' });
+  deliver({ group: 'not-a-group-this-chrome-knows' });
+  deliver({ group: 'a'.repeat(32) });
+  deliver({ group: 'a'.repeat(33) });
+  deliver({ group: '' });
+  deliver({ group: 'Suggestions' });
+  deliver({ group: 'suggestions&tab=share' });
+  deliver({ group: '../general' });
+  deliver({ group: 7 });
+  deliver({ group: null });
+  assert.deepStrictEqual(seen, [undefined, 'suggestions', 'not-a-group-this-chrome-knows', 'a'.repeat(32)]);
+});
+
+test('workspace endpoint never honours an open-workspace-settings, which only travels to the embedder', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({
+    handlers: { [contract.OPEN_WORKSPACE_SETTINGS]: () => seen.push('workspace') },
+  });
+  win.deliver({ source: parentWin, origin: 'http://chrome', data: { type: contract.OPEN_WORKSPACE_SETTINGS } });
+  assert.deepStrictEqual(seen, []);
+});
+
+test('workspace endpoint reads the workspace-settings capability only as a boolean or absent', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({
+    handlers: { [contract.EMBEDDER_CAPABILITIES]: (msg) => seen.push(msg.opensWorkspaceSettings) },
+  });
+  const deliver = (payload) =>
+    win.deliver({
+      source: parentWin,
+      origin: 'http://chrome',
+      data: { type: contract.EMBEDDER_CAPABILITIES, canPopOut: true, ...payload },
+    });
+  deliver({});
+  deliver({ opensWorkspaceSettings: true });
+  deliver({ opensWorkspaceSettings: false });
+  deliver({ opensWorkspaceSettings: 'yes' });
+  deliver({ opensWorkspaceSettings: 1 });
+  assert.deepStrictEqual(seen, [undefined, true, false]);
+});
+
+test('embedder endpoint takes an open-share-settings whatever coach mark it names', () => {
+  // A mark this chrome does not know must still open the panel, so the mark is never a reason to drop the message.
+  const frameWin = makeWindowDouble();
+  const seen = [];
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    isExpectedOrigin: () => true,
+    handlers: { [contract.OPEN_SHARE_SETTINGS]: (msg) => seen.push([msg.serviceName, msg.coachMark]) },
+  });
+  const deliver = (payload) =>
+    win.deliver({
+      source: frameWin,
+      origin: 'https://agent-1.localhost',
+      data: { type: contract.OPEN_SHARE_SETTINGS, ...payload },
+    });
+  deliver({ coachMark: 'mobile-access' });
+  deliver({ coachMark: 'a-mark-from-a-newer-workspace' });
+  deliver({ coachMark: 7 });
+  deliver({ coachMark: null });
+  deliver({});
+  deliver({ serviceName: 'web', coachMark: 'mobile-access' });
+  deliver({ serviceName: 'web/../admin', coachMark: 'mobile-access' });
+  assert.deepStrictEqual(seen, [
+    [undefined, 'mobile-access'],
+    [undefined, 'a-mark-from-a-newer-workspace'],
+    [undefined, 7],
+    [undefined, null],
+    [undefined, undefined],
+    ['web', 'mobile-access'],
+  ]);
+});
+
+test('workspace endpoint reads the coach-marks capability only as a boolean or absent', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({
+    handlers: { [contract.EMBEDDER_CAPABILITIES]: (msg) => seen.push(msg.showsCoachMarks) },
+  });
+  const deliver = (payload) =>
+    win.deliver({
+      source: parentWin,
+      origin: 'http://chrome',
+      data: { type: contract.EMBEDDER_CAPABILITIES, canPopOut: true, ...payload },
+    });
+  deliver({});
+  deliver({ showsCoachMarks: true });
+  deliver({ showsCoachMarks: false });
+  deliver({ showsCoachMarks: 'yes' });
+  deliver({ showsCoachMarks: 1 });
+  assert.deepStrictEqual(seen, [undefined, true, false]);
 });
 
 test('embedder endpoint takes a highlight-chrome only for a known anchor or null', () => {

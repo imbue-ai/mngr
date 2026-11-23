@@ -1,0 +1,19 @@
+The first run's welcome page no longer asks "What type of studio do you want to make?". While the first workspace is built it shows "Welcome, \<first name\>!" over the progress bar and "Show details", then "Your workspace is ready!" and Continue. Nothing about the user is handed to the new workspace: a first-run create's seed carries only the flag that says it is one, and the first conversation is the workspace's own (`specs/chat-suggestions/spec.md`).
+
+- Settings has a new page for a workspace, "Suggestions", last in the Workspace & apps tab's list, with two switches: "Next step suggestions" (after a reply) and "New chat suggestions" (on a new chat). Each applies to the whole workspace and is saved the moment it is flipped; a flip that cannot be saved goes back and says why. The values live in the workspace, so for one that is stopped, or built from a template without the switches, the page says "Suggestions settings are available while the workspace is running and up to date." and offers nothing to flip.
+
+- The embed contract moves from version 17 to 19. In version 18 a workspace can ask the app to open Settings on one page of its own settings (`minds:open-workspace-settings`: General, Backup, Updates or Suggestions), and the app tells the workspace it takes that ask (`opensWorkspaceSettings` in `minds:embedder-capabilities`). A workspace shared with the account is not told so, and its ask is ignored.
+
+- For developers: `GET` and `PUT /ui/api/workspaces/<agent_id>/suggestion-settings` read and change the two switches in the workspace's chat app through `mngr forward`. They answer 502 with `code` `UNREACHABLE` or `UNSUPPORTED` when the workspace gives no values.
+
+- The workspace chat's "Access Studio from your phone" suggestion opens Settings on the workspace's Sharing with a small bubble pointing at "Email me a Mobile Access Link": "Use this to open Studio on your phone." The bubble goes on "Got it", on a press of the control, and when Settings closes, and Settings opened by hand shows none. It points at the control while sharing is off too, where the control is dimmed and its tooltip says to enable sharing.
+
+- In version 19 of the embed contract, `minds:open-share-settings` takes an optional `coachMark` (the one value is `mobile-access`; any other is ignored and Sharing still opens), and the app tells the workspace it draws such marks (`showsCoachMarks` in `minds:embedder-capabilities`). A workspace shared with the account is not told so.
+
+- For developers: the bubble is a new component, `views/components/CoachBubble.ts`, catalogued in the styleguide page. The share handler carries the mark to the Settings route as `coach`, which Settings hands to the Sharing page once and removes.
+
+- The first run's "Sign in to Imbue" dialog is drawn in the sign-in page's cream and brown rather than as a white card over it.
+
+- The progress bar of a workspace being created keeps moving. A step that takes longer than expected creeps on toward its end instead of stopping partway (it reads four fifths done at its expected time), and the two stretches nothing reported before, `mngr create` starting up and the app's own bookkeeping once it has answered, are steps of their own. The setup page of a first Imbue Cloud workspace no longer opens on "2 minutes left": the steps of a cloud create are seeded from measured runs (about 40 seconds in all).
+
+- Added the brand marks of three more services to the bundled service icons: Instagram (from selfh.st/icons), YouTube (from SVG Logos) and HubSpot (from simple-icons, in its brand orange). Latchkey connects to none of them, so the Permissions page is unchanged; the workspace's chat, which bundles the same directory, draws them in the connector picker of a new workspace's first conversation. The icons' README and attribution list name the three files and their sources.

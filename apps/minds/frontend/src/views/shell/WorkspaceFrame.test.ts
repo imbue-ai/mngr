@@ -100,6 +100,7 @@ function makeContract() {
     IMMERSIVE_REQUEST: "minds:immersive-request",
     IMMERSIVE_CHANGED: "minds:immersive-changed",
     OPEN_LOCAL_FILES: "minds:open-local-files",
+    OPEN_WORKSPACE_SETTINGS: "minds:open-workspace-settings",
     HIGHLIGHT_CHROME: "minds:highlight-chrome",
     CHROME_ANCHORS: [
       "workspace-switcher",
@@ -329,6 +330,8 @@ describe("buildEmbedHandlers", () => {
         opensExternalLinks: false,
         opensCustomSchemeLinks: false,
         opensLocalFiles: true,
+        opensWorkspaceSettings: true,
+        showsCoachMarks: true,
         immersive: true,
         washesFirstRunExit: true,
       },
@@ -341,6 +344,8 @@ describe("buildEmbedHandlers", () => {
         opensExternalLinks: true,
         opensCustomSchemeLinks: true,
         opensLocalFiles: true,
+        opensWorkspaceSettings: true,
+        showsCoachMarks: true,
         immersive: true,
         washesFirstRunExit: true,
       },
@@ -353,12 +358,14 @@ describe("buildEmbedHandlers", () => {
         opensExternalLinks: false,
         opensCustomSchemeLinks: false,
         opensLocalFiles: true,
+        opensWorkspaceSettings: true,
+        showsCoachMarks: true,
         immersive: false,
         washesFirstRunExit: true,
       },
     ]);
     // Someone else's workspace is neither pulled out nor given local files,
-    // whatever the desktop could do for an owned one.
+    // settings or coach marks, whatever the desktop could do for an owned one.
     const shared = makeHandlers({ canPopOut: true, opensExternalLinks: true, isShared: true });
     shared.handlers[shared.contract.WORKSPACE_READY]({});
     expect(shared.ackPayloads).toEqual([
@@ -367,6 +374,8 @@ describe("buildEmbedHandlers", () => {
         opensExternalLinks: true,
         opensCustomSchemeLinks: true,
         opensLocalFiles: false,
+        opensWorkspaceSettings: false,
+        showsCoachMarks: false,
         immersive: true,
         washesFirstRunExit: false,
       },
@@ -399,6 +408,21 @@ describe("buildEmbedHandlers", () => {
         },
       },
     ]);
+    expect(sent).toEqual([]);
+  });
+
+  it("floats Settings over this workspace at the page of its own settings the workspace names, and at General for none or one it does not have", () => {
+    const { contract, handlers, navigations, sent } = makeHandlers();
+    handlers[contract.OPEN_WORKSPACE_SETTINGS]({ group: "suggestions" });
+    handlers[contract.OPEN_WORKSPACE_SETTINGS]({});
+    handlers[contract.OPEN_WORKSPACE_SETTINGS]({ group: "a-group-from-a-newer-workspace" });
+    // Sharing and Permissions are opened by their own messages, never by this one.
+    handlers[contract.OPEN_WORKSPACE_SETTINGS]({ group: "sharing" });
+    const at = (group: string) => ({
+      path: "/settings",
+      params: { workspace: WORKSPACE_AGENT_ID, tab: "workspace", group },
+    });
+    expect(navigations).toEqual([at("suggestions"), at("general"), at("general"), at("general")]);
     expect(sent).toEqual([]);
   });
 
@@ -597,10 +621,28 @@ describe("buildEmbedHandlers", () => {
     expect(navigations).toEqual([wholeWorkspace, wholeWorkspace]);
   });
 
+  it("carries a coach mark it draws to Sharing, and opens Sharing bare for any other", () => {
+    // A newer workspace naming a mark this chrome lacks still lands on Sharing.
+    const { contract, handlers, navigations } = makeHandlers();
+    handlers[contract.OPEN_SHARE_SETTINGS]({ coachMark: "mobile-access" });
+    handlers[contract.OPEN_SHARE_SETTINGS]({ serviceName: "web", coachMark: "mobile-access" });
+    handlers[contract.OPEN_SHARE_SETTINGS]({ coachMark: "a-mark-from-a-newer-workspace" });
+    handlers[contract.OPEN_SHARE_SETTINGS]({ coachMark: 7 });
+    const sharing = { workspace: WORKSPACE_AGENT_ID, tab: "workspace", group: "sharing" };
+    expect(navigations).toEqual([
+      { path: "/settings", params: { ...sharing, coach: "mobile-access" } },
+      { path: "/settings", params: { ...sharing, share_target: "web", coach: "mobile-access" } },
+      { path: "/settings", params: sharing },
+      { path: "/settings", params: sharing },
+    ]);
+  });
+
   it("keeps the owner-only overlays closed over a shared workspace, still answering the AI-keys request", () => {
     const { contract, handlers, navigations, acks } = makeHandlers({ isShared: true });
     handlers[contract.OPEN_SHARE_SETTINGS]({ serviceName: "web" });
+    handlers[contract.OPEN_SHARE_SETTINGS]({ coachMark: "mobile-access" });
     handlers[contract.OPEN_LOCAL_FILES]({});
+    handlers[contract.OPEN_WORKSPACE_SETTINGS]({ group: "suggestions" });
     handlers[contract.OPEN_AI_KEYS_PAGE]({});
     expect(navigations).toEqual([]);
     expect(acks).toEqual([contract.OPEN_AI_KEYS_ACK]);

@@ -22,7 +22,9 @@ import { ForwardPageOverlay } from "./ForwardPageOverlay";
 import { SharedFrameOverlay, sharedStallDelayMs } from "./SharedFrameOverlay";
 import type { ImmersiveChange } from "./immersive";
 import { ImmersiveController } from "./immersive";
+import { findShareCoachMark } from "../../models/sharePanel";
 import { LOCAL_FILES_SECTION } from "../../models/workspacePermissions";
+import { findWorkspaceOwnSettingsGroup } from "../pages/settings/settings-route";
 import type {
   ChromeAnchor,
   DetachedWindowEntry,
@@ -81,6 +83,7 @@ interface EmbedContractModule {
   IMMERSIVE_REQUEST: string;
   IMMERSIVE_CHANGED: string;
   OPEN_LOCAL_FILES: string;
+  OPEN_WORKSPACE_SETTINGS: string;
   HIGHLIGHT_CHROME: string;
   CHROME_ANCHORS: readonly string[];
   REQUEST_ID_PATTERN: RegExp;
@@ -272,11 +275,13 @@ export function buildEmbedHandlers(
     // Float Settings over this machine (kept mounted), at Sharing: the asking
     // app's page, or the whole workspace's when the message names none
     // (contract v13). A name Sharing does not recognize falls back to the
-    // whole workspace too (SharePanelModel.selectTarget).
-    const serviceName =
-      typeof message.serviceName === "string" ? message.serviceName : null;
-    const place = { workspace: workspaceAgentId(), tab: "workspace", group: "sharing" };
-    navigate(SETTINGS_PATH, serviceName === null ? place : { ...place, share_target: serviceName });
+    // whole workspace too (SharePanelModel.selectTarget). A coach mark Sharing
+    // draws rides along as `coach`; one it does not know opens Sharing bare.
+    const place: Record<string, string> = { workspace: workspaceAgentId(), tab: "workspace", group: "sharing" };
+    if (typeof message.serviceName === "string") place.share_target = message.serviceName;
+    const coachMark = findShareCoachMark(message.coachMark);
+    if (coachMark !== null) place.coach = coachMark;
+    navigate(SETTINGS_PATH, place);
   };
   handlers[contract.OPEN_LOCAL_FILES] = () => {
     if (isSharedWorkspace()) return;
@@ -286,6 +291,16 @@ export function buildEmbedHandlers(
       tab: "workspace",
       group: "permissions",
       perm_section: LOCAL_FILES_SECTION,
+    });
+  };
+  handlers[contract.OPEN_WORKSPACE_SETTINGS] = (message) => {
+    if (isSharedWorkspace()) return;
+    // Float Settings over this machine, at the page of the workspace's own settings asked for. A page this
+    // chrome does not have opens General, as no page does.
+    navigate(SETTINGS_PATH, {
+      workspace: workspaceAgentId(),
+      tab: "workspace",
+      group: findWorkspaceOwnSettingsGroup(message.group) ?? "general",
     });
   };
   handlers[contract.BRING_APP_TO_FRONT] = () => bringAppToFront();
@@ -305,10 +320,11 @@ export function buildEmbedHandlers(
     // What this chrome can do, so the workspace's pull-out gesture turns on
     // only where a desktop window can be made, and it hands over the
     // external links it does not open itself only where main opens them.
-    // Every chrome that runs these handlers has Settings, so each
-    // takes OPEN_LOCAL_FILES. Someone else's workspace (specs/shared-with-me,
-    // S12) gets neither: its windows are not this device's to pull out, and
-    // its local files are its owner's.
+    // Every chrome that runs these handlers has Settings, so each takes
+    // OPEN_LOCAL_FILES and OPEN_WORKSPACE_SETTINGS and draws Sharing's coach
+    // marks. Someone else's workspace (specs/shared-with-me, S12) gets none of
+    // them: its windows are not this device's to pull out, and its local
+    // files, its settings and its sharing are its owner's.
     const isShared = isSharedWorkspace();
     sendAck(contract.EMBEDDER_CAPABILITIES, {
       canPopOut: deps.popout !== null && !isShared,
@@ -317,6 +333,8 @@ export function buildEmbedHandlers(
       opensCustomSchemeLinks: deps.openExternalLink !== null,
       opensLocalFiles: !isShared,
       washesFirstRunExit: !isShared,
+      opensWorkspaceSettings: !isShared,
+      showsCoachMarks: !isShared,
     });
   };
   handlers[contract.CHAT_ON_SCREEN] = (message) =>

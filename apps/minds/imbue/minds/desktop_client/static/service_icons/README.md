@@ -4,6 +4,12 @@ Brand marks for the services latchkey can connect to, keyed by latchkey
 canonical service name (`<service_id>.svg`). Used by the Permissions tab's
 service marks.
 
+Three marks are for services latchkey does not connect to: `instagram.svg`,
+`youtube.svg` and `hubspot.svg`. The workspace's chat bundles this directory
+too, and draws them in the connector picker of a new workspace's first
+conversation (`specs/chat-suggestions/spec.md`), which asks which apps the
+user has rather than connecting any.
+
 These are each vendor's own artwork, in the vendor's own colors. Nothing here
 is recolored, and nothing may be: several of these brands publish usage rules
 that forbid altering their logo's colors. A mark that cannot be seen on the
@@ -110,6 +116,9 @@ The CC BY 4.0 set requires attribution wherever the app ships. That lives in
 | `wix-mcp.svg` | simple-icons v13.21.0 (CC0-1.0) |
 | `spotify.svg` | `logos:spotify-icon` |
 | `strava.svg` | `selfhst:strava` |
+| `instagram.svg` | `selfhst:instagram` |
+| `youtube.svg` | `logos:youtube-icon` |
+| `hubspot.svg` | simple-icons v13.21.0 (CC0-1.0) |
 
 The brand-kit files carry the vendor's artwork unaltered, with two mechanical
 normalizations so they behave like the rest of the set: fixed root
@@ -120,13 +129,14 @@ files. Vercel's black triangle names no fill at all, exactly as the vendor
 publishes it; like Notion's unfilled path it paints the SVG default, black,
 which is the brand's color.
 
-Calendly, Umami, Linktree, Webflow and Wix have no color symbol in either
-Iconify set — SVG Logos carries Webflow and Wix only as wordmarks, and
-the others not at all — so they keep the flat simple-icons silhouette the
-whole set used to be. Their fill is written into the file (Calendly `#006BFF`,
-Umami `#000000`, Linktree `#43E55E`, Webflow `#146EF5`, Wix `#0C6EFC`, each
-brand's own color as simple-icons records it) because an `<img>`-loaded SVG
-inherits no color from the page: left implicit, all would paint black.
+Calendly, Umami, Linktree, Webflow, Wix and HubSpot have no color symbol in
+either Iconify set — SVG Logos carries Webflow, Wix and HubSpot only as
+wordmarks, and the others not at all — so they keep the flat simple-icons
+silhouette the whole set used to be. Their fill is written into the file
+(Calendly `#006BFF`, Umami `#000000`, Linktree `#43E55E`, Webflow `#146EF5`,
+Wix `#0C6EFC`, HubSpot `#FF7A59`, each brand's own color as simple-icons
+records it) because an `<img>`-loaded SVG inherits no color from the page:
+left implicit, all would paint black.
 
 Several of the vendor marks are single-color because that is how the brand
 draws them — GitHub, Linear, Sentry, Dropbox, Discord and Yelp in their brand

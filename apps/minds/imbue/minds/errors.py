@@ -167,6 +167,10 @@ class EmptyWelcomeChatError(MindError, ValueError):
     """A welcome chat that is not a first-run arrival was handed over with no turns."""
 
 
+class EmptySuggestionSettingsChangeError(MindError, ValueError):
+    """A change to a workspace's suggestion switches named none of them."""
+
+
 class RemoteCommandRequestError(MindError, ValueError):
     """Raised when a remote-execution request cannot be run as asked, before anything runs.
 

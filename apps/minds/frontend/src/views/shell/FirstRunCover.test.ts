@@ -1,9 +1,10 @@
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { firstRun, toggleStudioType } from "../../models/firstRun";
+import { firstRun } from "../../models/firstRun";
 import { firstRunCover } from "../../models/firstRunCover";
 import type { AnyVnode } from "../../testing";
-import { allText, attrsOf, byId, jsonResponse, renderDeep } from "../../testing";
+import { allText, attrsOf, byId, renderDeep } from "../../testing";
+import { WORKSPACE_READY_LINE } from "../pages/create/FirstRunWelcome";
 import { FirstRunCover, OPENING_WORKSPACE_LINE } from "./FirstRunCover";
 
 function render(routePath: string): AnyVnode | null {
@@ -26,13 +27,13 @@ describe("FirstRunCover", () => {
 
   it("offers no Continue while the workspace is not ready, and one that lands at once when it is", () => {
     vi.spyOn(m, "redraw").mockImplementation(() => undefined);
-    const posted: { context?: string }[] = [];
-    vi.stubGlobal("fetch", (_url: string, init?: RequestInit) => {
-      posted.push(JSON.parse(init?.body as string) as { context?: string });
-      return Promise.resolve(jsonResponse({ chat_id: "agent-chat" }));
+    const requestedUrls: string[] = [];
+    vi.stubGlobal("fetch", (url: string) => {
+      requestedUrls.push(url);
+      return Promise.reject(new Error("the cover asks the desktop client for nothing"));
     });
     firstRun.noteCreate("create-attempt-a", { userId: "u", email: "gleb@example.com", displayName: "Gleb" });
-    firstRunCover.raise("create-attempt-a", false);
+    firstRunCover.raise("create-attempt-a");
 
     const loading = render("/workspace/agent-1") as AnyVnode;
     expect(allText(byId(loading, "creating-welcome"))).toBe("Welcome, Gleb!");
@@ -43,21 +44,19 @@ describe("FirstRunCover", () => {
     firstRunCover.markReady("create-attempt-b");
     expect(byId(render("/workspace/agent-1") as AnyVnode, "creating-continue")).toBeUndefined();
 
-    firstRun.studioTypes = toggleStudioType(firstRun.studioTypes, "film");
     firstRunCover.markReady("create-attempt-a");
     const ready = render("/workspace/agent-1") as AnyVnode;
+    expect(allText(byId(ready, "creating-ready"))).toBe(WORKSPACE_READY_LINE);
     (attrsOf(byId(ready, "creating-continue") as AnyVnode).onclick as () => void)();
 
-    // The cover is down at the press, and the answer as it stood goes to the workspace.
+    // The cover is down at the press, and nothing more is handed to the workspace: its seed went at done.
     expect(firstRunCover.state).toBeNull();
-    expect(posted).toEqual([
-      { title: "Welcome", turns: [], is_first_run: true, context: "I want to use Studio for: Film." },
-    ]);
+    expect(requestedUrls).toEqual([]);
   });
 
   it("drops when the user goes somewhere that is neither the creation page nor a workspace", async () => {
     vi.spyOn(m, "redraw").mockImplementation(() => undefined);
-    firstRunCover.raise("create-attempt-a", false);
+    firstRunCover.raise("create-attempt-a");
 
     expect(render("/settings")).toBeNull();
     await Promise.resolve();

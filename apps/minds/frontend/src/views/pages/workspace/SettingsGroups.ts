@@ -1,6 +1,7 @@
 // A workspace's own settings, one page each: General (name, colour, size,
-// owner, the danger zone), Backup, and Updates. Settings' Workspace & apps tab
-// lists them in its rail (SettingsPage.ts) and draws the selected one here.
+// owner, the danger zone), Backup, Updates, and Suggestions. Settings'
+// Workspace & apps tab lists them in its rail (SettingsPage.ts) and draws the
+// selected one here.
 
 import m from "mithril";
 import { getAppContext } from "../../../app-context";
@@ -37,12 +38,11 @@ import { MachineSizeInput } from "../../components/MachineSizeInput";
 import { updateNavDotFor } from "../../../models/updateSurfaces";
 import { shownUpdatePill } from "../../shell/workspace-notices";
 import { BackupGroup } from "./BackupGroup";
+import { SuggestionsGroup } from "./SuggestionsGroup";
 import { UpdatesGroup } from "./UpdatesGroup";
 import { Spinner } from "../../components/Spinner";
+import type { WorkspaceOwnSettingsGroup } from "../settings/settings-route";
 import { OWNER_SECTION_ID, ownerSectionQuery, rememberSettingsPlace } from "../settings/settings-route";
-
-/** The pages this module draws. */
-export type WorkspaceOwnSettingsGroup = "general" | "backup" | "updates";
 
 export interface WorkspaceSettingsGroupAttrs {
   model: WorkspaceOptionsModel;
@@ -102,6 +102,7 @@ export function WorkspaceSettingsGroup(): m.Component<WorkspaceSettingsGroupAttr
         group === "general" ? renderGeneralGroup(model, local) : null,
         group === "backup" ? m(BackupGroup, { agentId: data.agent_id }) : null,
         group === "updates" ? m(UpdatesGroup, { agentId: data.agent_id }) : null,
+        group === "suggestions" ? m(SuggestionsGroup, { agentId: data.agent_id }) : null,
         // Fixed-position when open and nothing at all when closed, so they ride
         // beside the page rather than inside it.
         renderDestroyDialog(model, local),

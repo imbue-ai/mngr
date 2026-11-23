@@ -40,7 +40,7 @@ import { ChatError } from "./start/ChatError";
 import type { ChatErrorAttrs } from "./start/ChatError";
 import { ShellState } from "../shell/shell-state";
 import { CreatingPage, failureTurn } from "./CreatingPage";
-import { STUDIO_TYPE_QUESTION } from "./create/FirstRunWelcome";
+import { SETTING_UP_LINE } from "./StartPage";
 
 describe("failureTurn", () => {
   /** The turn as one live component, so its See details stays open across a
@@ -575,7 +575,7 @@ describe("CreatingPage across a route change", () => {
     (page.onremove as () => void).call(page);
   });
 
-  it("welcomes a first-run create, hands the picks over while it builds, and enters under the cover once the workspace has them", async () => {
+  it("welcomes a first-run create with its progress alone, and enters under the cover once the workspace has its seed", async () => {
     firstRun.noteCreate("create-attempt-w", { userId: "user-1", email: "gleb@example.com", displayName: "Gleb Denisov" });
     const { page, entered, seedBodies, settleSeed, setStatus } = mountDoneAttempt(
       "create-attempt-w",
@@ -585,22 +585,19 @@ describe("CreatingPage across a route change", () => {
     const render = (): m.Vnode => (page.view as (v: m.Vnode) => m.Vnode).call(page, vnodeFor("create-attempt-w"));
     await vi.waitFor(() => expect(seedBodies).toHaveLength(1));
 
-    // The welcome, not the transcript: the greeting, the question, the pills, and no Continue while it builds.
+    // The welcome, not the transcript: the greeting, the progress under it with its details toggle, nothing to
+    // pick, and no Continue while it builds.
     const building = renderDeep(render());
     expect(attrsOf(building as AnyVnode)["data-first-run"]).toBe("true");
     expect(allText(byId(building, "creating-welcome"))).toBe("Welcome, Gleb!");
-    expect(allText(byId(building, "studio-type-question"))).toBe(STUDIO_TYPE_QUESTION);
-    expect(byId(building, "creating-continue")).toBeUndefined();
+    expect(allText(byId(building, "creating-setting-up"))).toBe(SETTING_UP_LINE);
+    expect(byId(building, "creating-welcome-bar")).toBeDefined();
+    const buttons = collectVnodes(building).filter((node) => node.tag === "button");
+    expect(buttons.map((button) => allText(button))).toEqual(["Show details"]);
+    expect(collectVnodes(building).filter((node) => node.tag === "input")).toEqual([]);
     expect(collectText(building).join("")).not.toContain(MANIFESTO_OPENER);
-    // The first hand-over carries the arrival flag and nothing picked yet.
-    expect(seedBodies[0]).toEqual({ title: "Welcome", turns: [], is_first_run: true, context: "" });
-
-    // A pick is handed over again at once, so the seed at the attempt's end carries it.
-    const writing = collectVnodes(building).find((node) => attrsOf(node)["data-studio-type"] === "writing") as AnyVnode;
-    (attrsOf(writing).onclick as () => void)();
-    expect(seedBodies).toHaveLength(2);
-    expect(seedBodies[1].context).toBe("I want to use Studio for: Writing.");
-    expect(attrsOf(collectVnodes(renderDeep(render())).find((node) => attrsOf(node)["data-studio-type"] === "writing") as AnyVnode)["aria-pressed"]).toBe("true");
+    // The hand-over at load carries the arrival flag and nothing else.
+    expect(seedBodies).toEqual([{ title: "Welcome", turns: [], is_first_run: true }]);
 
     // Done: nothing is offered here. The workspace is entered only once it has the hand-over (which tells it this
     // is a first run), under the shell's cover, and the cover is ready only when the workspace says so.
@@ -616,7 +613,8 @@ describe("CreatingPage across a route change", () => {
     settleSeed();
     await vi.advanceTimersByTimeAsync(WELCOME_CHAT_WAIT_BOUND_MS + 1_000);
     expect(firstRunCover.state?.isReady).toBe(true);
-    expect(seedBodies.at(-1)?.context).toBe("I want to use Studio for: Writing.");
+    // The hand-overs at done carry the same body: nothing was asked on the page, so nothing more travels.
+    expect(seedBodies.slice(1)).toEqual([seedBodies[0], seedBodies[0]]);
     (page.onremove as () => void).call(page);
   });
 

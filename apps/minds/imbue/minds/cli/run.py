@@ -913,12 +913,14 @@ def run(
     # The proxy signs its TLS leaves with the local CA it keeps under this host
     # dir, which is the one it was spawned with; every probe of it pins that CA.
     forward_ca_cert_path = local_ca_cert_path(mngr_host_dir)
+    # Shared by the welcome chat's seed and the settings that live only in a workspace's chat app.
+    chat_app_route = make_chat_app_forward_route(mngr_forward_port, preauth_cookie, forward_ca_cert_path)
     # Shared by the agent creator (it seeds a finished attempt's held conversation) and the creation
     # page's route (it hands the conversation over, and waits on the seed while the page is open).
     welcome_chat_seeder = WelcomeChatSeeder(
         mngr_caller=mngr_caller,
         backend_resolver=backend_resolver,
-        chat_app_route=make_chat_app_forward_route(mngr_forward_port, preauth_cookie, forward_ca_cert_path),
+        chat_app_route=chat_app_route,
     )
     # Materializes the workspace profile snapshot (spec section 8): on create (below, riding
     # the creator's done hook right after the welcome chat is seeded, with the device's zone
@@ -1084,6 +1086,7 @@ def run(
         notification_dispatcher=notification_dispatcher,
         paths=paths,
         welcome_chat_seeder=welcome_chat_seeder,
+        chat_app_route=chat_app_route,
         envelope_stream_consumer=consumer,
         session_store=session_store,
         minds_config=minds_config,
