@@ -11,6 +11,7 @@ from datetime import timezone
 from pathlib import Path
 from threading import Lock
 from types import SimpleNamespace
+from typing import Any
 from typing import cast
 from unittest.mock import patch
 from uuid import UUID
@@ -45,6 +46,7 @@ from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import split_cli_args_string
+from imbue.mngr.config.external_settings import desugar_settings_overrides
 from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.errors import AgentStartError
@@ -104,6 +106,7 @@ from imbue.mngr_claude.claude_config import build_credential_sync_hooks_config
 from imbue.mngr_claude.claude_config import build_permission_auto_allow_hooks_config
 from imbue.mngr_claude.claude_config import build_readiness_hooks_config
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
+from imbue.mngr_claude.claude_config import fold_hook_configs
 from imbue.mngr_claude.claude_config import get_agent_hook_settings_path
 from imbue.mngr_claude.claude_config import get_managed_settings_path
 from imbue.mngr_claude.dialogs import BypassPermissionsWarning
@@ -143,6 +146,7 @@ from imbue.mngr_claude.plugin import _sync_user_resources
 from imbue.mngr_claude.plugin import _write_generated_files
 from imbue.mngr_claude.plugin import agent_field_generators
 from imbue.mngr_claude.plugin import approve_api_key_for_claude
+from imbue.mngr_claude.plugin import build_mngr_hook_configs
 from imbue.mngr_claude.plugin import compute_claude_json_flags
 from imbue.mngr_claude.plugin import compute_settings_json_flags
 from imbue.mngr_claude.plugin import get_files_for_deploy
@@ -2829,7 +2833,7 @@ def test_configure_agent_hooks_writes_managed_file_not_settings_local(
         host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False, use_env_config_dir=True)
     )
 
-    agent._configure_agent_hooks(host, temp_mngr_ctx)
+    agent._configure_agent_hooks(host)
 
     # The managed settings file holds the hooks.
     managed_path = get_managed_settings_path(agent._get_agent_dir())
@@ -2853,7 +2857,7 @@ def test_configure_agent_hooks_works_without_a_git_repo(
         host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False, use_env_config_dir=True)
     )
 
-    agent._configure_agent_hooks(host, temp_mngr_ctx)
+    agent._configure_agent_hooks(host)
 
     managed_path = get_managed_settings_path(agent._get_agent_dir())
     assert managed_path.exists()
@@ -2874,7 +2878,7 @@ def test_configure_agent_hooks_creates_managed_settings_file(
         host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False, use_env_config_dir=True)
     )
 
-    agent._configure_agent_hooks(host, temp_mngr_ctx)
+    agent._configure_agent_hooks(host)
 
     managed_path = get_managed_settings_path(agent._get_agent_dir())
     assert managed_path.exists()
@@ -2905,7 +2909,7 @@ def test_configure_agent_hooks_applies_settings_overrides_in_managed_file(
         ),
     )
 
-    agent._configure_agent_hooks(host, temp_mngr_ctx)
+    agent._configure_agent_hooks(host)
 
     content = get_managed_settings_path(agent._get_agent_dir()).read_text()
     settings = json.loads(content)
@@ -3074,7 +3078,7 @@ def test_build_upgraded_files_leaves_out_a_settings_file_whose_hooks_already_mat
         temp_mngr_ctx,
         agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
     )
-    agent._configure_agent_hooks(host, temp_mngr_ctx)
+    agent._configure_agent_hooks(host)
     managed_settings_text = get_managed_settings_path(agent._get_agent_dir()).read_text()
     inputs = _make_upgrade_inputs(
         agent, str(agent.assemble_command(host, (), None)), {_MANAGED_SETTINGS_PATH: managed_settings_text}, ()
@@ -3234,7 +3238,7 @@ def test_configure_agent_hooks_does_not_touch_existing_settings_local(
         host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False, use_env_config_dir=True)
     )
 
-    agent._configure_agent_hooks(host, temp_mngr_ctx)
+    agent._configure_agent_hooks(host)
 
     # settings.local.json is byte-for-byte unchanged.
     assert settings_local.read_text() == original_text
@@ -3269,7 +3273,7 @@ def test_configure_agent_hooks_overwrites_managed_file_fresh(
     stale = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "mkdir -p /events/stale"}]}]}}
     managed_path.write_text(json.dumps(stale))
 
-    agent._configure_agent_hooks(host, temp_mngr_ctx)
+    agent._configure_agent_hooks(host)
 
     settings = json.loads(managed_path.read_text())
     stop_hooks = settings["hooks"].get("Stop", [])
@@ -3293,7 +3297,7 @@ def test_configure_agent_hooks_adds_credential_sync_on_macos(
     )
 
     with patch(f"{_CLAUDE_AGENT_MODULE}.is_macos", return_value=True):
-        agent._configure_agent_hooks(host, temp_mngr_ctx)
+        agent._configure_agent_hooks(host)
 
     settings = json.loads(get_managed_settings_path(agent._get_agent_dir()).read_text())
 
@@ -3323,7 +3327,7 @@ def test_configure_agent_hooks_skips_credential_sync_when_disabled(
     )
 
     with patch(f"{_CLAUDE_AGENT_MODULE}.is_macos", return_value=True):
-        agent._configure_agent_hooks(host, temp_mngr_ctx)
+        agent._configure_agent_hooks(host)
 
     settings = json.loads(get_managed_settings_path(agent._get_agent_dir()).read_text())
 
@@ -3406,7 +3410,7 @@ def test_configure_agent_hooks_adds_permission_auto_allow_when_enabled(
         ClaudeAgentConfig(check_installation=False, auto_allow_permissions=True, use_env_config_dir=True),
     )
 
-    agent._configure_agent_hooks(host, temp_mngr_ctx)
+    agent._configure_agent_hooks(host)
 
     managed_path = get_managed_settings_path(agent._get_agent_dir())
     assert managed_path.exists()
@@ -3437,7 +3441,7 @@ def test_configure_agent_hooks_does_not_add_permission_auto_allow_by_default(
         host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False, use_env_config_dir=True)
     )
 
-    agent._configure_agent_hooks(host, temp_mngr_ctx)
+    agent._configure_agent_hooks(host)
 
     settings = json.loads(get_managed_settings_path(agent._get_agent_dir()).read_text())
 
@@ -3515,6 +3519,209 @@ def test_provision_configures_readiness_hooks_in_env_config_dir_mode(
     settings = json.loads(managed_path.read_text())
     assert "hooks" in settings
     assert "SessionStart" in settings["hooks"]
+
+
+_SETTINGS_OVERRIDES_CONFIG_PATH = ("agent_types", "claude", "settings_overrides")
+_USER_STOP_HOOK_GROUP = {"hooks": [{"type": "command", "command": "echo user-stop-hook-61927"}]}
+
+
+def _provision_with_settings_overrides(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    is_config_dir_isolated: bool,
+    # In the form a user writes in their mngr config, with any `__mngr_merge` map.
+    settings_overrides: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Provision a claude agent as create does; return the settings file holding its hooks, and mngr's own hooks."""
+    if not is_config_dir_isolated:
+        shared_dir = tmp_path / "shared"
+        shared_dir.mkdir()
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(shared_dir))
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(
+            check_installation=False,
+            isolate_local_config_dir=is_config_dir_isolated,
+            auto_dismiss_dialogs_at_startup=True,
+            settings_overrides=desugar_settings_overrides(settings_overrides, _SETTINGS_OVERRIDES_CONFIG_PATH),
+        ),
+    )
+    _init_git_with_gitignore(agent.work_dir)
+    agent.provision(host=host, options=CreateAgentOptions(agent_type=AgentTypeName("claude")), mngr_ctx=temp_mngr_ctx)
+
+    if is_config_dir_isolated:
+        settings_path = agent.get_claude_config_dir() / "settings.json"
+    else:
+        settings_path = get_managed_settings_path(agent._get_agent_dir())
+    mngr_hook_configs = build_mngr_hook_configs(agent.agent_config, is_unattended=agent.is_unattended_enabled())
+    return json.loads(settings_path.read_text()), fold_hook_configs({}, mngr_hook_configs)["hooks"]
+
+
+@pytest.mark.parametrize("is_config_dir_isolated", [True, False])
+def test_provision_puts_mngrs_stop_group_after_the_users_when_settings_overrides_assigns_stop(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+    is_config_dir_isolated: bool,
+) -> None:
+    settings, mngr_hooks = _provision_with_settings_overrides(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        monkeypatch,
+        is_config_dir_isolated=is_config_dir_isolated,
+        settings_overrides={
+            "hooks": {"Stop": [_USER_STOP_HOOK_GROUP]},
+            "__mngr_merge": {"hooks": "extend", "hooks.Stop": "assign"},
+        },
+    )
+
+    assert settings["hooks"]["Stop"] == [_USER_STOP_HOOK_GROUP, *mngr_hooks["Stop"]]
+    assert {**settings["hooks"], "Stop": mngr_hooks["Stop"]} == mngr_hooks
+
+
+@pytest.mark.parametrize("is_config_dir_isolated", [True, False])
+def test_provision_keeps_every_mngr_hook_event_when_settings_overrides_assigns_hooks(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+    is_config_dir_isolated: bool,
+) -> None:
+    settings, mngr_hooks = _provision_with_settings_overrides(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        monkeypatch,
+        is_config_dir_isolated=is_config_dir_isolated,
+        settings_overrides={"hooks": {"Stop": [_USER_STOP_HOOK_GROUP]}, "__mngr_merge": {"hooks": "assign"}},
+    )
+
+    assert settings["hooks"] == {**mngr_hooks, "Stop": [_USER_STOP_HOOK_GROUP, *mngr_hooks["Stop"]]}
+
+
+@pytest.mark.parametrize("is_config_dir_isolated", [True, False])
+def test_provision_accepts_a_bare_hooks_override_that_drops_only_mngrs_hooks(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+    is_config_dir_isolated: bool,
+) -> None:
+    settings, mngr_hooks = _provision_with_settings_overrides(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        monkeypatch,
+        is_config_dir_isolated=is_config_dir_isolated,
+        settings_overrides={"hooks": {"Stop": [_USER_STOP_HOOK_GROUP]}},
+    )
+
+    assert settings["hooks"] == {**mngr_hooks, "Stop": [_USER_STOP_HOOK_GROUP, *mngr_hooks["Stop"]]}
+
+
+@pytest.mark.parametrize("is_config_dir_isolated", [True, False])
+def test_provision_appends_the_users_stop_group_after_mngrs_when_settings_overrides_extends_stop(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+    is_config_dir_isolated: bool,
+) -> None:
+    settings, mngr_hooks = _provision_with_settings_overrides(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        monkeypatch,
+        is_config_dir_isolated=is_config_dir_isolated,
+        settings_overrides={"hooks": {"Stop": [_USER_STOP_HOOK_GROUP]}, "__mngr_merge": {"hooks.Stop": "extend"}},
+    )
+
+    assert settings["hooks"] == {**mngr_hooks, "Stop": [*mngr_hooks["Stop"], _USER_STOP_HOOK_GROUP]}
+
+
+@pytest.mark.parametrize("is_config_dir_isolated", [True, False])
+def test_provision_writes_exactly_mngrs_hooks_when_settings_overrides_is_empty(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+    is_config_dir_isolated: bool,
+) -> None:
+    settings, mngr_hooks = _provision_with_settings_overrides(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        monkeypatch,
+        is_config_dir_isolated=is_config_dir_isolated,
+        settings_overrides={},
+    )
+
+    assert list(settings["hooks"].items()) == list(mngr_hooks.items())
+
+
+@pytest.mark.parametrize("is_config_dir_isolated", [True, False])
+def test_provision_refuses_a_settings_overrides_hooks_value_that_is_not_a_map(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+    is_config_dir_isolated: bool,
+) -> None:
+    with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
+        _provision_with_settings_overrides(
+            local_provider,
+            tmp_path,
+            temp_mngr_ctx,
+            monkeypatch,
+            is_config_dir_isolated=is_config_dir_isolated,
+            settings_overrides={"hooks": "x", "__mngr_merge": {"hooks": "assign"}},
+        )
+
+    assert exc_info.value.only_exception_is_instance_of(ConfigParseError)
+    assert str(exc_info.value.exceptions[0]).startswith(
+        "`hooks` in the agent type's `settings_overrides` must be a map from hook event name"
+    )
+
+
+@pytest.mark.parametrize("is_config_dir_isolated", [True, False])
+@pytest.mark.parametrize(
+    "settings_overrides",
+    [
+        {"hooks": {"Stop": "x"}, "__mngr_merge": {"hooks": "extend", "hooks.Stop": "assign"}},
+        {"hooks": {"Stop": ["x"]}, "__mngr_merge": {"hooks.Stop": "extend"}},
+        {"hooks": {"Stop": [{"hooks": "echo x"}]}, "__mngr_merge": {"hooks": "extend", "hooks.Stop": "assign"}},
+    ],
+    ids=["str", "list_of_str", "group_hooks_str"],
+)
+def test_provision_refuses_a_settings_overrides_hook_event_that_is_not_a_list_of_groups(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+    is_config_dir_isolated: bool,
+    settings_overrides: dict[str, Any],
+) -> None:
+    with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
+        _provision_with_settings_overrides(
+            local_provider,
+            tmp_path,
+            temp_mngr_ctx,
+            monkeypatch,
+            is_config_dir_isolated=is_config_dir_isolated,
+            settings_overrides=settings_overrides,
+        )
+
+    assert exc_info.value.only_exception_is_instance_of(ConfigParseError)
+    assert str(exc_info.value.exceptions[0]).startswith(
+        "`hooks.Stop` in the agent type's `settings_overrides` must be a list of hook groups"
+    )
 
 
 def test_provision_shared_mode_dismisses_dialogs_in_global_config_but_not_permissions(
@@ -7006,10 +7213,6 @@ def test_build_settings_json_extend_hooks_concatenates_session_start() -> None:
     """A ``hooks__extend.SessionStart__extend`` override concatenates onto mngr's
     own readiness ``SessionStart`` group instead of replacing it -- both groups
     present -- while preserving the other hook events mngr installed.
-
-    Writing the intermediate ``hooks`` key as ``hooks__extend`` is what merges
-    onto the base hooks dict; a bare ``hooks`` would assign-and-narrow (dropping
-    mngr's other hook events).
     """
     ctx = ProvisioningContext(is_unattended=False)
     user_group = {"matcher": "*", "hooks": [{"type": "command", "command": "echo user"}]}
@@ -7025,6 +7228,74 @@ def test_build_settings_json_extend_hooks_concatenates_session_start() -> None:
     assert user_group in session_start
     # Other hook events mngr installed (e.g. Notification) survive the extend.
     assert len(data["hooks"]) >= 2
+
+
+_HOME_STOP_HOOK_GROUP = {"hooks": [{"type": "command", "command": "echo home-stop-hook-30518"}]}
+
+
+def _write_home_settings_with_a_stop_hook() -> Path:
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(json.dumps({"hooks": {"Stop": [_HOME_STOP_HOOK_GROUP]}}))
+    return claude_dir
+
+
+def test_build_settings_json_refuses_a_bare_override_that_drops_a_home_hook() -> None:
+    claude_dir = _write_home_settings_with_a_stop_hook()
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides=desugar_settings_overrides(
+            {"hooks": {"Stop": [_USER_STOP_HOOK_GROUP]}, "__mngr_merge": {"hooks": "extend"}},
+            _SETTINGS_OVERRIDES_CONFIG_PATH,
+        ),
+    )
+
+    with pytest.raises(ConfigParseError, match="hooks.Stop") as exc_info:
+        _build_settings_json(claude_dir, config, ProvisioningContext(is_unattended=False), sync_local=True)
+    assert str(claude_dir / "settings.json") in str(exc_info.value)
+
+
+def test_build_settings_json_assign_over_a_home_hook_event_drops_the_home_group_but_not_mngrs() -> None:
+    claude_dir = _write_home_settings_with_a_stop_hook()
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides=desugar_settings_overrides(
+            {"hooks": {"Stop": [_USER_STOP_HOOK_GROUP]}, "__mngr_merge": {"hooks": "extend", "hooks.Stop": "assign"}},
+            _SETTINGS_OVERRIDES_CONFIG_PATH,
+        ),
+    )
+
+    content = _build_settings_json(claude_dir, config, ProvisioningContext(is_unattended=False), sync_local=True)
+
+    assert json.loads(content)["hooks"]["Stop"] == [
+        _USER_STOP_HOOK_GROUP,
+        *build_readiness_hooks_config()["hooks"]["Stop"],
+    ]
+
+
+@pytest.mark.parametrize(
+    "settings_overrides",
+    [
+        {"hooks": {"Stop": "x"}, "__mngr_merge": {"hooks.Stop": "extend"}},
+        {"hooks": {"Stop": "x"}},
+        {"hooks": {"Stop": "x"}, "__mngr_merge": {"hooks": "extend"}},
+    ],
+    ids=["extend", "bare", "bare_under_extended_hooks"],
+)
+def test_build_settings_json_refuses_a_malformed_hook_event_over_a_home_hook_with_the_shape_error(
+    settings_overrides: dict[str, Any],
+) -> None:
+    claude_dir = _write_home_settings_with_a_stop_hook()
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides=desugar_settings_overrides(settings_overrides, _SETTINGS_OVERRIDES_CONFIG_PATH),
+    )
+
+    with pytest.raises(ConfigParseError) as exc_info:
+        _build_settings_json(claude_dir, config, ProvisioningContext(is_unattended=False), sync_local=True)
+    assert str(exc_info.value).startswith(
+        "`hooks.Stop` in the agent type's `settings_overrides` must be a list of hook groups"
+    )
 
 
 def test_build_settings_json_output_has_no_extend_markers() -> None:

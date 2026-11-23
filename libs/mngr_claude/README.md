@@ -44,9 +44,9 @@ When isolation is disabled (shared mode):
   layers it natively. With no per-agent config dir here, instead:
   - mngr writes its hooks **and** the resolved `settings_overrides` patch into the
     managed `claude --settings` file, which Claude layers (highest precedence) over
-    the user's shared config. The fold's base is mngr's hooks, not the shared config
-    (Claude layers that itself), so narrowing here only guards against an override
-    dropping mngr's hooks.
+    the user's shared config. The fold's base is only mngr's hooks, not the shared
+    config (Claude layers that itself), and an override never removes those, so
+    nothing here can narrow.
   - a user-supplied `--settings` (in `cli_args`/`agent_args`) is **rejected** at
     provision: mngr already uses `--settings` here and can't reliably merge a second
     one (its value may be inline JSON, not a file). Put those settings in
@@ -73,6 +73,11 @@ allow = ["Bash(npm *)"]
 [agent_types.claude.settings_overrides.__mngr_merge]
 "permissions.allow" = "extend"   # or "assign"
 ```
+
+mngr's own hooks survive any override, since mngr needs them to track the agent's
+turns: an override that assigns over a hook event (`"hooks.Stop" = "assign"`) or over
+all of `hooks` replaces everything there except mngr's entries, which then follow the
+user's. A bare key that would drop only mngr's hooks is therefore not a narrowing.
 
 **macOS subscription users:** keep isolation **off**. Claude Code hashes
 `CLAUDE_CONFIG_DIR` into its macOS keychain label, so an isolated agent gets a

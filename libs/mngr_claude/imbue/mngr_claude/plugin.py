@@ -75,6 +75,7 @@ from imbue.mngr.config.external_settings import apply_settings_patch
 from imbue.mngr.config.field_markers import SettingsPatchField
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import ConfigError
+from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import InvalidUpgradeInputError
 from imbue.mngr.errors import NoCommandDefinedError
@@ -573,6 +574,58 @@ def build_mngr_hook_configs(config: ClaudeAgentConfig, *, is_unattended: bool) -
     )
 
 
+_HOOK_GROUP_EXAMPLE: Final[str] = '{hooks = [{type = "command", command = "..."}]}'
+
+
+@pure
+def _is_hook_group_list(value: Any) -> bool:
+    """Whether ``value`` is a list of hook groups, each a map whose ``hooks`` is a list of maps."""
+    return isinstance(value, list) and all(
+        isinstance(group, dict)
+        and isinstance(group.get("hooks"), list)
+        and all(isinstance(hook, dict) for hook in group["hooks"])
+        for group in value
+    )
+
+
+@pure
+def _check_settings_overrides_hooks_shape(settings_overrides: Mapping[str, Any]) -> None:
+    """Raise ``ConfigParseError`` if the ``hooks`` that ``settings_overrides`` sets are not shaped as Claude reads them."""
+    hooks = apply_settings_patch(
+        {}, settings_overrides, allow_narrowing=True, base_description="an empty Claude settings file"
+    ).get("hooks", {})
+    if not isinstance(hooks, dict):
+        raise ConfigParseError(
+            "`hooks` in the agent type's `settings_overrides` must be a map from hook event name to a list of "
+            f"hook groups, e.g. `hooks = {{Stop = [{_HOOK_GROUP_EXAMPLE}]}}`."
+        )
+    for event_name, groups in hooks.items():
+        if not _is_hook_group_list(groups):
+            raise ConfigParseError(
+                f"`hooks.{event_name}` in the agent type's `settings_overrides` must be a list of hook groups, "
+                f"each a map like `{_HOOK_GROUP_EXAMPLE}`."
+            )
+
+
+def _fold_mngr_hooks_and_settings_overrides(
+    base_data: dict[str, Any],
+    hook_configs: list[dict[str, Any]],
+    settings_overrides: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Fold ``hook_configs`` and then ``settings_overrides`` onto ``base_data``, keeping mngr's hooks through any override.
+
+    ``hook_configs`` is folded again after the patch, so in a hook event the patch assigned, mngr's groups follow
+    the user's.
+    """
+    patched = apply_settings_patch(
+        fold_hook_configs(base_data, hook_configs),
+        settings_overrides,
+        allow_narrowing=True,
+        base_description="mngr's Claude settings",
+    )
+    return fold_hook_configs(patched, hook_configs)
+
+
 @pure
 def _build_resumable_session_gate(encoded_project_dir: str, session_id_expression: str) -> str:
     """Shell gate that succeeds iff claude can actually resume ``session_id_expression``.
@@ -825,15 +878,17 @@ def _build_settings_json(
 ) -> str:
     """Build settings.json content for per-agent config dirs.
 
-    Builds the provision base ``B`` (home settings.json or generated defaults + context
-    flags + mngr's own hooks), then folds the user's ``settings_overrides`` patch onto it
-    via ``apply_settings_patch`` (see that function for the fold semantics and the narrowing
-    guard, gated by ``allow_narrowing``).
+    Folds mngr's own hooks and the user's ``settings_overrides`` patch onto the home
+    settings.json (or generated defaults) plus the context flags, via
+    ``_fold_mngr_hooks_and_settings_overrides``. First refuses a patch whose hooks are
+    malformed and then, unless ``allow_narrowing`` is set, one that would drop a value
+    from the home settings (or defaults).
 
     The hooks land in the config-dir ``settings.json`` (the "user" layer Claude reads from
     ``$CLAUDE_CONFIG_DIR``) rather than a managed ``--settings`` file, so a user's own
     ``--settings`` passes through and Claude layers it natively.
     """
+    _check_settings_overrides_hooks_shape(config.settings_overrides)
     source = source_claude_dir / "settings.json"
     if sync_local and source.exists():
         try:
@@ -849,11 +904,10 @@ def _build_settings_json(
     # Flags are flat scalars, so a shallow update is correct here.
     data.update(compute_settings_json_flags(ctx))
 
-    # Fold in mngr's own hooks (concatenated into the hook event lists by
-    # merge_hooks_config), then fold the user's settings_overrides patch onto that base.
-    data = fold_hook_configs(data, build_mngr_hook_configs(config, is_unattended=is_unattended))
-    data = apply_settings_patch(
-        data, config.settings_overrides, allow_narrowing=allow_narrowing, base_description=base_description
+    if not allow_narrowing:
+        apply_settings_patch(data, config.settings_overrides, allow_narrowing=False, base_description=base_description)
+    data = _fold_mngr_hooks_and_settings_overrides(
+        data, build_mngr_hook_configs(config, is_unattended=is_unattended), config.settings_overrides
     )
     # Applied last so a resolved agent-type setting (currently only `output_style`) wins
     # over a settings_overrides value for the same key.
@@ -1932,7 +1986,7 @@ class ClaudeCoreAgent(
             )
         return scripts
 
-    def _configure_agent_hooks(self, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
+    def _configure_agent_hooks(self, host: OnlineHostInterface) -> None:
         """Write mngr's hooks (and the user's settings_overrides) to the managed settings file.
 
         This is the ``use_env_config_dir``-mode channel only. In that mode there
@@ -1952,20 +2006,15 @@ class ClaudeCoreAgent(
         sync_credentials_on_login is set, and the permission auto-allow hook when
         unattended. Then folds the user's ``settings_overrides`` patch onto that,
         so the managed file is the single ``--settings`` overlay Claude layers
-        (highest precedence) over the user's shared config -- the base for the
-        fold is mngr's hooks (not the shared config, which Claude layers itself),
-        so narrowing here only guards against an override dropping mngr's hooks.
+        (highest precedence) over the user's shared config. The fold's base is
+        empty (Claude layers the shared config itself), so there is nothing here
+        for an override to narrow.
         """
-        # The always-on readiness hooks, plus the optional credential-sync (macOS) and
-        # permission auto-allow hooks, with the user's settings_overrides folded on top.
-        settings = fold_hook_configs(
-            {}, build_mngr_hook_configs(self.agent_config, is_unattended=self.is_unattended_enabled())
-        )
-        settings = apply_settings_patch(
-            settings,
+        _check_settings_overrides_hooks_shape(self.agent_config.settings_overrides)
+        settings = _fold_mngr_hooks_and_settings_overrides(
+            {},
+            build_mngr_hook_configs(self.agent_config, is_unattended=self.is_unattended_enabled()),
             self.agent_config.settings_overrides,
-            allow_narrowing=mngr_ctx.config.allow_settings_key_assignment_narrowing,
-            base_description="mngr's managed Claude hooks",
         )
         # Folded on last so a role's `output_style` wins over a settings_overrides
         # outputStyle. Merged into the resolved dict rather than layered as config, so it
@@ -2260,7 +2309,7 @@ class ClaudeCoreAgent(
             # resolved predicate (not the deprecated use_env_config_dir alias) so it
             # also fires when shared mode is set via isolate_local_config_dir=False.
             if not self._is_isolated_config_dir():
-                self._configure_agent_hooks(host, mngr_ctx)
+                self._configure_agent_hooks(host)
 
             # should be done by now, just wanted to do in parallel for latency reasons
             provision_scripts_thread.join(60.0)

@@ -508,6 +508,33 @@ def test_upgrade_adds_no_settings_overrides_hook_of_the_running_config(
     assert managed_settings_path.read_bytes() == created_settings_bytes
 
 
+@pytest.mark.rsync
+@_EITHER_CONFIG_DIR_MODE
+def test_upgrade_finds_a_just_created_agent_whose_settings_overrides_assign_over_a_hook_event_current(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+    base_config: ClaudeAgentConfig,
+) -> None:
+    """An agent created with `__mngr_merge = {"hooks" = "extend", "hooks.Stop" = "assign"}` already has the hooks upgrade writes."""
+    created_config = base_config.model_copy_update(
+        to_update(
+            base_config.field_ref().settings_overrides,
+            {"model": "opus[1m]", "hooks__extend": {"Stop__assign": [_USER_HOOK_GROUP]}},
+        )
+    )
+    agent = _create_claude_agent(local_provider, tmp_path, temp_mngr_ctx, monkeypatch, created_config)
+    settings_path = _get_hook_settings_path(agent)
+    created_settings_bytes = settings_path.read_bytes()
+
+    outcome = run_upgrade_as_cli(agent)
+
+    assert outcome == make_current_outcome(agent)
+    assert settings_path.read_bytes() == created_settings_bytes
+    assert _read_live_hooks(agent)["Stop"] == [_USER_HOOK_GROUP, *build_readiness_hooks_config()["hooks"]["Stop"]]
+
+
 @pytest.mark.tmux
 @pytest.mark.rsync
 def test_upgrade_keeps_the_hooks_mngr_did_not_write_and_drops_a_stale_mngr_hook(
