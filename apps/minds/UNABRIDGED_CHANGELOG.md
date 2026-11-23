@@ -4,6 +4,56 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-22
+
+The first run's welcome page no longer asks "What type of studio do you want to make?". While the first workspace is built it shows "Welcome, \<first name\>!" over the progress bar and "Show details", then "Your workspace is ready!" and Continue. Nothing about the user is handed to the new workspace: a first-run create's seed carries only the flag that says it is one, and the first conversation is the workspace's own (`specs/chat-suggestions/spec.md`).
+
+- Settings has a new page for a workspace, "Suggestions", last in the Workspace & apps tab's list, with two switches: "Next step suggestions" (after a reply) and "New chat suggestions" (on a new chat). Each applies to the whole workspace and is saved the moment it is flipped; a flip that cannot be saved goes back and says why. The values live in the workspace, so for one that is stopped, or built from a template without the switches, the page says "Suggestions settings are available while the workspace is running and up to date." and offers nothing to flip.
+
+- The embed contract moves from version 17 to 19. In version 18 a workspace can ask the app to open Settings on one page of its own settings (`minds:open-workspace-settings`: General, Backup, Updates or Suggestions), and the app tells the workspace it takes that ask (`opensWorkspaceSettings` in `minds:embedder-capabilities`). A workspace shared with the account is not told so, and its ask is ignored.
+
+- For developers: `GET` and `PUT /ui/api/workspaces/<agent_id>/suggestion-settings` read and change the two switches in the workspace's chat app through `mngr forward`. They answer 502 with `code` `UNREACHABLE` or `UNSUPPORTED` when the workspace gives no values.
+
+- The workspace chat's "Access Studio from your phone" suggestion opens Settings on the workspace's Sharing with a small bubble pointing at "Email me a Mobile Access Link": "Use this to open Studio on your phone." The bubble goes on "Got it", on a press of the control, and when Settings closes, and Settings opened by hand shows none. It points at the control while sharing is off too, where the control is dimmed and its tooltip says to enable sharing.
+
+- In version 19 of the embed contract, `minds:open-share-settings` takes an optional `coachMark` (the one value is `mobile-access`; any other is ignored and Sharing still opens), and the app tells the workspace it draws such marks (`showsCoachMarks` in `minds:embedder-capabilities`). A workspace shared with the account is not told so.
+
+- For developers: the bubble is a new component, `views/components/CoachBubble.ts`, catalogued in the styleguide page. The share handler carries the mark to the Settings route as `coach`, which Settings hands to the Sharing page once and removes.
+
+- The first run's "Sign in to Imbue" dialog is drawn in the sign-in page's cream and brown rather than as a white card over it.
+
+- The progress bar of a workspace being created keeps moving. A step that takes longer than expected creeps on toward its end instead of stopping partway (it reads four fifths done at its expected time), and the two stretches nothing reported before, `mngr create` starting up and the app's own bookkeeping once it has answered, are steps of their own. The setup page of a first Imbue Cloud workspace no longer opens on "2 minutes left": the steps of a cloud create are seeded from measured runs (about 40 seconds in all).
+
+- Added the brand marks of three more services to the bundled service icons: Instagram (from selfh.st/icons), YouTube (from SVG Logos) and HubSpot (from simple-icons, in its brand orange). Latchkey connects to none of them, so the Permissions page is unchanged; the workspace's chat, which bundles the same directory, draws them in the connector picker of a new workspace's first conversation. The icons' README and attribution list name the three files and their sources.
+
+Imbue Studio has a new top bar, two switcher menus, and one Settings that holds every setting.
+
+- The top bar is 44px tall. Its left side is a trail: the Studio wordmark (Home), the window's account by its email, and the workspace on screen ("Open workspace" on the home page). Its right side is the bell, Report a bug, one Settings gear, and a Share button in workspaces you own. The three workspace icons and the docked options panel are gone.
+
+- The account and workspace buttons open menus that list every choice, with the current one marked by a faint tint and a check, and both take the arrow keys and Enter. Every row has an icon in one column: a person for an account, a computer for "This device", the workspace's colour dot, a plus for "New account" and "New workspace", which sit in their lists as entries. The workspace menu has a search field over your workspaces and the workspaces and apps shared with you. The account menu ends with "Manage accounts".
+
+- A shortcut opens the workspace menu from anywhere in the app, inside a workspace included: Cmd+K on macOS, Ctrl+Shift+K elsewhere. In the desktop app, Settings > Studio > Keyboard shortcuts changes it or turns it off.
+
+- Settings has three tabs: Studio, Accounts (in place of the Manage Accounts page), and Workspace & apps (in place of the options panel), which shows General, Permissions, Sharing, Backup, and Updates for whichever workspace you pick. The gear carries the dot for a waiting permission request, and the request opens as a centered dialog.
+
+- Sharing is a page per target (the whole workspace, or one app; an app's is titled "Share the <name> app"), with a QR code of the link, a folded list of who has access that is left out while nobody has, and "Invite an agent" as a section of its own. "Email me a Mobile Access Link" is on every target's page, and on an app's page it emails that app's own link in a message about that app.
+
+- A Sharing page no longer waits for Imbue Cloud before it draws. Its title and sections appear at once; the people invited, and the link and QR code when the app already knows the share's address, appear as soon as the workspace has answered; only the switch and each person's invitation status wait for Imbue Cloud, behind a spinner of their own.
+
+- A workspace or app shared with you has an About page in Settings, whose "Leave workspace" or "Remove app" hides it from your lists without changing the access its owner gave.
+
+- Old links (`/accounts`, `/workspace/<id>/options`, `/workspace/<id>/settings`, `/sharing/<id>`) land on their place in Settings, and the embed contract is unchanged.
+
+- The backend's event log gains, at debug level, one line per API request with its status and duration, and the Sharing page's read logs its lock wait and its read of the workspace's share state, so a slow page can be read from the log.
+
+- The docs describe the new layout, and the behavior corpus gains the `top-bar/` and `settings/` areas.
+
+- Imbue Studio no longer installs an owner-exec daemon on a remote workspace's machine, and removes the one an earlier version left there. The daemon ran commands as root for whoever held the owner's key, the workspace container could reach it, and nothing used it. An older Imbue Studio on another of your computers puts it back until that computer is updated; the machine's firewall keeps it unreachable meanwhile.
+
+- Imbue Studio recognises a workspace machine that a newer Imbue Studio set up with software this version cannot drive, and leaves it alone. No such machine exists yet, so nothing changes today. When one does, the workspace still opens and its agents keep working. Its Permissions tab says "This workspace's machine was set up by a newer Imbue Studio. Update Imbue Studio to manage its permissions here." with the update button, and shows none of this computer's own connections. A permission request that was already waiting stays pending: Approve and Deny show the same sentence, and its dialog offers no account of this computer's.
+
+- Approving a permission request when the workspace's machine can't be read now shows a sentence and, where one applies, a button (the update button for permissions a newer Imbue Studio wrote), with the technical reason behind See details. It used to show the raw error.
+
 ## 2026-11-21
 
 The microphone's denial toast now shows where to change the decision, and takes you there. Its body reads "Blocked on this computer. Change it under Permissions > Client permissions.", where before the toast's two-line limit cut the body off at "Change this...". The words "Permissions > Client permissions" are drawn as a link, and clicking the toast opens the workspace's Permissions tab at its Client permissions section.

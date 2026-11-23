@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-22
+
+`mngr imbue_cloud shares mobile-access-link` takes `--app-name`, the display name of the one app the emailed link opens. With it the message is about that app rather than the whole workspace, and `--link` is the app's own address; the connector refuses an app named without its link.
+
 ## 2026-11-21
 
 Creating an Imbue Cloud workspace on the fast path makes fewer remote calls between the lease and `created`. What the create writes and what it reports are unchanged.

@@ -17,6 +17,12 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Desktop microphone permission per workspace: a workspace's first request prompts (Allow / Don't allow, remembered on this computer or for the session), a remembered refusal shows a toast, and the Permissions tab's new **Client permissions** section sets it; answers never leave this computer.
 - Added: Resource warnings for the computer Studio runs on: a titlebar pill when disk (default on), memory or CPU (opt-in) runs low, opening Settings > This computer > Resource warnings.
 - Added: A permission request for a custom-service connection whose sign-in captures a cookie or token notes it "may rely on an unofficial API", with a "See more" explanation, as experimental-connector warnings now have.
+- Added: A new top bar (Studio wordmark, account and workspace switcher menus; bell, Report a bug, a Settings gear, and Share in owned workspaces). The workspace menu searches your and shared workspaces and opens with Cmd+K (Ctrl+Shift+K elsewhere), rebindable in Settings > Studio > Keyboard shortcuts.
+- Added: A workspace Suggestions settings page with "Next step suggestions" and "New chat suggestions" switches, saved in the workspace (`GET`/`PUT /ui/api/workspaces/<agent_id>/suggestion-settings`).
+- Added: Embed contract v19: `minds:open-workspace-settings` opens Settings on a page of the workspace's settings, and `minds:open-share-settings` takes an optional `coachMark` (`mobile-access`), advertised via `opensWorkspaceSettings` and `showsCoachMarks` in `minds:embedder-capabilities`; the chat's "Access Studio from your phone" suggestion uses it to point a bubble at "Email me a Mobile Access Link".
+- Added: Settings has an About page for a workspace or app shared with you, whose "Leave workspace" / "Remove app" hides it from your lists.
+- Added: Studio recognises a workspace machine set up by a newer Studio (none exist yet) and leaves it alone: the workspace still opens, but its Permissions tab and pending requests say to update Imbue Studio.
+- Added: Instagram, YouTube and HubSpot service icons.
 
 ### Changed
 
@@ -29,13 +35,17 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: The bundled latchkey moves to 3.25.0.
 - Changed: When the background carry of a remote workspace's registered agents gives up, it logs one error with the failure attached (type, cause chain, the failed machine command), so Sentry groups it by failure.
 - Changed: Backup failure reasons (`OperationFailureReason`, `BackupProgramFailureReason`) join the generated wire contract (`UiWireSchema`), and the app words them from a table keyed by the generated types.
-- Changed: The first run is a sign-in page ("Reimagine your personal computer", Sign in, "Use without an account", a "Help improve Studio" checkbox) instead of the start chat; a new account's first Imbue Cloud workspace starts on sign-in, and while it builds the creation page asks "What type of studio do you want to make?" and passes the picks to the workspace.
+- Changed: The first run is a sign-in page ("Reimagine your personal computer", Sign in, "Use without an account", a "Help improve Studio" checkbox) instead of the start chat; a new account's first Imbue Cloud workspace starts on sign-in, and while it builds the creation page shows "Welcome, <first name>!" over its progress; nothing about the user is passed to the new workspace.
 - Changed: In light mode the app's outer ground is cream with deep-brown text, and the first run uses the bundled Besley Medium headline font (SIL OFL).
 - Changed: The wash into a new workspace starts as the create finishes and is faster; with a template on embed contract v16 (`minds:provider-chooser-on-screen`) it lifts once the provider chooser is on screen instead of waiting for the welcome chat, and with v17 (`minds:first-run-provider-step`) the title bar stays cream while the first-run provider page covers the workspace.
 - Changed: The welcome chat is seeded via `mngr forward` to the chat app's `POST /api/chats/seed`, falling back to `mngr exec` for older templates.
 - Changed: The once-a-minute background sync waits while a workspace is being created (up to 2 minutes).
 - Changed: A remote workspace's latchkey gateway comes back after a VM reboot without reprovisioning; its secrets are now stored on the VM's disk (`/root/.latchkey/`).
 - Changed: Progress bars show time left as "6 minutes left" / "Less than a minute left", and a new workspace's suggested color cycles through the palette starting at deep brown.
+- Changed: One Settings with Studio, Accounts and Workspace & apps tabs replaces the Manage Accounts page, the workspace icons and the docked options panel; permission requests open as a centered dialog, and old links (`/accounts`, `/workspace/<id>/options`, `/workspace/<id>/settings`, `/sharing/<id>`) redirect into Settings.
+- Changed: Sharing is a page per target (workspace or app) with a QR code, a folded access list and "Invite an agent"; it draws without waiting for Imbue Cloud, and an app's "Email me a Mobile Access Link" emails that app's own link.
+- Changed: The workspace-creation progress bar keeps moving through slow steps, and a first Imbue Cloud workspace's estimate is seeded from measured runs (about 40 seconds) instead of opening on "2 minutes left".
+- Changed: A permission approval that fails because the workspace's machine can't be read shows a sentence (and an update button where it applies) with the technical reason behind See details, instead of the raw error.
 
 ### Removed
 
@@ -51,6 +61,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: Studio no longer sticks on "Starting Imbue Studio..." when its window is minimized, hidden or fully covered during startup.
 - Fixed: Backup-update and restore gates no longer count chats whose state cannot be read as running, so "Stop all chats and retry" no longer stops a chat and then reports that chat as blocking (MIND-723); a state that stays unreadable fails with the new `CHAT_STATE_UNREADABLE` reason (Try again; restore also offers Force restore).
 - Fixed: The permission request window no longer flashes a scrollbar while growing taller.
+
+### Security
+
+- Security: Studio no longer installs the owner-exec daemon on a remote workspace's machine, and removes one an earlier version installed; it ran commands as root and was reachable from the workspace container.
 
 ## [minds-v0.10.5] - 2026-11-17
 

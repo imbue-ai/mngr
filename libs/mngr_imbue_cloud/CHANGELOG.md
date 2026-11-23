@@ -20,6 +20,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `mngr imbue_cloud auth browser-session-code` mints the single-use code the desktop's embedded browser redeems for an accounts-origin session.
 - Added: `shares push-grants` forwards optional `targets` and `workspace_name`; a refused domain grant raises with code `grants_refused` and `ImbueCloudShareRefusedError.refusals`.
 - Added: Agent listings publish `turn_end`, read in the same listing command as the state.
+- Added: `mngr imbue_cloud shares mobile-access-link --app-name` emails a link to one app (with `--link` as that app's address) instead of the whole workspace.
 
 ### Changed
 

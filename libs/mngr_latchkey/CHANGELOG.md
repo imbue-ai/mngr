@@ -17,6 +17,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: The `permission-requests` extension accepts `"proxy": true` on `custom-service` requests (booleans only, else HTTP 400) and stores it on the request's payload.
 - Added: Latchkey service plugins: `imbue.mngr_latchkey.service_plugins` pins Garmin Connect, Spotify and Strava (`KNOWN_SERVICE_PLUGINS`), installed by `mngr latchkey forward` before the gateway starts and by the `mngr-latchkey` Debian package on remote machines; the service catalog lists their services.
 - Added: `is_capture_login_flow` and `is_capture_login_registration` tell whether a custom service signs in by capturing a cookie or token (`cookie-capture`, `token-capture`).
+- Added: Machine generations: `mngr-latchkey` records generation 1 in `/etc/mngr-machine/generation`, and every command sent to a machine first checks it, raising `MachineNewerError` on a newer machine. `mngr latchkey forward` then records a `machine_newer` marker and leaves the host alone until it stops, moves or the forward restarts; `register-agent` registers locally and errors asking to update.
 
 ### Changed
 
@@ -33,6 +34,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Removed
 
 - Removed: The `on_host_created` hook that pointed a new container lacking `host.docker.internal` at the reverse-tunneled `http://127.0.0.1:1989`, with `fall_back_to_reverse_tunneled_gateway_url` and `CONTAINER_HOSTS_FILE_PATH`; outer hosts must create containers with the mapping.
+- Removed: `owner_exec_vm.py` and its version pin.
 
 ### Fixed
 
@@ -47,6 +49,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Security
 
 - Security: Requires `filelock>=4.2.1`, fixing the `ReadWriteLock` advisories (e.g. GHSA-v4x8-3wr5-3wq8) the forward-ownership lock was exposed to.
+- Security: Provisioning no longer installs the owner-exec daemon and removes an existing one (`owner-exec-vm` unit, binary, `/etc/owner-exec/`); the firewall accepts only the gateway port (1989) from the docker bridge and drops the daemon's port 8794 on every interface.
 
 ## [v0.2.1] - 2026-10-28
 
