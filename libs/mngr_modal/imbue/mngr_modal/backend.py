@@ -31,6 +31,7 @@ from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.env_utils import TEST_ENV_PATTERN
+from imbue.mngr_modal.config import MODAL_DEFAULT_HOST_DIR
 from imbue.mngr_modal.config import ModalMode
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.config import modal_config_path
@@ -720,7 +721,7 @@ class ModalProviderBackend(ProviderBackendInterface):
           The provider config can override the profile's user_id to allow sharing
           Modal resources across different mngr profiles or installations.
         - ``app_name`` = whatever ``derive_modal_app_name`` makes of the instance name.
-        - ``host_dir`` = ``config.host_dir`` if set, else ``Path("/mngr")``.
+        - ``host_dir`` = ``config.host_dir`` if set, else ``MODAL_DEFAULT_HOST_DIR``.
 
         Logs a warning when truncation actually shortens a name.
         """
@@ -736,5 +737,5 @@ class ModalProviderBackend(ProviderBackendInterface):
 
         app_name = derive_modal_app_name(prefix, name, config.app_name)
 
-        host_dir = config.host_dir if config.host_dir is not None else Path("/mngr")
+        host_dir = config.host_dir if config.host_dir is not None else MODAL_DEFAULT_HOST_DIR
         return environment_name, app_name, host_dir

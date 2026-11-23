@@ -17,6 +17,9 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import UserId
 from imbue.mngr_modal.errors import ModalProfileNotFoundError
 
+# Where a sandbox keeps mngr's data when the provider block names no `host_dir`.
+MODAL_DEFAULT_HOST_DIR: Final[Path] = Path("/mngr")
+
 
 class ModalMode(UpperCaseStrEnum):
     """How the modal provider backend talks to Modal.

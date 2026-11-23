@@ -157,6 +157,7 @@ from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.store import LatchkeyStoreError
+from imbue.mngr_modal.config import MODAL_DEFAULT_HOST_DIR
 
 # Path the workspace-readiness / health probes hit through the plugin. We probe
 # ``/`` and treat any 200 as "ready" -- deliberately *not* coupled to any
@@ -1640,12 +1641,12 @@ def _build_mngr_create_command(
                 # the container runtime to runsc. runc is the docker template's
                 # default, so RUNC needs no extra template.
                 mngr_command.extend(["--template", "docker_runsc"])
-            mngr_command.extend(_remote_host_env_flags())
+            mngr_command.extend(_remote_host_env_flags(WORKSPACE_HOST_DIR))
             mngr_command.extend(create_attempt_host_label_args)
             mngr_command.extend(size_args)
         case LaunchMode.LIMA:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "lima"])
-            mngr_command.extend(_remote_host_env_flags())
+            mngr_command.extend(_remote_host_env_flags(WORKSPACE_HOST_DIR))
             mngr_command.extend(create_attempt_host_label_args)
             mngr_command.extend(size_args)
             # Point Lima at the baked raw image via the provider's existing per-arch
@@ -1656,7 +1657,7 @@ def _build_mngr_create_command(
                 )
         case LaunchMode.VULTR:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "vultr"])
-            mngr_command.extend(_remote_host_env_flags())
+            mngr_command.extend(_remote_host_env_flags(WORKSPACE_HOST_DIR))
             # The user always picks a Vultr region in the create form (advanced
             # settings). It is a hard placement requirement: the VPS is created
             # in exactly this region.
@@ -1664,7 +1665,7 @@ def _build_mngr_create_command(
                 mngr_command.extend(_build_arg_flag(f"--vultr-region={region}"))
         case LaunchMode.AWS:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "aws"])
-            mngr_command.extend(_remote_host_env_flags())
+            mngr_command.extend(_remote_host_env_flags(WORKSPACE_HOST_DIR))
             # The create address already selects the ``aws_<hex>`` connection
             # instance (whose block is pinned to this region). Pass the matching
             # ``--aws-region`` build arg too so intent is explicit and the
@@ -1705,7 +1706,9 @@ def _build_mngr_create_command(
             # Same remote shape as vultr/aws: the ``main`` + ``modal`` templates
             # run the provisioning chain over SSH on the freshly-created sandbox.
             mngr_command.extend(["--new-host", "--template", "main", "--template", "modal"])
-            mngr_command.extend(_remote_host_env_flags())
+            # The Modal connection block sets no user-data layout, so the sandbox keeps mngr's
+            # data at the provider's own default rather than the workspace layout's path.
+            mngr_command.extend(_remote_host_env_flags(str(MODAL_DEFAULT_HOST_DIR)))
             # Modal places each sandbox per create (one of its broad region
             # names); the connection block carries no placement, and an empty
             # region passes no flag, so Modal places the sandbox anywhere.
@@ -1725,7 +1728,7 @@ def _build_mngr_create_command(
             # connection instance. GCE is zonal, so the placement flag is ``--gcp-zone``
             # (the form's "region" value for GCP is a zone).
             mngr_command.extend(["--new-host", "--template", "main", "--template", "gcp"])
-            mngr_command.extend(_remote_host_env_flags())
+            mngr_command.extend(_remote_host_env_flags(WORKSPACE_HOST_DIR))
             if region:
                 mngr_command.extend(_build_arg_flag(f"--gcp-zone={region}"))
             if instance_type:
@@ -1735,7 +1738,7 @@ def _build_mngr_create_command(
             # Same shape as aws; the address already selects the ``azure_<hex>``
             # connection instance.
             mngr_command.extend(["--new-host", "--template", "main", "--template", "azure"])
-            mngr_command.extend(_remote_host_env_flags())
+            mngr_command.extend(_remote_host_env_flags(WORKSPACE_HOST_DIR))
             if region:
                 mngr_command.extend(_build_arg_flag(f"--azure-region={region}"))
             if instance_type:
@@ -1748,21 +1751,24 @@ def _build_mngr_create_command(
     return mngr_command
 
 
-def _remote_host_env_flags() -> list[str]:
+def _remote_host_env_flags(host_dir: str) -> list[str]:
     """Return the --host-env / --pass-host-env flags for a new remote host.
 
-    Remote containers always store their mngr state under the workspace
-    layout's container-internal path (``/home/user/.mngr``, matching the
-    provider blocks' ``host_dir``), independent of the local ``MNGR_HOST_DIR``
-    (which could be ``~/.minds/mngr`` for production or
-    ``~/.minds-<env-name>/mngr`` for any other activated env). We only
-    propagate ``MNGR_PREFIX`` so the inner mngr's tmux/session names match the
-    local ones, avoiding confusion when the same name has to refer to the
-    "same" thing on both sides.
+    ``host_dir`` is where the new host's provider keeps mngr's data: the workspace
+    layout's container-internal path (``/home/user/.mngr``) for every provider block
+    that sets the user-data layout knobs, and the provider's own default for one that
+    does not. It must name the provider's real host dir: every agent's own env
+    carries that real one, while bash reads the host env again through ``.bashrc``,
+    so a host env that named another path would split the host's processes across
+    two host dirs. It is independent of the local ``MNGR_HOST_DIR`` (which could be
+    ``~/.minds/mngr`` for production or ``~/.minds-<env-name>/mngr`` for any other
+    activated env). We only propagate ``MNGR_PREFIX`` so the inner mngr's
+    tmux/session names match the local ones, avoiding confusion when the same name
+    has to refer to the "same" thing on both sides.
     """
     return [
         "--host-env",
-        f"MNGR_HOST_DIR={WORKSPACE_HOST_DIR}",
+        f"MNGR_HOST_DIR={host_dir}",
         "--pass-host-env",
         "MNGR_PREFIX",
     ]
