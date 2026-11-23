@@ -1258,8 +1258,8 @@ describe("Settings › Workspace & apps: one of the account's own workspaces", (
       return { harness, heal: () => (isFailing = false) };
     }
 
-    it("shows the load error with Try again on General, Backup, Updates, and Sharing", async () => {
-      for (const group of ["general", "backup", "updates", "sharing"]) {
+    it("shows the load error with Try again on General, Backup, Updates, Suggestions, and Sharing", async () => {
+      for (const group of ["general", "backup", "updates", "suggestions", "sharing"]) {
         const { harness } = failing(`${ON_ALPHA}&group=${group}`);
         const view = await drawLoaded(harness);
 

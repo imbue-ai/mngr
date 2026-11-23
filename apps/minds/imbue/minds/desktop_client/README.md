@@ -97,11 +97,14 @@ user id or `local` for the device. Every window is for one account, and sees tha
     replays the history before tailing live). The status carries a `progress` object
     (`create_progress.py`): a tree of steps -- the desktop's own (fetching the template,
     the `mngr create` call, the boot wait), mngr's phases and the provider's sub-steps
-    from the `--format jsonl` progress stream nested under the call, and the template
-    bootstrap's events nested under the wait -- weighted by the durations the device
-    has learned for each step (`create_progress_history.py`, seeded from
-    `create_progress_defaults.toml`), folded into a percent that never moves backwards,
-    a rate the page extrapolates between polls, and a coarse remaining time
+    from the `--format jsonl` progress stream nested under the call, between a step
+    for the desktop's work before mngr's first report and one for its work after mngr
+    reports the agent created, and the template bootstrap's events nested under the
+    wait -- weighted by the durations the device has learned for each step
+    (`create_progress_history.py`, seeded from `create_progress_defaults.toml`), folded
+    into a percent that never moves backwards (a step with no counter reads four fifths
+    of its share at its expected time and keeps creeping toward the whole while it runs
+    on), a rate the page extrapolates between polls, and a coarse remaining time
     auto-redirects to the agent when the create attempt completes
     when no live create attempt is tracked but a pending-create-attempt record survives, the
     page becomes the record-backed detail view: retry + discard for an interrupted

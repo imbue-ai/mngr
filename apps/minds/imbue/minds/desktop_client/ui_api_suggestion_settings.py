@@ -1,6 +1,6 @@
 """Settings' Suggestions page for a workspace (specs/chat-suggestions, sections 3.7 and 4.8).
 
-Two routes on ``/ui/api/workspaces/<agent_id>/suggestion-settings`` read and change the two
+Two routes on ``/ui/api/workspaces/<agent_id>/suggestion-settings`` read and change the
 suggestion switches of a workspace. The switches live only in the workspace's chat app, so each
 request is passed on to that app's own origin through ``mngr forward`` (``ChatAppForwardRoute``,
 the route the welcome chat's seed takes): the page cannot ask the chat app itself, which is
@@ -61,14 +61,14 @@ _NO_ROUTE_MESSAGE: Final[str] = "This app cannot reach workspace suggestion sett
 
 
 class SuggestionSettings(FrozenModel):
-    """A workspace's two suggestion switches, as the Suggestions page reads them."""
+    """A workspace's suggestion switches, as the Suggestions page reads them."""
 
     is_next_step_suggestions_enabled: bool = Field(description="Whether suggested replies follow an agent's reply")
     is_new_chat_suggestions_enabled: bool = Field(description="Whether suggestions show on a chat with no message")
 
 
 class SuggestionSettingsChange(FrozenModel):
-    """The body of a write: the switches to change, at least one of the two."""
+    """The body of a write: the switches to change, at least one of them."""
 
     is_next_step_suggestions_enabled: StrictBool | None = Field(
         default=None, description="The next-step switch's new value; None leaves it as it is"
@@ -85,7 +85,7 @@ class SuggestionSettingsChange(FrozenModel):
 
 
 class _ChatAppSuggestionSwitches(FrozenModel):
-    """The chat app's settings, read for the two switches alone; a chat app from before them sends none."""
+    """The chat app's settings, read for the switches alone; a chat app from before them sends none."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -136,7 +136,7 @@ def _unsupported(detail: str) -> SuggestionSettingsFailure:
 
 
 def _read_switches_from_answer(response: httpx2.Response) -> SuggestionSettings | SuggestionSettingsFailure:
-    """The two switches out of a chat app's answer to either settings route."""
+    """The switches out of a chat app's answer to either settings route."""
     if response.status_code in _MISSING_ROUTE_STATUS_CODES:
         return _unsupported(f"the chat app has no such route (HTTP {response.status_code})")
     if not 200 <= response.status_code < 300:
@@ -196,14 +196,14 @@ def _ask_chat_app(
 def read_suggestion_settings(
     route: ChatAppForwardRoute, workspace_agent_id: AgentId
 ) -> SuggestionSettings | SuggestionSettingsFailure:
-    """The workspace's two suggestion switches, or why they could not be read."""
+    """The workspace's suggestion switches, or why they could not be read."""
     return _ask_chat_app(route, workspace_agent_id, "GET", CHAT_SETTINGS_PATH, None)
 
 
 def change_suggestion_settings(
     route: ChatAppForwardRoute, workspace_agent_id: AgentId, change: SuggestionSettingsChange
 ) -> SuggestionSettings | SuggestionSettingsFailure:
-    """Change the named switches and leave the rest; the two as they stand afterwards, or why nothing is known."""
+    """Change the named switches and leave the rest; all of them as they stand afterwards, or why nothing is known."""
     body = change.model_dump(exclude_none=True)
     return _ask_chat_app(route, workspace_agent_id, "PUT", CHAT_SUGGESTION_SETTINGS_PATH, body)
 
@@ -238,7 +238,7 @@ def _route_and_workspace_or_error(agent_id: str) -> tuple[ChatAppForwardRoute, A
 
 
 def _handle_read_suggestion_settings(agent_id: str) -> Response:
-    """GET: the two switches, 200; 502 with ``code`` ``UNREACHABLE`` or ``UNSUPPORTED`` when the workspace gave none."""
+    """GET: the switches, 200; 502 with ``code`` ``UNREACHABLE`` or ``UNSUPPORTED`` when the workspace gave none."""
     resolved = _route_and_workspace_or_error(agent_id)
     if isinstance(resolved, Response):
         return resolved

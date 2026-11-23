@@ -2285,10 +2285,11 @@ describe("ShellState.openHelpForError", () => {
 
     shell.openHelpForError(ERROR, null);
 
+    // The request popup is not one of the bar's flyouts, so the form stacks on it rather than replacing it.
     expect(routeSet).toHaveBeenCalledWith(
       "/help",
       expect.objectContaining({ workspace: WORKSPACE_ID, account: "local" }),
-      { replace: true },
+      undefined,
     );
     expect(takePendingHelpLaunch()).toMatchObject({
       workspaceAgentId: WORKSPACE_ID,

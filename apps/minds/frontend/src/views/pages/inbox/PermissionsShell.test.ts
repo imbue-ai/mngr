@@ -372,6 +372,7 @@ describe("PermissionsShell manual credentials", () => {
         display_name: "AWS",
         accent: "",
         workspace_agent_id: "agent-alpha",
+        refusal_notice: null,
       },
     ];
     model.selectedId = "evt-a";

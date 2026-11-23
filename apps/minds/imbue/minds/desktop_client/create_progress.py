@@ -47,8 +47,8 @@ from imbue.mngr.utils.progress import ProgressEventKind
 from imbue.mngr.utils.progress import ProgressStep
 
 # A running step is assumed to need at least this fraction of the time it has
-# already taken on top of it, so an overrunning step never reads as nearly done:
-# its remaining time grows with its overrun instead of decaying to nothing.
+# already taken on top of it, so an overrunning step's remaining time grows
+# with its overrun instead of decaying to nothing.
 _OVERRUN_MARGIN: Final[float] = 0.5
 # How done a running step with no counter reads when it has run for exactly its
 # expected time. It gets there in proportion to its elapsed time; past it, each

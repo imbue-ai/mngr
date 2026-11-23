@@ -16,7 +16,7 @@ export const SUGGESTION_SWITCH_KEYS = [
 ] as const;
 export type SuggestionSwitchKey = (typeof SUGGESTION_SWITCH_KEYS)[number];
 
-/** What both routes answer: the two switches as they stand in the workspace. */
+/** What both routes answer: the switches as they stand in the workspace. */
 export type SuggestionSettings = Record<SuggestionSwitchKey, boolean>;
 
 /**
@@ -31,7 +31,7 @@ export function suggestionSettingsUrl(agentId: string): string {
   return `/ui/api/workspaces/${encodeURIComponent(agentId)}/suggestion-settings`;
 }
 
-/** The two switches out of a route's answer, or null when it does not carry both as booleans. */
+/** The switches out of a route's answer, or null when it does not carry every one as a boolean. */
 export function suggestionSettingsFromBody(body: unknown): SuggestionSettings | null {
   if (body === null || typeof body !== "object") return null;
   const fields = body as Record<string, unknown>;
