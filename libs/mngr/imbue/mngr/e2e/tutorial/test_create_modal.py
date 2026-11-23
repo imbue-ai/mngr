@@ -1280,6 +1280,11 @@ def test_destroy_all_modal_agents(e2e: E2eSession) -> None:
     expect(after.stdout).not_to_contain("doomed-agent")
 
 
+# Flaky: Modal's control plane can keep answering not-found for the snapshot
+# endpoint it just deployed for longer than the post-deploy lookup retries, so
+# the create fails before the host is listed. A transient on Modal's side, not
+# in this test's logic, so let offload retry rather than fail the run.
+@pytest.mark.flaky
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync

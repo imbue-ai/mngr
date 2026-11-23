@@ -1,0 +1,1 @@
+The Modal tutorial release test `test_create_modal_idle_timeout_60` is marked flaky: Modal can keep answering not-found for the snapshot endpoint a create just deployed for longer than the lookup retries.
