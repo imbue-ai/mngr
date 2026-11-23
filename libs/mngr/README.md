@@ -324,6 +324,7 @@ mngr <command> [options]
 - [`cleanup`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/secondary/cleanup.md): Clean up stopped agents and unused resources
 - [`event`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/secondary/event.md): View agent and host event files
 - [`gc`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/secondary/gc.md): Garbage collect unused resources
+- [`upgrade`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/secondary/upgrade.md): Upgrade existing agents to match the version of mngr running this `mngr upgrade` command
 
 ### For managing mngr itself:
 

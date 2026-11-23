@@ -1,8 +1,12 @@
 import pytest
 
+from imbue.mngr.api.connect import SIGNAL_EXIT_CODE_DESTROY
+from imbue.mngr.api.connect import SIGNAL_EXIT_CODE_STOP
+from imbue.mngr.cli.exit_codes import EXIT_CODE_AGENTS_NOT_UPGRADED
 from imbue.mngr.cli.exit_codes import EXIT_CODE_ERROR
 from imbue.mngr.cli.exit_codes import EXIT_CODE_HOST_RESOURCE_REMAINS
 from imbue.mngr.cli.exit_codes import EXIT_CODE_LOCAL_STATE_REMAINS
+from imbue.mngr.cli.exit_codes import EXIT_CODE_MESSAGE_DELIVERED_BUT_BLOCKED
 from imbue.mngr.cli.exit_codes import EXIT_CODE_PROCESSES_REMAIN
 from imbue.mngr.cli.exit_codes import EXIT_CODE_PROVIDER_INACCESSIBLE
 from imbue.mngr.cli.exit_codes import EXIT_CODE_SUCCESS
@@ -10,6 +14,7 @@ from imbue.mngr.cli.exit_codes import EXIT_CODE_TIMEOUT
 from imbue.mngr.cli.exit_codes import _CATEGORY_SEVERITY_ORDER
 from imbue.mngr.cli.exit_codes import _EXIT_CODE_BY_CATEGORY
 from imbue.mngr.cli.exit_codes import exit_code_for_failures
+from imbue.mngr.errors import EXIT_CODE_TARGET_NOT_FOUND
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 
@@ -74,3 +79,21 @@ def test_every_category_is_ranked_and_mapped() -> None:
     all_categories = set(CleanupFailureCategory)
     assert set(_CATEGORY_SEVERITY_ORDER) == all_categories
     assert set(_EXIT_CODE_BY_CATEGORY) == all_categories
+
+
+def test_agents_not_upgraded_shares_its_exit_code_with_no_other_mngr_exit_code() -> None:
+    other_exit_codes = {
+        EXIT_CODE_SUCCESS,
+        EXIT_CODE_ERROR,
+        EXIT_CODE_TIMEOUT,
+        EXIT_CODE_PROCESSES_REMAIN,
+        EXIT_CODE_LOCAL_STATE_REMAINS,
+        EXIT_CODE_HOST_RESOURCE_REMAINS,
+        EXIT_CODE_PROVIDER_INACCESSIBLE,
+        EXIT_CODE_MESSAGE_DELIVERED_BUT_BLOCKED,
+        EXIT_CODE_TARGET_NOT_FOUND,
+        SIGNAL_EXIT_CODE_DESTROY,
+        SIGNAL_EXIT_CODE_STOP,
+    }
+
+    assert EXIT_CODE_AGENTS_NOT_UPGRADED not in other_exit_codes

@@ -91,18 +91,20 @@ def create_test_agent(
     )
 
 
-def create_test_agent_state(host: Host, work_dir: Path, name: str) -> AgentInterface:
+def create_test_agent_state(
+    host: Host, work_dir: Path, name: str, agent_type: str = PLACEHOLDER_AGENT_TYPE
+) -> AgentInterface:
     """Create a minimal agent state (without starting it) for testing.
 
     Creates the agent's data.json and state directory on the host without
     creating a tmux session or starting the agent process. Useful for tests
-    that need an agent to exist but don't need it running.
+    that need an agent to exist but don't need it running. An ``agent_type``
+    that is not registered yet is registered as a placeholder.
     """
-    agent_type = AgentTypeName(PLACEHOLDER_AGENT_TYPE)
-    register_placeholder_agent_type(str(agent_type))
+    register_placeholder_agent_type(agent_type)
     options = CreateAgentOptions(
         name=AgentName(name),
-        agent_type=agent_type,
+        agent_type=AgentTypeName(agent_type),
         command=CommandString("sleep 1"),
     )
     return host.create_agent_state(work_dir, options)

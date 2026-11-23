@@ -496,6 +496,11 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
+    @contextmanager
+    def hold_message_lock(self, timeout_seconds: float) -> Generator[None, None, None]:
+        with self._message_lock(timeout_seconds=timeout_seconds):
+            yield
+
     def wait_for_ready_signal(
         self, is_readiness_awaited: bool, start_action: Callable[[], None], timeout: float | None = None
     ) -> None:

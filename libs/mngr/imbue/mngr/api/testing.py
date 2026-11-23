@@ -1,5 +1,6 @@
 """Shared test fixtures for API tests."""
 
+import json
 import shlex
 import shutil
 import subprocess
@@ -7,22 +8,56 @@ import types
 from collections.abc import Callable
 from collections.abc import Generator
 from collections.abc import Mapping
+from collections.abc import Sequence
 from contextlib import contextmanager
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Any
+from typing import Final
+from typing import TypeVar
 
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
+from imbue.mngr.agents.default_plugins.command_agent import CommandAgent
+from imbue.mngr.agents.upgrade import build_shared_shell_lib_files
 from imbue.mngr.api.git import LocalGitContext
+from imbue.mngr.api.upgrade import AgentCurrent
+from imbue.mngr.api.upgrade import AgentUpgradeFailed
+from imbue.mngr.api.upgrade import AgentUpgradeOutcome
+from imbue.mngr.api.upgrade import AgentUpgradeSkipped
+from imbue.mngr.api.upgrade import AgentUpgraded
+from imbue.mngr.api.upgrade import UpgradeFailedStep
+from imbue.mngr.api.upgrade import UpgradePlan
+from imbue.mngr.api.upgrade import UpgradeSkip
+from imbue.mngr.api.upgrade import UpgradeSkipKind
+from imbue.mngr.api.upgrade import upgrade_agent
+from imbue.mngr.config.agent_class_registry import register_agent_class
+from imbue.mngr.config.agent_config_registry import register_agent_config
+from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentStartError
+from imbue.mngr.errors import LockNotHeldError
+from imbue.mngr.errors import PluginMngrError
+from imbue.mngr.hosts.common import get_agent_state_dir_path
+from imbue.mngr.hosts.host import Host
+from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.data_types import HarnessFileSpec
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import UpgradeSkipDetail
 from imbue.mngr.utils.env_utils import build_source_env_shell_commands
+from imbue.mngr.utils.polling import poll_until
 
 
 @contextmanager
@@ -225,3 +260,286 @@ class SyncTestContext(FrozenModel):
 def has_uncommitted_changes(path: Path, cg: ConcurrencyGroup) -> bool:
     """Check for uncommitted changes using LocalGitContext."""
     return LocalGitContext(cg=cg).has_uncommitted_changes(path)
+
+
+UPGRADED_SCRIPT_NAME: Final[str] = "written_by_upgrade.sh"
+
+DIALOG_MARKER_NAME: Final[str] = "dialog_open"
+
+READY_MARKER_NAME: Final[str] = "ready_after_restart"
+
+NEVER_READY_TIMEOUT_SECONDS: Final[float] = 0.5
+
+UPGRADABLE_COMMAND_AGENT_TYPE: Final[str] = "upgradable-command"
+
+UPGRADE_FAILING_COMMAND_AGENT_TYPE: Final[str] = "upgrade-failing-command"
+
+UPGRADE_FAILURE_MESSAGE: Final[str] = "cannot build the hooks"
+
+UPGRADE_CRASHING_COMMAND_AGENT_TYPE: Final[str] = "upgrade-crashing-command"
+
+
+class UpgradeCrashError(Exception):
+    """An error from an agent's build that ``mngr upgrade`` does not turn into an agent's outcome."""
+
+
+class UpgradableCommandAgent(CommandAgent):
+    """A command agent whose upgrade builds the shared shell libs and one script, by default ``commands/UPGRADED_SCRIPT_NAME``, or raises.
+
+    It is on a dialog while ``DIALOG_MARKER_NAME`` exists in its state dir, and ready as soon as it restarts.
+    """
+
+    upgrade_unsupported_detail: str | None = Field(
+        default=None, description="What get_upgrade_unsupported_detail returns"
+    )
+    upgraded_script_path: Path = Field(
+        default=Path("commands") / UPGRADED_SCRIPT_NAME,
+        description="Where the staged script goes, relative to the staging dir",
+    )
+    upgraded_script_content: str = Field(default="", description="The content of the staged script")
+    build_error_message: str | None = Field(default=None, description="When set, the build raises with it")
+    upgrade_input_paths: tuple[Path, ...] = Field(default=(), description="What get_upgrade_input_paths returns")
+    ready_signal_paths: tuple[Path, ...] = Field(
+        default=(Path(READY_MARKER_NAME),), description="What get_ready_signal_paths returns"
+    )
+
+    def get_upgrade_input_paths(self) -> tuple[Path, ...]:
+        return self.upgrade_input_paths
+
+    def get_upgrade_unsupported_detail(self, input_content_by_path: Mapping[Path, str | None]) -> str | None:
+        return self.upgrade_unsupported_detail
+
+    def is_blocked_on_dialog(self) -> bool:
+        return self._check_file_exists(self._get_agent_dir() / DIALOG_MARKER_NAME)
+
+    def build_upgraded_files(self, input_content_by_path: Mapping[Path, str | None]) -> dict[Path, HarnessFileSpec]:
+        if self.build_error_message is not None:
+            raise PluginMngrError(self.build_error_message)
+        return {
+            **build_shared_shell_lib_files(),
+            self.upgraded_script_path: HarnessFileSpec(content=self.upgraded_script_content, mode="0755"),
+        }
+
+    def get_ready_signal_paths(self) -> tuple[Path, ...]:
+        return self.ready_signal_paths
+
+    def wait_for_ready_after_restart(self, timeout: float) -> None:
+        return None
+
+
+class ScriptedStateCommandAgent(UpgradableCommandAgent):
+    """An upgradable command agent whose lifecycle state reads as each of ``lifecycle_states`` in turn, the last one from then on."""
+
+    lifecycle_states: list[AgentLifecycleState] = Field(
+        default_factory=list, description="The states its lifecycle reads return, in order"
+    )
+
+    def get_lifecycle_state(self) -> AgentLifecycleState:
+        return self.lifecycle_states.pop(0) if len(self.lifecycle_states) > 1 else self.lifecycle_states[0]
+
+
+class NeverReadyCommandAgent(UpgradableCommandAgent):
+    """An upgradable command agent that is ready once ``READY_MARKER_NAME`` exists in its state dir, which nothing writes."""
+
+    def get_ready_timeout_seconds(self) -> float:
+        return NEVER_READY_TIMEOUT_SECONDS
+
+    def wait_for_ready_after_restart(self, timeout: float) -> None:
+        ready_marker_path = self._get_agent_dir() / READY_MARKER_NAME
+        if not poll_until(lambda: self._check_file_exists(ready_marker_path), timeout=timeout, poll_interval=0.05):
+            raise AgentStartError(str(self.name), f"{READY_MARKER_NAME} did not appear within {timeout}s")
+
+
+class UpgradeFailingCommandAgent(UpgradableCommandAgent):
+    """An upgradable command agent whose build always raises ``UPGRADE_FAILURE_MESSAGE``."""
+
+    build_error_message: str | None = Field(
+        default=UPGRADE_FAILURE_MESSAGE, description="When set, the build raises with it"
+    )
+
+
+class UpgradeCrashingCommandAgent(UpgradableCommandAgent):
+    """An upgradable command agent whose build always raises ``UpgradeCrashError``."""
+
+    def build_upgraded_files(self, input_content_by_path: Mapping[Path, str | None]) -> dict[Path, HarnessFileSpec]:
+        raise UpgradeCrashError(UPGRADE_FAILURE_MESSAGE)
+
+
+def register_upgradable_command_agent_types() -> None:
+    """Register the upgradable test agent types, so a host loads an agent of each type as its class."""
+    register_agent_class(UPGRADABLE_COMMAND_AGENT_TYPE, UpgradableCommandAgent)
+    register_agent_config(UPGRADABLE_COMMAND_AGENT_TYPE, AgentTypeConfig)
+    register_agent_class(UPGRADE_FAILING_COMMAND_AGENT_TYPE, UpgradeFailingCommandAgent)
+    register_agent_config(UPGRADE_FAILING_COMMAND_AGENT_TYPE, AgentTypeConfig)
+    register_agent_class(UPGRADE_CRASHING_COMMAND_AGENT_TYPE, UpgradeCrashingCommandAgent)
+    register_agent_config(UPGRADE_CRASHING_COMMAND_AGENT_TYPE, AgentTypeConfig)
+
+
+class LockRecordingHost(Host):
+    """Local Host whose cooperative lock is observable and optionally refused, and whose agent stops and starts only record whether that lock was held."""
+
+    is_lock_refused: bool = Field(default=False, description="Refuse every acquisition with LockNotHeldError")
+    is_currently_locked: bool = Field(default=False, description="Whether the (fake) lock is held right now")
+    lock_timeouts: list[float | None] = Field(
+        default_factory=list, description="The timeout_seconds passed to each acquisition attempt"
+    )
+    is_lock_held_at_stop: list[bool] = Field(
+        default_factory=list, description="Whether the lock was held when each stop_agents call ran"
+    )
+    is_lock_held_at_start: list[bool] = Field(
+        default_factory=list, description="Whether the lock was held when each start_agents call ran"
+    )
+
+    @contextmanager
+    def lock_cooperatively(self, timeout_seconds: float | None = 300.0) -> Generator[None, None, None]:
+        self.lock_timeouts.append(timeout_seconds)
+        if self.is_lock_refused:
+            raise LockNotHeldError("Timed out waiting to acquire the host lock")
+        self.is_currently_locked = True
+        try:
+            yield
+        finally:
+            self.is_currently_locked = False
+
+    def stop_agents(self, agent_ids: Sequence[AgentId], timeout_seconds: float = 5.0) -> None:
+        self.is_lock_held_at_stop.append(self.is_currently_locked)
+
+    def start_agents(self, agent_ids: Sequence[AgentId]) -> None:
+        self.is_lock_held_at_start.append(self.is_currently_locked)
+
+
+UpgradableCommandAgentT = TypeVar("UpgradableCommandAgentT", bound=UpgradableCommandAgent)
+
+
+def make_upgradable_command_agent(
+    host: OnlineHostInterface,
+    agent_id: AgentId,
+    agent_name: AgentName,
+    work_dir: Path,
+    mngr_ctx: MngrContext,
+    upgrade_unsupported_detail: str | None,
+    upgraded_script_content: str,
+    build_error_message: str | None,
+    agent_class: type[UpgradableCommandAgentT],
+) -> UpgradableCommandAgentT:
+    """An upgradable view, of ``agent_class``, of the command agent ``agent_id`` on ``host``, built without validation."""
+    return agent_class.model_construct(
+        id=agent_id,
+        name=agent_name,
+        agent_type=AgentTypeName("command"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
+        mngr_ctx=mngr_ctx,
+        agent_config=AgentTypeConfig(),
+        host=host,
+        upgrade_unsupported_detail=upgrade_unsupported_detail,
+        upgraded_script_content=upgraded_script_content,
+        build_error_message=build_error_message,
+    )
+
+
+def write_command_agent_record(
+    host: Host, agent_id: AgentId, agent_name: AgentName, work_dir: Path, agent_data: Mapping[str, object]
+) -> Path:
+    """Write the data.json of a command agent in its new state dir on ``host``, with ``agent_data`` over its fields, and return that dir."""
+    state_dir = get_agent_state_dir_path(host.host_dir, agent_id)
+    state_dir.mkdir(parents=True)
+    (state_dir / "data.json").write_text(
+        json.dumps(
+            {
+                "id": str(agent_id),
+                "name": str(agent_name),
+                "type": "command",
+                "command": "sleep 948226",
+                "work_dir": str(work_dir),
+                "create_time": datetime.now(timezone.utc).isoformat(),
+                **agent_data,
+            }
+        )
+    )
+    return state_dir
+
+
+def make_recorded_upgradable_agent(
+    host: Host,
+    work_dir: Path,
+    mngr_ctx: MngrContext,
+    agent_data: Mapping[str, object],
+    upgraded_script_content: str,
+    agent_class: type[UpgradableCommandAgentT],
+) -> UpgradableCommandAgentT:
+    """An upgradable view, of ``agent_class``, of a never-started command agent whose state dir holds only its data.json, with ``agent_data`` over its fields."""
+    agent_id = AgentId.generate()
+    agent_name = AgentName(f"recorded-{agent_id.get_uuid().hex[:8]}")
+    write_command_agent_record(host, agent_id, agent_name, work_dir, agent_data)
+    return make_upgradable_command_agent(
+        host,
+        agent_id,
+        agent_name,
+        work_dir,
+        mngr_ctx,
+        upgrade_unsupported_detail=None,
+        upgraded_script_content=upgraded_script_content,
+        build_error_message=None,
+        agent_class=agent_class,
+    )
+
+
+def run_upgrade_as_cli(agent: AgentInterface[Any]) -> AgentUpgradeOutcome:
+    """The outcome of ``mngr upgrade NAME`` for ``agent``: on its own host, not forced and not a dry run."""
+    return upgrade_agent(
+        agent, agent.get_host(), is_forced=False, is_dry_run=False, is_caller=False, mngr_ctx=agent.mngr_ctx
+    )
+
+
+@pure
+def make_current_outcome(agent: AgentInterface[Any]) -> AgentCurrent:
+    """The outcome of a real run that finds ``agent`` current."""
+    return AgentCurrent(agent_id=agent.id, agent_name=agent.name, is_dry_run=False)
+
+
+@pure
+def make_upgraded_while_stopped_outcome(agent: AgentInterface[Any], changed_paths: Sequence[Path]) -> AgentUpgraded:
+    """The outcome of a real run that rewrote ``changed_paths`` on ``agent``, which stays stopped."""
+    return AgentUpgraded(
+        agent_id=agent.id,
+        agent_name=agent.name,
+        plan=UpgradePlan.LEAVE_STOPPED,
+        prior_state=AgentLifecycleState.STOPPED,
+        changed_paths=tuple(changed_paths),
+        is_dry_run=False,
+    )
+
+
+@pure
+def make_skipped_outcome(agent: AgentInterface[Any], skip: UpgradeSkip) -> AgentUpgradeSkipped:
+    """The outcome of a real run that skips ``agent`` for ``skip``."""
+    return AgentUpgradeSkipped(
+        agent_id=agent.id, agent_name=agent.name, kind=skip.kind, detail=skip.detail, is_dry_run=False
+    )
+
+
+@pure
+def make_unsupported_until_recreated_outcome(agent: AgentInterface[Any], harness_detail: str) -> AgentUpgradeSkipped:
+    """The outcome of a real run that skips ``agent`` for ``harness_detail``, the reason its harness gives, followed by the re-create command."""
+    assert "mngr create" not in harness_detail, (
+        f"mngr upgrade appends the re-create command, so a harness's unsupported detail leaves it out: {harness_detail!r}"
+    )
+    return make_skipped_outcome(
+        agent,
+        UpgradeSkip(
+            kind=UpgradeSkipKind.UNSUPPORTED,
+            detail=UpgradeSkipDetail(
+                f"{harness_detail}; re-create it with `mngr create {agent.name} --reuse --update`"
+            ),
+        ),
+    )
+
+
+@pure
+def make_prepare_failed_outcome(agent: AgentInterface[Any], error_message: str) -> AgentUpgradeFailed:
+    """The outcome of a run whose prepare step failed for ``agent`` with ``error_message``."""
+    return AgentUpgradeFailed(
+        agent_id=agent.id, agent_name=agent.name, step=UpgradeFailedStep.PREPARE, error_message=error_message
+    )

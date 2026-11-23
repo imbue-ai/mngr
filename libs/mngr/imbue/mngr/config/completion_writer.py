@@ -47,6 +47,7 @@ _POSITIONAL_COMPLETION_SPEC: Final[dict[str, list[list[str]]]] = {
     "start": [["agent_names"]],
     "stop": [["agent_names"]],
     "transcript": [["agent_names", "host_names"]],
+    "upgrade": [["agent_names"]],
 }
 
 # Per-position positional completion spec for group subcommands.
@@ -126,11 +127,6 @@ _FIELD_TYPE_COMPLETION_SOURCES: Final[dict[type, str]] = {
     AgentTypeName: "agent_type_names",
     ProviderBackendName: "provider_backend_names",
 }
-
-
-# =============================================================================
-# Cache writers
-# =============================================================================
 
 
 def _extract_options_for_command(cmd: click.Command) -> list[str]:

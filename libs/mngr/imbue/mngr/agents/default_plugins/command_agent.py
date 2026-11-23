@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import SendKeysAgent
+from imbue.mngr.agents.upgrade import NoOpUpgradeMixin
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 
 
-class CommandAgent(SendKeysAgent[AgentTypeConfig], HasUnattendedModeMixin):
+class CommandAgent(SendKeysAgent[AgentTypeConfig], HasUnattendedModeMixin, NoOpUpgradeMixin):
     """Agent type that runs an arbitrary shell command (see ``register_agent_type``).
 
     A bare command runner: it does not inherit ``CliBackedAgentMixin``, so the CLI-oriented

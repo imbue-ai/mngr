@@ -6,7 +6,9 @@ import os
 import re
 import shutil
 from collections.abc import Generator
+from collections.abc import Iterator
 from collections.abc import Mapping
+from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -16,6 +18,7 @@ from loguru import logger
 
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.imbue_common.pure import pure
+from imbue.mngr.agents.upgrade import rebuild_hook_groups_keeping_other_entries
 from imbue.mngr.errors import ConfigError
 from imbue.mngr.hosts.background_tasks import BACKGROUND_TASK_DIR_NAME
 from imbue.mngr.utils.file_utils import atomic_write
@@ -976,10 +979,11 @@ def build_readiness_hooks_config() -> dict[str, Any]:
       ``{"trigger": "manual"|"auto"|"unknown", "ended_at": "<utc iso>"}``.
       Overwritten by each PostCompact; the summary itself stays in the transcript.
 
-    These hooks are written into the agent's Claude settings only when the agent is
-    provisioned at create; starting or restarting an agent does not rewrite them. An
-    agent created before a hook was added never runs it, so consumers must tolerate the
-    'compacting' and 'last_compaction.json' files never appearing.
+    These hooks are written into the agent's Claude settings when the agent is
+    provisioned at create and by ``mngr upgrade``; starting or restarting an agent does
+    not rewrite them. An agent created before a hook was added never runs it until it is
+    upgraded, so consumers must tolerate the 'compacting' and 'last_compaction.json' files
+    never appearing.
 
     Every state-writing hook is prefixed with MAIN_SESSION_ONLY_GUARD rather
     than bare SESSION_GUARD: a nested claude launched from inside the agent
@@ -1202,6 +1206,10 @@ def build_readiness_hooks_config() -> dict[str, Any]:
     }
 
 
+# Matcher of the hook group that auto-allows every permission request.
+_PERMISSION_AUTO_ALLOW_MATCHER: Final[str] = "*"
+
+
 @pure
 def build_permission_auto_allow_hooks_config() -> dict[str, Any]:
     """Build hooks configuration that auto-allows all permission dialogs.
@@ -1213,7 +1221,7 @@ def build_permission_auto_allow_hooks_config() -> dict[str, Any]:
         "hooks": {
             "PermissionRequest": [
                 {
-                    "matcher": "*",
+                    "matcher": _PERMISSION_AUTO_ALLOW_MATCHER,
                     "hooks": [
                         {
                             "type": "command",
@@ -1254,6 +1262,19 @@ def build_credential_sync_hooks_config() -> dict[str, Any]:
             ],
         }
     }
+
+
+@pure
+def build_mngr_hook_configs_for_options(
+    *, is_credential_sync_enabled: bool, is_permission_auto_allow_enabled: bool
+) -> list[dict[str, Any]]:
+    """mngr's hook configs for these options, in the order they fold into a settings file."""
+    hook_configs = [build_readiness_hooks_config()]
+    if is_credential_sync_enabled:
+        hook_configs.append(build_credential_sync_hooks_config())
+    if is_permission_auto_allow_enabled:
+        hook_configs.append(build_permission_auto_allow_hooks_config())
+    return hook_configs
 
 
 @pure
@@ -1299,3 +1320,95 @@ def fold_hook_configs(base: dict[str, Any], hook_configs: list[dict[str, Any]]) 
     settings dict (equal by value to ``base`` if every hook already existed).
     """
     return functools.reduce(merge_hooks_config, hook_configs, base)
+
+
+# Substrings that together mark the command of the permission auto-allow hook.
+_PERMISSION_AUTO_ALLOW_COMMAND_MARKERS: Final[tuple[str, ...]] = (
+    '"hookEventName":"PermissionRequest"',
+    '"behavior":"allow"',
+)
+
+# Substring that marks the command of the credential-sync hook.
+_CREDENTIAL_SYNC_COMMAND_MARKER: Final[str] = "commands/sync_keychain_credentials.py"
+
+# Start of a hook command that runs a plugin's python module behind SESSION_GUARD; mngr_claude writes no such hook.
+_PLUGIN_MODULE_HOOK_COMMAND_PREFIX: Final[str] = SESSION_GUARD + "exec uv run python -m "
+
+
+@pure
+def _get_hook_entry_command(hook_entry: Any) -> str | None:
+    command = hook_entry.get("command") if isinstance(hook_entry, dict) else None
+    return command if isinstance(command, str) else None
+
+
+@pure
+def _is_permission_auto_allow_hook_entry(hook_entry: Any, hook_group: Mapping[str, Any]) -> bool:
+    command = _get_hook_entry_command(hook_entry)
+    return (
+        command is not None
+        and hook_group.get("matcher") == _PERMISSION_AUTO_ALLOW_MATCHER
+        and all(marker in command for marker in _PERMISSION_AUTO_ALLOW_COMMAND_MARKERS)
+    )
+
+
+@pure
+def _is_credential_sync_hook_entry(hook_entry: Any) -> bool:
+    command = _get_hook_entry_command(hook_entry)
+    return command is not None and _CREDENTIAL_SYNC_COMMAND_MARKER in command
+
+
+@pure
+def is_mngr_hook_entry(hook_entry: Any, hook_group: Mapping[str, Any]) -> bool:
+    """Whether mngr_claude of any version wrote this entry of ``hook_group``: a readiness, auto-allow or credential-sync hook."""
+    command = _get_hook_entry_command(hook_entry)
+    if command is None:
+        return False
+    if command.startswith(SESSION_GUARD):
+        return not command.startswith(_PLUGIN_MODULE_HOOK_COMMAND_PREFIX)
+    return _is_permission_auto_allow_hook_entry(hook_entry, hook_group) or _is_credential_sync_hook_entry(hook_entry)
+
+
+@pure
+def _iter_hook_entries_with_group(
+    hooks: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> Iterator[tuple[Any, Mapping[str, Any]]]:
+    for hook_groups in hooks.values():
+        for hook_group in hook_groups:
+            for hook_entry in hook_group.get("hooks", []):
+                yield hook_entry, hook_group
+
+
+@pure
+def has_permission_auto_allow_hook(hooks: Mapping[str, Sequence[Mapping[str, Any]]]) -> bool:
+    return any(
+        _is_permission_auto_allow_hook_entry(hook_entry, hook_group)
+        for hook_entry, hook_group in _iter_hook_entries_with_group(hooks)
+    )
+
+
+@pure
+def has_credential_sync_hook(hooks: Mapping[str, Sequence[Mapping[str, Any]]]) -> bool:
+    return any(_is_credential_sync_hook_entry(hook_entry) for hook_entry, _ in _iter_hook_entries_with_group(hooks))
+
+
+@pure
+def has_mngr_hook_entry(hooks: Mapping[str, Sequence[Mapping[str, Any]]]) -> bool:
+    return any(
+        is_mngr_hook_entry(hook_entry, hook_group) for hook_entry, hook_group in _iter_hook_entries_with_group(hooks)
+    )
+
+
+@pure
+def rebuild_hooks_keeping_agent_options(live_hooks: Mapping[str, Sequence[Mapping[str, Any]]]) -> dict[str, Any]:
+    """This mngr's hooks for an agent whose settings hold ``live_hooks``, keeping every entry mngr did not write.
+
+    The auto-allow and credential-sync hooks are built only when ``live_hooks`` has them.
+    """
+    mngr_hooks = fold_hook_configs(
+        {},
+        build_mngr_hook_configs_for_options(
+            is_credential_sync_enabled=has_credential_sync_hook(live_hooks),
+            is_permission_auto_allow_enabled=has_permission_auto_allow_hook(live_hooks),
+        ),
+    )["hooks"]
+    return rebuild_hook_groups_keeping_other_entries(live_hooks, mngr_hooks, is_mngr_hook_entry)

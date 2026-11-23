@@ -8,6 +8,7 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
+from imbue.mngr.api.testing import register_upgradable_command_agent_types
 from imbue.mngr.cli.archive import archive
 from imbue.mngr.cli.capture import capture
 from imbue.mngr.cli.check_deps import check_deps
@@ -217,6 +218,28 @@ def create_test_agent(
 
     for session_name in created_sessions:
         cleanup_tmux_session(session_name)
+
+
+@pytest.fixture
+def upgradable_agent_types(plugin_manager: pluggy.PluginManager) -> None:
+    """Register the test agent types ``mngr upgrade`` covers in the registry ``plugin_manager`` loaded."""
+    register_upgradable_command_agent_types()
+
+
+@pytest.fixture
+def path_without_rsync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace PATH with one dir of links to every executable on it except ``rsync``."""
+    bin_dir = tmp_path / "bin-without-rsync"
+    bin_dir.mkdir()
+    for path_dir in (Path(entry) for entry in os.environ["PATH"].split(os.pathsep) if entry):
+        if not path_dir.is_dir():
+            continue
+        for executable in path_dir.iterdir():
+            link = bin_dir / executable.name
+            is_linked = executable.name != "rsync" and os.path.isfile(executable) and os.access(executable, os.X_OK)
+            if is_linked and not os.path.lexists(link):
+                link.symlink_to(executable)
+    monkeypatch.setenv("PATH", str(bin_dir))
 
 
 @pytest.fixture

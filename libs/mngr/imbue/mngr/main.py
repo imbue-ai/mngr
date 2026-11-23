@@ -56,6 +56,7 @@ from imbue.mngr.cli.snapshot import snapshot
 from imbue.mngr.cli.start import start
 from imbue.mngr.cli.stop import stop
 from imbue.mngr.cli.transcript import transcript
+from imbue.mngr.cli.upgrade import upgrade
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.providers.registry import get_all_provider_args_help_sections
@@ -289,6 +290,7 @@ BUILTIN_COMMANDS: list[click.Command] = [
     plugin_command,
     observe,
     transcript,
+    upgrade,
 ]
 
 for cmd in BUILTIN_COMMANDS:

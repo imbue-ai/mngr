@@ -21,6 +21,9 @@ EXIT_CODE_MESSAGE_DELIVERED_BUT_BLOCKED: Final[int] = 7
 # "The named agent or host does not exist" is EXIT_CODE_TARGET_NOT_FOUND (8), defined in
 # errors.py beside the exception classes that carry it.
 
+# `mngr upgrade` only: no agent failed, but at least one named agent was left out of date and untouched.
+EXIT_CODE_AGENTS_NOT_UPGRADED: Final[int] = 9
+
 # Maps each cleanup failure category to its process exit code.
 _EXIT_CODE_BY_CATEGORY: Final[dict[CleanupFailureCategory, int]] = {
     CleanupFailureCategory.TIMEOUT: EXIT_CODE_TIMEOUT,

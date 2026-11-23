@@ -51,6 +51,7 @@ from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import ConfigError
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import HostConnectionError
+from imbue.mngr.errors import InvalidUpgradeInputError
 from imbue.mngr.errors import MessageDeliveredButBlockedError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import SendFailureKind
@@ -98,9 +99,12 @@ from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
 from imbue.mngr_claude.claude_config import MAIN_SESSION_ONLY_GUARD
 from imbue.mngr_claude.claude_config import PERMISSIONS_WAITING_FILENAME
+from imbue.mngr_claude.claude_config import SESSION_GUARD
 from imbue.mngr_claude.claude_config import build_credential_sync_hooks_config
+from imbue.mngr_claude.claude_config import build_permission_auto_allow_hooks_config
 from imbue.mngr_claude.claude_config import build_readiness_hooks_config
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
+from imbue.mngr_claude.claude_config import get_agent_hook_settings_path
 from imbue.mngr_claude.claude_config import get_managed_settings_path
 from imbue.mngr_claude.dialogs import BypassPermissionsWarning
 from imbue.mngr_claude.dialogs import EmptyShellMode
@@ -1059,6 +1063,23 @@ def test_upgrade_stored_command_rewrites_the_session_name_an_older_mngr_stored(
 
     assert agent.upgrade_stored_command(stored_by_older_mngr) == current
     assert agent.upgrade_stored_command(current) == current
+
+
+def test_upgrade_stored_command_clears_the_main_pid_claim_a_launch_command_from_before_the_claim_left(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    current = agent.assemble_command(host=host, agent_args=(), command_override=None)
+    stored_before_the_claim = CommandString(
+        current.replace(" $MNGR_AGENT_STATE_DIR/claude_main_pid &&", " &&").replace(
+            PANE_SESSION_NAME_SHELL_EXPRESSION, shlex.quote(agent.session_name)
+        )
+    )
+    assert "rm -rf $MNGR_AGENT_STATE_DIR/session_started && " in stored_before_the_claim
+    assert "claude_main_pid" not in stored_before_the_claim
+
+    assert agent.upgrade_stored_command(stored_before_the_claim) == current
+    assert "rm -rf $MNGR_AGENT_STATE_DIR/session_started $MNGR_AGENT_STATE_DIR/claude_main_pid && " in current
 
 
 # Provisioning Lifecycle Tests
@@ -2570,6 +2591,41 @@ def test_startup_bypass_permissions_warning_reports_how_to_accept_it_before_retr
     assert agent.enter_press_count == 0
 
 
+def test_wait_for_ready_after_restart_reports_a_dialog_holding_the_pane_without_pressing_a_key(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    agent = _make_scripted_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        [BYPASS_PERMISSIONS_WARNING_PANE],
+        agent_class=_KeyRecordingClaudeAgent,
+    )
+    assert isinstance(agent, _KeyRecordingClaudeAgent)
+    agent.session_started_ready_at_position = 1
+
+    with pytest.raises(DialogDetectedError) as exc_info:
+        agent.wait_for_ready_after_restart(timeout=0.1)
+
+    assert exc_info.value.reason == BypassPermissionsWarning().get_startup_message()
+    assert agent.pressed_keys == []
+    assert agent.enter_press_count == 0
+
+
+def test_wait_for_ready_after_restart_returns_on_the_marker_get_ready_signal_paths_names(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    ready_signal_path, main_pid_claim_path = agent.get_ready_signal_paths()
+    marker_path = agent._get_agent_dir() / ready_signal_path
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    marker_path.touch()
+
+    agent.wait_for_ready_after_restart(timeout=0.1)
+
+    assert (ready_signal_path, main_pid_claim_path) == (Path("session_started"), Path("claude_main_pid"))
+
+
 def test_send_preflight_refuses_the_bypass_permissions_warning_without_a_keypress(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
@@ -2857,6 +2913,261 @@ def test_configure_agent_hooks_applies_settings_overrides_in_managed_file(
     assert settings["permissions"]["allow"] == ["Bash(npm *)"]
     assert "SessionStart" in settings["hooks"]
     assert "__extend" not in content
+
+
+_AGENT_DATA_PATH = Path("data.json")
+_MANAGED_SETTINGS_PATH = get_agent_hook_settings_path(Path(), use_env_config_dir=True)
+_CONFIG_DIR_SETTINGS_PATH = get_agent_hook_settings_path(Path(), use_env_config_dir=False)
+_COMMON_TRANSCRIPT_SCRIPT_NAMES = ("common_transcript.sh", "common_transcript_convert.py")
+_OPTIONAL_SCRIPT_NAMES = (*_COMMON_TRANSCRIPT_SCRIPT_NAMES, "stream_snapshot.py")
+_STALE_MNGR_HOOK_GROUP = {"hooks": [{"type": "command", "command": SESSION_GUARD + "echo stale-mngr-hook-27465"}]}
+_USER_HOOK_GROUP = {"hooks": [{"type": "command", "command": "echo user-hook-27465"}]}
+
+
+def _make_upgrade_inputs(
+    agent: ClaudeAgent,
+    stored_command: str,
+    settings_text_by_path: Mapping[Path, str],
+    script_names_agent_has: tuple[str, ...],
+) -> dict[Path, str | None]:
+    """The content of each path the agent's upgrade reads, None for the ones the agent does not have."""
+    content_by_path: dict[Path, str] = {
+        _AGENT_DATA_PATH: json.dumps({"command": stored_command}),
+        **settings_text_by_path,
+        **{Path("commands") / name: "echo script-the-agent-has-27465\n" for name in script_names_agent_has},
+    }
+    return {path: content_by_path.get(path) for path in agent.get_upgrade_input_paths()}
+
+
+def test_get_upgrade_input_paths_names_the_record_both_settings_files_and_the_optional_scripts(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    assert agent.get_upgrade_input_paths() == (
+        _AGENT_DATA_PATH,
+        _MANAGED_SETTINGS_PATH,
+        _CONFIG_DIR_SETTINGS_PATH,
+        *(Path("commands") / name for name in _OPTIONAL_SCRIPT_NAMES),
+    )
+
+
+_NO_OWN_HOOKS_FILE_DETAIL = "created before mngr kept its hooks in a file of its own; first remove the hooks mngr left in .claude/settings.local.json in its work dir"
+
+
+@pytest.mark.parametrize(
+    ("isolate_local_config_dir", "expected_detail"), [(False, None), (True, _NO_OWN_HOOKS_FILE_DETAIL)]
+)
+def test_get_upgrade_unsupported_detail_is_none_when_the_stored_command_loads_the_managed_settings_file(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    isolate_local_config_dir: bool,
+    expected_detail: str | None,
+) -> None:
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=isolate_local_config_dir),
+    )
+    stored_command = str(agent.assemble_command(host, (), None))
+
+    assert agent.get_upgrade_unsupported_detail(_make_upgrade_inputs(agent, stored_command, {}, ())) == expected_detail
+
+
+@pytest.mark.parametrize(
+    ("config_dir_settings_text", "expected_detail"),
+    [
+        pytest.param(None, _NO_OWN_HOOKS_FILE_DETAIL, id="missing"),
+        pytest.param("{}", _NO_OWN_HOOKS_FILE_DETAIL, id="no_hooks"),
+        pytest.param(
+            json.dumps({"hooks": {"Stop": [_USER_HOOK_GROUP]}}), _NO_OWN_HOOKS_FILE_DETAIL, id="only_a_user_hook"
+        ),
+        pytest.param(
+            json.dumps({"hooks": {"Stop": [_USER_HOOK_GROUP, _STALE_MNGR_HOOK_GROUP]}}), None, id="a_stale_mngr_hook"
+        ),
+        pytest.param(json.dumps(build_permission_auto_allow_hooks_config()), None, id="only_the_auto_allow_hook"),
+    ],
+)
+def test_get_upgrade_unsupported_detail_for_an_agent_with_its_own_config_dir_needs_a_mngr_hook_in_its_settings(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    config_dir_settings_text: str | None,
+    expected_detail: str | None,
+) -> None:
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=True),
+    )
+    settings_text_by_path = (
+        {} if config_dir_settings_text is None else {_CONFIG_DIR_SETTINGS_PATH: config_dir_settings_text}
+    )
+    inputs = _make_upgrade_inputs(agent, str(agent.assemble_command(host, (), None)), settings_text_by_path, ())
+
+    assert agent.get_upgrade_unsupported_detail(inputs) == expected_detail
+
+
+@pytest.mark.parametrize(
+    ("config_dir_settings_text", "expected_problem"),
+    [
+        pytest.param(
+            "{not json",
+            "is not valid JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+            id="not_json",
+        ),
+        pytest.param("[]", "does not hold a JSON object", id="not_an_object"),
+        pytest.param(
+            json.dumps({"hooks": {"Stop": {"hooks": [_STALE_MNGR_HOOK_GROUP]}}}),
+            "has a `hooks` value that does not map each event to a list of hook groups",
+            id="malformed_hooks",
+        ),
+    ],
+)
+def test_get_upgrade_unsupported_detail_refuses_malformed_settings_in_an_agents_own_config_dir(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    config_dir_settings_text: str,
+    expected_problem: str,
+) -> None:
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=True),
+    )
+    inputs = _make_upgrade_inputs(
+        agent,
+        str(agent.assemble_command(host, (), None)),
+        {_CONFIG_DIR_SETTINGS_PATH: config_dir_settings_text},
+        (),
+    )
+
+    with pytest.raises(InvalidUpgradeInputError) as exc_info:
+        agent.get_upgrade_unsupported_detail(inputs)
+
+    assert str(exc_info.value) == f"{_CONFIG_DIR_SETTINGS_PATH} {expected_problem}"
+
+
+def test_build_upgraded_files_refuses_a_managed_settings_file_that_is_not_json(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    inputs = _make_upgrade_inputs(
+        agent, f"claude {MANAGED_SETTINGS_LAUNCH_ARG}", {_MANAGED_SETTINGS_PATH: "{not json"}, ()
+    )
+
+    with pytest.raises(InvalidUpgradeInputError, match=f"{_MANAGED_SETTINGS_PATH} is not valid JSON"):
+        agent.build_upgraded_files(inputs)
+
+
+def test_build_upgraded_files_leaves_out_a_settings_file_whose_hooks_already_match(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
+    )
+    agent._configure_agent_hooks(host, temp_mngr_ctx)
+    managed_settings_text = get_managed_settings_path(agent._get_agent_dir()).read_text()
+    inputs = _make_upgrade_inputs(
+        agent, str(agent.assemble_command(host, (), None)), {_MANAGED_SETTINGS_PATH: managed_settings_text}, ()
+    )
+
+    upgraded_files = agent.build_upgraded_files(inputs)
+
+    assert {path.parent for path in upgraded_files} == {Path("commands")}
+    assert upgraded_files[Path("commands/wait_for_stop_hook.sh")].mode == "0755"
+    assert Path("commands/mngr_background_task_lib.sh") in upgraded_files
+
+
+@pytest.mark.parametrize(
+    ("stored_command", "settings_path", "other_settings_path"),
+    [
+        pytest.param(
+            f"claude {MANAGED_SETTINGS_LAUNCH_ARG}", _MANAGED_SETTINGS_PATH, _CONFIG_DIR_SETTINGS_PATH, id="managed"
+        ),
+        pytest.param("claude", _CONFIG_DIR_SETTINGS_PATH, _MANAGED_SETTINGS_PATH, id="own_config_dir"),
+    ],
+)
+def test_build_upgraded_files_rebuilds_the_hooks_of_the_settings_file_the_stored_command_loads(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    stored_command: str,
+    settings_path: Path,
+    other_settings_path: Path,
+) -> None:
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    stale_settings = {"model": "sonnet", "hooks": {"Stop": [_STALE_MNGR_HOOK_GROUP, _USER_HOOK_GROUP]}}
+    other_settings_text = json.dumps({"hooks": {"Stop": [_STALE_MNGR_HOOK_GROUP]}})
+    inputs = _make_upgrade_inputs(
+        agent,
+        stored_command,
+        {settings_path: json.dumps(stale_settings), other_settings_path: other_settings_text},
+        (),
+    )
+
+    upgraded_settings_file = agent.build_upgraded_files(inputs)[settings_path]
+
+    readiness_hooks = build_readiness_hooks_config()["hooks"]
+    assert json.loads(upgraded_settings_file.content) == {
+        "model": "sonnet",
+        "hooks": {
+            "Stop": [*readiness_hooks["Stop"], _USER_HOOK_GROUP],
+            **{event: groups for event, groups in readiness_hooks.items() if event != "Stop"},
+        },
+    }
+    assert upgraded_settings_file.mode == "0644"
+    assert other_settings_path not in agent.build_upgraded_files(inputs)
+
+
+@pytest.mark.parametrize("is_enabled_by_running_config", [True, False])
+@pytest.mark.parametrize(
+    ("script_names_agent_has", "expected_script_names"),
+    [
+        pytest.param((), (), id="none"),
+        pytest.param(("common_transcript.sh",), _COMMON_TRANSCRIPT_SCRIPT_NAMES, id="common_transcript_sh"),
+        pytest.param(
+            ("common_transcript_convert.py",), _COMMON_TRANSCRIPT_SCRIPT_NAMES, id="common_transcript_convert"
+        ),
+        pytest.param(("stream_snapshot.py",), ("stream_snapshot.py",), id="stream_snapshot"),
+        pytest.param(_OPTIONAL_SCRIPT_NAMES, _OPTIONAL_SCRIPT_NAMES, id="all"),
+    ],
+)
+def test_build_upgraded_files_includes_the_optional_scripts_the_agent_has_whatever_the_config_enables(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    is_enabled_by_running_config: bool,
+    script_names_agent_has: tuple[str, ...],
+    expected_script_names: tuple[str, ...],
+) -> None:
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(
+            check_installation=False,
+            isolate_local_config_dir=False,
+            emit_common_transcript=is_enabled_by_running_config,
+            streaming_snapshot_interval_seconds=0.25 if is_enabled_by_running_config else 0.0,
+        ),
+    )
+    inputs = _make_upgrade_inputs(agent, str(agent.assemble_command(host, (), None)), {}, script_names_agent_has)
+
+    upgraded_files = agent.build_upgraded_files(inputs)
+
+    assert tuple(name for name in _OPTIONAL_SCRIPT_NAMES if Path("commands") / name in upgraded_files) == (
+        expected_script_names
+    )
+    assert Path("commands/wait_for_stop_hook.sh") in upgraded_files
 
 
 def test_seed_model_state_writes_launch_selection(

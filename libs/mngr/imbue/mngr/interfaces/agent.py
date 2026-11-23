@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from abc import ABC
 from abc import abstractmethod
+from collections.abc import Generator
 from collections.abc import Iterator
 from collections.abc import Mapping
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -24,6 +26,7 @@ from imbue.mngr.errors import AgentNoLongerIdleError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.data_types import FileTransferSpec
+from imbue.mngr.interfaces.data_types import HarnessFileSpec
 from imbue.mngr.interfaces.data_types import HostLifecycleSnapshot
 from imbue.mngr.interfaces.live_output import LiveOutputReader
 from imbue.mngr.primitives import ActivitySource
@@ -200,6 +203,12 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         that none is open.
         """
         return False
+
+    @abstractmethod
+    @contextmanager
+    def hold_message_lock(self, timeout_seconds: float) -> Generator[None, None, None]:
+        """Hold the lock a message send to the agent holds until it has submitted, raising MessageLockTimeoutError if another holder keeps it past ``timeout_seconds``; a no-op off the local host."""
+        ...
 
     @abstractmethod
     def get_initial_message(self) -> str | None:
@@ -679,6 +688,56 @@ class HasSessionAdoptionMixin(ABC):
     @abstractmethod
     def adopt_session(self, host: OnlineHostInterface, options: CreateAgentOptions, mngr_ctx: MngrContext) -> None:
         """Adopt the session(s) named in the create options into this newly provisioned agent."""
+        ...
+
+
+class UpgradableAgentMixin(ABC):
+    """Mixin for agent types whose mngr-generated files ``mngr upgrade`` can rewrite for an existing agent.
+
+    ``mngr upgrade`` swaps in each built file whose bytes or executable bit differ from the live one.
+    Inputs are the files ``get_upgrade_input_paths`` names, decoded as UTF-8.
+    The input, detail and build methods read no host and no config, and are deterministic.
+    They raise a MngrError for anything they cannot handle.
+    Only the readiness wait touches the host.
+    The build returns only mngr's files; a file another program also writes is an input, rebuilt keeping what mngr did not write.
+    The build's files run under the launch command an older mngr stored for the agent.
+    The build gives this mngr's version of what the agent already has, never what the running config gives a new agent.
+    The build's files are identical, bytes and executable bit, to what create writes.
+    A file the build leaves out stays in place.
+    """
+
+    @abstractmethod
+    def get_upgrade_input_paths(self) -> tuple[Path, ...]:
+        """Paths, relative to the agent's state dir, whose current content the detail and build methods are given."""
+        ...
+
+    @abstractmethod
+    def get_upgrade_unsupported_detail(self, input_content_by_path: Mapping[Path, str | None]) -> str | None:
+        """None when this agent, started as it is stored, loads the files ``build_upgraded_files`` returns; otherwise why not, in one line.
+
+        The line names any step the user must take before re-creating the agent, but not the re-create command, which ``mngr upgrade`` appends.
+        Raises a MngrError, never an unsupported detail, for an input of a shape the harness cannot read.
+        """
+        ...
+
+    @abstractmethod
+    def build_upgraded_files(self, input_content_by_path: Mapping[Path, str | None]) -> dict[Path, HarnessFileSpec]:
+        """This mngr's version of each file it generates for the agent, keyed by path relative to its state dir.
+
+        ``input_content_by_path`` holds the content of each path ``get_upgrade_input_paths`` names, None for a missing one.
+        A file another program also writes may be left out when mngr's part of it already matches.
+        Raises a MngrError when an input has a shape it cannot rebuild.
+        """
+        ...
+
+    @abstractmethod
+    def get_ready_signal_paths(self) -> tuple[Path, ...]:
+        """Markers, relative to the state dir, that the agent's launch clears before its harness starts (readiness markers and similar), which ``mngr upgrade`` removes while the agent is stopped."""
+        ...
+
+    @abstractmethod
+    def wait_for_ready_after_restart(self, timeout: float) -> None:
+        """Block until the restarted agent can take input, raising the harness's start error if it cannot; no create-only side effects."""
         ...
 
 

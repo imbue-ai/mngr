@@ -15,7 +15,6 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Callable
-from typing import ClassVar
 from typing import Final
 from typing import Mapping
 from typing import Sequence
@@ -387,6 +386,26 @@ def install_packaged_script_on_host(
     host.write_file(dest, content, mode=mode)
 
 
+SHARED_SHELL_LIB_NAMES: Final[tuple[str, ...]] = (
+    "mngr_log.sh",
+    "mngr_transcript_lib.sh",
+    "mngr_common_transcript_lib.sh",
+    "mngr_background_task_lib.sh",
+)
+
+
+def read_shared_shell_lib(name: str) -> str:
+    """The shared shell library ``name`` as this mngr ships it."""
+    return importlib.resources.files(mngr_resources).joinpath(name).read_text()
+
+
+def write_shared_shell_libs(host: OnlineHostInterface, commands_dir: Path) -> None:
+    """Write the shared shell libraries that mngr's bash scripts source into ``commands_dir``."""
+    # Per-file writes keep the executable bit, which the rsync staging helper does not.
+    for name in SHARED_SHELL_LIB_NAMES:
+        host.write_file(commands_dir / name, read_shared_shell_lib(name).encode(), mode="0755")
+
+
 def read_json_dict_via_host(host: OnlineHostInterface, path: Path) -> dict[str, Any]:
     """Host-aware variant of ``mngr.utils.file_utils.read_json_dict``.
 
@@ -510,7 +529,7 @@ _LIFECYCLE_SNAPSHOT_TIMEOUT_SECONDS: Final[float] = 5.0
 # transient (``outer_host.SSH_TRANSIENT_RETRY_MAX_ATTEMPTS`` attempts, with
 # ``SSH_TRANSIENT_RETRY_BACKOFFS_SECONDS`` between them), so the worst case is that many
 # times this value plus the backoff; it is sized so that worst case still ends before
-# the start path's own host-lock wait (``api.find._START_HOST_LOCK_TIMEOUT_SECONDS``)
+# the start path's own host-lock wait (``api.find.START_HOST_LOCK_TIMEOUT_SECONDS``)
 # gives up.
 _START_AGENT_LAUNCH_TIMEOUT_SECONDS: Final[float] = 90.0
 
@@ -3189,13 +3208,6 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             with log_span("Calling on_after_provisioning for agent {}", agent.name):
                 agent.on_after_provisioning(host=self, options=options, mngr_ctx=mngr_ctx)
 
-    _SHARED_SHELL_LIB_NAMES: ClassVar[tuple[str, ...]] = (
-        "mngr_log.sh",
-        "mngr_transcript_lib.sh",
-        "mngr_common_transcript_lib.sh",
-        "mngr_background_task_lib.sh",
-    )
-
     def _ensure_shared_shell_libs(self, agent: AgentInterface) -> None:
         """Write the shared shell libraries (and the SIGWINCH repaint script) to the host.
 
@@ -3220,15 +3232,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
           running so the agent reads RUNNING_BACKGROUND rather than WAITING.
         """
         host_commands = self.host_dir / "commands"
-        agent_commands = self._get_agent_state_dir(agent) / "commands"
-        # These should stay per-file write_file calls (not upload_files_in_bulk) because
-        # they need the executable bit (mode="0755"), which the rsync staging helper does
-        # not preserve. The set is fixed and small, so the per-file cost is negligible and
-        # this is exempt from the bulk-upload ratchet.
-        for name in self._SHARED_SHELL_LIB_NAMES:
-            content_bytes = importlib.resources.files(mngr_resources).joinpath(name).read_text().encode()
-            self.write_file(host_commands / name, content_bytes, mode="0755")
-            self.write_file(agent_commands / name, content_bytes, mode="0755")
+        write_shared_shell_libs(self, host_commands)
+        write_shared_shell_libs(self, self._get_agent_state_dir(agent) / "commands")
 
         # Install the post-attach SIGWINCH repaint script at host level only. Unlike
         # the libs above it is executed directly (by the per-session tmux
@@ -3593,6 +3598,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         ) from e
                     if not result.success:
                         raise AgentStartError(str(agent.name), result.stderr)
+
+    def check_agent_can_start(self, agent: AgentInterface) -> None:
+        self._get_agent_command(agent)
+        self._ensure_work_dir_exists(agent)
 
     def _run_classified_cleanup_command(
         self,

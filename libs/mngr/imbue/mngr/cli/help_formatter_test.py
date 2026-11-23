@@ -10,6 +10,7 @@ from click_option_group import optgroup
 from imbue.mngr.cli.common_opts import COMMON_OPTIONS_GROUP_NAME
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import _run_pager_with_subprocess
+from imbue.mngr.cli.help_formatter import _wrap_paragraph
 from imbue.mngr.cli.help_formatter import _wrap_text
 from imbue.mngr.cli.help_formatter import _write_to_stdout
 from imbue.mngr.cli.help_formatter import add_pager_help_option
@@ -841,11 +842,6 @@ def test_all_subcommands_have_git_style_help() -> None:
             )
 
 
-# =============================================================================
-# CommandHelpMetadata.full_description
-# =============================================================================
-
-
 def test_get_pager_command_with_config_pager() -> None:
     """get_pager_command should return config.pager when set."""
     config = MngrConfig(pager="bat", prefix="mngr-", is_error_reporting_enabled=False)
@@ -902,11 +898,6 @@ def test_full_description_does_not_double_period() -> None:
     assert ".." not in meta.full_description
 
 
-# =============================================================================
-# _wrap_text
-# =============================================================================
-
-
 def test_wrap_text_simple() -> None:
     """_wrap_text should wrap text with proper indentation."""
     result = _wrap_text("hello world", width=80, indent="  ", subsequent_indent=None)
@@ -923,9 +914,26 @@ def test_wrap_text_wraps_long_lines() -> None:
     assert lines[1].startswith("    ")
 
 
-# =============================================================================
-# render_markdown link rewriting
-# =============================================================================
+def test_wrap_paragraph_wraps_a_paragraph_without_a_list_as_one_block() -> None:
+    paragraph = "one two three four five\nsix seven eight nine ten"
+    result = _wrap_paragraph(paragraph, width=20, indent="  ")
+    assert result == "  one two three four\n  five six seven\n  eight nine ten"
+    assert result == _wrap_text(paragraph, width=20, indent="  ", subsequent_indent=None)
+
+
+def test_wrap_paragraph_keeps_each_list_item_on_lines_of_its_own() -> None:
+    paragraph = "Each agent is:\n- first: one two three four\n  five six\n- second: seven"
+    result = _wrap_paragraph(paragraph, width=20, indent="  ")
+    assert result == "\n".join(
+        [
+            "  Each agent is:",
+            "  - first: one two",
+            "    three four five",
+            "    six",
+            "  - second: seven",
+        ]
+    )
+
 
 # Link-target resolution is unit-tested in markdown_render_test.py; these cover
 # that render_markdown threads link_base through to the rich renderer.
@@ -968,11 +976,6 @@ def test_ansi_description_section_is_indented() -> None:
     plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
     description_line = next(line for line in plain.splitlines() if "description paragraph" in line)
     assert description_line.startswith("       ")
-
-
-# =============================================================================
-# CLI documentation completeness
-# =============================================================================
 
 
 def test_all_non_hidden_commands_have_generated_docs() -> None:

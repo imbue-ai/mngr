@@ -32,8 +32,6 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.base_agent import build_stderr_tee_redirect
 from imbue.mngr.agents.base_agent import quote_agent_args
-from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
-from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.installation import VersionMismatchPolicy
 from imbue.mngr.agents.installation import ensure_cli_installed
@@ -57,6 +55,12 @@ from imbue.mngr.agents.tui_utils import send_enter_keystroke
 from imbue.mngr.agents.tui_utils import send_key_keystroke
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.agents.update_policy import is_self_update_disabled
+from imbue.mngr.agents.upgrade import AGENT_DATA_RELATIVE_PATH
+from imbue.mngr.agents.upgrade import build_command_script_files
+from imbue.mngr.agents.upgrade import build_shared_shell_lib_files
+from imbue.mngr.agents.upgrade import is_hooks_value_well_formed
+from imbue.mngr.agents.upgrade import parse_json_object_input
+from imbue.mngr.agents.upgrade import read_stored_launch_command
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import dedupe_by_resolved_path
@@ -72,6 +76,7 @@ from imbue.mngr.config.field_markers import SettingsPatchField
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import ConfigError
 from imbue.mngr.errors import HostConnectionError
+from imbue.mngr.errors import InvalidUpgradeInputError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendFailureKind
@@ -95,9 +100,11 @@ from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.agent import HasVersionManagementMixin
 from imbue.mngr.interfaces.agent import SupportsLiveOutputMixin
+from imbue.mngr.interfaces.agent import UpgradableAgentMixin
 from imbue.mngr.interfaces.agent import read_idle_since_for_compaction
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import FileType
+from imbue.mngr.interfaces.data_types import HarnessFileSpec
 from imbue.mngr.interfaces.data_types import RelativePath
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
@@ -126,9 +133,7 @@ from imbue.mngr_claude.claude_config import PERMISSIONS_WAITING_FILENAME
 from imbue.mngr_claude.claude_config import acknowledge_cost_threshold
 from imbue.mngr_claude.claude_config import add_claude_trust_for_path
 from imbue.mngr_claude.claude_config import auto_dismiss_claude_dialogs
-from imbue.mngr_claude.claude_config import build_credential_sync_hooks_config
-from imbue.mngr_claude.claude_config import build_permission_auto_allow_hooks_config
-from imbue.mngr_claude.claude_config import build_readiness_hooks_config
+from imbue.mngr_claude.claude_config import build_mngr_hook_configs_for_options
 from imbue.mngr_claude.claude_config import check_claude_dialogs_dismissed
 from imbue.mngr_claude.claude_config import complete_onboarding
 from imbue.mngr_claude.claude_config import disable_lsp_recommendations
@@ -141,13 +146,16 @@ from imbue.mngr_claude.claude_config import find_user_config_in_unisolated_mode
 from imbue.mngr_claude.claude_config import fold_hook_configs
 from imbue.mngr_claude.claude_config import get_agent_claude_config_dir
 from imbue.mngr_claude.claude_config import get_agent_claude_plugin_dir
+from imbue.mngr_claude.claude_config import get_agent_hook_settings_path
 from imbue.mngr_claude.claude_config import get_claude_config_dir
 from imbue.mngr_claude.claude_config import get_managed_settings_path
 from imbue.mngr_claude.claude_config import get_user_claude_config_dir
+from imbue.mngr_claude.claude_config import has_mngr_hook_entry
 from imbue.mngr_claude.claude_config import is_effort_callout_dismissed
 from imbue.mngr_claude.claude_config import is_onboarding_completed
 from imbue.mngr_claude.claude_config import is_source_directory_trusted
 from imbue.mngr_claude.claude_config import read_claude_config
+from imbue.mngr_claude.claude_config import rebuild_hooks_keeping_agent_options
 from imbue.mngr_claude.claude_config import remove_claude_trust_for_path
 from imbue.mngr_claude.claude_config import resolve_shared_claude_config_dir
 from imbue.mngr_claude.compaction import CLAUDE_DEFAULT_CACHE_TTL_MINUTES
@@ -559,12 +567,10 @@ def build_mngr_hook_configs(config: ClaudeAgentConfig, *, is_unattended: bool) -
     (``is_unattended_enabled``) so the gate cannot drift from that contract; the
     agent-less deploy path passes the equivalent config field directly.
     """
-    hook_configs = [build_readiness_hooks_config()]
-    if config.sync_credentials_on_login and is_macos():
-        hook_configs.append(build_credential_sync_hooks_config())
-    if is_unattended:
-        hook_configs.append(build_permission_auto_allow_hooks_config())
-    return hook_configs
+    return build_mngr_hook_configs_for_options(
+        is_credential_sync_enabled=config.sync_credentials_on_login and is_macos(),
+        is_permission_auto_allow_enabled=is_unattended,
+    )
 
 
 @pure
@@ -1490,6 +1496,11 @@ _CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME: Final[str] = "common_transcript.sh"
 # shell resolves it relative to itself; gated by the same emit_common_transcript.
 _CLAUDE_COMMON_TRANSCRIPT_CONVERT_SCRIPT_NAME: Final[str] = "common_transcript_convert.py"
 
+_CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAMES: Final[tuple[str, ...]] = (
+    _CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME,
+    _CLAUDE_COMMON_TRANSCRIPT_CONVERT_SCRIPT_NAME,
+)
+
 # The raw-transcript streamer (returned by ClaudeAgent.get_raw_transcript_scripts
 # per HasTranscriptMixin). Always provisioned: it tails Claude's native session
 # JSONL files into logs/claude_transcript/events.jsonl, which is read by the
@@ -1510,9 +1521,8 @@ _CLAUDE_BACKGROUND_TASKS_SCRIPT_NAME: Final[str] = "claude_background_tasks.sh"
 #   - wait_for_stop_hook.sh and sync_keychain_credentials.py are unrelated
 #     helpers invoked by Claude hooks.
 #
-# The raw-transcript streamer (stream_transcript.sh) is also always provisioned
-# but is provisioned via :func:`provision_raw_transcript_scripts` because it
-# satisfies the :class:`HasTranscriptMixin` contract.
+# The raw-transcript streamer (stream_transcript.sh) is also always provisioned,
+# as the script of ``ClaudeCoreAgent.get_raw_transcript_scripts``.
 _CLAUDE_ALWAYS_PROVISIONED_SCRIPT_NAMES: Final[tuple[str, ...]] = (
     _CLAUDE_BACKGROUND_TASKS_SCRIPT_NAME,
     "wait_for_stop_hook.sh",
@@ -1525,24 +1535,53 @@ _CLAUDE_ALWAYS_PROVISIONED_SCRIPT_NAMES: Final[tuple[str, ...]] = (
 # like common_transcript.sh).
 _CLAUDE_STREAM_SNAPSHOT_SCRIPT_NAME: Final[str] = "stream_snapshot.py"
 
+# What an upgrade reads, relative to the agent's state dir.
+_MANAGED_SETTINGS_RELATIVE_PATH: Final[Path] = get_agent_hook_settings_path(Path(), use_env_config_dir=True)
+_CONFIG_DIR_SETTINGS_RELATIVE_PATH: Final[Path] = get_agent_hook_settings_path(Path(), use_env_config_dir=False)
+_COMMON_TRANSCRIPT_SCRIPT_RELATIVE_PATHS: Final[tuple[Path, ...]] = tuple(
+    Path("commands") / name for name in _CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAMES
+)
+_STREAM_SNAPSHOT_SCRIPT_RELATIVE_PATH: Final[Path] = Path("commands") / _CLAUDE_STREAM_SNAPSHOT_SCRIPT_NAME
 
-def _provision_claude_always_on_scripts(
-    host: OnlineHostInterface,
-    agent_state_dir: Path,
-    concurrency_group: ConcurrencyGroup,
-) -> None:
-    """Write Claude's always-on background scripts to $MNGR_AGENT_STATE_DIR/commands/.
+_HOOK_SETTINGS_FILE_MODE: Final[str] = "0644"
 
-    The raw-transcript streamer is provisioned separately via
-    :func:`provision_raw_transcript_scripts`, and the gated common-transcript
-    converter via :func:`maybe_provision_common_transcript_scripts`.
+# The readiness marker claude's SessionStart hook creates in the agent's state dir.
+_SESSION_STARTED_MARKER_NAME: Final[str] = "session_started"
 
-    Note: mngr_log.sh (shared logging library) is provisioned by
-    Host.provision_agent() to both host-level and agent-level commands
-    directories, so we do not write it here.
-    """
-    scripts = {name: _load_claude_resource_script(name) for name in _CLAUDE_ALWAYS_PROVISIONED_SCRIPT_NAMES}
-    provision_scripts_to_commands_dir(host, agent_state_dir, scripts, concurrency_group)
+# The record, in the agent's state dir, of the pid of the claude that owns the agent's hooks.
+_MAIN_PID_CLAIM_NAME: Final[str] = "claude_main_pid"
+
+# What every launch removes before claude starts.
+_LAUNCH_MARKER_CLEAR: Final[str] = (
+    f"rm -rf $MNGR_AGENT_STATE_DIR/{_SESSION_STARTED_MARKER_NAME} $MNGR_AGENT_STATE_DIR/{_MAIN_PID_CLAIM_NAME}"
+)
+
+# The same removal as launch commands stored before 2026-07-28 ran it, without the claim.
+# CLEANUP: drop this and its rewrite in ClaudeAgent.upgrade_stored_command in the release after the first one
+# that ships `mngr upgrade`, whose notes tell users to run `mngr upgrade` on claude agents created before 2026-07-28
+# and to start once each one it reports as `(stopped)`.
+_LAUNCH_MARKER_CLEAR_WITHOUT_MAIN_PID_CLAIM: Final[str] = (
+    f"rm -rf $MNGR_AGENT_STATE_DIR/{_SESSION_STARTED_MARKER_NAME}"
+)
+
+
+@pure
+def _get_hook_settings_relative_path(agent_data_content: str | None) -> Path:
+    """The settings file holding the agent's hooks: the managed file when its stored launch command loads it, else its own config dir's."""
+    if MANAGED_SETTINGS_LAUNCH_ARG in read_stored_launch_command(agent_data_content):
+        return _MANAGED_SETTINGS_RELATIVE_PATH
+    return _CONFIG_DIR_SETTINGS_RELATIVE_PATH
+
+
+@pure
+def _parse_live_hook_settings(settings_path: Path, settings_content: str | None) -> dict[str, Any]:
+    """The settings holding the agent's hooks, with a ``hooks`` value that can be rebuilt; empty when the file is missing."""
+    live_settings = parse_json_object_input(settings_path, settings_content)
+    if not is_hooks_value_well_formed(live_settings.get("hooks", {})):
+        raise InvalidUpgradeInputError(
+            f"{settings_path} has a `hooks` value that does not map each event to a list of hook groups"
+        )
+    return live_settings
 
 
 def _check_python3_available(host: OnlineHostInterface) -> None:
@@ -1560,23 +1599,14 @@ def _check_python3_available(host: OnlineHostInterface) -> None:
         )
 
 
-def _provision_stream_snapshot_script(
-    host: OnlineHostInterface,
-    agent_state_dir: Path,
-    interval_seconds: float,
-    concurrency_group: ConcurrencyGroup,
-) -> None:
-    """Provision the response-streaming watcher script and its poll-interval file.
+def _write_stream_interval_file(host: OnlineHostInterface, agent_state_dir: Path, interval_seconds: float) -> None:
+    """Write the response-streaming watcher's poll-interval file.
 
     The interval is written to a file (rather than passed via an env var) because
     env-var propagation into the background-tasks subshell that launches the
     watcher is unreliable; the watcher reads the interval from this file at
     runtime via $MNGR_AGENT_STATE_DIR, which it always has.
     """
-    script = _load_claude_resource_script(_CLAUDE_STREAM_SNAPSHOT_SCRIPT_NAME)
-    provision_scripts_to_commands_dir(
-        host, agent_state_dir, {_CLAUDE_STREAM_SNAPSHOT_SCRIPT_NAME: script}, concurrency_group
-    )
     interval_path = get_agent_claude_plugin_dir(agent_state_dir) / "stream_interval"
     host.write_file(interval_path, f"{interval_seconds}\n".encode(), "0644")
 
@@ -1705,8 +1735,7 @@ class ClaudeCoreAgent(
         ``logs/claude_transcript/events.jsonl``, which feeds both the
         common-transcript converter and the submission-evidence probes in
         ``_build_submission_evidence_probes``. The background orchestrator that
-        supervises this streamer is provisioned separately by
-        ``_provision_claude_always_on_scripts``.
+        supervises this streamer is one of ``_CLAUDE_ALWAYS_PROVISIONED_SCRIPT_NAMES``.
         """
         return {_CLAUDE_RAW_TRANSCRIPT_SCRIPT_NAME: _load_claude_resource_script(_CLAUDE_RAW_TRANSCRIPT_SCRIPT_NAME)}
 
@@ -1718,16 +1747,10 @@ class ClaudeCoreAgent(
         The raw transcript streamer is on
         :meth:`get_raw_transcript_scripts` and the background
         orchestrator that supervises it is in
-        ``_provision_claude_always_on_scripts``; both run regardless of
+        ``_CLAUDE_ALWAYS_PROVISIONED_SCRIPT_NAMES``; both run regardless of
         whether the common transcript is on.
         """
-        return {
-            name: _load_claude_resource_script(name)
-            for name in (
-                _CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME,
-                _CLAUDE_COMMON_TRANSCRIPT_CONVERT_SCRIPT_NAME,
-            )
-        }
+        return {name: _load_claude_resource_script(name) for name in _CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAMES}
 
     def get_claude_config_dir(self) -> Path:
         """Return the Claude config directory for this agent.
@@ -1889,6 +1912,25 @@ class ClaudeCoreAgent(
         # Raises UserInputError, listing what is available, when the name has no match.
         resolve_output_style(self.agent_config.output_style, read_output_style_files(host, styles_dir))
         return {OUTPUT_STYLE_SETTING_KEY: str(self.agent_config.output_style)}
+
+    def _build_command_scripts(
+        self, *, is_common_transcript_written: bool, is_stream_snapshot_written: bool
+    ) -> dict[str, str]:
+        """The scripts mngr generates for this agent in its ``commands/`` dir, by name.
+
+        The background tasks script launches the common-transcript converter and the
+        response-streaming watcher only when it finds them there, so an option that is
+        off gets no script.
+        """
+        scripts = {name: _load_claude_resource_script(name) for name in _CLAUDE_ALWAYS_PROVISIONED_SCRIPT_NAMES}
+        scripts.update(self.get_raw_transcript_scripts())
+        if is_common_transcript_written:
+            scripts.update(self.get_common_transcript_scripts())
+        if is_stream_snapshot_written:
+            scripts[_CLAUDE_STREAM_SNAPSHOT_SCRIPT_NAME] = _load_claude_resource_script(
+                _CLAUDE_STREAM_SNAPSHOT_SCRIPT_NAME
+            )
+        return scripts
 
     def _configure_agent_hooks(self, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
         """Write mngr's hooks (and the user's settings_overrides) to the managed settings file.
@@ -2154,33 +2196,19 @@ class ClaudeCoreAgent(
             _resolve_plugins_dir_sentinel(host)
 
         with mngr_ctx.concurrency_group.make_concurrency_group("claude_provisioning") as concurrency_group:
-            # Provision Claude's always-on background scripts (activity
-            # tracker, hook helpers), the always-on raw-transcript streamer
-            # (per HasTranscriptMixin), and -- when the user has not opted
-            # out -- the gated common-transcript converter. Splitting the
-            # three paths is what makes emit_common_transcript=False
-            # actually take effect on disk: claude_background_tasks.sh only
-            # launches the converter if it finds it in commands/, and we
-            # don't write it there if the flag is off.
-            provision_backgroun_script_thread = start_mngr_thread(
-                concurrency_group=concurrency_group,
-                target=_provision_claude_always_on_scripts,
-                args=(host, self._get_agent_dir(), concurrency_group),
+            command_scripts = self._build_command_scripts(
+                is_common_transcript_written=self.is_common_transcript_enabled,
+                is_stream_snapshot_written=config.streaming_snapshot_interval_seconds > 0,
             )
-            provision_raw_transcript_scripts(self, host, self._get_agent_dir(), concurrency_group)
-            maybe_provision_common_transcript_scripts(self, host, self._get_agent_dir(), concurrency_group)
+            provision_scripts_thread = start_mngr_thread(
+                concurrency_group=concurrency_group,
+                target=provision_scripts_to_commands_dir,
+                args=(host, self._get_agent_dir(), command_scripts, concurrency_group),
+            )
 
-            # Provision the response-streaming watcher only when enabled. Its
-            # presence on disk is what makes claude_background_tasks.sh launch
-            # it, so a disabled interval simply means the script is absent.
             if config.streaming_snapshot_interval_seconds > 0:
                 _check_python3_available(host)
-                _provision_stream_snapshot_script(
-                    host,
-                    self._get_agent_dir(),
-                    config.streaming_snapshot_interval_seconds,
-                    concurrency_group,
-                )
+                _write_stream_interval_file(host, self._get_agent_dir(), config.streaming_snapshot_interval_seconds)
 
             # Dismiss start dialogs (TUI-only; a no-op on the headless core).
             self._dismiss_start_dialogs(host, options, mngr_ctx)
@@ -2235,7 +2263,7 @@ class ClaudeCoreAgent(
                 self._configure_agent_hooks(host, mngr_ctx)
 
             # should be done by now, just wanted to do in parallel for latency reasons
-            provision_backgroun_script_thread.join(60.0)
+            provision_scripts_thread.join(60.0)
 
     def _seed_model_state(self, host: OnlineHostInterface) -> None:
         """Seed ``model_state.json`` from the launch settings before first start.
@@ -2447,6 +2475,7 @@ class ClaudeAgent(
     SupportsLiveOutputMixin,
     HasSessionAdoptionMixin,
     HasCompactionMixin,
+    UpgradableAgentMixin,
 ):
     """Interactive (TUI-driven) Claude agent.
 
@@ -3010,9 +3039,6 @@ class ClaudeAgent(
         if timeout is None:
             timeout = _READY_SIGNAL_TIMEOUT_SECONDS
 
-        # this file is removed when we start the agent, see assemble_command, and created by the SessionStart hook when the session is ready
-        session_started_path = self._get_agent_dir() / "session_started"
-
         with log_span("Waiting for session_started file (timeout={}s)", timeout):
             # Run the start action, but always skip the base class's generic TUI-ready wait
             # (is_readiness_awaited=False): Claude's authoritative readiness signal is the
@@ -3022,53 +3048,53 @@ class ClaudeAgent(
             # session_started poll below ever got to see the marker that was already there.
             with log_span("Calling start_action..."):
                 super().wait_for_ready_signal(is_readiness_awaited=False, start_action=start_action, timeout=timeout)
+            self._wait_for_session_started_marker(timeout)
 
-            # Poll for the session_started file (created by SessionStart hook)
-            if poll_until(
-                lambda: self._check_file_exists(session_started_path),
-                timeout=timeout,
-                poll_interval=0.05,
-            ):
-                return
+    def get_ready_signal_paths(self) -> tuple[Path, ...]:
+        return (Path(_SESSION_STARTED_MARKER_NAME), Path(_MAIN_PID_CLAIM_NAME))
 
-            # Readiness never signaled -- an unexpected startup dialog may be holding the pane.
-            # Independent of auto_dismiss_dialogs_at_startup, which pre-dismisses the known ones
-            # via config before launch.
-            #
-            # A dialog found here is REPORTED, never acted on. Startup is not send time: the
-            # dialogs this branch clears are ones a send has to get past, whereas a dialog that
-            # stopped an agent from starting is a fact about that agent worth surfacing, and
-            # pressing keys at a pane whose TUI never signalled readiness is guesswork. This is
-            # the behaviour that shipped before the dialog registry, and it is deliberate.
-            # Known startup dialogs are pre-dismissed by config before launch instead, via
-            # auto_dismiss_dialogs_at_startup.
-            #
-            # Only a dialog we can NAME counts. A claude that is simply still booting has no
-            # input prompt yet and matches nothing, so it classifies as Unrecognized -- and
-            # treating that as "blocked" would turn every slow start into a false dialog error
-            # instead of the honest AgentStartError below.
-            startup_dialog = classify(self._capture_input_box_pane_content(self.tmux_target) or "")
-            if startup_dialog is not None and not isinstance(startup_dialog, Unrecognized):
-                raise DialogDetectedError(
-                    str(self.name),
-                    startup_dialog.get_nickname(),
-                    startup_dialog.get_startup_message()
-                    or f"Claude stopped on a dialog ({startup_dialog.get_nickname()}) while starting.",
-                )
+    def wait_for_ready_after_restart(self, timeout: float) -> None:
+        with log_span("Waiting for session_started file after a restart (timeout={}s)", timeout):
+            self._wait_for_session_started_marker(timeout)
 
-            # No dialog explains the silence; give the session a short grace to signal anyway.
-            if poll_until(
-                lambda: self._check_file_exists(session_started_path),
-                timeout=self._dialog_observe_window_seconds(),
-                poll_interval=0.05,
-            ):
-                return
+    def _wait_for_session_started_marker(self, timeout: float) -> None:
+        """Poll for the marker the SessionStart hook creates, raising when the agent does not signal readiness in time."""
+        session_started_path = self._get_agent_dir() / _SESSION_STARTED_MARKER_NAME
+        if poll_until(
+            lambda: self._check_file_exists(session_started_path),
+            timeout=timeout,
+            poll_interval=0.05,
+        ):
+            return
 
-            raise AgentStartError(
+        # Readiness never signaled -- an unexpected startup dialog may be holding the pane.
+        # A dialog found here is reported, never acted on: pressing keys at a pane whose TUI never
+        # signalled readiness is guesswork. Known startup dialogs are pre-dismissed by config before
+        # launch, via auto_dismiss_dialogs_at_startup.
+        # Only a dialog we can name counts: a claude still booting has no input prompt yet and
+        # classifies as Unrecognized.
+        startup_dialog = classify(self._capture_input_box_pane_content(self.tmux_target) or "")
+        if startup_dialog is not None and not isinstance(startup_dialog, Unrecognized):
+            raise DialogDetectedError(
                 str(self.name),
-                f"Agent did not signal readiness within {timeout}s. "
-                "This may indicate a trust dialog appeared or Claude Code failed to start.",
+                startup_dialog.get_nickname(),
+                startup_dialog.get_startup_message()
+                or f"Claude stopped on a dialog ({startup_dialog.get_nickname()}) while starting.",
             )
+
+        # No dialog explains the silence; give the session a short grace to signal anyway.
+        if poll_until(
+            lambda: self._check_file_exists(session_started_path),
+            timeout=self._dialog_observe_window_seconds(),
+            poll_interval=0.05,
+        ):
+            return
+
+        raise AgentStartError(
+            str(self.name),
+            f"Agent did not signal readiness within {timeout}s. "
+            "This may indicate a trust dialog appeared or Claude Code failed to start.",
+        )
 
     # HasCompactionMixin capability implementation
 
@@ -3123,11 +3149,53 @@ class ClaudeAgent(
         return f"( {script_path} {PANE_SESSION_NAME_SHELL_EXPRESSION} {shlex.quote(primary_window_name)} ) &"
 
     def upgrade_stored_command(self, command: CommandString) -> CommandString:
+        command_reading_session_name = upgrade_literal_session_name_argument(
+            command, f"( $MNGR_AGENT_STATE_DIR/commands/{_CLAUDE_BACKGROUND_TASKS_SCRIPT_NAME}"
+        )
         return CommandString(
-            upgrade_literal_session_name_argument(
-                command, f"( $MNGR_AGENT_STATE_DIR/commands/{_CLAUDE_BACKGROUND_TASKS_SCRIPT_NAME}"
+            command_reading_session_name.replace(
+                f"{_LAUNCH_MARKER_CLEAR_WITHOUT_MAIN_PID_CLAIM} &&", f"{_LAUNCH_MARKER_CLEAR} &&"
             )
         )
+
+    def get_upgrade_input_paths(self) -> tuple[Path, ...]:
+        return (
+            AGENT_DATA_RELATIVE_PATH,
+            _MANAGED_SETTINGS_RELATIVE_PATH,
+            _CONFIG_DIR_SETTINGS_RELATIVE_PATH,
+            *_COMMON_TRANSCRIPT_SCRIPT_RELATIVE_PATHS,
+            _STREAM_SNAPSHOT_SCRIPT_RELATIVE_PATH,
+        )
+
+    def get_upgrade_unsupported_detail(self, input_content_by_path: Mapping[Path, str | None]) -> str | None:
+        """None when the stored launch command loads the managed settings file, or the settings of the agent's own Claude config dir hold a hook of mngr's; raises InvalidUpgradeInputError when those settings are malformed."""
+        hook_settings_path = _get_hook_settings_relative_path(input_content_by_path[AGENT_DATA_RELATIVE_PATH])
+        if hook_settings_path == _MANAGED_SETTINGS_RELATIVE_PATH:
+            return None
+        config_dir_settings = _parse_live_hook_settings(hook_settings_path, input_content_by_path[hook_settings_path])
+        if has_mngr_hook_entry(config_dir_settings.get("hooks", {})):
+            return None
+        return "created before mngr kept its hooks in a file of its own; first remove the hooks mngr left in .claude/settings.local.json in its work dir"
+
+    def build_upgraded_files(self, input_content_by_path: Mapping[Path, str | None]) -> dict[Path, HarnessFileSpec]:
+        """mngr's shared libs and scripts, an optional script only where the agent has it, and the settings file holding its hooks when they differ."""
+        hook_settings_path = _get_hook_settings_relative_path(input_content_by_path[AGENT_DATA_RELATIVE_PATH])
+        live_settings = _parse_live_hook_settings(hook_settings_path, input_content_by_path[hook_settings_path])
+        command_scripts = self._build_command_scripts(
+            is_common_transcript_written=any(
+                input_content_by_path[path] is not None for path in _COMMON_TRANSCRIPT_SCRIPT_RELATIVE_PATHS
+            ),
+            is_stream_snapshot_written=input_content_by_path[_STREAM_SNAPSHOT_SCRIPT_RELATIVE_PATH] is not None,
+        )
+        upgraded_files = {**build_shared_shell_lib_files(), **build_command_script_files(command_scripts)}
+        upgraded_hooks = rebuild_hooks_keeping_agent_options(live_settings.get("hooks", {}))
+        if upgraded_hooks == live_settings.get("hooks"):
+            return upgraded_files
+        upgraded_settings_content = json.dumps({**live_settings, "hooks": upgraded_hooks}, indent=2) + "\n"
+        return {
+            **upgraded_files,
+            hook_settings_path: HarnessFileSpec(content=upgraded_settings_content, mode=_HOOK_SETTINGS_FILE_MODE),
+        }
 
     def _build_append_system_prompt_args(self) -> tuple[str, ...]:
         """Turn this agent type's ``append_system_prompt`` blocks into claude's own flag.
@@ -3301,7 +3369,7 @@ class ClaudeAgent(
         stderr_redirect = build_stderr_tee_redirect(f'"$MNGR_AGENT_STATE_DIR/{STDERR_LOG_NAME}"')
         return CommandString(
             f"{background_cmd} {env_exports}"
-            f" && rm -rf $MNGR_AGENT_STATE_DIR/session_started $MNGR_AGENT_STATE_DIR/claude_main_pid"
+            f" && {_LAUNCH_MARKER_CLEAR}"
             f" && {{ {{ {resume_cmd} ; }} || {{ {resume_uuid_cmd} ; }} || {{ {create_cmd} ; }} ; }}"
             f" {stderr_redirect}"
         )

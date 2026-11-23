@@ -854,6 +854,16 @@ def tmux_session_exists(session_name: str) -> bool:
     return result.returncode == 0
 
 
+def read_tmux_pane_pid(session_name: str) -> str:
+    """The pid of the process running in the session's pane, which changes when the session is restarted."""
+    return subprocess.run(
+        ["tmux", "list-panes", "-t", f"={session_name}:", "-F", "#{pane_pid}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
 @contextmanager
 def renamed_tmux_session() -> Generator[tuple[str, str, str], None, None]:
     """Create a tmux session, rename it, and yield ``(old_name, new_name, pane_id)``.
@@ -1054,6 +1064,22 @@ def create_test_agent_via_cli(
     The caller should wrap this call inside a tmux_session_cleanup context
     manager to ensure the session is cleaned up even if assertions fail.
     """
+    return create_test_agent_of_type_via_cli(
+        cli_runner, temp_work_dir, mngr_test_prefix, plugin_manager, agent_name, "command", command
+    )
+
+
+def create_test_agent_of_type_via_cli(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    mngr_test_prefix: str,
+    plugin_manager: pluggy.PluginManager,
+    agent_name: str,
+    # A registered agent type whose class launches the command given after ``--``.
+    agent_type: str,
+    command: str,
+) -> str:
+    """Create a test agent of ``agent_type`` via the CLI, running ``command``, and return its tmux session name."""
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     create_result = cli_runner.invoke(
@@ -1062,7 +1088,7 @@ def create_test_agent_via_cli(
             "--name",
             agent_name,
             "--type",
-            "command",
+            agent_type,
             "--source",
             str(temp_work_dir),
             "--transfer=none",

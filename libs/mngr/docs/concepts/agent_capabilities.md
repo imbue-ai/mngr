@@ -24,6 +24,7 @@ capability on a headless agent, or a CLI-specific capability on a bare command r
 | deploy_contributions | Y | - | - | - | - | - | - | - | - |
 | usage_tracking | Y | - | - | Y | - | Y | Y | n/a | n/a |
 | compaction | Y | n/a | - | Y | - | - | Y | n/a | n/a |
+| upgrade | Y | - | - | - | - | - | - | Y | Y |
 | headless_output | n/a | Y | n/a | n/a | n/a | n/a | n/a | n/a | Y |
 
 ## Capabilities
@@ -41,4 +42,5 @@ capability on a headless agent, or a CLI-specific capability on a bare command r
 - **deploy_contributions** -- Bakes config/cred files + env vars into a `mngr schedule` image (via the get_files_for_deploy hookimpl). Only needed if the agent runs under `mngr schedule`.
 - **usage_tracking** -- Emits token/cost usage that `mngr usage` aggregates (via a sibling `mngr_<harness>_usage` plugin). Wanted so the agent's spend is visible.
 - **compaction** -- Supports manually triggering context compaction for active context management.
+- **upgrade** -- `mngr upgrade` can rewrite the files mngr generated for an existing agent, so an agent created by an older mngr picks up newer behaviour without being recreated. Every port that generates scripts or hooks wants it.
 - **headless_output** -- Runs non-interactively and exposes its output via output(). Only for headless agent variants.

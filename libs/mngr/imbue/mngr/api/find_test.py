@@ -1,7 +1,4 @@
 from collections.abc import Callable
-from collections.abc import Generator
-from collections.abc import Sequence
-from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -11,7 +8,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.api.address_parsers import parse_host_location_address
 from imbue.mngr.api.find import AgentMatch
-from imbue.mngr.api.find import _START_HOST_LOCK_TIMEOUT_SECONDS
+from imbue.mngr.api.find import START_HOST_LOCK_TIMEOUT_SECONDS
 from imbue.mngr.api.find import _filter_all_agents
 from imbue.mngr.api.find import _find_agents_by_identifiers_or_state
 from imbue.mngr.api.find import _post_filter_matches_by_addresses
@@ -23,7 +20,9 @@ from imbue.mngr.api.find import filter_one_host
 from imbue.mngr.api.find import get_host_from_list_by_id
 from imbue.mngr.api.find import get_unique_host_from_list_by_name
 from imbue.mngr.api.find import group_agents_by_host
+from imbue.mngr.api.find import order_agent_matches_as_named
 from imbue.mngr.api.find import start_agents_locked
+from imbue.mngr.api.testing import LockRecordingHost
 from imbue.mngr.cli.exit_codes import EXIT_CODE_ERROR
 from imbue.mngr.cli.testing import create_test_agent
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -737,6 +736,60 @@ def test_group_agents_by_host_key_format() -> None:
     assert expected_key in result
 
 
+def _local_match(agent_name: str, host_name: str) -> AgentMatch:
+    return AgentMatch(
+        agent_id=AgentId.generate(),
+        agent_name=AgentName(agent_name),
+        host_id=HostId.generate(),
+        host_name=HostName(host_name),
+        provider_name=ProviderInstanceName("local"),
+    )
+
+
+def test_order_agent_matches_as_named_follows_the_addresses_not_the_discovery_order() -> None:
+    first, second, third = (_local_match(name, "host") for name in ("first", "second", "third"))
+    addresses = [AgentAddress(agent=AgentName(name)) for name in ("third", "first", "second")]
+
+    assert order_agent_matches_as_named(addresses, [first, second, third]) == [third, first, second]
+
+
+def test_order_agent_matches_as_named_places_an_agent_named_twice_at_its_first_mention() -> None:
+    first, second = (_local_match(name, "host") for name in ("first", "second"))
+    addresses = [
+        AgentAddress(agent=second.agent_id),
+        AgentAddress(agent=AgentName("first")),
+        AgentAddress(agent=AgentName("second")),
+    ]
+
+    assert order_agent_matches_as_named(addresses, [first, second]) == [second, first]
+
+
+def test_order_agent_matches_as_named_tells_same_named_agents_apart_by_host() -> None:
+    on_host_a, on_host_b, other = (
+        _local_match("shared", "host-a"),
+        _local_match("shared", "host-b"),
+        _local_match("other", "host-a"),
+    )
+    addresses = [
+        AgentAddress(agent=AgentName("shared"), host=HostAddress(host=HostName("host-b"))),
+        AgentAddress(agent=AgentName("other")),
+        AgentAddress(agent=AgentName("shared"), host=HostAddress(host=HostName("host-a"))),
+    ]
+
+    assert order_agent_matches_as_named(addresses, [on_host_a, other, on_host_b]) == [on_host_b, other, on_host_a]
+
+
+def test_order_agent_matches_as_named_keeps_the_given_order_among_matches_of_one_address() -> None:
+    on_host_a, on_host_b, other = (
+        _local_match("shared", "host-a"),
+        _local_match("shared", "host-b"),
+        _local_match("other", "host-a"),
+    )
+    addresses = [AgentAddress(agent=AgentName("shared")), AgentAddress(agent=AgentName("other"))]
+
+    assert order_agent_matches_as_named(addresses, [other, on_host_b, on_host_a]) == [on_host_b, on_host_a, other]
+
+
 def test__find_agents_by_identifiers_or_state_no_agents_returns_empty(
     temp_mngr_ctx: MngrContext,
 ) -> None:
@@ -1117,36 +1170,8 @@ def test_ensure_agent_started_respects_config_when_data_unset(
     assert agent.captured_timeouts == [37.5]
 
 
-class _LockRecordingHost(Host):
-    """Local Host whose cooperative lock is observable, and optionally refused, so tests can see
-    what a start does with it without holding a real flock."""
-
-    is_lock_refused: bool = Field(default=False, description="Refuse every acquisition with LockNotHeldError")
-    is_currently_locked: bool = Field(default=False, description="Whether the (fake) lock is held right now")
-    lock_timeouts: list[float | None] = Field(
-        default_factory=list, description="The timeout_seconds passed to each acquisition attempt"
-    )
-    is_lock_held_at_start: list[bool] = Field(
-        default_factory=list, description="Whether the lock was held when each start_agents call ran"
-    )
-
-    @contextmanager
-    def lock_cooperatively(self, timeout_seconds: float | None = 300.0) -> Generator[None, None, None]:
-        self.lock_timeouts.append(timeout_seconds)
-        if self.is_lock_refused:
-            raise LockNotHeldError("Timed out waiting to acquire the host lock")
-        self.is_currently_locked = True
-        try:
-            yield
-        finally:
-            self.is_currently_locked = False
-
-    def start_agents(self, agent_ids: Sequence[AgentId]) -> None:
-        self.is_lock_held_at_start.append(self.is_currently_locked)
-
-
-def _make_lock_recording_host(local_provider: LocalProviderInstance, is_lock_refused: bool) -> _LockRecordingHost:
-    return make_local_host_of_class(local_provider, _LockRecordingHost, is_lock_refused=is_lock_refused)
+def _make_lock_recording_host(local_provider: LocalProviderInstance, is_lock_refused: bool) -> LockRecordingHost:
+    return make_local_host_of_class(local_provider, LockRecordingHost, is_lock_refused=is_lock_refused)
 
 
 def test_start_agents_locked_bounds_the_lock_wait_and_names_the_host_on_timeout(
@@ -1163,11 +1188,11 @@ def test_start_agents_locked_bounds_the_lock_wait_and_names_the_host_on_timeout(
     with pytest.raises(LockNotHeldError) as exc_info:
         start_agents_locked(host, [agent_id], is_restart=False)
 
-    assert host.lock_timeouts == [_START_HOST_LOCK_TIMEOUT_SECONDS]
+    assert host.lock_timeouts == [START_HOST_LOCK_TIMEOUT_SECONDS]
     message = str(exc_info.value)
     assert str(host.id) in message
     assert str(agent_id) in message
-    assert f"{_START_HOST_LOCK_TIMEOUT_SECONDS:.0f}s" in message
+    assert f"{START_HOST_LOCK_TIMEOUT_SECONDS:.0f}s" in message
     assert host.is_lock_held_at_start == []
 
 
@@ -1183,7 +1208,7 @@ def test_start_lock_wait_outlasts_the_launch_bound_ssh_worst_case() -> None:
     worst_case_seconds = SSH_TRANSIENT_RETRY_MAX_ATTEMPTS * _START_AGENT_LAUNCH_TIMEOUT_SECONDS + sum(
         SSH_TRANSIENT_RETRY_BACKOFFS_SECONDS
     )
-    assert worst_case_seconds < _START_HOST_LOCK_TIMEOUT_SECONDS
+    assert worst_case_seconds < START_HOST_LOCK_TIMEOUT_SECONDS
 
 
 class _StartThroughAgent(BaseAgent[AgentTypeConfig]):
@@ -1215,11 +1240,11 @@ def test_ensure_agent_started_starts_a_stopped_agent_under_the_host_lock(
     ensure_agent_started(agent, host, is_start_desired=True)
 
     assert host.is_lock_held_at_start == [True]
-    assert host.lock_timeouts == [_START_HOST_LOCK_TIMEOUT_SECONDS]
+    assert host.lock_timeouts == [START_HOST_LOCK_TIMEOUT_SECONDS]
     assert host.is_currently_locked is False
 
 
-class _UnreadableLifecycleHost(_LockRecordingHost):
+class _UnreadableLifecycleHost(LockRecordingHost):
     """Local host whose tmux panes and processes cannot be read, as on a host too loaded to answer."""
 
     def read_lifecycle_snapshot(self) -> HostLifecycleSnapshot | None:

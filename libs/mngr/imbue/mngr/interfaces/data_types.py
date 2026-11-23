@@ -793,6 +793,13 @@ class FileTransferSpec(FrozenModel):
     )
 
 
+class HarnessFileSpec(FrozenModel):
+    """A file a harness's mngr integration writes into an agent: its text and its mode."""
+
+    content: str = Field(description="The file's text")
+    mode: str = Field(description="The file's permission bits as an octal string, such as 0755")
+
+
 class HostLifecycleOptions(FrozenModel):
     """Lifecycle and idle detection options for the host.
 

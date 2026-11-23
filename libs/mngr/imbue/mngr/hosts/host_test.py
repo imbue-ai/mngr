@@ -696,6 +696,32 @@ def test_get_created_branch_name_returns_none_when_null(
     assert agent.get_created_branch_name() is None
 
 
+def test_check_agent_can_start_raises_for_an_agent_with_no_stored_command(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    agent, host = _create_testable_agent(local_provider, temp_host_dir, temp_work_dir)
+    data_path = get_agent_state_dir_path(host.host_dir, agent.id) / "data.json"
+    data = json.loads(data_path.read_text())
+    del data["command"]
+    data_path.write_text(json.dumps(data))
+
+    with pytest.raises(NoCommandDefinedError, match="No command in data.json"):
+        host.check_agent_can_start(agent)
+
+
+def test_check_agent_can_start_raises_for_an_agent_whose_work_dir_is_gone(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    tmp_path: Path,
+) -> None:
+    agent, host = _create_testable_agent(local_provider, temp_host_dir, tmp_path / "gone-48213")
+
+    with pytest.raises(AgentStartError, match="does not exist and no branch is recorded"):
+        host.check_agent_can_start(agent)
+
+
 # Tests for _ensure_work_dir_exists
 
 

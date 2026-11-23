@@ -13,12 +13,14 @@ import click
 import pytest
 
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
+from imbue.mngr.cli.complete import _get_completions
 from imbue.mngr.cli.help_topics import get_all_topics
 from imbue.mngr.config.completion_cache import COMPLETION_CACHE_FILENAME
 from imbue.mngr.config.completion_cache import CompletionCacheData
 from imbue.mngr.config.completion_writer import write_cli_completions_cache
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.main import cli
+from imbue.mngr.utils.testing import write_discovery_snapshot_to_path
 
 
 def _read_cache(cache_dir: Path) -> CompletionCacheData:
@@ -160,6 +162,22 @@ def test_help_targets_cover_commands_and_topics(completion_cache_dir: Path) -> N
     assert "address" in cache.help_targets
     for topic_name in topic_names:
         assert topic_name in cache.help_targets, f"topic {topic_name!r} missing from help_targets"
+
+
+@pytest.mark.parametrize("command_name", ["stop", "upgrade"])
+def test_agent_commands_complete_agent_names(
+    command_name: str, completion_cache_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`mngr <command> <partial>` completes the matching agent names on the real CLI."""
+    monkeypatch.setenv("MNGR_HOST_DIR", str(completion_cache_dir))
+    write_discovery_snapshot_to_path(
+        completion_cache_dir / "events" / "mngr" / "discovery" / "events.jsonl", ["my-agent", "other-agent"]
+    )
+    write_cli_completions_cache(cli_group=cli)
+    monkeypatch.setenv("COMP_WORDS", f"mngr {command_name} my-ag")
+    monkeypatch.setenv("COMP_CWORD", "2")
+
+    assert _get_completions() == ["my-agent"]
 
 
 def test_help_targets_absent_without_topic_names(completion_cache_dir: Path) -> None:

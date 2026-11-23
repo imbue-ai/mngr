@@ -888,6 +888,10 @@ class SystemPromptText(NonEmptyStr):
     """Free-form text appended to an agent's system prompt."""
 
 
+class UpgradeSkipDetail(NonEmptyStr):
+    """Why ``mngr upgrade`` left an agent as it was, in one clause such as ``it is mid-turn (--force interrupts it)``."""
+
+
 class SnapshotName(str):
     """Human-readable name for a snapshot."""
 

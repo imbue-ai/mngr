@@ -253,6 +253,23 @@ def _wrap_text(text: str, width: int, indent: str, subsequent_indent: str | None
 
 
 @pure
+def _wrap_paragraph(paragraph: str, width: int, indent: str) -> str:
+    """Wrap a paragraph, keeping each "- " list item on lines of its own."""
+    lines = paragraph.split("\n")
+    if not any(line.startswith("- ") for line in lines):
+        return _wrap_text(paragraph, width, indent, None)
+    items: list[str] = []
+    for line in lines:
+        if line.startswith("- ") or not items:
+            items.append(line.strip())
+        else:
+            items[-1] = f"{items[-1]} {line.strip()}"
+    return "\n".join(
+        _wrap_text(item, width, indent, f"{indent}  " if item.startswith("- ") else None) for item in items
+    )
+
+
+@pure
 def _format_section_title(title: str) -> str:
     """Format a section title in man-page style (uppercase)."""
     return title.upper()
@@ -320,7 +337,7 @@ def _write_git_style_help(
         output.write("\n")
     else:
         for paragraph in metadata.full_description.strip().split("\n\n"):
-            wrapped = _wrap_text(paragraph.strip(), width - 7, "       ", None)
+            wrapped = _wrap_paragraph(paragraph.strip(), width - 7, "       ")
             output.write(f"{wrapped}\n\n")
 
     # OPTIONS section

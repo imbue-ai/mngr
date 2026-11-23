@@ -10,20 +10,13 @@ otherwise. Release-marked, so it does not run per PR.
 
 from __future__ import annotations
 
-import os
-import pwd
 import shlex
-import shutil
-import subprocess
-import sys
-from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from typing import Final
 
 import pytest
 
-from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
 from imbue.mngr.agents.agent_release_testing import count_user_steps_containing
 from imbue.mngr.agents.agent_release_testing import is_step_from
 from imbue.mngr.agents.agent_release_testing import read_common_records
@@ -35,15 +28,13 @@ from imbue.mngr.agents.agent_release_testing import send_expecting_success
 from imbue.mngr.agents.agent_release_testing import wait_for_user_message
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import get_short_random_string
-from imbue.mngr.utils.testing import run_mngr_subprocess
 from imbue.mngr_claude.dialogs import classify
 from imbue.mngr_claude.plugin import has_input_prompt_line
 from imbue.mngr_claude.testing import AGENT_DESTROY_TIMEOUT_SECONDS
 from imbue.mngr_claude.testing import ClaudeReleaseProfile
-from imbue.mngr_claude.testing import RELEASE_TEST_MODEL
+from imbue.mngr_claude.testing import LocalLoginClaudeProfile
 from imbue.mngr_claude.testing import SESSION_RECORD_TIMEOUT_SECONDS
 from imbue.mngr_claude.testing import TURN_PROGRESS_TIMEOUT_SECONDS
-from imbue.mngr_claude.testing import append_project_settings
 from imbue.mngr_claude.testing import capture_agent_pane
 from imbue.mngr_claude.testing import capture_agent_pane_with_scrollback
 from imbue.mngr_claude.testing import commit_project_claude_settings
@@ -492,95 +483,6 @@ def test_claude_mid_turn_message_lands_once_in_the_common_transcript(tmp_path: P
 _BANG_SEND_TIMEOUT_SECONDS: Final[float] = 150.0
 
 
-def _login_home() -> Path:
-    """The invoking user's real home, independent of a redirected ``HOME``.
-
-    The release harness isolates ``HOME`` to a temp dir; a subscription (no
-    API key) Claude login lives under the *real* home -- ``~/.claude`` and, on
-    macOS, the login keychain at ``~/Library/Keychains`` -- so both the
-    availability check and the ``mngr`` subprocesses must consult it to
-    authenticate. Read from the password database so a patched ``HOME`` env var
-    does not hide it.
-    """
-    return Path(pwd.getpwuid(os.getuid()).pw_dir)
-
-
-def _local_claude_login_present() -> bool:
-    """Whether a local ``claude`` can authenticate without ``ANTHROPIC_API_KEY``.
-
-    The rest of the release suite requires ``ANTHROPIC_API_KEY``, but this
-    reproduction needs only a live claude TUI -- the strand is a TUI/tmux
-    behaviour and a bare ``!`` never reaches the model. A developer logged into
-    Claude locally (a subscription/OAuth login, as minds users are) can run it:
-    the OAuth token lives in ``~/.claude/.credentials.json`` or, on macOS, the
-    login keychain under the ``Claude Code-credentials`` service. Both are keyed
-    to the real login home, not the harness's redirected ``HOME``.
-    """
-    home = _login_home()
-    if (home / ".claude" / ".credentials.json").exists():
-        return True
-    if sys.platform == "darwin":
-        probe = subprocess.run(
-            ["security", "find-generic-password", "-s", "Claude Code-credentials"],
-            capture_output=True,
-            check=False,
-            env={**os.environ, "HOME": str(home)},
-        )
-        if probe.returncode == 0:
-            return True
-    return False
-
-
-class _LocalLoginClaudeProfile(ClaudeReleaseProfile):
-    """A Claude release profile that also runs on a locally-logged-in (no API key) machine.
-
-    Reuses ``ClaudeReleaseProfile``'s workspace/config plumbing, but widens the
-    availability gate to accept a local Claude login. With an ``ANTHROPIC_API_KEY``
-    set it behaves exactly like the parent profile (isolated config dir, key passed
-    into the agent), so its tests still run in the key-based release
-    pipeline. Without one it authenticates from the developer's existing local
-    Claude login (a subscription/OAuth login, as minds users have):
-
-    * The ``mngr`` subprocesses run under the *real* login home, since the harness
-      isolates ``HOME`` to a temp dir and the macOS login keychain / ``~/.claude``
-      credentials live under the real home.
-    * The agent is provisioned in *shared* config-dir mode
-      (``isolate_local_config_dir = false``) so it reuses that login directly. This
-      is the mode mngr itself recommends for macOS subscription users (isolated
-      mode copies the credentials into a separate keychain entry that goes stale).
-      As a result the agent shares the developer's ``~/.claude`` while it runs, and
-      whatever session a test drives stays behind there. mngr's own state stays
-      isolated via ``MNGR_HOST_DIR`` and the per-test tmux server.
-    """
-
-    def unavailable_reason(self) -> str | None:
-        if shutil.which("claude") is None:
-            return "Requires `claude` on PATH."
-        if os.environ.get("ANTHROPIC_API_KEY") or _local_claude_login_present():
-            return None
-        return "Requires ANTHROPIC_API_KEY or a local Claude login (~/.claude credentials or macOS keychain)."
-
-    def setup(self, tmp_path: Path) -> AgentReleaseContext:
-        ctx = super().setup(tmp_path)
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            append_project_settings(ctx, "\n[agent_types.claude]\nisolate_local_config_dir = false\n")
-        return ctx
-
-    def run_mngr(self, ctx: AgentReleaseContext, *args: str, timeout: float) -> subprocess.CompletedProcess[str]:
-        env = dict(ctx.env)
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            # Point at the real login home so keychain / ~/.claude auth resolves.
-            env["HOME"] = str(_login_home())
-        return run_mngr_subprocess(*args, env=env, timeout=timeout)
-
-    def create_extra_args(self, ctx: AgentReleaseContext) -> Sequence[str]:
-        args: list[str] = ["--no-ensure-clean", "--source", str(ctx.project_dir)]
-        if os.environ.get("ANTHROPIC_API_KEY"):
-            args += ["--pass-env", "ANTHROPIC_API_KEY"]
-        args += ["--", "--dangerously-skip-permissions", "--model", RELEASE_TEST_MODEL]
-        return args
-
-
 # The continuation glyph Claude renders before a shell command's captured output
 # (e.g. ``⎿  mngr-behaviors-probe``). Its presence in the pane means a command ran and
 # produced output; its absence means no shell command ran.
@@ -629,7 +531,7 @@ def test_claude_bang_prefix_does_not_strand_agent_in_shell_mode(tmp_path: Path) 
     later follow-up is the only turn), and the agent is ready for the next message
     (the ``❯`` prompt is back and a normal follow-up is delivered and recorded).
     """
-    profile = _LocalLoginClaudeProfile()
+    profile = LocalLoginClaudeProfile()
     reason = profile.unavailable_reason()
     if reason is not None:
         pytest.skip(reason)
@@ -704,7 +606,7 @@ def test_claude_bang_command_runs_and_leaves_agent_ready(tmp_path: Path) -> None
     and the ``❯`` prompt afterward, which is what this asserts (via the pane the interactive
     client sees), not any mngr terminal internal.
     """
-    profile = _LocalLoginClaudeProfile()
+    profile = LocalLoginClaudeProfile()
     reason = profile.unavailable_reason()
     if reason is not None:
         pytest.skip(reason)
@@ -753,4 +655,4 @@ def test_claude_question_mark_messages_are_delivered_whole(tmp_path: Path) -> No
     Claude Code takes a lone ``?`` typed into an empty input box as its shortcuts-panel key, so a
     send that typed it would leave nothing to submit.
     """
-    run_question_mark_message_delivery(_LocalLoginClaudeProfile(), tmp_path)
+    run_question_mark_message_delivery(LocalLoginClaudeProfile(), tmp_path)

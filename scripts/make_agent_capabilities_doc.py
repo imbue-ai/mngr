@@ -46,6 +46,7 @@ from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.agent import HasVersionManagementMixin
 from imbue.mngr.interfaces.agent import HeadlessAgentMixin
 from imbue.mngr.interfaces.agent import SupportsLiveOutputMixin
+from imbue.mngr.interfaces.agent import UpgradableAgentMixin
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
@@ -308,6 +309,12 @@ AGENT_CAPABILITIES: Final[tuple[AgentCapability, ...]] = (
         detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
         scope=CapabilityScope.INTERACTIVE_ONLY,
         mixin=HasCompactionMixin,
+    ),
+    AgentCapability(
+        key="upgrade",
+        description="`mngr upgrade` can rewrite the files mngr generated for an existing agent, so an agent created by an older mngr picks up newer behaviour without being recreated. Every port that generates scripts or hooks wants it.",
+        detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
+        mixin=UpgradableAgentMixin,
     ),
     # The headless-output row is kept last: it applies only to headless agent variants.
     AgentCapability(

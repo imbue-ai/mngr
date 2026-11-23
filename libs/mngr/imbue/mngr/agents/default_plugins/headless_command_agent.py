@@ -4,6 +4,7 @@ from pathlib import Path
 
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_headless_agent import BaseHeadlessAgent
+from imbue.mngr.agents.upgrade import NoOpUpgradeMixin
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -16,7 +17,7 @@ class HeadlessCommandConfig(AgentTypeConfig):
     """Config for the headless_command agent type."""
 
 
-class HeadlessCommand(BaseHeadlessAgent[HeadlessCommandConfig]):
+class HeadlessCommand(BaseHeadlessAgent[HeadlessCommandConfig], NoOpUpgradeMixin):
     """Agent type that runs an arbitrary command headlessly and captures its output.
 
     Redirects stdout/stderr to files so callers can read output programmatically

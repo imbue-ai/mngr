@@ -62,7 +62,7 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 # pole and normally finishes within a few minutes), so a wait this long means the holder
 # is wedged, and a loud failure beats queueing behind it forever. Boot-time callers are
 # re-run by their systemd unit and interactive callers can simply retry.
-_START_HOST_LOCK_TIMEOUT_SECONDS: Final[float] = 600.0
+START_HOST_LOCK_TIMEOUT_SECONDS: Final[float] = 600.0
 
 
 @pure
@@ -437,7 +437,7 @@ def start_agents_locked(host: OnlineHostInterface, agent_ids: Sequence[AgentId],
     hook (local), or a concurrent ``mngr gc``. gc shares it, so a gc that tore down
     an agent is serialized before us, and the state-dir check below makes a doomed
     (re)launch fail with a clear error instead of trying to boot an agent gc already
-    removed. The wait is bounded (``_START_HOST_LOCK_TIMEOUT_SECONDS``): a holder
+    removed. The wait is bounded (``START_HOST_LOCK_TIMEOUT_SECONDS``): a holder
     that never releases surfaces as a ``LockNotHeldError`` naming the host, rather
     than a silent hang that (for a boot-time oneshot) leaves the host's agents down for good.
 
@@ -448,7 +448,7 @@ def start_agents_locked(host: OnlineHostInterface, agent_ids: Sequence[AgentId],
     killed.
     """
     try:
-        with host.lock_cooperatively(timeout_seconds=_START_HOST_LOCK_TIMEOUT_SECONDS):
+        with host.lock_cooperatively(timeout_seconds=START_HOST_LOCK_TIMEOUT_SECONDS):
             for agent_id in agent_ids:
                 agent_state_dir = get_agent_state_dir_path(host.host_dir, agent_id)
                 if not host.path_exists(agent_state_dir):
@@ -464,7 +464,7 @@ def start_agents_locked(host: OnlineHostInterface, agent_ids: Sequence[AgentId],
         agent_id_list = ", ".join(str(agent_id) for agent_id in agent_ids)
         raise LockNotHeldError(
             f"Could not acquire the host lock on host {host.id} within "
-            f"{_START_HOST_LOCK_TIMEOUT_SECONDS:.0f}s to start agent(s) {agent_id_list}: another mngr "
+            f"{START_HOST_LOCK_TIMEOUT_SECONDS:.0f}s to start agent(s) {agent_id_list}: another mngr "
             "operation (create, start, or gc) is holding it. If that operation is wedged, stop it and retry."
         ) from e
 
@@ -798,6 +798,29 @@ def _post_filter_matches_by_addresses(
             raise AgentNotFoundError(f"No agent found matching address: {addr}")
 
     return filtered
+
+
+@pure
+def order_agent_matches_as_named(addresses: Sequence[AgentAddress], matches: Sequence[AgentMatch]) -> list[AgentMatch]:
+    """Order ``matches`` by the first address that names each one; matches of one address keep their given order."""
+    return sorted(matches, key=lambda match: _get_first_naming_address_idx(addresses, match))
+
+
+@pure
+def _get_first_naming_address_idx(addresses: Sequence[AgentAddress], match: AgentMatch) -> int:
+    """The index of the first address that names ``match``, or the address count when none does."""
+    return next(
+        (idx for idx, address in enumerate(addresses) if _is_agent_match_named_by_address(address, match)),
+        len(addresses),
+    )
+
+
+@pure
+def _is_agent_match_named_by_address(address: AgentAddress, match: AgentMatch) -> bool:
+    is_agent_named = (
+        match.agent_id == address.agent if isinstance(address.agent, AgentId) else match.agent_name == address.agent
+    )
+    return is_agent_named and _address_matches_agent_match(address, match)
 
 
 def find_one_agent_and_agents_by_host(

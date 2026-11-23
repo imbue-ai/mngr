@@ -756,6 +756,11 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         ...
 
     @abstractmethod
+    def check_agent_can_start(self, agent: AgentInterface) -> None:
+        """Raise the error ``start_agents`` raises for ``agent`` when its stored command or its work dir is missing."""
+        ...
+
+    @abstractmethod
     def stop_agents(self, agent_ids: Sequence[AgentId], timeout_seconds: float = 5.0) -> None:
         """Stop the specified agents gracefully within the given timeout.
 

@@ -259,6 +259,10 @@ class InvalidCommonTranscriptRecordError(AgentError, ValueError):
     """
 
 
+class InvalidUpgradeInputError(AgentError):
+    """Raised when an input file ``mngr upgrade`` reads for an agent cannot be decoded or parsed."""
+
+
 class AgentNotFoundError(AgentError):
     """No agent with this ID exists."""
 

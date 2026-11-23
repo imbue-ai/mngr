@@ -99,6 +99,7 @@ SECONDARY_COMMANDS = {
     "transcript",
     "tutor",
     "robinhood",
+    "upgrade",
     "usage",
     "witness",
     "wait",

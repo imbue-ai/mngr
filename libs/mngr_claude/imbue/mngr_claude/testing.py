@@ -1,8 +1,10 @@
 import json
 import os
+import pwd
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
 from collections.abc import Callable
 from collections.abc import Generator
@@ -121,6 +123,28 @@ BACKGROUND_SLEEP_PROMPT: Final[str] = (
     f"Use the Bash tool with run_in_background set to true to run exactly: sleep {BACKGROUND_SLEEP_SECONDS} "
     "-- do not wait for it or check on it, and then reply with just OK."
 )
+
+
+def get_login_home() -> Path:
+    """The invoking user's real home, where a subscription Claude login lives, whatever ``HOME`` says."""
+    return Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
+def is_local_claude_login_present() -> bool:
+    """Whether a local ``claude`` can authenticate without ``ANTHROPIC_API_KEY``, through a subscription login."""
+    home = get_login_home()
+    if (home / ".claude" / ".credentials.json").exists():
+        return True
+    if sys.platform == "darwin":
+        probe = subprocess.run(
+            ["security", "find-generic-password", "-s", "Claude Code-credentials"],
+            capture_output=True,
+            check=False,
+            env={**os.environ, "HOME": str(home)},
+        )
+        if probe.returncode == 0:
+            return True
+    return False
 
 
 def _init_claude_workspace(path: Path) -> None:
@@ -453,6 +477,56 @@ def append_project_settings(ctx: AgentReleaseContext, settings_toml: str) -> Non
     settings_path = Path(ctx.env["MNGR_PROJECT_CONFIG_DIR"]) / "settings.local.toml"
     with settings_path.open("a") as settings_file:
         settings_file.write(settings_toml)
+
+
+class LocalLoginClaudeProfile(ClaudeReleaseProfile):
+    """A Claude release profile that also runs on a locally-logged-in (no API key) machine.
+
+    Reuses ``ClaudeReleaseProfile``'s workspace/config plumbing, but widens the
+    availability gate to accept a local Claude login. With an ``ANTHROPIC_API_KEY``
+    set it behaves exactly like the parent profile (isolated config dir, key passed
+    into the agent), so its tests still run in the key-based release
+    pipeline. Without one it authenticates from the developer's existing local
+    Claude login (a subscription/OAuth login, as minds users have):
+
+    * The ``mngr`` subprocesses run under the *real* login home, since the harness
+      isolates ``HOME`` to a temp dir and the macOS login keychain / ``~/.claude``
+      credentials live under the real home.
+    * The agent is provisioned in *shared* config-dir mode
+      (``isolate_local_config_dir = false``) so it reuses that login directly. This
+      is the mode mngr itself recommends for macOS subscription users (isolated
+      mode copies the credentials into a separate keychain entry that goes stale).
+      As a result the agent shares the developer's ``~/.claude`` while it runs, and
+      whatever session a test drives stays behind there. mngr's own state stays
+      isolated via ``MNGR_HOST_DIR`` and the per-test tmux server.
+    """
+
+    def unavailable_reason(self) -> str | None:
+        if shutil.which("claude") is None:
+            return "Requires `claude` on PATH."
+        if os.environ.get("ANTHROPIC_API_KEY") or is_local_claude_login_present():
+            return None
+        return "Requires ANTHROPIC_API_KEY or a local Claude login (~/.claude credentials or macOS keychain)."
+
+    def setup(self, tmp_path: Path) -> AgentReleaseContext:
+        ctx = super().setup(tmp_path)
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            append_project_settings(ctx, "\n[agent_types.claude]\nisolate_local_config_dir = false\n")
+        return ctx
+
+    def run_mngr(self, ctx: AgentReleaseContext, *args: str, timeout: float) -> subprocess.CompletedProcess[str]:
+        env = dict(ctx.env)
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            # Point at the real login home so keychain / ~/.claude auth resolves.
+            env["HOME"] = str(get_login_home())
+        return run_mngr_subprocess(*args, env=env, timeout=timeout)
+
+    def create_extra_args(self, ctx: AgentReleaseContext) -> Sequence[str]:
+        args: list[str] = ["--no-ensure-clean", "--source", str(ctx.project_dir)]
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            args += ["--pass-env", "ANTHROPIC_API_KEY"]
+        args += ["--", "--dangerously-skip-permissions", "--model", RELEASE_TEST_MODEL]
+        return args
 
 
 _PROXIED_TURN_PROMPT: Final[str] = "Reply with just OK."

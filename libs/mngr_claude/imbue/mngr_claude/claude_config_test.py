@@ -1,5 +1,6 @@
 """Unit tests for claude_config.py."""
 
+import copy
 import json
 import os
 import re
@@ -18,9 +19,12 @@ from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
 from imbue.mngr_claude.claude_config import HOOK_BACKGROUND_TASK_NAME_PREFIX
 from imbue.mngr_claude.claude_config import LAST_COMPACTION_FILENAME
 from imbue.mngr_claude.claude_config import MAIN_SESSION_ONLY_GUARD
+from imbue.mngr_claude.claude_config import SESSION_GUARD
 from imbue.mngr_claude.claude_config import acknowledge_cost_threshold
 from imbue.mngr_claude.claude_config import add_claude_trust_for_path
 from imbue.mngr_claude.claude_config import auto_dismiss_claude_dialogs
+from imbue.mngr_claude.claude_config import build_credential_sync_hooks_config
+from imbue.mngr_claude.claude_config import build_mngr_hook_configs_for_options
 from imbue.mngr_claude.claude_config import build_permission_auto_allow_hooks_config
 from imbue.mngr_claude.claude_config import build_readiness_hooks_config
 from imbue.mngr_claude.claude_config import check_claude_dialogs_dismissed
@@ -33,11 +37,17 @@ from imbue.mngr_claude.claude_config import ensure_chat_cancel_tap_keybinding
 from imbue.mngr_claude.claude_config import find_project_config
 from imbue.mngr_claude.claude_config import find_user_config_in_isolated_mode
 from imbue.mngr_claude.claude_config import find_user_config_in_unisolated_mode
+from imbue.mngr_claude.claude_config import fold_hook_configs
 from imbue.mngr_claude.claude_config import get_claude_config_dir
 from imbue.mngr_claude.claude_config import get_user_claude_config_dir
+from imbue.mngr_claude.claude_config import has_credential_sync_hook
+from imbue.mngr_claude.claude_config import has_mngr_hook_entry
+from imbue.mngr_claude.claude_config import has_permission_auto_allow_hook
+from imbue.mngr_claude.claude_config import is_mngr_hook_entry
 from imbue.mngr_claude.claude_config import is_source_directory_trusted
 from imbue.mngr_claude.claude_config import is_tap_binding_active
 from imbue.mngr_claude.claude_config import mark_claude_agent_idle
+from imbue.mngr_claude.claude_config import rebuild_hooks_keeping_agent_options
 from imbue.mngr_claude.claude_config import remove_claude_trust_for_path
 from imbue.mngr_claude.claude_config import resolve_shared_claude_config_dir
 
@@ -1563,3 +1573,303 @@ def test_user_prompt_submit_hook_removes_the_last_turn_end_as_it_opens_a_turn(tm
     assert result.returncode == 0, f"hook failed: stdout={result.stdout!r} stderr={result.stderr!r}"
     assert (state_dir / "active").exists()
     assert not (state_dir / "turn_end").exists()
+
+
+def _only_hook_command(hooks_config: dict[str, Any], event_name: str) -> str:
+    """The command of a hooks config that holds a single hook, under ``event_name``."""
+    return hooks_config["hooks"][event_name][0]["hooks"][0]["command"]
+
+
+_STALE_MNGR_HOOK_COMMAND = SESSION_GUARD + "echo stale-mngr-hook-51734"
+_USER_HOOK_COMMAND = "echo user-hook-51734"
+_PLUGIN_MODULE_HOOK_COMMAND = SESSION_GUARD + "exec uv run python -m imbue.some_plugin_51734.hooks.spawn"
+_AUTO_ALLOW_HOOK_COMMAND = _only_hook_command(build_permission_auto_allow_hooks_config(), "PermissionRequest")
+_CREDENTIAL_SYNC_HOOK_COMMAND = _only_hook_command(build_credential_sync_hooks_config(), "Notification")
+_READINESS_HOOKS: dict[str, Any] = build_readiness_hooks_config()["hooks"]
+
+
+def _command_hook_group(*commands: str, matcher: str | None = None) -> dict[str, Any]:
+    """A hook group running each command, under ``matcher`` when one is given."""
+    hook_group: dict[str, Any] = {"hooks": [{"type": "command", "command": command} for command in commands]}
+    return hook_group if matcher is None else {"matcher": matcher, **hook_group}
+
+
+def _build_mngr_hooks(*, is_credential_sync_enabled: bool, is_permission_auto_allow_enabled: bool) -> dict[str, Any]:
+    """The ``hooks`` value of a settings file holding only mngr's hooks for these options."""
+    hook_configs = build_mngr_hook_configs_for_options(
+        is_credential_sync_enabled=is_credential_sync_enabled,
+        is_permission_auto_allow_enabled=is_permission_auto_allow_enabled,
+    )
+    return fold_hook_configs({}, hook_configs)["hooks"]
+
+
+_EVERY_OPTION_COMBINATION = pytest.mark.parametrize(
+    ("is_credential_sync_enabled", "is_permission_auto_allow_enabled"),
+    [(False, False), (True, False), (False, True), (True, True)],
+)
+
+# Stale mngr hooks, hooks mngr did not write, a group mixing both and events mngr does not use.
+_MESSY_LIVE_HOOKS: dict[str, Any] = {
+    "PreToolUse": [_command_hook_group(_PLUGIN_MODULE_HOOK_COMMAND, matcher="Agent")],
+    "Stop": [_command_hook_group(_USER_HOOK_COMMAND), _command_hook_group(_STALE_MNGR_HOOK_COMMAND)],
+    "SessionStart": [_command_hook_group(_STALE_MNGR_HOOK_COMMAND, _USER_HOOK_COMMAND, matcher="startup")],
+    "PermissionRequest": [_command_hook_group(_AUTO_ALLOW_HOOK_COMMAND, matcher="*")],
+    "SubagentStop": [_command_hook_group(_STALE_MNGR_HOOK_COMMAND)],
+    "SessionEnd": [],
+}
+
+# The user's own hooks, on events mngr also uses and on one it does not.
+_HOME_HOOKS: dict[str, Any] = {
+    "SubagentStop": [_command_hook_group("echo home-subagent-stop-51734")],
+    "Stop": [_command_hook_group("echo home-stop-51734")],
+    "Notification": [_command_hook_group("echo home-notification-51734", matcher="idle_prompt")],
+    "PermissionRequest": [_command_hook_group("echo home-permission-51734", matcher="Bash")],
+}
+_PATCHED_STOP_GROUP = _command_hook_group("echo patched-stop-51734")
+_PATCHED_PRE_TOOL_USE_GROUP = _command_hook_group("echo patched-pre-tool-use-51734", matcher="Bash")
+
+
+def _build_created_hooks(
+    home_hooks: dict[str, Any], *, is_credential_sync_enabled: bool, is_permission_auto_allow_enabled: bool
+) -> dict[str, Any]:
+    """The ``hooks`` value a create writes: mngr's hooks folded onto ``home_hooks``, then the patched groups."""
+    hook_configs = build_mngr_hook_configs_for_options(
+        is_credential_sync_enabled=is_credential_sync_enabled,
+        is_permission_auto_allow_enabled=is_permission_auto_allow_enabled,
+    )
+    hooks = fold_hook_configs({"hooks": home_hooks}, hook_configs)["hooks"]
+    return {**hooks, "Stop": [*hooks["Stop"], _PATCHED_STOP_GROUP], "PreToolUse": [_PATCHED_PRE_TOOL_USE_GROUP]}
+
+
+# An agent's own config dir settings after its mngr hooks went stale: home groups, mngr's, then a patched group.
+_STALE_CONFIG_DIR_LIVE_HOOKS: dict[str, Any] = {
+    "SubagentStop": _HOME_HOOKS["SubagentStop"],
+    "Stop": [*_HOME_HOOKS["Stop"], _command_hook_group(_STALE_MNGR_HOOK_COMMAND), _PATCHED_STOP_GROUP],
+    "Notification": [
+        *_HOME_HOOKS["Notification"],
+        _command_hook_group(_STALE_MNGR_HOOK_COMMAND, matcher="idle_prompt"),
+        _command_hook_group(_CREDENTIAL_SYNC_HOOK_COMMAND + "; true", matcher="auth_success"),
+    ],
+    "PermissionRequest": [
+        *_HOME_HOOKS["PermissionRequest"],
+        _command_hook_group(_STALE_MNGR_HOOK_COMMAND),
+        _command_hook_group(_AUTO_ALLOW_HOOK_COMMAND + "; true", matcher="*"),
+    ],
+}
+
+
+@_EVERY_OPTION_COMBINATION
+def test_build_mngr_hook_configs_for_options_builds_each_optional_hook_only_when_enabled(
+    is_credential_sync_enabled: bool, is_permission_auto_allow_enabled: bool
+) -> None:
+    hooks = _build_mngr_hooks(
+        is_credential_sync_enabled=is_credential_sync_enabled,
+        is_permission_auto_allow_enabled=is_permission_auto_allow_enabled,
+    )
+
+    assert has_credential_sync_hook(hooks) is is_credential_sync_enabled
+    assert has_permission_auto_allow_hook(hooks) is is_permission_auto_allow_enabled
+    assert hooks["Stop"] == _READINESS_HOOKS["Stop"]
+
+
+def test_is_mngr_hook_entry_recognizes_every_hook_entry_mngr_builds() -> None:
+    hooks = _build_mngr_hooks(is_credential_sync_enabled=True, is_permission_auto_allow_enabled=True)
+
+    unrecognized_entries = [
+        hook_entry
+        for hook_groups in hooks.values()
+        for hook_group in hook_groups
+        for hook_entry in hook_group["hooks"]
+        if not is_mngr_hook_entry(hook_entry, hook_group)
+    ]
+
+    assert unrecognized_entries == []
+
+
+@pytest.mark.parametrize(
+    ("hook_entry", "hook_group_matcher", "expected"),
+    [
+        pytest.param({"type": "command", "command": _STALE_MNGR_HOOK_COMMAND}, None, True, id="stale_readiness_hook"),
+        pytest.param({"type": "command", "command": _USER_HOOK_COMMAND}, None, False, id="user_hook"),
+        pytest.param(
+            {"type": "command", "command": _USER_HOOK_COMMAND + "; " + SESSION_GUARD},
+            None,
+            False,
+            id="guard_not_at_the_start",
+        ),
+        pytest.param({"type": "command", "command": _PLUGIN_MODULE_HOOK_COMMAND}, "Agent", False, id="plugin_module"),
+        pytest.param({"type": "command", "command": _AUTO_ALLOW_HOOK_COMMAND}, "*", True, id="auto_allow"),
+        pytest.param({"type": "command", "command": _AUTO_ALLOW_HOOK_COMMAND}, "Bash", False, id="scoped_allow"),
+        pytest.param({"type": "command", "command": _AUTO_ALLOW_HOOK_COMMAND}, None, False, id="allow_no_matcher"),
+        pytest.param(
+            {"type": "command", "command": _CREDENTIAL_SYNC_HOOK_COMMAND}, "auth_success", True, id="credential_sync"
+        ),
+        pytest.param({"type": "prompt", "prompt": "Is this safe?"}, None, False, id="entry_without_a_command"),
+        pytest.param("not-an-object", None, False, id="entry_that_is_not_an_object"),
+    ],
+)
+def test_is_mngr_hook_entry_tells_mngrs_hooks_from_the_rest(
+    hook_entry: Any, hook_group_matcher: str | None, expected: bool
+) -> None:
+    matcher_fields = {} if hook_group_matcher is None else {"matcher": hook_group_matcher}
+
+    assert is_mngr_hook_entry(hook_entry, {**matcher_fields, "hooks": [hook_entry]}) is expected
+
+
+def test_has_permission_auto_allow_hook_ignores_an_allow_hook_scoped_to_one_tool() -> None:
+    hooks = {"PermissionRequest": [_command_hook_group(_AUTO_ALLOW_HOOK_COMMAND, matcher="Bash")]}
+
+    assert has_permission_auto_allow_hook(hooks) is False
+
+
+@pytest.mark.parametrize(
+    ("hooks", "expected"),
+    [
+        pytest.param({}, False, id="empty"),
+        pytest.param({"Stop": [{"matcher": "startup"}]}, False, id="group_without_entries"),
+        pytest.param(_HOME_HOOKS, False, id="user_hooks"),
+        pytest.param(
+            {"PreToolUse": [_command_hook_group(_PLUGIN_MODULE_HOOK_COMMAND, matcher="Agent")]},
+            False,
+            id="plugin_module_hook",
+        ),
+        pytest.param(
+            {"PermissionRequest": [_command_hook_group(_AUTO_ALLOW_HOOK_COMMAND, matcher="Bash")]},
+            False,
+            id="scoped_allow_hook",
+        ),
+        pytest.param(
+            {"Stop": [_command_hook_group(_USER_HOOK_COMMAND, _STALE_MNGR_HOOK_COMMAND)]}, True, id="stale_mngr_hook"
+        ),
+        pytest.param(
+            {"PermissionRequest": [_command_hook_group(_AUTO_ALLOW_HOOK_COMMAND, matcher="*")]}, True, id="auto_allow"
+        ),
+        pytest.param(
+            {"Notification": [_command_hook_group(_CREDENTIAL_SYNC_HOOK_COMMAND, matcher="auth_success")]},
+            True,
+            id="credential_sync",
+        ),
+        pytest.param(_STALE_CONFIG_DIR_LIVE_HOOKS, True, id="stale_config_dir_layout"),
+    ],
+)
+def test_has_mngr_hook_entry_finds_an_entry_of_mngrs_in_any_group(hooks: dict[str, Any], expected: bool) -> None:
+    assert has_mngr_hook_entry(hooks) is expected
+
+
+def test_rebuild_hooks_builds_only_the_readiness_hooks_from_an_empty_value() -> None:
+    assert rebuild_hooks_keeping_agent_options({}) == _READINESS_HOOKS
+
+
+@_EVERY_OPTION_COMBINATION
+def test_rebuild_hooks_returns_the_hooks_mngr_just_built_unchanged(
+    is_credential_sync_enabled: bool, is_permission_auto_allow_enabled: bool
+) -> None:
+    hooks = _build_mngr_hooks(
+        is_credential_sync_enabled=is_credential_sync_enabled,
+        is_permission_auto_allow_enabled=is_permission_auto_allow_enabled,
+    )
+
+    rebuilt_hooks = rebuild_hooks_keeping_agent_options(hooks)
+
+    assert rebuilt_hooks == hooks
+    assert list(rebuilt_hooks) == list(hooks)
+
+
+def test_rebuild_hooks_replaces_an_older_optional_hook_with_this_version_of_it() -> None:
+    older_auto_allow_group = {
+        "matcher": "*",
+        "hooks": [{"type": "command", "command": _AUTO_ALLOW_HOOK_COMMAND + "; true", "timeout": 9}],
+    }
+
+    rebuilt_hooks = rebuild_hooks_keeping_agent_options({"PermissionRequest": [older_auto_allow_group]})
+
+    assert rebuilt_hooks == _build_mngr_hooks(is_credential_sync_enabled=False, is_permission_auto_allow_enabled=True)
+
+
+def test_rebuild_hooks_drops_stale_mngr_hooks_and_keeps_every_other_one_and_the_order_of_live_events() -> None:
+    rebuilt_hooks = rebuild_hooks_keeping_agent_options(_MESSY_LIVE_HOOKS)
+
+    mngr_hooks = _build_mngr_hooks(is_credential_sync_enabled=False, is_permission_auto_allow_enabled=True)
+    assert rebuilt_hooks == {
+        **mngr_hooks,
+        "PreToolUse": [_command_hook_group(_PLUGIN_MODULE_HOOK_COMMAND, matcher="Agent")],
+        "Stop": [_command_hook_group(_USER_HOOK_COMMAND), *mngr_hooks["Stop"]],
+        "SessionStart": [*mngr_hooks["SessionStart"], _command_hook_group(_USER_HOOK_COMMAND, matcher="startup")],
+        "SessionEnd": [],
+    }
+    kept_live_event_names = ["PreToolUse", "Stop", "SessionStart", "PermissionRequest", "SessionEnd"]
+    new_event_names = [event_name for event_name in mngr_hooks if event_name not in kept_live_event_names]
+    assert list(rebuilt_hooks) == [*kept_live_event_names, *new_event_names]
+
+
+def test_rebuild_hooks_appends_mngrs_groups_to_an_event_that_holds_none_of_its_entries() -> None:
+    scoped_allow_group = _command_hook_group(_AUTO_ALLOW_HOOK_COMMAND, matcher="Bash")
+    user_stop_group = _command_hook_group(_USER_HOOK_COMMAND)
+
+    rebuilt_hooks = rebuild_hooks_keeping_agent_options(
+        {"PermissionRequest": [scoped_allow_group], "Stop": [user_stop_group], "PostCompact": []}
+    )
+
+    assert rebuilt_hooks["PermissionRequest"] == [scoped_allow_group, *_READINESS_HOOKS["PermissionRequest"]]
+    assert rebuilt_hooks["Stop"] == [user_stop_group, *_READINESS_HOOKS["Stop"]]
+    assert rebuilt_hooks["PostCompact"] == _READINESS_HOOKS["PostCompact"]
+
+
+@_EVERY_OPTION_COMBINATION
+@pytest.mark.parametrize(
+    "home_hooks", [pytest.param({}, id="managed_file_layout"), pytest.param(_HOME_HOOKS, id="config_dir_layout")]
+)
+def test_rebuild_hooks_returns_each_layout_a_create_writes_unchanged(
+    home_hooks: dict[str, Any], is_credential_sync_enabled: bool, is_permission_auto_allow_enabled: bool
+) -> None:
+    created_hooks = _build_created_hooks(
+        home_hooks,
+        is_credential_sync_enabled=is_credential_sync_enabled,
+        is_permission_auto_allow_enabled=is_permission_auto_allow_enabled,
+    )
+
+    rebuilt_hooks = rebuild_hooks_keeping_agent_options(created_hooks)
+
+    assert rebuilt_hooks == created_hooks
+    assert list(rebuilt_hooks) == list(created_hooks)
+
+
+def test_rebuild_hooks_replaces_stale_mngr_groups_between_the_home_and_the_patched_groups() -> None:
+    rebuilt_hooks = rebuild_hooks_keeping_agent_options(_STALE_CONFIG_DIR_LIVE_HOOKS)
+
+    mngr_hooks = _build_mngr_hooks(is_credential_sync_enabled=True, is_permission_auto_allow_enabled=True)
+    assert rebuilt_hooks == {
+        **mngr_hooks,
+        "SubagentStop": _HOME_HOOKS["SubagentStop"],
+        "Stop": [*_HOME_HOOKS["Stop"], *mngr_hooks["Stop"], _PATCHED_STOP_GROUP],
+        "Notification": [*_HOME_HOOKS["Notification"], *mngr_hooks["Notification"]],
+        "PermissionRequest": [*_HOME_HOOKS["PermissionRequest"], *mngr_hooks["PermissionRequest"]],
+    }
+    new_event_names = [event_name for event_name in mngr_hooks if event_name not in _STALE_CONFIG_DIR_LIVE_HOOKS]
+    assert list(rebuilt_hooks) == [*_STALE_CONFIG_DIR_LIVE_HOOKS, *new_event_names]
+
+
+@pytest.mark.parametrize(
+    "live_hooks",
+    [
+        pytest.param(_MESSY_LIVE_HOOKS, id="messy"),
+        pytest.param(_STALE_CONFIG_DIR_LIVE_HOOKS, id="stale_config_dir_layout"),
+        pytest.param(
+            _build_created_hooks({}, is_credential_sync_enabled=True, is_permission_auto_allow_enabled=True),
+            id="managed_file_layout",
+        ),
+        pytest.param(
+            _build_created_hooks(_HOME_HOOKS, is_credential_sync_enabled=True, is_permission_auto_allow_enabled=True),
+            id="config_dir_layout",
+        ),
+    ],
+)
+def test_rebuild_hooks_is_idempotent_and_leaves_its_input_alone(live_hooks: dict[str, Any]) -> None:
+    live_hooks_before = copy.deepcopy(live_hooks)
+
+    rebuilt_hooks = rebuild_hooks_keeping_agent_options(live_hooks)
+    rebuilt_again_hooks = rebuild_hooks_keeping_agent_options(rebuilt_hooks)
+
+    assert rebuilt_again_hooks == rebuilt_hooks
+    assert list(rebuilt_again_hooks) == list(rebuilt_hooks)
+    assert live_hooks == live_hooks_before
