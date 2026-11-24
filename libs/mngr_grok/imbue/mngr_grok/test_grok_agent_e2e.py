@@ -35,6 +35,7 @@ from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import mngr_agent_cleanup
 from imbue.mngr.utils.testing import run_git_command
 from imbue.mngr.utils.testing import run_mngr_subprocess
+from imbue.mngr_grok.grok_config import GROK_HOME_RELATIVE_PATH
 from imbue.mngr_grok.grok_config import GROK_PLUGIN_STATE_RELATIVE_PATH
 from imbue.mngr_grok.grok_config import SESSION_ID_RELATIVE_PATH
 from imbue.mngr_grok.grok_config import compute_session_bucket_name
@@ -42,6 +43,7 @@ from imbue.mngr_grok.grok_sessions import GROK_SESSIONS_RELATIVE_PATH
 from imbue.mngr_grok.grok_sessions import ROOTS_RELATIVE_PATH
 from imbue.mngr_grok.resources.grok_hook import ACTIVE_MARKER_FILENAME
 from imbue.mngr_grok.resources.grok_hook import SUBMISSIONS_LOG_FILENAME
+from imbue.mngr_grok.resources.grok_hook import TURN_END_FILENAME
 from imbue.mngr_grok.resources.grok_hook import normalized_prompt_tail
 from imbue.mngr_grok.resources.testing import read_common_transcript_records
 from imbue.mngr_grok.testing import FOREGROUND_SUBAGENT_TRIGGER
@@ -519,3 +521,75 @@ def test_grok_clone_and_adoption_fork_the_session_into_their_own_buckets(
     assert len({source_session_id, clone_session_id, adopt_session_id}) == 3
     assert clone_session_dirs == sorted([source_session_id, clone_session_id])
     assert adopt_session_dirs == sorted([source_session_id, adopt_session_id])
+
+
+def _list_pids_running(script_path: Path) -> list[str]:
+    """The pids of the processes whose command line names ``script_path``."""
+    result = subprocess.run(["pgrep", "-f", str(script_path)], capture_output=True, text=True, check=False)
+    return result.stdout.split()
+
+
+@pytest.mark.release
+@pytest.mark.harness_internals(harness="grok")
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(900)
+def test_grok_upgrade_moves_an_agent_onto_new_files_and_keeps_its_conversation(
+    build_hermetic_grok_agent_environment: Callable[[str], dict[str, str]], tmp_path: Path
+) -> None:
+    secret = f"SECRET-{get_short_random_string()}"
+
+    with _running_grok_profile(build_hermetic_grok_agent_environment, tmp_path, GrokStubServerConfig()) as (
+        profile,
+        ctx,
+    ):
+        agent_name = _new_agent_name("upgrade")
+        with _created_grok_agent(profile, ctx, agent_name, profile.create_extra_args(ctx)) as state_dir:
+            _send(profile, ctx, agent_name, f"Remember this exact secret for later: {secret}. Reply with just OK.")
+            _wait_for_idle(state_dir)
+            session_id_before = _read_session_id(state_dir)
+            hook_handler_path = state_dir / GROK_HOME_RELATIVE_PATH / "hooks" / "grok_hook.py"
+            created_hook_handler = hook_handler_path.read_text()
+            # Make it look like an older mngr created it.
+            hook_handler_path.write_text(created_hook_handler + "\n# an older handler\n")
+            (state_dir / "commands" / "mngr_background_task_lib.sh").unlink()
+            data_before = (state_dir / "data.json").read_bytes()
+            supervisor_path = state_dir / "commands" / "grok_background_tasks.sh"
+            streamer_path = state_dir / "commands" / "grok_transcript_streamer.py"
+            supervisor_pids_before = _list_pids_running(supervisor_path)
+
+            upgrade = _run_mngr_expecting_success(profile, ctx, "upgrade", agent_name, timeout=_CREATE_TIMEOUT_SECONDS)
+
+            hook_handler_after_upgrade = hook_handler_path.read_text()
+            is_background_task_lib_restored = (state_dir / "commands" / "mngr_background_task_lib.sh").is_file()
+            data_after_upgrade = (state_dir / "data.json").read_bytes()
+            supervisor_pids_after = _list_pids_running(supervisor_path)
+            streamer_pids_after = _list_pids_running(streamer_path)
+            _send(profile, ctx, agent_name, profile.recall_prompt())
+            _wait_for_reply_with(state_dir, "STUB_RECALL")
+            _wait_for_idle(state_dir)
+            recall_replies = [
+                str(record["message"])
+                for record in read_common_transcript_records(state_dir)
+                if record.get("source") == "agent" and "STUB_RECALL" in str(record.get("message"))
+            ]
+            session_id_after_upgrade = _read_session_id(state_dir)
+            turn_end = (state_dir / TURN_END_FILENAME).read_text()
+            second_upgrade = _run_mngr_expecting_success(
+                profile, ctx, "upgrade", agent_name, timeout=_CREATE_TIMEOUT_SECONDS
+            )
+
+    assert f"upgraded {agent_name} (restarted)" in upgrade.stdout, upgrade.stdout
+    assert hook_handler_after_upgrade == created_hook_handler
+    assert is_background_task_lib_restored
+    assert data_after_upgrade == data_before
+    assert len(supervisor_pids_before) == 1, supervisor_pids_before
+    assert len(supervisor_pids_after) == 1 and supervisor_pids_after != supervisor_pids_before, (
+        f"expected one supervisor started by the upgrade, found {supervisor_pids_after} "
+        f"(before the upgrade: {supervisor_pids_before})"
+    )
+    assert len(streamer_pids_after) == 1, streamer_pids_after
+    assert session_id_after_upgrade == session_id_before
+    assert recall_replies == [f"STUB_RECALL: {secret}"]
+    assert "kind:COMPLETED" in turn_end
+    assert f"current {agent_name}" in second_upgrade.stdout, second_upgrade.stdout

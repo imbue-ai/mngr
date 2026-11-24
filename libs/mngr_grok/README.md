@@ -69,7 +69,7 @@ prompt_suggestions = true
 "ui" = "extend"   # keeps the permission_mode mngr writes
 ```
 
-Configuration is rendered when the agent is created; `mngr create <name> --reuse --update` renders it again.
+Configuration is rendered when the agent is created; `mngr create <name> --reuse --update` renders it again, and `mngr upgrade` leaves it as it is (see [Upgrade](#upgrade)).
 
 ### Fields
 
@@ -151,13 +151,20 @@ mngr also writes `[privacy] privacy_banner_acked` into every agent's `config.tom
 - **Clone and adopt.** `mngr create <name> grok --from <agent>` copies the source agent's current session into the new agent, and `--adopt <session id or session directory>` copies one from `~/.grok/sessions`, a live local grok agent, or a preserved one. The first launch forks the copy into the agent's own session. A fork keeps its source session's role, because grok fixes a session's system prompt when the session is created; the agent's own role applies to the sessions it starts later. A clone or adoption fails for a work dir whose URL-encoded path exceeds 255 bytes.
 - **Preservation.** With `preserve_on_destroy = true`, `mngr destroy` first copies the agent's transcripts and grok sessions (and its memory store when `memory = true`) to `<local_host_dir>/preserved/`, where `--adopt <session id>` finds them.
 
+### Upgrade
+
+`mngr upgrade <name>` gives a grok agent that an older mngr created this mngr's `commands/` scripts and shared shell libraries, and mngr's hooks file (`hooks/mngr.json`) and hook handler in its grok home, restarting it if idle; it resumes its session. The common-transcript scripts are rewritten only where the agent has them. `config.toml`, the launch settings, the role and every other file stay as they are, including hooks added in `config.toml` or in another file of the `hooks/` directory.
+
+- An agent whose launch command does not run `commands/grok_launch.sh` is skipped until `mngr create <name> --reuse --update` re-creates it.
+- The upgrade is `ready` once grok's SessionStart hook runs in the restarted agent; otherwise it fails at `ready`. grok shows its login, consent, folder-trust and paywall screens before its session starts and runs no hook for them, so on that failure mngr reads the agent's screen once to name the screen grok shows and how to clear it.
+
 ## Troubleshooting
 
 - **"grok has no usable credential"** (the login screen): run `grok login` on the agent's host (`grok login --device-auth` on a remote host), or pass `XAI_API_KEY`, then run the failed `mngr create` again, or `mngr create <name> --reuse --update` for an agent that exists. With `share_auth = false` only `XAI_API_KEY` works: pass it when you create the agent (`--pass-env XAI_API_KEY`).
 - **"grok is asking whether to trust the agent's work dir"** (the trust dialog): mngr records trust when it creates the agent, so this is a bug; report the work dir's layout. An agent that exists can answer the dialog through `mngr connect <agent>`.
 - **"grok shows a notice from xAI"** (a consent notice): run `grok` yourself and accept it, then run the failed `mngr create` again, or `mngr create <name> --reuse --update` for an agent that exists, so the agent copies your answer; with `share_auth = false` nothing is copied. An agent that exists can also accept it through `mngr connect <agent>`.
 - **"the account has no subscription that includes Grok Build"** (the paywall): sign in with a qualifying account, or use `XAI_API_KEY` with `share_auth = false`. Do not press keys on this screen: `l` logs out and deletes the credential file, which under `share_auth` is your own.
-- **A hook failure line in grok's TUI** (`◆ <event> hook (global/mngr) failed, ignored: …`): mngr's hook handler could not run, so the agent's RUNNING/WAITING state is unreliable. Check that `python3` 3.9 or newer is on the host's `PATH`, then run `mngr create <name> --reuse --update` to reinstall the handler. Failed runs are also recorded in `$MNGR_AGENT_STATE_DIR/events/grok/hook_failures/events.jsonl`, except those of the `Notification` and `SubagentStart` hooks, which grok leaves out of its session log.
+- **A hook failure line in grok's TUI** (`◆ <event> hook (global/mngr) failed, ignored: …`): mngr's hook handler could not run, so the agent's RUNNING/WAITING state is unreliable. Check that `python3` 3.9 or newer is on the host's `PATH`, then run `mngr upgrade <name>` to reinstall the handler. Failed runs are also recorded in `$MNGR_AGENT_STATE_DIR/events/grok/hook_failures/events.jsonl`, except those of the `Notification` and `SubagentStart` hooks, which grok leaves out of its session log.
 - **`$MNGR_AGENT_STATE_DIR/logs/grok_hooks.log`** has one line per run of mngr's handler, `<time> event=<event> session=<id> prompt=<id> <outcome>`. An error inside the handler reads `error:<exception>` and is recorded only here, because grok sees that run succeed; a handler that could not run writes no line. The launch script logs to `$MNGR_AGENT_STATE_DIR/events/logs/grok_launch/events.jsonl`.
 
 See the [mngr agent types documentation](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/concepts/agent_types.md) for more details.

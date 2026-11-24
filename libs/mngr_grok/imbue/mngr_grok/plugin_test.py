@@ -41,9 +41,12 @@ from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import ConfigParseError
+from imbue.mngr.errors import InvalidUpgradeInputError
 from imbue.mngr.errors import SendFailureKind
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import resolve_expected_process_name
+from imbue.mngr.hosts.host import SHARED_SHELL_LIB_NAMES
+from imbue.mngr.hosts.host import write_shared_shell_libs
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import CliBackedAgentMixin
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
@@ -54,6 +57,7 @@ from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.agent import HasVersionManagementMixin
+from imbue.mngr.interfaces.agent import UpgradableAgentMixin
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import VolumeFile
@@ -85,6 +89,7 @@ from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import write_executable_script
 from imbue.mngr_grok import resources as grok_resources
 from imbue.mngr_grok.grok_config import FORK_FROM_RELATIVE_PATH
+from imbue.mngr_grok.grok_config import GROK_HOME_RELATIVE_PATH
 from imbue.mngr_grok.grok_config import GROK_PLUGIN_STATE_RELATIVE_PATH
 from imbue.mngr_grok.grok_config import GrokRootTurn
 from imbue.mngr_grok.grok_config import LAUNCH_ENV_RELATIVE_PATH
@@ -139,6 +144,7 @@ from imbue.mngr_grok.resources import grok_hook
 from imbue.mngr_grok.resources.grok_hook import ACTIVE_MARKER_FILENAME
 from imbue.mngr_grok.resources.grok_hook import AUTO_WAKE_TAIL_MARKER
 from imbue.mngr_grok.resources.grok_hook import PENDING_WAKE_PROMPT_ID_PREFIX
+from imbue.mngr_grok.resources.grok_hook import SESSION_STARTED_FILENAME
 from imbue.mngr_grok.resources.grok_hook import SUBMISSIONS_LOG_FILENAME
 from imbue.mngr_grok.resources.grok_hook import normalized_prompt_tail
 from imbue.mngr_grok.resources.testing import HOOK_FIXTURES_DIR
@@ -191,7 +197,7 @@ def _read_unrecognised_dialog_pane() -> str:
     return read_pane_fixture(_PERMISSION_CARD_PANE).replace("1/4:select", "↑/↓:choose")
 
 
-def _make_grok_agent(
+def make_grok_agent(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     agent_config: GrokAgentConfig,
@@ -398,13 +404,14 @@ def test_grok_agent_declares_the_capability_mixins() -> None:
         HasPermissionPolicyMixin,
         HasVersionManagementMixin,
         HasAutoInstallMixin,
+        UpgradableAgentMixin,
     ):
         assert issubclass(GrokAgent, mixin), mixin
     assert not issubclass(GrokAgent, HasCompactionMixin)
 
 
 def test_get_expected_process_name_is_grok(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig(command=CommandString("env X=1 grok")))
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig(command=CommandString("env X=1 grok")))
 
     assert agent.get_expected_process_name() == "grok"
 
@@ -424,7 +431,7 @@ def test_a_listing_that_knows_only_the_grok_type_expects_the_grok_process() -> N
 
 
 def test_ready_indicator_is_the_per_send_pane_predicate(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
-    indicator = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig()).get_tui_ready_indicator()
+    indicator = make_grok_agent(local_provider, tmp_path, GrokAgentConfig()).get_tui_ready_indicator()
 
     assert indicator is is_ready_for_paste
 
@@ -438,7 +445,7 @@ def test_paste_placeholder_prefixes_match_the_chip_grok_draws_for_a_paste() -> N
 def test_assemble_command_runs_the_launch_script_with_the_grok_words(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig(cli_args=("--verbose",)))
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig(cli_args=("--verbose",)))
 
     command = agent.assemble_command(agent.host, ("-p", "two words"), None)
 
@@ -448,7 +455,7 @@ def test_assemble_command_runs_the_launch_script_with_the_grok_words(
 
 
 def test_assemble_command_honours_command_override(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
 
     command = agent.assemble_command(agent.host, (), CommandString("env FOO=1 /opt/grok"))
 
@@ -458,7 +465,7 @@ def test_assemble_command_honours_command_override(local_provider: LocalProvider
 def test_enter_retry_gate_is_the_footer_first_hint_condition(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    gate = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig())._build_enter_retry_gate("hello typed text")
+    gate = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())._build_enter_retry_gate("hello typed text")
 
     assert gate is not None
     assert gate.condition_command == GROK_ENTER_RETRY_CONDITION
@@ -470,7 +477,7 @@ def test_enter_retry_gate_is_the_footer_first_hint_condition(
 def test_modify_env_vars_disables_grok_autoupdater_by_default(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
     env_vars: dict[str, str] = {}
 
     agent.modify_env_vars(agent.host, env_vars)
@@ -479,7 +486,7 @@ def test_modify_env_vars_disables_grok_autoupdater_by_default(
 
 
 def test_modify_env_vars_keeps_a_user_autoupdater_value(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
     env_vars = {"GROK_DISABLE_AUTOUPDATER": "0"}
 
     agent.modify_env_vars(agent.host, env_vars)
@@ -491,7 +498,7 @@ def test_modify_env_vars_keeps_a_user_autoupdater_value(local_provider: LocalPro
 def test_modify_env_vars_leaves_the_autoupdater_on_for_auto_updates(
     local_provider: LocalProviderInstance, tmp_path: Path, update_policy: AgentUpdatePolicy
 ) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig(update_policy=update_policy))
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig(update_policy=update_policy))
     env_vars: dict[str, str] = {}
 
     agent.modify_env_vars(agent.host, env_vars)
@@ -503,7 +510,7 @@ def test_modify_env_vars_leaves_the_autoupdater_on_for_auto_updates(
 def test_provision_leaves_the_updater_on_in_the_config_for_auto_updates(
     local_provider: LocalProviderInstance, tmp_path: Path, update_policy: AgentUpdatePolicy
 ) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig(update_policy=update_policy))
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig(update_policy=update_policy))
 
     _provision(agent)
 
@@ -527,7 +534,7 @@ def test_provision_leaves_the_updater_on_in_the_config_for_auto_updates(
 def test_get_install_command(
     local_provider: LocalProviderInstance, tmp_path: Path, version: str | None, expected_command: str
 ) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig(version=version))
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig(version=version))
 
     assert agent.get_install_binary_name() == "grok"
     assert agent.get_install_command() == expected_command
@@ -550,7 +557,7 @@ def test_reconcile_installed_version_accepts_the_pinned_grok(
     local_provider: LocalProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     invocation_log_path = _put_standin_grok_on_path(monkeypatch, tmp_path, "grok 1.0.62 (4f2a9c1)")
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig(version="1.0.62"))
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig(version="1.0.62"))
 
     agent.reconcile_installed_version(agent.host, agent.mngr_ctx)
 
@@ -561,7 +568,7 @@ def test_reconcile_installed_version_rejects_another_grok(
     local_provider: LocalProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _put_standin_grok_on_path(monkeypatch, tmp_path, "grok 1.0.70 (4f2a9c1)")
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig(version="1.0.62"))
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig(version="1.0.62"))
 
     with pytest.raises(AgentInstallationError, match="1.0.62"):
         agent.reconcile_installed_version(agent.host, agent.mngr_ctx)
@@ -571,7 +578,7 @@ def test_reconcile_installed_version_continues_on_another_grok_under_warn(
     local_provider: LocalProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     invocation_log_path = _put_standin_grok_on_path(monkeypatch, tmp_path, "grok 1.0.70 (4f2a9c1)")
-    agent = _make_grok_agent(
+    agent = make_grok_agent(
         local_provider, tmp_path, GrokAgentConfig(version="1.0.62", version_mismatch=VersionMismatchPolicy.WARN)
     )
 
@@ -595,7 +602,7 @@ def test_provision_refuses_a_grok_on_path_that_is_not_grok_build(
     local_provider: LocalProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _put_standin_grok_on_path(monkeypatch, tmp_path, "0.0.34")
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig(check_installation=True))
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig(check_installation=True))
 
     with pytest.raises(AgentInstallationError, match=r"reported '0\.0\.34', which is not xAI's Grok Build.*grok-cli"):
         _provision(agent)
@@ -608,7 +615,7 @@ def test_provision_checks_the_grok_on_path_when_the_command_is_a_wrapper(
 ) -> None:
     _put_standin_grok_on_path(monkeypatch, tmp_path, "0.0.34")
     wrapper_command = CommandString(f"{tmp_path / 'wrapper-that-resolves-only-at-launch'} grok")
-    agent = _make_grok_agent(
+    agent = make_grok_agent(
         local_provider, tmp_path, GrokAgentConfig(command=wrapper_command, check_installation=True)
     )
 
@@ -620,7 +627,7 @@ def test_provision_accepts_grok_build_on_path_after_one_version_check(
     local_provider: LocalProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     invocation_log_path = _put_standin_grok_on_path(monkeypatch, tmp_path, "grok 1.0.62 (4f2a9c1)")
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig(check_installation=True))
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig(check_installation=True))
 
     _provision(agent)
 
@@ -633,7 +640,7 @@ def test_provision_skips_the_grok_build_check_when_grok_reports_no_version(
     local_provider: LocalProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit_status: int
 ) -> None:
     put_executable_first_on_path(tmp_path / "silent-grok-bin", monkeypatch, "grok", f"#!/bin/sh\nexit {exit_status}\n")
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig(check_installation=True))
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig(check_installation=True))
 
     with capture_loguru(level="DEBUG") as log_output:
         _provision(agent)
@@ -646,7 +653,7 @@ def test_provision_without_the_installation_check_runs_no_grok(
     local_provider: LocalProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     invocation_log_path = _put_standin_grok_on_path(monkeypatch, tmp_path, "0.0.34")
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig(check_installation=False))
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig(check_installation=False))
 
     _provision(agent)
 
@@ -658,7 +665,7 @@ def test_provision_without_the_installation_check_runs_no_grok(
 def test_is_unattended_enabled_follows_auto_allow_permissions(
     local_provider: LocalProviderInstance, tmp_path: Path, auto_allow_permissions: bool
 ) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig(auto_allow_permissions=auto_allow_permissions))
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig(auto_allow_permissions=auto_allow_permissions))
 
     assert agent.is_unattended_enabled() is auto_allow_permissions
 
@@ -678,7 +685,7 @@ def test_get_permission_policy_reads_the_permission_table(
     settings_overrides: dict[str, Any],
     expected_policy: Mapping[str, Any],
 ) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig(settings_overrides=settings_overrides))
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig(settings_overrides=settings_overrides))
 
     assert agent.get_permission_policy() == expected_policy
 
@@ -689,7 +696,7 @@ def test_get_permission_policy_reads_the_permission_table(
 def test_provision_renders_the_grok_home_and_launch_state(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
 
     _provision(agent)
 
@@ -741,7 +748,7 @@ def _json_dump(value: Mapping[str, Any]) -> str:
 
 
 def test_provision_twice_leaves_the_same_files(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
-    agent = _make_grok_agent(
+    agent = make_grok_agent(
         local_provider, tmp_path, GrokAgentConfig(append_system_prompt=(SystemPromptText("Be brief."),))
     )
     _provision(agent)
@@ -755,7 +762,7 @@ def test_provision_twice_leaves_the_same_files(local_provider: LocalProviderInst
 def test_provision_keeps_the_privacy_banner_ack_time_of_the_existing_config(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
     _provision(agent)
     config_path = _grok_home(agent) / "config.toml"
     config_document = tomlkit.parse(config_path.read_text())
@@ -770,7 +777,7 @@ def test_provision_keeps_the_privacy_banner_ack_time_of_the_existing_config(
 def test_provision_carries_over_model_choices_consent_answers_and_session_id(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
     _provision(agent)
     config_path = _grok_home(agent) / "config.toml"
     config_path.write_text(
@@ -796,7 +803,7 @@ def test_provision_carries_over_model_choices_consent_answers_and_session_id(
 def test_provision_drops_the_model_and_effort_it_rendered_once_they_are_unset(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig(model="grok-4.6", reasoning_effort="high"))
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig(model="grok-4.6", reasoning_effort="high"))
     _provision(agent)
     assert _read_config_toml(agent)["models"] == {"default": "grok-4.6", "default_reasoning_effort": "high"}
 
@@ -806,7 +813,7 @@ def test_provision_drops_the_model_and_effort_it_rendered_once_they_are_unset(
 
 
 def test_provision_replaces_an_empty_session_id(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
     session_id_path = agent._get_agent_dir() / SESSION_ID_RELATIVE_PATH
     session_id_path.parent.mkdir(parents=True)
     session_id_path.write_text("\n")
@@ -826,7 +833,7 @@ def test_provision_writes_the_role_and_removes_it_once_the_role_is_gone(
     config = GrokAgentConfig(
         append_system_prompt=(SystemPromptText("You review code."),), output_style=OutputStyleName("Terse")
     )
-    agent = _make_grok_agent(local_provider, tmp_path, config)
+    agent = make_grok_agent(local_provider, tmp_path, config)
 
     _provision(agent)
 
@@ -842,7 +849,7 @@ def test_provision_refuses_a_role_over_grok_argument_limit(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
     oversized_role = SystemPromptText("é" * 50_001)
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig(append_system_prompt=(oversized_role,)))
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig(append_system_prompt=(oversized_role,)))
 
     with pytest.raises(UserInputError, match="100002 bytes"):
         _provision(agent)
@@ -852,7 +859,7 @@ def test_provision_folds_settings_overrides_onto_the_rendered_config(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
     overrides = {"ui__extend": {"follow_up_behavior": "queue"}, "model": {"local": {"base_url": "http://127.0.0.1"}}}
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig(settings_overrides=overrides))
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig(settings_overrides=overrides))
 
     _provision(agent)
 
@@ -870,7 +877,7 @@ def test_provision_folds_settings_overrides_onto_the_rendered_config(
 def test_provision_refuses_settings_overrides_that_drop_mngr_keys(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig(settings_overrides={"ui": {"theme": "dark"}}))
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig(settings_overrides={"ui": {"theme": "dark"}}))
 
     with pytest.raises(ConfigParseError, match="__mngr_merge"):
         _provision(agent)
@@ -885,7 +892,7 @@ def test_provision_disables_claude_and_legacy_grok_agent_definitions(
     legacy_agents_dir = tmp_path / ".grok" / "agents"
     legacy_agents_dir.mkdir(parents=True)
     (legacy_agents_dir / "planner.md").write_text("Plan things.\n")
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
 
     _provision(agent)
 
@@ -903,7 +910,7 @@ def test_provision_without_claude_isolation_disables_the_enabled_claude_plugins(
     (claude_dir / "settings.json").write_text(
         '{"enabledPlugins": {"probe@market": true, "other@market": false, "probe@elsewhere": true}}'
     )
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig(isolate_from_claude_config=False))
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig(isolate_from_claude_config=False))
 
     _provision(agent)
 
@@ -920,7 +927,7 @@ def test_provision_without_shared_auth_keeps_the_credential_in_the_agent_home(
     (tmp_path / ".grok" / "config.toml").write_text(
         '[consent.answers.terms]\nversion = 1\naccount = "a@example.com"\naccepted = true\n'
     )
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig(share_auth=False))
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig(share_auth=False))
 
     _provision(agent)
 
@@ -933,7 +940,7 @@ def test_provision_without_shared_auth_keeps_the_credential_in_the_agent_home(
 def test_provision_keeps_remote_settings_on_for_an_api_key_in_the_agent_env(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
     _write_agent_env_file(agent, "XAI_API_KEY=xai-test-key\n")
 
     _provision(agent)
@@ -952,7 +959,7 @@ def test_provision_takes_the_env_file_credential_path_and_the_consent_answers_be
     (tmp_path / ".grok" / "config.toml").write_text(
         '[consent.answers.home_terms]\nversion = 1\naccount = "home@example.com"\naccepted = true\n'
     )
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
     _write_agent_env_file(agent, f"GROK_AUTH_PATH={tmp_path / 'accounts' / 'work.json'}\n")
 
     _provision(agent)
@@ -967,7 +974,7 @@ def test_provision_inside_a_grok_tool_ignores_the_inherited_credential_path(
 ) -> None:
     monkeypatch.setenv("GROK_AGENT", "1")
     monkeypatch.setenv("GROK_AUTH_PATH", str(tmp_path / "creator-account.json"))
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
 
     _provision(agent)
 
@@ -989,7 +996,7 @@ def test_provision_records_the_work_dir_trust_once_consented(
     is_interactive: bool,
     is_auto_dismiss_dialogs_at_startup: bool,
 ) -> None:
-    agent = _make_grok_agent(
+    agent = make_grok_agent(
         local_provider,
         tmp_path,
         GrokAgentConfig(auto_dismiss_dialogs_at_startup=is_auto_dismiss_dialogs_at_startup),
@@ -1015,7 +1022,7 @@ def test_provision_records_the_work_dir_trust_once_consented(
 def test_provision_stops_without_consent_and_writes_nothing(
     local_provider: LocalProviderInstance, tmp_path: Path, agent_class: type[GrokAgent], is_interactive: bool
 ) -> None:
-    agent = _make_grok_agent(
+    agent = make_grok_agent(
         local_provider,
         tmp_path,
         GrokAgentConfig(),
@@ -1036,7 +1043,7 @@ def test_provision_stops_without_consent_and_writes_nothing(
 def test_provision_stops_when_the_agent_environment_breaks_the_host_paths_command(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
     _write_agent_env_file(agent, "echo env-file-output-52817\nexit 3\n")
 
     with pytest.raises(GrokProvisioningError, match=r"host's paths for grok \(stdout='env-file-output-52817'"):
@@ -1048,7 +1055,7 @@ def test_provision_stops_when_the_agent_environment_breaks_the_host_paths_comman
 def test_provision_stops_when_the_grok_home_cannot_be_prepared(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
     sessions_path = _grok_home(agent) / "sessions"
     sessions_path.parent.mkdir(parents=True)
     sessions_path.write_text("a file where grok's session store belongs\n")
@@ -1390,6 +1397,45 @@ def test_wait_for_ready_signal_only_starts_when_readiness_is_not_awaited(temp_mn
 
     assert started == ["start"]
     assert host.capture_count == 0
+
+
+def test_wait_for_ready_after_restart_returns_at_the_marker_get_ready_signal_paths_names_without_reading_the_pane(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    agent, host = _make_pane_agent(temp_mngr_ctx, _BUSY_PANE)
+    (ready_signal_path,) = agent.get_ready_signal_paths()
+    host.files[_agent_file_key(agent, ready_signal_path)] = ""
+
+    agent.wait_for_ready_after_restart(timeout=5.0)
+
+    assert ready_signal_path == Path(SESSION_STARTED_FILENAME)
+    assert host.capture_count == 0
+
+
+def test_wait_for_ready_after_restart_times_out_without_session_start(temp_mngr_ctx: MngrContext) -> None:
+    agent, _ = _make_pane_agent(temp_mngr_ctx, _IDLE_PANE)
+
+    with pytest.raises(AgentStartError, match="SessionStart hook did not run within 0.3s"):
+        agent.wait_for_ready_after_restart(timeout=0.3)
+
+
+@pytest.mark.parametrize(
+    ("pane_file_name", "message_fragment"),
+    [
+        (_LOGIN_PANE, "grok login.*then run `mngr create pane-grok --reuse --update`"),
+        (_TRUST_DIALOG_PANE, "answer the dialog in the agent's terminal"),
+    ],
+)
+def test_wait_for_ready_after_restart_names_the_gate_screen_with_the_advice_for_an_agent_that_exists(
+    temp_mngr_ctx: MngrContext, pane_file_name: str, message_fragment: str
+) -> None:
+    agent, host = _make_pane_agent(temp_mngr_ctx, pane_file_name)
+
+    with pytest.raises(AgentStartError, match=message_fragment) as error_info:
+        agent.wait_for_ready_after_restart(timeout=0.3)
+
+    assert "the same `mngr create` again" not in error_info.value.reason
+    assert host.capture_count == 1
 
 
 # Sending
@@ -1930,7 +1976,7 @@ def _submit_root_prompt(state_dir: Path, session_id: str, prompt_id: str, prompt
 
 def _make_agent_with_a_turn_in_flight(local_provider: LocalProviderInstance, tmp_path: Path) -> GrokAgent:
     """A local grok agent with mngr's hook handler installed, which has recorded a top-level turn in flight."""
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
     agent_dir = agent._get_agent_dir()
     hook_path = _get_hook_path(agent)
     hook_path.parent.mkdir(parents=True)
@@ -2113,7 +2159,7 @@ def _clear_restored_prompt_long_after_the_cancel(agent: GrokAgent) -> None:
 def test_clear_restored_prompt_presses_nothing_when_the_composer_is_already_empty(
     local_provider: LocalProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
     pane_dir = _put_scripted_grok_pane_on_path(monkeypatch, tmp_path, (_IDLE_PANE,))
 
     _clear_restored_prompt_long_after_the_cancel(agent)
@@ -2131,7 +2177,7 @@ def test_clear_restored_prompt_presses_nothing_when_the_composer_is_already_empt
 def test_clear_restored_prompt_presses_nothing_and_says_so_when_grok_shows_no_idle_input_box(
     local_provider: LocalProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pane_file_name: str
 ) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
     pane_dir = _put_scripted_grok_pane_on_path(monkeypatch, tmp_path, (pane_file_name,))
 
     with pytest.raises(GrokCancelUnsettledError) as raised:
@@ -2348,7 +2394,7 @@ def test_waiting_reason_reads_the_hook_markers_and_the_pane(
     is_blocked: bool,
 ) -> None:
     _put_standin_tmux_on_path(monkeypatch, tmp_path, pane)
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
     for marker_name in marker_names:
         _write_agent_marker(agent, marker_name)
 
@@ -2362,7 +2408,7 @@ def test_waiting_reason_reads_the_agent_pane_when_another_pane_of_its_window_is_
     _put_standin_tmux_on_path(
         monkeypatch, tmp_path, pane="user@host:~$ ", agent_pane=read_pane_fixture(_TOOL_RUNNING_PANE)
     )
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
     for marker_name in ("active", "permissions_waiting"):
         _write_agent_marker(agent, marker_name)
 
@@ -2406,7 +2452,7 @@ def _seed_agent_session_state(agent_dir: Path, session_id: str) -> None:
 def test_on_destroy_preserves_the_session_store_and_the_memory_store_only_with_memory_on(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_host_dir: Path, is_memory_enabled: bool
 ) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig(memory=is_memory_enabled))
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig(memory=is_memory_enabled))
     session_id = str(uuid.uuid4())
     _seed_agent_session_state(agent._get_agent_dir(), session_id)
 
@@ -2424,7 +2470,7 @@ def test_on_destroy_preserves_the_session_store_and_the_memory_store_only_with_m
 def test_on_destroy_preserves_nothing_when_preservation_is_off(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_host_dir: Path
 ) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig(preserve_on_destroy=False))
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig(preserve_on_destroy=False))
     _seed_agent_session_state(agent._get_agent_dir(), str(uuid.uuid4()))
 
     agent.on_destroy(agent.host)
@@ -2528,7 +2574,7 @@ def _work_dir_bucket(agent: GrokAgent) -> Path:
 def test_adopt_session_forks_the_clone_source_session_from_the_new_work_dir(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
     session_id = str(uuid.uuid4())
     source_state_dir = _make_source_agent_state(tmp_path, session_id, "Source role line\nmore\n")
     options = CreateAgentOptions(
@@ -2547,7 +2593,7 @@ def test_adopt_session_forks_the_clone_source_session_from_the_new_work_dir(
 def test_adopt_session_without_a_source_session_starts_fresh(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
     source_state_dir = tmp_path / "empty-source"
     source_state_dir.mkdir()
     options = CreateAgentOptions(
@@ -2564,7 +2610,7 @@ def test_adopt_session_without_a_source_session_starts_fresh(
 def test_adopt_session_copies_every_adopted_session_and_resumes_the_clone(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
     adopted_id = str(uuid.uuid4())
     make_grok_session_dir(tmp_path / ".grok" / "sessions", "%2Felsewhere", adopted_id)
     cloned_id = str(uuid.uuid4())
@@ -2585,7 +2631,7 @@ def test_adopt_session_copies_every_adopted_session_and_resumes_the_clone(
 def test_adopt_session_resumes_the_last_adopted_session_and_names_the_role_it_keeps(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    agent = _make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
     role_path = agent._get_agent_dir() / ROLE_PROMPT_RELATIVE_PATH
     role_path.parent.mkdir(parents=True)
     role_path.write_text("Reviewer role\n")
@@ -2611,3 +2657,150 @@ def test_adopt_session_resumes_the_last_adopted_session_and_names_the_role_it_ke
 )
 def test_describe_grok_role(role_text: str, expected: str) -> None:
     assert describe_grok_role(role_text) == expected
+
+
+# Upgrade
+
+_AGENT_DATA_PATH: Final[Path] = Path("data.json")
+_ALWAYS_UPGRADED_SCRIPT_NAMES: Final[tuple[str, ...]] = (
+    "grok_launch.sh",
+    "grok_background_tasks.sh",
+    "stream_transcript.sh",
+    "grok_transcript_streamer.py",
+)
+_COMMON_TRANSCRIPT_SCRIPT_NAMES: Final[tuple[str, ...]] = ("common_transcript.sh", "common_transcript_convert.py")
+_HOOK_FILE_PATHS: Final[tuple[Path, ...]] = (
+    GROK_HOME_RELATIVE_PATH / "hooks" / "mngr.json",
+    GROK_HOME_RELATIVE_PATH / "hooks" / "grok_hook.py",
+)
+_NO_LAUNCH_SCRIPT_DETAIL: Final[str] = "its launch command does not run commands/grok_launch.sh"
+
+
+def _make_upgrade_inputs(
+    agent: GrokAgent, agent_data_text: str | None, script_names_agent_has: tuple[str, ...]
+) -> dict[Path, str | None]:
+    """The content of each path the agent's upgrade reads, None for the ones the agent does not have."""
+    content_by_path: dict[Path, str] = {
+        **({} if agent_data_text is None else {_AGENT_DATA_PATH: agent_data_text}),
+        **{Path("commands") / name: "echo script-the-agent-has-51873\n" for name in script_names_agent_has},
+    }
+    return {path: content_by_path.get(path) for path in agent.get_upgrade_input_paths()}
+
+
+def _make_agent_data_text(command: str) -> str:
+    return json.dumps({"command": command})
+
+
+def test_get_upgrade_input_paths_names_the_record_and_the_common_transcript_scripts(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+
+    assert agent.get_upgrade_input_paths() == (
+        _AGENT_DATA_PATH,
+        *(Path("commands") / name for name in _COMMON_TRANSCRIPT_SCRIPT_NAMES),
+    )
+
+
+@pytest.mark.parametrize(
+    ("agent_data_text", "expected_detail"),
+    [
+        pytest.param(
+            _make_agent_data_text('bash "$MNGR_AGENT_STATE_DIR/commands/grok_launch.sh" grok'),
+            None,
+            id="launch_script",
+        ),
+        pytest.param(
+            _make_agent_data_text(
+                "bash \"$MNGR_AGENT_STATE_DIR/commands/grok_launch.sh\" env FOO=1 /opt/grok --verbose -p 'two words'"
+            ),
+            None,
+            id="launch_script_with_a_command_override",
+        ),
+        pytest.param(
+            _make_agent_data_text("grok --resume 0199aaaa"), _NO_LAUNCH_SCRIPT_DETAIL, id="grok_without_the_script"
+        ),
+        pytest.param(json.dumps({"name": "test-grok"}), _NO_LAUNCH_SCRIPT_DETAIL, id="no_command"),
+        pytest.param(json.dumps({"command": ["grok"]}), _NO_LAUNCH_SCRIPT_DETAIL, id="command_not_a_string"),
+        pytest.param("[]", _NO_LAUNCH_SCRIPT_DETAIL, id="record_not_an_object"),
+        pytest.param(None, _NO_LAUNCH_SCRIPT_DETAIL, id="no_record"),
+    ],
+)
+def test_get_upgrade_unsupported_detail_is_none_only_when_the_stored_command_runs_the_launch_script(
+    local_provider: LocalProviderInstance, tmp_path: Path, agent_data_text: str | None, expected_detail: str | None
+) -> None:
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+
+    assert agent.get_upgrade_unsupported_detail(_make_upgrade_inputs(agent, agent_data_text, ())) == expected_detail
+
+
+def test_get_upgrade_unsupported_detail_accepts_the_command_the_agent_type_assembles(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig(cli_args=("--verbose",)))
+    stored_command = str(agent.assemble_command(agent.host, ("-p", "two words"), CommandString("env X=1 grok")))
+
+    detail = agent.get_upgrade_unsupported_detail(
+        _make_upgrade_inputs(agent, _make_agent_data_text(stored_command), ())
+    )
+
+    assert detail is None
+
+
+def test_get_upgrade_unsupported_detail_refuses_a_record_that_is_not_json(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+
+    with pytest.raises(InvalidUpgradeInputError, match="data.json is not valid JSON"):
+        agent.get_upgrade_unsupported_detail(_make_upgrade_inputs(agent, "{not json", ()))
+
+
+@pytest.mark.parametrize("is_enabled_by_running_config", [True, False])
+@pytest.mark.parametrize(
+    ("script_names_agent_has", "expected_common_transcript_names"),
+    [
+        pytest.param((), (), id="none"),
+        pytest.param(("common_transcript.sh",), _COMMON_TRANSCRIPT_SCRIPT_NAMES, id="common_transcript_sh"),
+        pytest.param(
+            ("common_transcript_convert.py",), _COMMON_TRANSCRIPT_SCRIPT_NAMES, id="common_transcript_convert"
+        ),
+        pytest.param(_COMMON_TRANSCRIPT_SCRIPT_NAMES, _COMMON_TRANSCRIPT_SCRIPT_NAMES, id="both"),
+    ],
+)
+def test_build_upgraded_files_includes_the_common_transcript_scripts_only_where_the_agent_has_them(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    is_enabled_by_running_config: bool,
+    script_names_agent_has: tuple[str, ...],
+    expected_common_transcript_names: tuple[str, ...],
+) -> None:
+    agent = make_grok_agent(
+        local_provider, tmp_path, GrokAgentConfig(emit_common_transcript=is_enabled_by_running_config)
+    )
+    stored_command = _make_agent_data_text(str(agent.assemble_command(agent.host, (), None)))
+
+    upgraded_files = agent.build_upgraded_files(_make_upgrade_inputs(agent, stored_command, script_names_agent_has))
+
+    script_names = (*SHARED_SHELL_LIB_NAMES, *_ALWAYS_UPGRADED_SCRIPT_NAMES, *expected_common_transcript_names)
+    assert set(upgraded_files) == {*(Path("commands") / name for name in script_names), *_HOOK_FILE_PATHS}
+
+
+def test_build_upgraded_files_writes_what_create_writes_with_the_same_executable_bits(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    agent = make_grok_agent(local_provider, tmp_path, GrokAgentConfig())
+    agent_dir = agent._get_agent_dir()
+    write_shared_shell_libs(agent.host, agent_dir / "commands")
+    _provision(agent)
+    stored_command = _make_agent_data_text(str(agent.assemble_command(agent.host, (), None)))
+
+    upgraded_files = agent.build_upgraded_files(
+        _make_upgrade_inputs(agent, stored_command, _COMMON_TRANSCRIPT_SCRIPT_NAMES)
+    )
+
+    assert {
+        path: (upgraded_file.content, int(upgraded_file.mode, 8) & 0o111)
+        for path, upgraded_file in upgraded_files.items()
+    } == {path: ((agent_dir / path).read_text(), (agent_dir / path).stat().st_mode & 0o111) for path in upgraded_files}
+    assert upgraded_files[_HOOK_FILE_PATHS[1]].mode == "0755"

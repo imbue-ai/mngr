@@ -24,8 +24,6 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.pure import pure
 from imbue.mngr import hookimpl
-from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
-from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.installation import VersionMismatchPolicy
 from imbue.mngr.agents.installation import ensure_cli_installed
@@ -42,6 +40,10 @@ from imbue.mngr.agents.tui_utils import build_normalized_message_probe
 from imbue.mngr.agents.tui_utils import is_shell_command_message
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.agents.update_policy import is_self_update_disabled
+from imbue.mngr.agents.upgrade import AGENT_DATA_RELATIVE_PATH
+from imbue.mngr.agents.upgrade import build_command_script_files
+from imbue.mngr.agents.upgrade import build_shared_shell_lib_files
+from imbue.mngr.agents.upgrade import read_stored_launch_command
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import flag_gated_items
@@ -72,7 +74,9 @@ from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.agent import HasVersionManagementMixin
+from imbue.mngr.interfaces.agent import UpgradableAgentMixin
 from imbue.mngr.interfaces.data_types import FileType
+from imbue.mngr.interfaces.data_types import HarnessFileSpec
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import HostLocation
@@ -89,9 +93,11 @@ from imbue.mngr.utils.agent_skills import split_skill_frontmatter
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_grok import resources as grok_resources
+from imbue.mngr_grok.grok_config import GROK_HOME_RELATIVE_PATH
 from imbue.mngr_grok.grok_config import GROK_PLUGIN_STATE_RELATIVE_PATH
 from imbue.mngr_grok.grok_config import GrokRootTurn
 from imbue.mngr_grok.grok_config import LAUNCH_ENV_RELATIVE_PATH
+from imbue.mngr_grok.grok_config import LAUNCH_SCRIPT_INVOCATION
 from imbue.mngr_grok.grok_config import LAUNCH_SCRIPT_NAME
 from imbue.mngr_grok.grok_config import RENDERED_MODEL_SETTINGS_RELATIVE_PATH
 from imbue.mngr_grok.grok_config import ROLE_PROMPT_RELATIVE_PATH
@@ -152,10 +158,16 @@ _HOOKS_DIRNAME: Final[str] = "hooks"
 _HOOKS_CONFIG_FILENAME: Final[str] = "mngr.json"
 _CONFIG_FILENAME: Final[str] = "config.toml"
 _PRIVATE_FILE_MODE: Final[str] = "0600"
+_HOOKS_CONFIG_FILE_MODE: Final[str] = "0644"
 _EXECUTABLE_FILE_MODE: Final[str] = "0755"
 
 _SUBMISSIONS_LOG_RELATIVE_PATH: Final[Path] = GROK_PLUGIN_STATE_RELATIVE_PATH / SUBMISSIONS_LOG_FILENAME
 _LAST_INTERRUPT_RELATIVE_PATH: Final[Path] = GROK_PLUGIN_STATE_RELATIVE_PATH / "last_interrupt"
+_HOOKS_RELATIVE_PATH: Final[Path] = GROK_HOME_RELATIVE_PATH / _HOOKS_DIRNAME
+
+_COMMON_TRANSCRIPT_SCRIPT_RELATIVE_PATHS: Final[tuple[Path, ...]] = tuple(
+    Path("commands") / name for name in COMMON_TRANSCRIPT_SCRIPT_NAMES
+)
 
 # The work dir's directory of output-style files.
 _OUTPUT_STYLES_RELATIVE_PATH: Final[Path] = Path(".agents", "output-styles")
@@ -742,6 +754,22 @@ def _load_grok_resource_text(filename: str) -> str:
     return importlib.resources.files(grok_resources).joinpath(filename).read_text()
 
 
+def _render_hooks_config_text() -> str:
+    return json.dumps(build_hooks_json(), indent=2) + "\n"
+
+
+def _build_hook_files() -> dict[Path, HarnessFileSpec]:
+    """mngr's hooks file in the agent's grok home and the handler it runs, keyed by path relative to the state dir."""
+    return {
+        _HOOKS_RELATIVE_PATH / _HOOKS_CONFIG_FILENAME: HarnessFileSpec(
+            content=_render_hooks_config_text(), mode=_HOOKS_CONFIG_FILE_MODE
+        ),
+        _HOOKS_RELATIVE_PATH / _HOOK_HANDLER_SCRIPT_NAME: HarnessFileSpec(
+            content=_load_grok_resource_text(_HOOK_HANDLER_SCRIPT_NAME), mode=_EXECUTABLE_FILE_MODE
+        ),
+    }
+
+
 def _read_optional_text_file(host: OnlineHostInterface, path: Path) -> str:
     try:
         return host.read_text_file(path)
@@ -759,6 +787,7 @@ class GrokAgent(
     HasPermissionPolicyMixin,
     HasVersionManagementMixin,
     HasAutoInstallMixin,
+    UpgradableAgentMixin,
 ):
     """Agent implementation for xAI's Grok Build CLI (``grok``)."""
 
@@ -819,6 +848,31 @@ class GrokAgent(
             )
         if not is_idle:
             self._raise_not_ready(target_arg, f"grok's composer was not idle and empty within {ready_timeout}s")
+
+    def get_ready_signal_paths(self) -> tuple[Path, ...]:
+        return (Path(SESSION_STARTED_FILENAME),)
+
+    def wait_for_ready_after_restart(self, timeout: float) -> None:
+        """Wait for grok's SessionStart hook; past the timeout, raise naming the gate screen grok shows instead, if any."""
+        session_started_path = self._get_agent_dir() / SESSION_STARTED_FILENAME
+        with log_span("Waiting for grok's SessionStart hook after a restart (timeout={}s)", timeout):
+            is_session_started = poll_until(
+                lambda: self._check_file_exists(session_started_path),
+                timeout=timeout,
+                poll_interval=_READY_POLL_INTERVAL_SECONDS,
+            )
+        if is_session_started:
+            return
+        target_arg = self._send_target_arg(self.tmux_target)
+        gate_screen = detect_gate_screen(self._capture_pane_content(target_arg) or "")
+        if gate_screen is not None:
+            raise AgentStartError(
+                str(self.name),
+                _describe_grok_gate_screen(
+                    gate_screen, str(self.name), is_auth_shared=self.agent_config.share_auth, is_at_startup=False
+                ),
+            )
+        self._raise_not_ready(target_arg, f"grok's SessionStart hook did not run within {timeout}s")
 
     def _capture_pane_past_gate_screens(self, target_arg: str) -> str:
         pane_content = self._capture_pane_content(target_arg) or ""
@@ -1167,17 +1221,45 @@ class GrokAgent(
         )
         self._provision_grok_state(host, host_paths, mngr_ctx)
         with mngr_ctx.concurrency_group.make_concurrency_group("grok_provisioning") as concurrency_group:
-            provision_raw_transcript_scripts(self, host, self._get_agent_dir(), concurrency_group)
-            maybe_provision_common_transcript_scripts(self, host, self._get_agent_dir(), concurrency_group)
             provision_scripts_to_commands_dir(
                 host,
                 self._get_agent_dir(),
-                {
-                    LAUNCH_SCRIPT_NAME: _load_grok_resource_text(LAUNCH_SCRIPT_NAME),
-                    _BACKGROUND_TASKS_SCRIPT_NAME: _load_grok_resource_text(_BACKGROUND_TASKS_SCRIPT_NAME),
-                },
+                self._build_command_scripts(is_common_transcript_written=self.is_common_transcript_enabled),
                 concurrency_group,
             )
+
+    def _build_command_scripts(self, *, is_common_transcript_written: bool) -> dict[str, str]:
+        """The scripts mngr generates for this agent in its ``commands/`` dir, by name."""
+        scripts = {
+            LAUNCH_SCRIPT_NAME: _load_grok_resource_text(LAUNCH_SCRIPT_NAME),
+            _BACKGROUND_TASKS_SCRIPT_NAME: _load_grok_resource_text(_BACKGROUND_TASKS_SCRIPT_NAME),
+            **self.get_raw_transcript_scripts(),
+        }
+        if is_common_transcript_written:
+            scripts.update(self.get_common_transcript_scripts())
+        return scripts
+
+    def get_upgrade_input_paths(self) -> tuple[Path, ...]:
+        return (AGENT_DATA_RELATIVE_PATH, *_COMMON_TRANSCRIPT_SCRIPT_RELATIVE_PATHS)
+
+    def get_upgrade_unsupported_detail(self, input_content_by_path: Mapping[Path, str | None]) -> str | None:
+        """None when the stored launch command runs mngr's launch script."""
+        if LAUNCH_SCRIPT_INVOCATION in read_stored_launch_command(input_content_by_path[AGENT_DATA_RELATIVE_PATH]):
+            return None
+        return f"its launch command does not run commands/{LAUNCH_SCRIPT_NAME}"
+
+    def build_upgraded_files(self, input_content_by_path: Mapping[Path, str | None]) -> dict[Path, HarnessFileSpec]:
+        """mngr's shared libs, scripts and hook files, with the common-transcript scripts only where the agent has them."""
+        command_scripts = self._build_command_scripts(
+            is_common_transcript_written=any(
+                input_content_by_path[path] is not None for path in _COMMON_TRANSCRIPT_SCRIPT_RELATIVE_PATHS
+            )
+        )
+        return {
+            **build_shared_shell_lib_files(),
+            **build_command_script_files(command_scripts),
+            **_build_hook_files(),
+        }
 
     def _verify_installed_grok_is_grok_build(self, host: OnlineHostInterface) -> None:
         """Raise when `grok --version` prints something other than Grok Build's version line."""
@@ -1303,9 +1385,7 @@ class GrokAgent(
                 agent_dir / RENDERED_MODEL_SETTINGS_RELATIVE_PATH,
                 render_rendered_model_settings(rendered_config.own_model_settings),
             )
-            host.write_text_file(
-                grok_home / _HOOKS_DIRNAME / _HOOKS_CONFIG_FILENAME, json.dumps(build_hooks_json(), indent=2) + "\n"
-            )
+            host.write_text_file(grok_home / _HOOKS_DIRNAME / _HOOKS_CONFIG_FILENAME, _render_hooks_config_text())
             host.write_file(
                 grok_home / _HOOKS_DIRNAME / _HOOK_HANDLER_SCRIPT_NAME,
                 _load_grok_resource_text(_HOOK_HANDLER_SCRIPT_NAME).encode(),

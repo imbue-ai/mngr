@@ -1,4 +1,6 @@
 import shutil
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
 
@@ -7,10 +9,13 @@ import pytest
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.api.create import create
 from imbue.mngr.api.providers import get_local_host
+from imbue.mngr.api.testing import upgrade_agent
+from imbue.mngr.api.upgrade import AgentUpgraded
+from imbue.mngr.api.upgrade import UpgradePlan
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostLocation
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import TransferMode
@@ -18,6 +23,7 @@ from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import tmux_session_cleanup
+from imbue.mngr_grok.grok_config import GROK_HOME_RELATIVE_PATH
 from imbue.mngr_grok.grok_config import GROK_PLUGIN_STATE_RELATIVE_PATH
 from imbue.mngr_grok.grok_config import ROOT_TURNS_RELATIVE_PATH
 from imbue.mngr_grok.plugin import GrokAgent
@@ -163,12 +169,14 @@ finally:
 """
 
 _MESSAGE: Final[str] = "hello from the grok stand-in 7731"
+_HOOK_HANDLER_RELATIVE_PATH: Final[Path] = GROK_HOME_RELATIVE_PATH / "hooks" / "grok_hook.py"
 
 
-@pytest.mark.tmux
-def test_grok_agent_confirms_a_message_and_reports_its_turn(
+@contextmanager
+def _created_standin_grok_agent(
     temp_mngr_ctx: MngrContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+) -> Generator[GrokAgent, None, None]:
+    """A grok agent created as `mngr create` creates one, running the stand-in grok; its tmux session goes on exit."""
     put_executable_first_on_path(tmp_path / "standin-bin", monkeypatch, "grok", _STANDIN_GROK_SCRIPT)
     bash_path = shutil.which("bash")
     assert bash_path is not None
@@ -189,9 +197,16 @@ def test_grok_agent_confirms_a_message_and_reports_its_turn(
             ),
             mngr_ctx=mngr_ctx,
         )
-        agent = result.agent
-        assert isinstance(agent, GrokAgent)
-        state_dir = get_agent_state_dir_path(local_host.host_dir, agent.id)
+        assert isinstance(result.agent, GrokAgent)
+        yield result.agent
+
+
+@pytest.mark.tmux
+def test_grok_agent_confirms_a_message_and_reports_its_turn(
+    temp_mngr_ctx: MngrContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _created_standin_grok_agent(temp_mngr_ctx, tmp_path, monkeypatch) as agent:
+        state_dir = agent._get_agent_dir()
         assert (state_dir / SESSION_STARTED_FILENAME).is_file()
         assert not (state_dir / ACTIVE_MARKER_FILENAME).exists()
 
@@ -214,3 +229,35 @@ def test_grok_agent_confirms_a_message_and_reports_its_turn(
         )
         assert '"turn_completed"' in (state_dir / "logs" / "grok_transcript" / "events.jsonl").read_text()
         assert list((state_dir / ROOT_TURNS_RELATIVE_PATH).iterdir()) == []
+
+
+@pytest.mark.tmux
+@pytest.mark.rsync
+def test_upgrade_restarts_a_grok_agent_onto_the_new_hook_handler_and_waits_for_its_session(
+    temp_mngr_ctx: MngrContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _created_standin_grok_agent(temp_mngr_ctx, tmp_path, monkeypatch) as agent:
+        state_dir = agent._get_agent_dir()
+        hook_handler_path = state_dir / _HOOK_HANDLER_RELATIVE_PATH
+        created_hook_handler = hook_handler_path.read_text()
+        hook_handler_path.write_text(created_hook_handler + "\n# an older handler 7731\n")
+        session_started_before = (state_dir / SESSION_STARTED_FILENAME).stat().st_mtime_ns
+
+        # The stand-in runs as python3, not grok, so mngr reads the agent as DONE and only a forced upgrade restarts it.
+        outcome = upgrade_agent(
+            agent, agent.host, is_forced=True, is_dry_run=False, is_caller=False, mngr_ctx=agent.mngr_ctx
+        )
+
+        assert isinstance(outcome, AgentUpgraded)
+        assert (outcome.plan, outcome.prior_state, outcome.changed_paths) == (
+            UpgradePlan.RESTART_INTERRUPTING,
+            AgentLifecycleState.DONE,
+            (_HOOK_HANDLER_RELATIVE_PATH,),
+        )
+        assert hook_handler_path.read_text() == created_hook_handler
+        assert (state_dir / SESSION_STARTED_FILENAME).stat().st_mtime_ns != session_started_before
+
+        with capture_loguru(level="DEBUG") as log_output:
+            agent.send_message(_MESSAGE)
+
+        assert "Message submitted successfully (confirmed by submissions-log)" in log_output.getvalue()

@@ -34,7 +34,7 @@ RENDERED_MODEL_SETTINGS_RELATIVE_PATH: Final[Path] = GROK_PLUGIN_STATE_RELATIVE_
 ROOT_TURNS_RELATIVE_PATH: Final[Path] = GROK_PLUGIN_STATE_RELATIVE_PATH / "turns"
 
 LAUNCH_SCRIPT_NAME: Final[str] = "grok_launch.sh"
-_LAUNCH_SCRIPT_INVOCATION: Final[str] = f'bash "$MNGR_AGENT_STATE_DIR/commands/{LAUNCH_SCRIPT_NAME}"'
+LAUNCH_SCRIPT_INVOCATION: Final[str] = f'bash "$MNGR_AGENT_STATE_DIR/commands/{LAUNCH_SCRIPT_NAME}"'
 
 # Grok resolves this against the hooks file's directory and execs it directly; a space would route it through sh.
 _HOOK_HANDLER_COMMAND: Final[str] = "./grok_hook.py"
@@ -464,7 +464,7 @@ def build_launch_command(
     and are quoted.
     """
     base_command = command_override if command_override is not None else command
-    words = (_LAUNCH_SCRIPT_INVOCATION, str(base_command), *cli_args, *quote_agent_args(tuple(agent_args)))
+    words = (LAUNCH_SCRIPT_INVOCATION, str(base_command), *cli_args, *quote_agent_args(tuple(agent_args)))
     return CommandString(" ".join(words))
 
 
