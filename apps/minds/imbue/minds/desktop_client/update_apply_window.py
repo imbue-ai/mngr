@@ -45,6 +45,7 @@ from imbue.minds.desktop_client.workspace_program_command import extract_marker_
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
 from imbue.minds.errors import MindError
 from imbue.minds.utils.mngr_caller import MngrCaller
+from imbue.minds.workspace_programs.program_support import BACKGROUND_TASKS_CLI_PATH
 from imbue.minds.workspace_programs.update_dispatcher import DISPATCHER_ARCHIVE_PATH
 from imbue.minds.workspace_programs.update_protocol import BUSY_CHAT_IDS_FIELD
 from imbue.minds.workspace_programs.update_protocol import BUSY_MODE
@@ -92,10 +93,6 @@ BUSY_BEGIN_SENTINEL: Final[str] = "MNGR_UPDATE_BUSY_BEGIN"
 BUSY_END_SENTINEL: Final[str] = "MNGR_UPDATE_BUSY_END"
 # Printed when the workspace's cron runs the update dispatcher, whose watchdog restarts a stopped lead.
 WATCHDOG_INSTALLED_SENTINEL: Final[str] = "MNGR_UPDATE_WATCHDOG_INSTALLED"
-
-# The template's background-task CLI, relative to the work_dir; a template that predates it is read through the
-# installed dispatcher's ``busy`` mode instead.
-BACKGROUND_TASKS_SCRIPT_PATH: Final[str] = "system/scripts/background_tasks.py"
 
 # The CLI's share of the probe's budget: against a restarting chat app it can spend 3s connecting and
 # 10s reading before it falls back to the marker files. One cut off prints nothing, so no chat reads busy.
@@ -185,7 +182,7 @@ def build_update_run_probe_args(workspace_address: str) -> list[str]:
             "timeout",
             str(_BACKGROUND_TASKS_TIMEOUT_SECONDS),
             "python3",
-            BACKGROUND_TASKS_SCRIPT_PATH,
+            BACKGROUND_TASKS_CLI_PATH,
             "list",
             "--format",
             "tsv",
@@ -202,7 +199,7 @@ def build_update_run_probe_args(workspace_address: str) -> list[str]:
         f"{inner_list} 2>/dev/null || echo {AGENTS_FAILED_SENTINEL}; "
         f"echo {AGENTS_END_SENTINEL}; "
         f"echo {BUSY_BEGIN_SENTINEL}; "
-        f"if test -f {shlex.quote(BACKGROUND_TASKS_SCRIPT_PATH)}; then {inner_busy}; "
+        f"if test -f {shlex.quote(BACKGROUND_TASKS_CLI_PATH)}; then {inner_busy}; "
         f"else {inner_busy_from_markers}; fi 2>/dev/null || true; "
         f"echo {BUSY_END_SENTINEL}; "
         f"test -f {shlex.quote(LIVE_CRON_DIRECTORY + '/' + DISPATCHER_CRON_NAME)} && echo {WATCHDOG_INSTALLED_SENTINEL}; true"

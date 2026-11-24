@@ -1,13 +1,10 @@
 """Report what would hold a mutating backup program back: busy chats and an in-flight backup tick.
 
-The ``running_chats`` are the agents actively RUNNING, RUNNING_BACKGROUND (their turn
-ended with work they declared still outstanding), or WAITING with their chat busy per
-the template's background-task CLI when it has one (agents sharing the repo-root
-work_dir, excluding the ``main``-type services agent -- worktree/worker agents live
-elsewhere and never count). The ``unreadable_chats`` are those whose state mngr could
-not read in time; the mutating program reads them again before deciding. Reads
-``--agent-id`` (the services agent, whose state dir holds the backup events log);
-answers on one ``GATE_RESULT_MARKER`` line.
+The ``running_chats`` and ``unreadable_chats`` are the chats
+``backup_support.list_running_chats`` reads as running and as unreadable; the mutating
+program reads the unreadable ones again before deciding. Reads ``--agent-id`` (the
+services agent, whose state dir holds the backup events log); answers on one
+``GATE_RESULT_MARKER`` line.
 """
 
 import sys

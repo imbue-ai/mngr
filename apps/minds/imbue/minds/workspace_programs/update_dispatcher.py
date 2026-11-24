@@ -46,6 +46,7 @@ from typing import TypedDict
 from typing import assert_never
 
 from imbue.minds.workspace_programs.background_task_markers import busy_chat_ids
+from imbue.minds.workspace_programs.program_support import BACKGROUND_TASKS_CLI_PATH
 from imbue.minds.workspace_programs.program_support import as_json_object
 from imbue.minds.workspace_programs.program_support import emit_marker_json
 from imbue.minds.workspace_programs.program_support import run_command
@@ -95,7 +96,6 @@ _LOCAL_SETTINGS_PATH: Final[str] = ".mngr/settings.local.toml"
 _ACCOUNT_GATE_SCRIPT: Final[str] = "system/scripts/require_create_account.py"
 _ACCOUNT_RESOLVER_SCRIPT: Final[str] = "system/scripts/default_account_args.py"
 _TICKETS_DIR_DEFAULT: Final[str] = "data/.tickets"
-_BACKGROUND_TASKS_SCRIPT: Final[str] = "system/scripts/background_tasks.py"
 _MNGR_LIST_FIELD_SEPARATOR: Final[str] = "|"
 _MNGR_LIST_FIELDS: Final[tuple[str, ...]] = (
     "id",
@@ -458,13 +458,13 @@ def busy_agents(agent_environment: AgentEnvironment) -> BusyAgents:
     names: set[str] = set()
     agent_ids: set[str] = set()
     chat_ids: set[str] = set()
-    if not os.path.isfile(_BACKGROUND_TASKS_SCRIPT):
+    if not os.path.isfile(BACKGROUND_TASKS_CLI_PATH):
         # CLEANUP: return empty sets here again once ``OLDEST_IN_PLACE_UPDATABLE_VERSION`` reaches minds-v0.8.7,
         # the first release that ships the CLI.
         marker_chat_ids = busy_chat_ids()
         return names, set(marker_chat_ids), set(marker_chat_ids)
     listed = run_command(
-        [sys.executable or "python3", _BACKGROUND_TASKS_SCRIPT, "list", "--format", "tsv"],
+        [sys.executable or "python3", BACKGROUND_TASKS_CLI_PATH, "list", "--format", "tsv"],
         _SHORT_COMMAND_TIMEOUT_SECONDS,
         env=agent_environment.variables(),
     )

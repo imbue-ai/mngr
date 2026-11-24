@@ -315,9 +315,7 @@ def check_backup_service_for_workspace(
         # The user just turned it off here; nothing to verify while the write-through is queued.
         return BackupServiceCheck(state=BackupServiceCheckState.DISABLED)
 
-    command_str = build_workspace_program_command(
-        backup_check, ("--minimum-tag", minimum_backup_tag(), "--agent-id", str(agent_id))
-    )
+    command_str = build_workspace_program_command(backup_check, ("--minimum-tag", minimum_backup_tag()))
     result = run_mngr_exec_on_agent(
         build_agent_address(agent_id, resolver),
         command_str,

@@ -12,6 +12,7 @@ from imbue.minds.workspace_programs.backup_protocol import BackupProgramFailureR
 from imbue.minds.workspace_programs.backup_protocol import BackupProgramStatus
 from imbue.minds.workspace_programs.backup_protocol import BackupServiceState
 from imbue.minds.workspace_programs.backup_protocol import OFFICIAL_REMOTE_NAME
+from imbue.minds.workspace_programs.program_support import BACKGROUND_TASKS_CLI_PATH
 from imbue.minds.workspace_programs.program_support import as_json_object
 from imbue.minds.workspace_programs.program_support import as_json_object_list
 from imbue.minds.workspace_programs.program_support import poll_until
@@ -26,8 +27,6 @@ _BACKUP_CODE_PATH_CANDIDATES: Final[tuple[str, ...]] = (
     "libs/host_backup",
 )
 RESTIC_ENV_PATH: Final[str] = "data/.secrets/restic.env"
-# The template's background-task CLI; a workspace whose template predates it has no busy chats to report.
-BACKGROUND_TASKS_CLI_PATH: Final[str] = "system/scripts/background_tasks.py"
 GIT_IDENTITY: Final[tuple[str, ...]] = (
     "-c",
     "user.name=minds-backup-update",

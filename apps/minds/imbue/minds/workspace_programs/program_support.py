@@ -5,9 +5,13 @@ import time
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
+from typing import Final
 from typing import TypeVar
 
 _SampleT = TypeVar("_SampleT")
+
+# Relative to the workspace root, where ``mngr exec`` lands and cron's tick runs.
+BACKGROUND_TASKS_CLI_PATH: Final[str] = "system/scripts/background_tasks.py"
 
 
 def run_command(

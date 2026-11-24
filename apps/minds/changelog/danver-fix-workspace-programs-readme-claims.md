@@ -1,0 +1,5 @@
+- The workspace programs README (`imbue/minds/workspace_programs/README.md`) matches the code. It says the update program takes its mode and a context rather than `main(argv)`, and that its `tick` mode answers nothing; that a backup program's failure reason is validated strictly while the update program's values are plain strings the app reads leniently; what `update_protocol.py` holds and which of it the app reads; that ruff and ty check against Python 3.11; which two ratchets skip the package; and every test file that exercises the programs. The gate probe's docstring points to `backup_support.list_running_chats` for which chats count as running, instead of repeating a list of states that had missed `RUNNING_UNKNOWN_AGENT_TYPE`.
+
+- The path of the template's background-task CLI (`system/scripts/background_tasks.py`) has one definition, `program_support.BACKGROUND_TASKS_CLI_PATH`, which the backup gate, the update dispatcher and the app's update-run probe all read; each had kept its own copy.
+
+- The backup check no longer receives an `--agent-id` flag; the check program never read it.

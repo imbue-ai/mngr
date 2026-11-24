@@ -941,7 +941,7 @@ def test_backup_service_check_update_and_force_update_converge(running_workspace
     # the canonical URL), tags fetched from GitHub when missing, real
     # supervisord state reported.
     check = run_workspace_program_in_container(
-        running_workspace, backup_check, ("--minimum-tag", minimum_tag, "--agent-id", agent_id), timeout=600
+        running_workspace, backup_check, ("--minimum-tag", minimum_tag), timeout=600
     )
     check_payload = extract_marker_json(check.stdout, CHECK_RESULT_MARKER)
     assert check_payload is not None, (check.stdout, check.stderr)
@@ -971,7 +971,7 @@ def test_backup_service_check_update_and_force_update_converge(running_workspace
     # 3. Re-check: the code now matches the minimum tag exactly and the
     # service came back RUNNING.
     recheck = run_workspace_program_in_container(
-        running_workspace, backup_check, ("--minimum-tag", minimum_tag, "--agent-id", agent_id), timeout=600
+        running_workspace, backup_check, ("--minimum-tag", minimum_tag), timeout=600
     )
     recheck_payload = extract_marker_json(recheck.stdout, CHECK_RESULT_MARKER)
     assert recheck_payload is not None, (recheck.stdout, recheck.stderr)
