@@ -2,16 +2,27 @@ import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearAppContextForTests, registerAppContext } from "../../app-context";
 import type { AppContext } from "../../app-context";
-import { firstRun } from "../../models/firstRun";
-import { REPORTING_DETAIL_BODY } from "../../models/manifesto";
+import { REPORTING_DETAIL_BODY } from "../../models/onboarding";
 import { webLogin } from "../../models/webLogin";
 import type { AnyVnode } from "../../testing";
-import { allText, attrsOf, byId, collectText, createFormDefaults, jsonResponse, renderDeep } from "../../testing";
+import {
+  allText,
+  attrsOf,
+  byId,
+  classTokensOf,
+  collectText,
+  createFormDefaults,
+  jsonResponse,
+  renderDeep,
+  settle,
+} from "../../testing";
 import {
   SIGN_IN_LINE_LEAD,
   SIGN_IN_LINE_REST,
   SIGN_IN_LINE_SECOND,
   SIGN_IN_MESSAGE,
+  SIGNIN_LANDING_POLL_MS,
+  SIGNIN_LANDING_WAIT_MS,
   StartPage,
   WITHOUT_ACCOUNT_LABEL,
   WITHOUT_ACCOUNT_TIP,
@@ -33,8 +44,6 @@ describe("cloudCreateBody", () => {
       branch: "minds-v9.9.9",
       color: "#0b292b",
       host_name: "",
-      // The first workspace's creation page shows the onboarding examples.
-      is_onboarding_driven_by_agent: true,
     });
   });
 
@@ -102,19 +111,30 @@ describe("StartPage", () => {
     webLogin.state = "idle";
     webLogin.userId = "";
     webLogin.email = "";
-    firstRun.noteCreate("", null);
+    webLogin.activeWorkspaceCount = null;
+    vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     clearAppContextForTests();
   });
 
-  /** The page mounted with no account signed in; `workspaceCount` is what the sign-in landing reports. */
-  function mountPage(workspaceCount: number, isVerified = true) {
+  /**
+   * The page mounted with no account signed in. `handOffCount` is how many workspaces the sign-in's hand-off
+   * says the account has (null for a hand-off that does not say); `syncedCount` is what the sign-in landing
+   * route reports to a page that has to ask, and `landingState` how far the record sync it reports on has got.
+   */
+  function mountPage(
+    handOffCount: number | null,
+    syncedCount = 0,
+    landingState: "done" | "failed" | "pending" = "done",
+  ) {
     const accounts = { accounts: [] as (typeof SIGNED_IN)[], hasAccounts: false, signedInAccount: () => null };
     const routes: string[] = [];
     const adopted: string[] = [];
     const posted: Record<string, unknown>[] = [];
     const consentAnswers: { report_unexpected_errors: boolean }[] = [];
+    const landingAsks: string[] = [];
+    const completions: string[] = [];
     registerAppContext({
       stores: { accounts },
       shell: { accountId: "", adoptAccount: (id: string) => adopted.push(id), routeToHub: () => routes.push("hub") },
@@ -134,14 +154,17 @@ describe("StartPage", () => {
     });
     vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
       if (url.startsWith("/ui/api/onboarding/signin-landing")) {
-        return Promise.resolve(jsonResponse({ state: "done", workspace_count: workspaceCount }));
+        landingAsks.push(url);
+        return Promise.resolve(jsonResponse({ state: landingState, workspace_count: syncedCount }));
       }
-      if (url.startsWith("/ui/api/onboarding/complete")) return Promise.resolve(jsonResponse({}));
+      if (url.startsWith("/ui/api/onboarding/complete")) {
+        completions.push(init?.method ?? "GET");
+        return Promise.resolve(jsonResponse({}));
+      }
       if (url.startsWith("/ui/api/onboarding/consent")) {
         consentAnswers.push(JSON.parse(init?.body as string) as { report_unexpected_errors: boolean });
         return Promise.resolve(jsonResponse({}));
       }
-      if (url.startsWith("/accounts/verification")) return Promise.resolve(jsonResponse({ verified: isVerified }));
       if (url.startsWith("/ui/api/create/form-defaults")) return Promise.resolve(jsonResponse(createFormDefaults()));
       if (url === "/api/v1/workspaces") {
         posted.push(JSON.parse(init?.body as string) as Record<string, unknown>);
@@ -157,10 +180,28 @@ describe("StartPage", () => {
       webLogin.state = "done";
       webLogin.userId = SIGNED_IN.user_id;
       webLogin.email = SIGNED_IN.email;
+      webLogin.activeWorkspaceCount = handOffCount;
       accounts.accounts = [SIGNED_IN];
       (page.onupdate as () => void).call(page);
     };
-    return { page, render, routes, adopted, posted, starts, landSignIn, consentAnswers };
+    /** The channel lists the account though no poll of the browser sign-in reported it: its modal was closed. */
+    const listSignedInAccount = (): void => {
+      accounts.accounts = [SIGNED_IN];
+      (page.onupdate as () => void).call(page);
+    };
+    return {
+      page,
+      render,
+      routes,
+      adopted,
+      posted,
+      starts,
+      landSignIn,
+      listSignedInAccount,
+      consentAnswers,
+      landingAsks,
+      completions,
+    };
   }
 
   function press(view: AnyVnode, id: string): void {
@@ -168,8 +209,9 @@ describe("StartPage", () => {
   }
 
   it("signs in through the browser and starts a new account's first cloud workspace at once", async () => {
-    const { page, render, routes, adopted, posted, starts, landSignIn } = mountPage(0);
+    const { page, render, routes, adopted, posted, starts, landSignIn, landingAsks, completions } = mountPage(0);
     const signInPage = render();
+    expect(classTokensOf(signInPage)).toContain("light");
     expect(collectText(byId(signInPage, "start-line")).join("")).toBe(`${SIGN_IN_LINE_LEAD}${SIGN_IN_LINE_REST}${SIGN_IN_LINE_SECOND}`);
     expect(allText(byId(signInPage, "start-without-account"))).toBe(WITHOUT_ACCOUNT_LABEL);
     press(signInPage, "start-sign-in");
@@ -179,9 +221,12 @@ describe("StartPage", () => {
     expect(allText(byId(render(), "start-welcome"))).toBe("Welcome, Gleb!");
     await vi.waitFor(() => expect(routes).toEqual(["/creating/attempt-1"]));
     expect(adopted).toEqual(["user-1"]);
-    expect(posted[0]).toMatchObject({ account_id: "user-1", launch_mode: "IMBUE_CLOUD", is_onboarding_driven_by_agent: true });
-    expect(firstRun.isFirstRunCreate("attempt-1")).toBe(true);
-    expect(firstRun.account?.displayName).toBe("Gleb Denisov");
+    expect(posted[0]).toMatchObject({ account_id: "user-1", launch_mode: "IMBUE_CLOUD" });
+    expect(posted[0]).not.toHaveProperty("is_onboarding_driven_by_agent");
+    // The hand-off said the account has no workspaces, so nothing was asked of the record sync.
+    expect(landingAsks).toEqual([]);
+    // The create's own front door records that the install is past onboarding.
+    expect(completions).toEqual([]);
     (page.onremove as () => void).call(page);
   });
 
@@ -214,21 +259,85 @@ describe("StartPage", () => {
   });
 
   it("takes an account that already has workspaces to its home page, creating nothing", async () => {
-    const { page, render, routes, posted, landSignIn } = mountPage(2);
+    const { page, render, routes, posted, landSignIn, landingAsks, completions } = mountPage(2);
     press(render(), "start-sign-in");
     landSignIn();
-    await vi.waitFor(() => expect(routes).toEqual(["/account/user-1/"]));
+    expect(routes).toEqual(["/account/user-1/"]);
+    // Marked past onboarding, or the home page of an account whose records have not synced would send it back here.
+    expect(completions).toEqual(["POST"]);
+    expect(posted).toEqual([]);
+    expect(landingAsks).toEqual([]);
+    (page.onremove as () => void).call(page);
+  });
+
+  it("does nothing more for an account it sent home when it is drawn again before the route changes", async () => {
+    const { page, render, routes, posted, landSignIn, landingAsks } = mountPage(2);
+    press(render(), "start-sign-in");
+    landSignIn();
+
+    (page.onupdate as () => void).call(page);
+    await settle();
+
+    expect(routes).toEqual(["/account/user-1/"]);
+    expect(landingAsks).toEqual([]);
     expect(posted).toEqual([]);
     (page.onremove as () => void).call(page);
   });
 
-  it("waits on the emailed link before an unverified account's create", async () => {
-    const { page, render, routes, posted, landSignIn } = mountPage(0, false);
+  it("asks the record sync about an account whose hand-off carried no count, and follows its answer", async () => {
+    const withNone = mountPage(null, 0);
+    press(withNone.render(), "start-sign-in");
+    withNone.landSignIn();
+    expect(attrsOf(withNone.render())["data-stage"]).toBe("landing");
+    await vi.waitFor(() => expect(withNone.routes).toEqual(["/creating/attempt-1"]));
+    expect(withNone.landingAsks).toHaveLength(1);
+    (withNone.page.onremove as () => void).call(withNone.page);
+
+    const withSome = mountPage(null, 1);
+    press(withSome.render(), "start-sign-in");
+    withSome.landSignIn();
+    await vi.waitFor(() => expect(withSome.routes).toEqual(["/account/user-1/"]));
+    expect(withSome.posted).toEqual([]);
+    (withSome.page.onremove as () => void).call(withSome.page);
+  });
+
+  it("creates the first workspace when the record sync it has to ask has failed", async () => {
+    const { page, render, routes, posted, landSignIn, landingAsks } = mountPage(null, 0, "failed");
     press(render(), "start-sign-in");
     landSignIn();
-    await vi.waitFor(() => expect(byId(render(), "start-verify")).toBeDefined());
+    await vi.waitFor(() => expect(routes).toEqual(["/creating/attempt-1"]));
+    expect(landingAsks).toHaveLength(1);
+    expect(posted).toHaveLength(1);
+    (page.onremove as () => void).call(page);
+  });
+
+  it("creates the first workspace when the record sync it has to ask does not finish within the wait", async () => {
+    vi.useFakeTimers();
+    const { page, render, routes, posted, landSignIn, landingAsks } = mountPage(null, 0, "pending");
+    press(render(), "start-sign-in");
+    landSignIn();
+
+    await vi.advanceTimersByTimeAsync(SIGNIN_LANDING_WAIT_MS - SIGNIN_LANDING_POLL_MS);
+    expect(attrsOf(render())["data-stage"]).toBe("landing");
     expect(posted).toEqual([]);
-    expect(routes).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(2 * SIGNIN_LANDING_POLL_MS);
+    expect(routes).toEqual(["/creating/attempt-1"]);
+    expect(landingAsks.length).toBeGreaterThan(1);
+    (page.onremove as () => void).call(page);
+  });
+
+  it("asks the record sync about an account that shows up after the sign-in was closed, whatever count is held", async () => {
+    const { page, render, routes, posted, listSignedInAccount, landingAsks } = mountPage(null, 2);
+    press(render(), "start-sign-in");
+    // No poll of this sign-in reported a count, so one the model holds says nothing about this account.
+    webLogin.activeWorkspaceCount = 0;
+
+    listSignedInAccount();
+
+    await vi.waitFor(() => expect(routes).toEqual(["/account/user-1/"]));
+    expect(landingAsks).toHaveLength(1);
+    expect(posted).toEqual([]);
     (page.onremove as () => void).call(page);
   });
 
@@ -246,6 +355,6 @@ describe("StartPage", () => {
 describe("cloudCreateBody on an operator's local launch", () => {
   it("runs the first workspace on this computer when the defaults say the first run is local", () => {
     const body = cloudCreateBody(createFormDefaults({ is_first_run_local: true, local_launch_mode: "LIMA" }), "user-1");
-    expect(body).toMatchObject({ launch_mode: "LIMA", is_onboarding_driven_by_agent: true });
+    expect(body).toMatchObject({ launch_mode: "LIMA" });
   });
 });

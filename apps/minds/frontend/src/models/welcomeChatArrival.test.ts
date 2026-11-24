@@ -131,25 +131,6 @@ describe("WelcomeChatArrival", () => {
     expect(landings).toEqual(["ON_SCREEN"]);
   });
 
-  it("asks for the chat root only from a template that reports the chooser, while the seed has not answered", async () => {
-    const { arrival, answerSeed } = makeArrival();
-    expect(arrival.noteWorkspaceReady(REPORTS_NOTHING)).toBe(false);
-    expect(arrival.noteWorkspaceReady(REPORTS_CHAT)).toBe(false);
-    expect(arrival.noteWorkspaceReady(REPORTS_BOTH)).toBe(true);
-
-    answerSeed(CHAT_ID);
-    await settle();
-    expect(arrival.noteWorkspaceReady(REPORTS_BOTH)).toBe(false);
-  });
-
-  it("never asks for the chat root outside a wait", async () => {
-    const { arrival, answerSeed } = makeArrival();
-    answerSeed(null);
-    await settle();
-    expect(arrival.noteWorkspaceReady(REPORTS_BOTH)).toBe(false);
-    expect(new WelcomeChatArrival().noteWorkspaceReady(REPORTS_BOTH)).toBe(false);
-  });
-
   it("lands at once on a seed that definitively failed", async () => {
     const { answerSeed, landings } = makeArrival();
     answerSeed(null);

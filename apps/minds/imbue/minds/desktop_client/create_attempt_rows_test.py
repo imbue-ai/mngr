@@ -7,8 +7,10 @@ from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.agent_creator import CreateAttemptErrorKind
 from imbue.minds.desktop_client.create_attempt_rows import CreateAttemptRowKind
+from imbue.minds.desktop_client.create_attempt_rows import OwnerActiveWorkspace
 from imbue.minds.desktop_client.create_attempt_rows import derive_create_attempt_rows
 from imbue.minds.desktop_client.create_attempt_rows import derive_settling_create_owners
+from imbue.minds.desktop_client.create_attempt_rows import is_first_workspace_of_owner
 from imbue.minds.desktop_client.create_attempt_rows import is_host_being_created
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
@@ -223,3 +225,69 @@ def test_settling_create_owners_name_the_account_of_an_unfailed_create_whose_age
 
     assert list(owners) == [str(waiting_agent), str(done_agent)]
     assert {(owner.account_id, owner.account_email) for owner in owners.values()} == {("user-1", "owner@example.com")}
+
+
+def _owner_workspace(agent_id: str, host_name: str, provider_instance_name: str = "lima") -> OwnerActiveWorkspace:
+    return OwnerActiveWorkspace(agent_id=agent_id, provider_instance_name=provider_instance_name, host_name=host_name)
+
+
+def test_an_owner_with_no_active_workspace_is_creating_its_first() -> None:
+    assert is_first_workspace_of_owner(
+        (), attempt_agent_id=None, attempt_provider_instance_name="lima", attempt_host_name="my-workspace"
+    )
+
+
+def test_an_owner_with_another_active_workspace_is_not_creating_its_first() -> None:
+    workspaces = (_owner_workspace("agent-earlier", "an-earlier-workspace"),)
+
+    assert not is_first_workspace_of_owner(
+        workspaces, attempt_agent_id=None, attempt_provider_instance_name="lima", attempt_host_name="my-workspace"
+    )
+    assert not is_first_workspace_of_owner(
+        workspaces,
+        attempt_agent_id="agent-own",
+        attempt_provider_instance_name="lima",
+        attempt_host_name="my-workspace",
+    )
+
+
+def test_the_attempts_own_workspace_is_not_another_one_once_its_agent_id_is_known() -> None:
+    """The finished workspace carries the display name the user gave it, so only the agent id says it is the attempt's."""
+    own = _owner_workspace("agent-own", "My Workspace!")
+
+    assert is_first_workspace_of_owner(
+        (own,), attempt_agent_id="agent-own", attempt_provider_instance_name="lima", attempt_host_name="my-workspace"
+    )
+    assert not is_first_workspace_of_owner(
+        (own, _owner_workspace("agent-earlier", "an-earlier-workspace")),
+        attempt_agent_id="agent-own",
+        attempt_provider_instance_name="lima",
+        attempt_host_name="my-workspace",
+    )
+
+
+def test_before_its_agent_id_is_known_the_attempts_workspace_is_the_host_it_is_building() -> None:
+    """The connector writes a cloud workspace's record at lease time, before ``mngr create`` returns the agent id."""
+    leased = _owner_workspace("agent-leased", "My-Workspace", provider_instance_name="imbue_cloud_user-1")
+
+    assert is_first_workspace_of_owner(
+        (leased,),
+        attempt_agent_id=None,
+        attempt_provider_instance_name="imbue_cloud_user-1",
+        attempt_host_name="my-workspace",
+    )
+    # The same name on another provider is some other workspace.
+    assert not is_first_workspace_of_owner(
+        (leased,), attempt_agent_id=None, attempt_provider_instance_name="lima", attempt_host_name="my-workspace"
+    )
+
+
+def test_a_workspace_that_shares_the_attempts_host_name_is_another_one_once_the_agent_id_says_so() -> None:
+    renamed_earlier = _owner_workspace("agent-earlier", "my-workspace")
+
+    assert not is_first_workspace_of_owner(
+        (renamed_earlier,),
+        attempt_agent_id="agent-own",
+        attempt_provider_instance_name="lima",
+        attempt_host_name="my-workspace",
+    )

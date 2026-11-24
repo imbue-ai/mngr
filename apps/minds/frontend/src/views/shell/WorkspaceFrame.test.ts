@@ -122,7 +122,6 @@ function makeHandlers(
     opensExternalLinks?: boolean;
     canImmerse?: boolean;
     isShared?: boolean;
-    isChatRootWanted?: boolean;
   } = {},
 ) {
   const contract = makeContract();
@@ -131,8 +130,6 @@ function makeHandlers(
   const acks: string[] = [];
   const ackPayloads: (Record<string, unknown> | undefined)[] = [];
   const sent: { type: string; payload?: Record<string, unknown> }[] = [];
-  /** Sends and readiness reports, in the order they happened. */
-  const events: string[] = [];
   const relayArms: { flowId: string; url: string }[] = [];
   const relayStops: string[] = [];
   const popoutCalls: unknown[] = [];
@@ -152,7 +149,6 @@ function makeHandlers(
       acks.push(type);
       ackPayloads.push(payload);
       sent.push({ type, payload });
-      events.push(`send ${type}`);
     },
     bringAppToFront: () => {
       frontCount += 1;
@@ -167,14 +163,8 @@ function makeHandlers(
     workspaceAgentId: () => WORKSPACE_AGENT_ID,
     isSharedWorkspace: () => options.isShared === true,
     openRequestPopup: (requestId) => popupOpens.push(requestId),
-    onWorkspaceReady: (promises) => {
-      readyAnnouncements.push(promises);
-      events.push("ready");
-    },
-    onReportingKnown: (reporting) => {
-      reportingAnswers.push(reporting);
-      return options.isChatRootWanted === true;
-    },
+    onWorkspaceReady: (promises) => readyAnnouncements.push(promises),
+    onReportingKnown: (reporting) => reportingAnswers.push(reporting),
     onChatOnScreen: (chatId) => chatsOnScreen.push(chatId),
     onProviderChooserOnScreen: () => {
       chooserOnScreenCount += 1;
@@ -215,7 +205,6 @@ function makeHandlers(
     acks,
     ackPayloads,
     sent,
-    events,
     relayArms,
     relayStops,
     popoutCalls,
@@ -262,25 +251,13 @@ describe("buildEmbedHandlers", () => {
     expect(providerSteps).toEqual([true, false]);
   });
 
-  it("asks a ready workspace for its chat root, before the held message goes, only when the wait wants it", () => {
-    const wanted = makeHandlers({ isChatRootWanted: true });
-    wanted.handlers[wanted.contract.WORKSPACE_READY]({
+  it("sends a ready workspace its capabilities and no chat ask of its own", () => {
+    const { contract, handlers, sent } = makeHandlers();
+    handlers[contract.WORKSPACE_READY]({
       reportsChatOnScreen: true,
       reportsProviderChooserOnScreen: true,
     });
-    expect(wanted.events).toEqual([
-      "send minds:focus-chat",
-      "ready",
-      "send minds:embedder-capabilities",
-    ]);
-    expect(wanted.sent[0]).toEqual({ type: "minds:focus-chat", payload: {} });
-
-    const unwanted = makeHandlers({ isChatRootWanted: false });
-    unwanted.handlers[unwanted.contract.WORKSPACE_READY]({
-      reportsChatOnScreen: true,
-      reportsProviderChooserOnScreen: true,
-    });
-    expect(unwanted.sent.map((entry) => entry.type)).toEqual([
+    expect(sent.map((entry) => entry.type)).toEqual([
       "minds:embedder-capabilities",
     ]);
   });

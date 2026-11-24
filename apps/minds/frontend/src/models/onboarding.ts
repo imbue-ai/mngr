@@ -35,6 +35,13 @@ export class OnboardingProgress {
 export const onboardingProgress = new OnboardingProgress();
 
 export const REPORTING_CONSENT_QUESTION = "Is it ok if we report data to help improve Studio?";
+/** What error reports hold and how long they are kept: the part every surface that explains reporting shares. */
+export const REPORTING_DETAIL_BODY =
+  "Error reports include details about what went wrong and how " +
+  "your Studio is set up. We try to remove anything personal, but sometimes something identifying, like an email " +
+  "address, gets through. Your privacy matters to us, so we do our best to delete error data within 30 days. If " +
+  "you change your mind, you can turn error reporting on or off in Settings → Error reporting.";
+export const REPORTING_MORE_DETAIL = `We want you to know what you're saying yes to. ${REPORTING_DETAIL_BODY}`;
 
 /** POST the answer to the error-reporting question (whether error data may be reported); resolves true when
  *  it was recorded. */

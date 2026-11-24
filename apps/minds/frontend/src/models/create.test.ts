@@ -114,7 +114,6 @@ describe("CreateAttemptWatcher", () => {
     const watcher = new CreateAttemptWatcher("create-attempt-0123abcd", {
       onDone: (redirectUrl) => doneRedirects.push(redirectUrl),
       onFailed: (failure) => failures.push(failure.error),
-      onStageText: () => undefined,
       onLogLines: () => undefined,
       onProgress: () => undefined,
     });

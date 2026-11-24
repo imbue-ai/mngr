@@ -28,8 +28,8 @@ export type CollapsibleMarker = (isOpen: boolean) => m.Children;
  * turned, so opening reads as a turn rather than a cut between two glyphs.
  *
  * Exported because a caller that needs the same chevron with something added
- * to it -- the manifesto's, which fades in with the line it introduces --
- * should be adding to this one rather than drawing a second.
+ * to it -- one that fades in with the line it introduces -- should be adding
+ * to this one rather than drawing a second.
  */
 export function chevronMarker(
   isOpen: boolean,

@@ -1,42 +1,34 @@
-// The first run's sign-in page (/start, specs/ftue-onboarding-v2): one line,
+// The first run's sign-in page (/start, specs/onboarding-tweaks): one line,
 // Sign in, and "Use without an account". Sign in opens the browser sign-in;
 // the account that lands either has workspaces (its home page) or gets its
-// first cloud workspace started at once, after the email-verification gate
-// the connector requires, and the page hands over to the creation page, which
-// welcomes the user while the workspace is built. "Use without an account"
-// opens the create form on its run-on-this-computer preset.
+// first cloud workspace started at once, and the page hands over to the
+// creation page, which welcomes the user while the workspace is built. The
+// sign-in's hand-off says how many workspaces the account has; one that did
+// not say is asked about. "Use without an account" opens the create form on
+// its run-on-this-computer preset.
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
-import { electronBridge } from "../../electron-bridge";
 import type { CreateFormDefaults, CreateSubmitResult } from "../../models/create";
 import { fetchCreateFormDefaults, submitCreateRequest } from "../../models/create";
-import {
-  RESEND_EMAIL_LABEL,
-  VERIFICATION_POLL_MS,
-  fetchIsEmailVerified,
-  resendVerificationEmail,
-  verificationEmailSentNote,
-} from "../../models/emailVerification";
 import { fallbackErrorSentence } from "../../models/errors";
 import type { FirstRunAccount, FirstRunStage } from "../../models/firstRun";
 import {
+  SETTING_UP_LINE,
   SIGN_IN_STAGE,
   accountOf,
   cancelSignIn,
   firstNameOf,
-  firstRun,
   landAccount,
-  noteResend,
+  landingVerdict,
   refuseCreate,
   retryCreate,
   settleLanding,
-  settleVerification,
   startSignIn,
   welcomeHeading,
 } from "../../models/firstRun";
-import { REPORTING_DETAIL_BODY } from "../../models/manifesto";
 import {
+  REPORTING_DETAIL_BODY,
   fetchSigninLanding,
   markOnboardingComplete,
   recordErrorReportingConsent,
@@ -69,12 +61,10 @@ export const REPORTING_LABEL = "Help improve Studio";
 export const REPORTING_TIP_HEADING = "Report data to help improve Studio";
 const PRIVACY_POLICY_URL = "https://imbue.com/privacy/";
 export const SIGN_IN_MESSAGE = "Sign in to Imbue Studio, or create an account.";
-export const SETTING_UP_LINE = "Just a sec, we're setting up your workspace";
-/** The setting-up line once the build is known to take minutes, when "just a sec" would not be true. */
-export const SETTING_UP_LONG_LINE = "We're setting up your workspace";
-export const VERIFY_LINE = "Check your email";
 export const TRY_AGAIN_LABEL = "Try again";
 
+// CLEANUP: drop the landing wait (these two, `beginLanding`, the `landing` stage and the signin-landing route)
+// once every tier's connector sends the workspace count on the sign-in hand-off.
 /** How long the landing waits on the first record fetch before treating the account as new. */
 export const SIGNIN_LANDING_WAIT_MS = 15000;
 export const SIGNIN_LANDING_POLL_MS = 1000;
@@ -103,15 +93,14 @@ export function cloudCreateRefusal(result: CreateSubmitResult): string {
 }
 
 /**
- * The first workspace's create under the account, submitted without the form, as an onboarding create: the
- * create form's remote preset, or its local one when the defaults say the first run is local.
+ * The first workspace's create under the account, submitted without the form: the create form's remote preset,
+ * or its local one when the defaults say the first run is local.
  */
 export function cloudCreateBody(defaults: CreateFormDefaults, accountId: string): Record<string, unknown> {
   const model = new CreateFormModel();
   model.applyDefaults(defaults);
   model.accountId = accountId;
   model.applyPreset(defaults.is_first_run_local === true ? "local" : "remote");
-  model.isOnboardingDrivenByAgent = true;
   return { ...model.submitBody() };
 }
 
@@ -137,9 +126,10 @@ export const StartPage: m.ClosureComponent = () => {
   // The account ids signed in when Sign in was pressed: one appearing later is the sign-in landing.
   let accountIdsAtSignIn = new Set<string>();
   let landingTimer: ReturnType<typeof setTimeout> | null = null;
-  let verificationTimer: ReturnType<typeof setInterval> | null = null;
-  let isCheckingVerification = false;
   let isRemoved = false;
+  // Set once the landed account is sent to its home page. The page can be drawn again before the route changes,
+  // and by then the sign-in is dismissed: without this it would read as a landing that carried no count.
+  let hasLeftForHome = false;
   let isReportingAllowed = true;
 
   function setStage(next: FirstRunStage): void {
@@ -149,9 +139,7 @@ export const StartPage: m.ClosureComponent = () => {
 
   function stopTimers(): void {
     if (landingTimer !== null) clearTimeout(landingTimer);
-    if (verificationTimer !== null) clearInterval(verificationTimer);
     landingTimer = null;
-    verificationTimer = null;
   }
 
   function loadDefaults(): void {
@@ -178,11 +166,14 @@ export const StartPage: m.ClosureComponent = () => {
 
   /** While the browser sign-in is open, an account landing moves the page on; the modal closing without one goes back. */
   function syncSignIn(): void {
-    if (stage.kind !== "signing-in") return;
+    if (stage.kind !== "signing-in" || hasLeftForHome) return;
     const accounts = getAppContext().stores.accounts.accounts;
     const isNewAccountListed = accounts.some((entry) => !accountIdsAtSignIn.has(entry.user_id));
     if (webLogin.state === "done" || (isNewAccountListed && !webLogin.isOpen)) {
       const account = landedAccount();
+      // Read before the dismissal: a hand-off the poll never saw (the account showed up in the accounts list
+      // after the modal was closed) carries no count.
+      const verdict = landingVerdict(webLogin.state === "done" ? webLogin.activeWorkspaceCount : null);
       webLogin.noteSignedIn();
       webLogin.dismiss();
       if (account === null) {
@@ -192,8 +183,13 @@ export const StartPage: m.ClosureComponent = () => {
         return;
       }
       getAppContext().shell.adoptAccount(account.userId);
-      stage = landAccount(stage, account);
-      beginLanding(account);
+      if (verdict === "home") {
+        leaveForHome(account);
+        return;
+      }
+      stage = landAccount(stage, account, verdict);
+      if (stage.kind === "creating") submitCloudCreate(account);
+      else beginLanding(account);
       return;
     }
     if (!webLogin.isOpen) stage = cancelSignIn(stage);
@@ -226,60 +222,22 @@ export const StartPage: m.ClosureComponent = () => {
     void poll();
   }
 
+  /** An account that already has workspaces: the install is past onboarding, and its home page is where it goes. */
+  function leaveForHome(account: FirstRunAccount): void {
+    hasLeftForHome = true;
+    void markOnboardingComplete();
+    m.route.set(accountHubRoute(account.userId));
+  }
+
   function settleLandingWith(hasWorkspaces: boolean): void {
     if (stage.kind !== "landing") return;
     if (hasWorkspaces) {
-      void markOnboardingComplete();
-      m.route.set(accountHubRoute(stage.account.userId));
+      leaveForHome(stage.account);
       return;
     }
-    setStage(settleLanding(stage, false));
-    checkVerification();
-  }
-
-  /**
-   * The connector refuses a cloud create for an unverified email, so the page
-   * checks first and, when the answer is no, waits on the emailed link. A
-   * check that cannot be made does not block: the create itself will say what
-   * is wrong.
-   */
-  function checkVerification(): void {
-    const account = accountOf(stage);
-    if (account === null || isCheckingVerification) return;
-    isCheckingVerification = true;
-    fetchIsEmailVerified(account.email).then(
-      (isVerified) => {
-        isCheckingVerification = false;
-        applyVerification(isVerified);
-      },
-      () => {
-        isCheckingVerification = false;
-        applyVerification(true);
-      },
-    );
-  }
-
-  function applyVerification(isVerified: boolean): void {
-    if (isRemoved) return;
-    const wasWaiting = stage.kind === "verify";
-    setStage(settleVerification(stage, isVerified));
-    if (stage.kind === "verify" && verificationTimer === null) {
-      verificationTimer = setInterval(() => {
-        if (stage.kind === "verify") checkVerification();
-      }, VERIFICATION_POLL_MS);
-    }
-    if (stage.kind === "creating") {
-      if (verificationTimer !== null) clearInterval(verificationTimer);
-      verificationTimer = null;
-      // The link is clicked in a browser, which took OS focus with it.
-      if (wasWaiting) electronBridge.bringAppToFront();
-      submitCloudCreate(stage.account);
-    }
-  }
-
-  function resend(): void {
-    if (stage.kind !== "verify") return;
-    resendVerificationEmail(stage.account.email).then((outcome) => setStage(noteResend(stage, outcome)));
+    const next = settleLanding(stage, false);
+    setStage(next);
+    if (next.kind === "creating") submitCloudCreate(next.account);
   }
 
   function submitCloudCreate(account: FirstRunAccount): void {
@@ -301,7 +259,6 @@ export const StartPage: m.ClosureComponent = () => {
         try {
           const result = await submitCreateRequest(cloudCreateBody(loaded, account.userId));
           if (result.status === 202 && typeof result.data.operation_id === "string") {
-            firstRun.noteCreate(result.data.operation_id, account);
             m.route.set(`/creating/${result.data.operation_id}`);
             return;
           }
@@ -315,8 +272,9 @@ export const StartPage: m.ClosureComponent = () => {
   }
 
   function retry(): void {
-    setStage(retryCreate(stage));
-    checkVerification();
+    const next = retryCreate(stage);
+    setStage(next);
+    if (next.kind === "creating") submitCloudCreate(next.account);
   }
 
   function signInView(): m.Children {
@@ -404,25 +362,6 @@ export const StartPage: m.ClosureComponent = () => {
       { id: "start-welcome", class: "first-run-headline text-center text-[40px]" },
       welcomeHeading(firstNameOf(account)),
     );
-    if (stage.kind === "verify") {
-      return [
-        heading,
-        m("p", { id: "start-verify", class: "mt-6 text-center type-heading" }, VERIFY_LINE),
-        m(
-          "p",
-          { class: "mt-2 max-w-[480px] text-center type-heading" },
-          `Open the link we sent to ${account.email} and your workspace will start.`,
-        ),
-        stage.lastResend === null
-          ? null
-          : m(
-              "p",
-              { id: "start-verify-note", class: "mt-3 text-center type-body text-[color:var(--first-run-ink-muted)]" },
-              verificationEmailSentNote(account.email, stage.lastResend),
-            ),
-        m("button", { id: "start-resend", type: "button", class: "first-run-button first-run-button--secondary mt-6 type-label", onclick: resend }, RESEND_EMAIL_LABEL),
-      ];
-    }
     if (stage.kind === "refused") {
       return [
         heading,
@@ -455,7 +394,7 @@ export const StartPage: m.ClosureComponent = () => {
         {
           id: "start-flow",
           "data-stage": stage.kind,
-          class: "first-run relative flex min-h-full w-full flex-col [container-type:inline-size] items-center justify-center px-6 py-16",
+          class: "first-run light relative flex min-h-full w-full flex-col [container-type:inline-size] items-center justify-center px-6 py-16",
         },
         [
           m(
@@ -472,10 +411,8 @@ export const StartPage: m.ClosureComponent = () => {
                 },
                 initialPreset: "local",
                 backdrop: "wash",
-                isOnboardingDrivenByAgent: true,
                 onSubmitted: (operationId: string) => {
                   isFormOpen = false;
-                  firstRun.noteCreate(operationId, null);
                   m.route.set(`/creating/${operationId}`);
                 },
               })]

@@ -10,10 +10,10 @@ must:
 
 The ``running_callback_server`` fixture lives in ``cli/conftest.py``.
 
-Also covers ``_persist_auth_response`` (every OK response counts as signed in
-immediately -- verification is non-blocking), the PKCE / login-URL helpers
-the browser flow is built from, and the page the browser lands on, which must
-report the sign-in's real outcome.
+Also covers ``_persist_auth_response`` (a session is saved only for an account
+whose email is verified), the three sign-in commands built on it, the PKCE /
+login-URL helpers the browser flow is built from, and the page the browser
+lands on, which must report the sign-in's real outcome.
 """
 
 import base64
@@ -38,8 +38,8 @@ from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_imbue_cloud.cli._common import resolve_accounts_url
 from imbue.mngr_imbue_cloud.cli.auth import _CallbackCaptureBox
 from imbue.mngr_imbue_cloud.cli.auth import _LoginPageOutcome
+from imbue.mngr_imbue_cloud.cli.auth import _active_workspace_count_from_callback
 from imbue.mngr_imbue_cloud.cli.auth import _bind_callback_listener
-from imbue.mngr_imbue_cloud.cli.auth import _email_verification_from_callback
 from imbue.mngr_imbue_cloud.cli.auth import _ensure_connector_supports_browser_login
 from imbue.mngr_imbue_cloud.cli.auth import _hold_listener_lease
 from imbue.mngr_imbue_cloud.cli.auth import _login_result_page
@@ -59,6 +59,7 @@ from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
 from imbue.mngr_imbue_cloud.connector.session_store import make_session_from_tokens
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudEmailNotVerifiedError
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
 from imbue.mngr_imbue_cloud.wire_types import AuthRawResponse
@@ -139,38 +140,49 @@ def _get_body(port: int, path: str) -> str:
         return resp.read().decode("utf-8")
 
 
-def test_callback_handler_serves_the_verification_reminder_for_an_unverified_email(
+def test_callback_handler_serves_the_verification_reminder_for_a_refused_unverified_email(
     running_callback_server: tuple[_CallbackCaptureBox, int],
 ) -> None:
-    """A callback flagged verified=0 renders the reminder; the plain page otherwise."""
     box, port = running_callback_server
-    box.publish_outcome(_LoginPageOutcome.SIGNED_IN)
+    box.publish_outcome(_LoginPageOutcome.EMAIL_NOT_VERIFIED)
     reminder = _get_body(port, "/callback?code=abc123&state=xyz&email=alice%40example.com&verified=0")
     assert "Click the email verification link" in reminder
     assert "You must verify your address: alice@example.com" in reminder
     assert "Check your spam folder" in reminder
+    assert "You are signed in" not in reminder
 
+
+def test_callback_handler_serves_the_plain_page_for_a_completed_sign_in(
+    running_callback_server: tuple[_CallbackCaptureBox, int],
+) -> None:
+    box, port = running_callback_server
+    box.publish_outcome(_LoginPageOutcome.SIGNED_IN)
     plain = _get_body(port, "/callback?code=abc123&state=xyz&email=alice%40example.com&verified=1")
     assert "Click the email verification link" not in plain
     assert "You are signed in" in plain
 
 
 @pytest.mark.parametrize(
-    ("params", "expected_verdict"),
+    ("params", "expected_count"),
     [
-        ({"email": "alice@example.com", "verified": "1"}, True),
-        ({"email": "Alice@Example.com", "verified": "1"}, True),
-        ({"email": "alice@example.com", "verified": "0"}, False),
-        ({"email": "alice@example.com"}, None),
-        ({"email": "alice@example.com", "verified": "yes"}, None),
-        ({"email": "mallory@example.com", "verified": "1"}, None),
-        ({"verified": "1"}, None),
+        ({"workspaces": "0"}, 0),
+        ({"workspaces": "3"}, 3),
+        ({"workspaces": "12"}, 12),
+        ({}, None),
+        ({"workspaces": ""}, None),
+        ({"workspaces": "-1"}, None),
+        ({"workspaces": "+2"}, None),
+        ({"workspaces": "1.5"}, None),
+        ({"workspaces": " 2"}, None),
+        ({"workspaces": "many"}, None),
+        # A digit to str.isdigit that int() cannot read.
+        ({"workspaces": "\u00b2"}, None),
     ],
 )
-def test_email_verification_from_callback_speaks_only_for_the_signed_in_address(
-    params: dict[str, str], expected_verdict: bool | None
+def test_active_workspace_count_from_callback_reads_only_a_non_negative_integer(
+    params: dict[str, str], expected_count: int | None
 ) -> None:
-    assert _email_verification_from_callback(params, "alice@example.com") is expected_verdict
+    assert _active_workspace_count_from_callback(params) == expected_count
 
 
 def test_success_page_without_redirect_says_return_to_terminal() -> None:
@@ -206,41 +218,56 @@ def test_result_page_never_claims_success_for_an_unfinished_sign_in(
     expected_text: str,
     unexpected_text: str,
 ) -> None:
-    # An unverified address must not turn an unfinished sign-in into the verification reminder either.
+    # An address on the callback must not turn an unfinished sign-in into the verification reminder either.
     page = _login_result_page(success_redirect_url, outcome, "alice@example.com", _MANAGE_URL).decode("utf-8")
     assert expected_text in page
     assert unexpected_text not in page
     assert "Click the email verification link" not in page
 
 
-def test_success_page_with_unverified_email_leads_with_the_verification_reminder() -> None:
-    page = _login_result_page("minds://", _LoginPageOutcome.SIGNED_IN, "alice@example.com", _MANAGE_URL).decode(
-        "utf-8"
-    )
+def test_page_for_a_refused_unverified_email_leads_with_the_verification_reminder() -> None:
+    page = _login_result_page(
+        "minds://", _LoginPageOutcome.EMAIL_NOT_VERIFIED, "alice@example.com", _MANAGE_URL
+    ).decode("utf-8")
     assert '<h1 class="verify">Click the email verification link</h1>' in page
     assert "You must verify your address: alice@example.com" in page
     assert "Check your spam folder" in page
     assert f'<a href="{_MANAGE_URL}" target="_blank" rel="noopener">Send the email again</a>' in page
     assert "Feel free to close this tab." not in page
-    # The app link stays: the reminder replaces the welcome, not the way back.
+    assert "Sign-in didn&#x27;t finish" not in page
+    # The app link stays: the reminder replaces the outcome's message, not the way back.
     assert '<a href="minds://">Open app</a>' in page
 
 
 def test_terminal_reminder_also_offers_the_resend() -> None:
-    page = _login_result_page(None, _LoginPageOutcome.SIGNED_IN, "alice@example.com", _MANAGE_URL).decode("utf-8")
-    assert f'<a href="{_MANAGE_URL}" target="_blank" rel="noopener">Send the email again</a>' in page
-    assert "return to your terminal" in page
-
-
-def test_verified_sign_in_does_not_offer_a_resend() -> None:
-    page = _login_result_page("minds://", _LoginPageOutcome.SIGNED_IN, None, _MANAGE_URL).decode("utf-8")
-    assert "Send the email again" not in page
-
-
-def test_success_page_escapes_the_unverified_email() -> None:
-    page = _login_result_page(None, _LoginPageOutcome.SIGNED_IN, "<b>bold</b>@example.com", _MANAGE_URL).decode(
+    page = _login_result_page(None, _LoginPageOutcome.EMAIL_NOT_VERIFIED, "alice@example.com", _MANAGE_URL).decode(
         "utf-8"
     )
+    assert f'<a href="{_MANAGE_URL}" target="_blank" rel="noopener">Send the email again</a>' in page
+    assert "sign in again from your terminal" in page
+    assert "You are signed in" not in page
+
+
+def test_reminder_without_a_callback_email_names_no_address() -> None:
+    page = _login_result_page(None, _LoginPageOutcome.EMAIL_NOT_VERIFIED, None, _MANAGE_URL).decode("utf-8")
+    assert "Click the email verification link" in page
+    assert "You must verify your email address" in page
+    assert "None" not in page
+
+
+def test_completed_sign_in_never_shows_the_reminder() -> None:
+    page = _login_result_page("minds://", _LoginPageOutcome.SIGNED_IN, "alice@example.com", _MANAGE_URL).decode(
+        "utf-8"
+    )
+    assert "Send the email again" not in page
+    assert "Click the email verification link" not in page
+    assert "You&#x27;re in!" in page
+
+
+def test_reminder_escapes_the_unverified_email() -> None:
+    page = _login_result_page(
+        None, _LoginPageOutcome.EMAIL_NOT_VERIFIED, "<b>bold</b>@example.com", _MANAGE_URL
+    ).decode("utf-8")
     assert "<b>" not in page
     assert "&lt;b&gt;bold&lt;/b&gt;@example.com" in page
 
@@ -297,6 +324,9 @@ def test_resolve_accounts_url_prefers_flag_then_env_then_none(monkeypatch: pytes
     assert resolve_accounts_url("https://accounts-flag.example.com/") == "https://accounts-flag.example.com"
 
 
+_MINTED_ACCESS_TOKEN = "header.eyJmb28iOiJiYXIifQ.sig"
+
+
 def _make_auth_response(needs_email_verification: bool) -> AuthRawResponse:
     return AuthRawResponse(
         status="OK",
@@ -308,16 +338,44 @@ def _make_auth_response(needs_email_verification: bool) -> AuthRawResponse:
         },
         # The payload segment is base64url for {"foo":"bar"} -- a decodable JWT
         # body without an exp claim, so expiry decoding yields None.
-        tokens={"access_token": "header.eyJmb28iOiJiYXIifQ.sig", "refresh_token": "refresh-tok"},
+        tokens={"access_token": _MINTED_ACCESS_TOKEN, "refresh_token": "refresh-tok"},
         needs_email_verification=needs_email_verification,
     )
 
 
-def test_persist_auth_response_marks_account_active(tmp_path: Path) -> None:
+def _client_answering_is_verified(
+    is_verified_response: httpx2.Response,
+) -> tuple[ImbueCloudConnectorClient, list[tuple[str, str]]]:
+    """A client whose is-verified route gives the one answer and whose revoke route succeeds.
+
+    The list fills with ``(path, authorization header)`` as requests arrive.
+    """
+    recorded_requests: list[tuple[str, str]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        recorded_requests.append((request.url.path, request.headers["authorization"]))
+        if request.url.path == "/auth/email/is-verified":
+            return is_verified_response
+        if request.url.path == "/auth/session/revoke-current":
+            return httpx2.Response(200, json={"status": "OK"})
+        raise AssertionError(f"unexpected path {request.url.path}")
+
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx2.MockTransport(handler))
+    return client, recorded_requests
+
+
+def _is_verified_answer(is_email_verified: bool) -> httpx2.Response:
+    return httpx2.Response(200, json={"status": "OK", "verified": is_email_verified})
+
+
+def test_persist_auth_response_saves_a_verified_account_and_marks_it_active(tmp_path: Path) -> None:
     store = ImbueCloudSessionStore(sessions_dir=tmp_path)
     account = ImbueCloudAccount("alice@imbue.com")
+    client, recorded_requests = _client_answering_is_verified(_is_verified_answer(True))
 
-    payload = _persist_auth_response(_make_auth_response(needs_email_verification=False), account, store)
+    payload = _persist_auth_response(
+        _make_auth_response(needs_email_verification=False), account, store, client, is_verified_by_handoff=False
+    )
 
     assert payload["email"] == "alice@imbue.com"
     assert payload["profile_picture_url"] == "https://accounts.example/users/user-abc/profile-picture/abc"
@@ -327,18 +385,99 @@ def test_persist_auth_response_marks_account_active(tmp_path: Path) -> None:
     # without a connector round trip.
     assert session.profile_picture_url == "https://accounts.example/users/user-abc/profile-picture/abc"
     assert store.get_active_account() == account
+    # The check is asked with the freshly minted token, and a kept session is not revoked.
+    assert recorded_requests == [("/auth/email/is-verified", f"Bearer {_MINTED_ACCESS_TOKEN}")]
 
 
-def test_persist_auth_response_signs_in_even_when_old_connector_reports_unverified(tmp_path: Path) -> None:
-    """Verification is non-blocking: an old connector's needs_email_verification=True changes nothing."""
+def test_persist_auth_response_saves_nothing_for_an_unverified_account_and_revokes_the_minted_session(
+    tmp_path: Path,
+) -> None:
     store = ImbueCloudSessionStore(sessions_dir=tmp_path)
     account = ImbueCloudAccount("alice@imbue.com")
+    client, recorded_requests = _client_answering_is_verified(_is_verified_answer(False))
 
-    _persist_auth_response(_make_auth_response(needs_email_verification=True), account, store)
+    with pytest.raises(ImbueCloudEmailNotVerifiedError) as exc_info:
+        _persist_auth_response(
+            _make_auth_response(needs_email_verification=False), account, store, client, is_verified_by_handoff=False
+        )
 
-    session = store.load_by_account(account)
-    assert session is not None
+    assert exc_info.value.email == "alice@imbue.com"
+    assert store.load_by_account(account) is None
+    assert store.get_active_account() is None
+    assert recorded_requests == [
+        ("/auth/email/is-verified", f"Bearer {_MINTED_ACCESS_TOKEN}"),
+        ("/auth/session/revoke-current", f"Bearer {_MINTED_ACCESS_TOKEN}"),
+    ]
+
+
+def test_persist_auth_response_saves_nothing_when_the_verification_check_fails(tmp_path: Path) -> None:
+    """An unknown answer is not a verified one: the check's own error propagates and the minted session is revoked."""
+    store = ImbueCloudSessionStore(sessions_dir=tmp_path)
+    account = ImbueCloudAccount("alice@imbue.com")
+    client, recorded_requests = _client_answering_is_verified(httpx2.Response(500, json={"detail": "internal error"}))
+
+    with pytest.raises(ImbueCloudAuthError, match="500") as exc_info:
+        _persist_auth_response(
+            _make_auth_response(needs_email_verification=False), account, store, client, is_verified_by_handoff=False
+        )
+
+    assert not isinstance(exc_info.value, ImbueCloudEmailNotVerifiedError)
+    assert store.load_by_account(account) is None
+    assert [path for path, _authorization in recorded_requests] == [
+        "/auth/email/is-verified",
+        "/auth/session/revoke-current",
+    ]
+
+
+def test_persist_auth_response_treats_an_old_connectors_needs_email_verification_as_unverified(
+    tmp_path: Path,
+) -> None:
+    store = ImbueCloudSessionStore(sessions_dir=tmp_path)
+    account = ImbueCloudAccount("alice@imbue.com")
+    client, recorded_requests = _client_answering_is_verified(_is_verified_answer(True))
+
+    with pytest.raises(ImbueCloudEmailNotVerifiedError):
+        _persist_auth_response(
+            _make_auth_response(needs_email_verification=True), account, store, client, is_verified_by_handoff=True
+        )
+
+    assert store.load_by_account(account) is None
+    # The response already said so, so the route is not asked.
+    assert [path for path, _authorization in recorded_requests] == ["/auth/session/revoke-current"]
+
+
+def test_persist_auth_response_trusts_the_browser_handoff_without_asking_the_route(tmp_path: Path) -> None:
+    store = ImbueCloudSessionStore(sessions_dir=tmp_path)
+    account = ImbueCloudAccount("alice@imbue.com")
+    client, recorded_requests = _client_answering_is_verified(_is_verified_answer(False))
+
+    _persist_auth_response(
+        _make_auth_response(needs_email_verification=False), None, store, client, is_verified_by_handoff=True
+    )
+
+    assert store.load_by_account(account) is not None
     assert store.get_active_account() == account
+    assert recorded_requests == []
+
+
+def test_an_unverified_sign_in_leaves_an_earlier_session_for_the_account_in_place(tmp_path: Path) -> None:
+    """The revocation presents the minted session's own token, so the session already saved keeps working."""
+    store, account = _store_with_stale_session(tmp_path)
+    client, recorded_requests = _client_answering_is_verified(_is_verified_answer(False))
+    response = AuthRawResponse(
+        status="OK",
+        user={"user_id": "user-1", "email": str(account)},
+        tokens={"access_token": _MINTED_ACCESS_TOKEN, "refresh_token": "refresh-tok"},
+    )
+
+    with pytest.raises(ImbueCloudEmailNotVerifiedError):
+        _persist_auth_response(response, account, store, client, is_verified_by_handoff=False)
+
+    kept_session = store.load_by_account(account)
+    assert kept_session is not None
+    assert kept_session.access_token.get_secret_value() == "stale-at"
+    assert ("/auth/session/revoke-current", f"Bearer {_MINTED_ACCESS_TOKEN}") in recorded_requests
+    assert all("stale-at" not in authorization for _path, authorization in recorded_requests)
 
 
 def test_bind_callback_listener_reports_an_occupied_port_as_json(
@@ -571,8 +710,8 @@ def _run_login_and_complete_the_callback(
     """Run ``auth login`` against ``connector_url`` and play the browser's final redirect.
 
     ``extra_callback_params`` are what the connector appends beside ``code`` and
-    ``state`` (``email`` and ``verified``). Returns the command's result and the
-    text of the page the browser was shown.
+    ``state`` (``email``, ``verified``, and ``workspaces``). Returns the command's
+    result and the text of the page the browser was shown.
     """
     # The command saves the session under the active mngr profile.
     get_or_create_profile_dir(host_dir)
@@ -628,28 +767,121 @@ def test_login_page_says_signed_in_only_after_the_code_exchange_succeeds(
     assert "You&#x27;re in!" in page
 
 
+def _saved_accounts(host_dir: Path) -> list[ImbueCloudAccount]:
+    """The accounts with a session saved under the test's active mngr profile."""
+    store = ImbueCloudSessionStore(sessions_dir=get_sessions_dir(get_or_create_profile_dir(host_dir)))
+    return list(store.list_accounts())
+
+
+def _error_body(result: Result) -> dict[str, object]:
+    """The JSON error body a failed command printed; it follows any progress lines on stderr."""
+    return json.loads(result.stderr[result.stderr.index("{") :])
+
+
+def test_login_saves_the_session_and_no_longer_reports_a_verification_verdict(
+    device_login_connector_stub: Callable[..., tuple[str, list[str]]],
+    tmp_path: Path,
+    temp_host_dir: Path,
+) -> None:
+    result, _page = _run_login_and_complete_the_callback(
+        device_login_connector_stub(200)[0],
+        tmp_path,
+        temp_host_dir,
+        {"email": "device-login-4417@example.com", "verified": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {
+        "user_id": "user-device-login-4417",
+        "email": "device-login-4417@example.com",
+        "display_name": None,
+        "profile_picture_url": None,
+        "active_workspace_count": None,
+    }
+    assert _saved_accounts(temp_host_dir) == [ImbueCloudAccount("device-login-4417@example.com")]
+
+
 @pytest.mark.parametrize(
-    ("extra_callback_params", "expected_verdict"),
+    ("extra_callback_params", "expected_count"),
     [
-        ({"email": "device-login-4417@example.com", "verified": "1"}, True),
-        ({"email": "device-login-4417@example.com", "verified": "0"}, False),
-        # A connector that predates the email/verified parameters says nothing.
+        ({"workspaces": "0"}, 0),
+        ({"workspaces": "4"}, 4),
+        # A connector that predates the parameter, or could not read the count, sends none.
         ({}, None),
+        ({"workspaces": "-1"}, None),
+        ({"workspaces": "several"}, None),
     ],
+    ids=["zero", "some", "absent", "negative", "not_a_number"],
 )
-def test_login_reports_the_verification_verdict_the_callback_carried(
+def test_login_reports_the_active_workspace_count_the_callback_carried(
     device_login_connector_stub: Callable[..., tuple[str, list[str]]],
     tmp_path: Path,
     temp_host_dir: Path,
     extra_callback_params: dict[str, str],
-    expected_verdict: bool | None,
+    expected_count: int | None,
 ) -> None:
     result, _page = _run_login_and_complete_the_callback(
         device_login_connector_stub(200)[0], tmp_path, temp_host_dir, extra_callback_params
     )
 
     assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout)["is_email_verified"] is expected_verdict
+    assert json.loads(result.stdout)["active_workspace_count"] == expected_count
+
+
+def test_login_refuses_a_callback_that_says_the_email_is_unverified_without_exchanging_the_code(
+    device_login_connector_stub: Callable[..., tuple[str, list[str]]],
+    tmp_path: Path,
+    temp_host_dir: Path,
+) -> None:
+    connector_url, recorded_requests = device_login_connector_stub(200)
+
+    result, page = _run_login_and_complete_the_callback(
+        connector_url, tmp_path, temp_host_dir, {"email": "device-login-4417@example.com", "verified": "0"}
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    error_body = _error_body(result)
+    assert error_body["error_class"] == "ImbueCloudEmailNotVerifiedError"
+    assert error_body["code"] == "email_not_verified"
+    assert error_body["email"] == "device-login-4417@example.com"
+    assert "POST /auth/device/token" not in recorded_requests
+    assert _saved_accounts(temp_host_dir) == []
+    assert "Click the email verification link" in page
+    assert "You must verify your address: device-login-4417@example.com" in page
+    assert "You&#x27;re in" not in page
+
+
+def test_login_fails_as_email_not_verified_when_the_connector_refuses_the_exchange_for_it(
+    device_login_connector_stub: Callable[..., tuple[str, list[str]]],
+    tmp_path: Path,
+    temp_host_dir: Path,
+) -> None:
+    connector_url, recorded_requests = device_login_connector_stub(
+        403,
+        device_token_refusal_detail={
+            "code": "email_not_verified",
+            "message": "Signing in requires a verified email address.",
+            "email": "device-login-4417@example.com",
+        },
+    )
+
+    result, page = _run_login_and_complete_the_callback(
+        connector_url, tmp_path, temp_host_dir, {"email": "device-login-4417@example.com", "verified": "1"}
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert _error_body(result) == {
+        "error": "Signing in requires a verified email address.",
+        "error_class": "ImbueCloudEmailNotVerifiedError",
+        "code": "email_not_verified",
+        "email": "device-login-4417@example.com",
+    }
+    assert "POST /auth/device/token" in recorded_requests
+    assert _saved_accounts(temp_host_dir) == []
+    assert "Click the email verification link" in page
+    assert "You&#x27;re in" not in page
 
 
 def test_login_page_reports_failure_when_the_connector_refuses_the_code(
@@ -660,11 +892,10 @@ def test_login_page_reports_failure_when_the_connector_refuses_the_code(
     result, page = _run_login_and_complete_the_callback(device_login_connector_stub(400)[0], tmp_path, temp_host_dir)
 
     assert result.exit_code == 1
-    # The JSON error body follows the "Open this URL" line on stderr.
-    error_body = json.loads(result.stderr[result.stderr.index("{") :])
-    assert error_body["error_class"] == "ImbueCloudDeviceCodeRefusedError"
+    assert _error_body(result)["error_class"] == "ImbueCloudDeviceCodeRefusedError"
     assert "Sign-in didn&#x27;t finish" in page
     assert "You&#x27;re in" not in page
+    assert "Click the email verification link" not in page
 
 
 def test_login_gives_up_after_the_requested_listen_timeout(
@@ -688,8 +919,7 @@ def test_login_gives_up_after_the_requested_listen_timeout(
     )
 
     assert result.exit_code == 1
-    error_body = json.loads(result.stderr[result.stderr.index("{") :])
-    assert error_body["error_class"] == "LoginTimeout"
+    assert _error_body(result)["error_class"] == "LoginTimeout"
 
 
 def test_login_holds_the_listener_lease_while_waiting_and_releases_it_after(
@@ -789,3 +1019,150 @@ def test_resend_verification_prints_what_became_of_the_send(
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.output) == {**send_answer, "email": "alice@example.com"}
+
+
+_PASSWORD_AUTH_ACCOUNT = ImbueCloudAccount("password-auth-7306@example.com")
+
+
+def _run_password_auth(command: str, connector_url: str, host_dir: Path) -> Result:
+    """Run ``auth signin`` or ``auth signup`` for the stub's account against ``connector_url``."""
+    # The command saves the session under the active mngr profile.
+    get_or_create_profile_dir(host_dir)
+    return CliRunner().invoke(
+        auth,
+        [
+            command,
+            "--account",
+            str(_PASSWORD_AUTH_ACCOUNT),
+            "--password",
+            "pw-password-auth-7306",
+            "--connector-url",
+            connector_url,
+        ],
+    )
+
+
+def test_signin_saves_the_session_of_a_verified_account(
+    password_auth_connector_stub: Callable[..., tuple[str, list[str]]],
+    temp_host_dir: Path,
+) -> None:
+    connector_url, recorded_requests = password_auth_connector_stub(is_email_verified=True)
+
+    result = _run_password_auth("signin", connector_url, temp_host_dir)
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {
+        "user_id": "user-password-auth-7306",
+        "email": str(_PASSWORD_AUTH_ACCOUNT),
+        "display_name": None,
+        "profile_picture_url": None,
+    }
+    assert _saved_accounts(temp_host_dir) == [_PASSWORD_AUTH_ACCOUNT]
+    assert recorded_requests == ["POST /auth/signin", "POST /auth/email/is-verified"]
+
+
+def test_signin_refuses_an_unverified_account_without_saving_a_session(
+    password_auth_connector_stub: Callable[..., tuple[str, list[str]]],
+    temp_host_dir: Path,
+) -> None:
+    connector_url, recorded_requests = password_auth_connector_stub(is_email_verified=False)
+
+    result = _run_password_auth("signin", connector_url, temp_host_dir)
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    error_body = _error_body(result)
+    assert error_body["error_class"] == "ImbueCloudEmailNotVerifiedError"
+    assert error_body["code"] == "email_not_verified"
+    assert error_body["email"] == str(_PASSWORD_AUTH_ACCOUNT)
+    assert _saved_accounts(temp_host_dir) == []
+    assert recorded_requests == [
+        "POST /auth/signin",
+        "POST /auth/email/is-verified",
+        "POST /auth/session/revoke-current",
+    ]
+
+
+def test_signin_treats_an_old_connectors_needs_email_verification_as_unverified(
+    password_auth_connector_stub: Callable[..., tuple[str, list[str]]],
+    temp_host_dir: Path,
+) -> None:
+    connector_url, recorded_requests = password_auth_connector_stub(
+        is_email_verified=True, is_verification_reported_as_needed=True
+    )
+
+    result = _run_password_auth("signin", connector_url, temp_host_dir)
+
+    assert result.exit_code == 1
+    assert _error_body(result)["error_class"] == "ImbueCloudEmailNotVerifiedError"
+    assert _saved_accounts(temp_host_dir) == []
+    assert recorded_requests == ["POST /auth/signin", "POST /auth/session/revoke-current"]
+
+
+@pytest.mark.parametrize("command", ["signin", "signup"])
+def test_a_password_command_fails_with_the_checks_own_error_and_saves_nothing_when_the_check_cannot_be_made(
+    command: str,
+    password_auth_connector_stub: Callable[..., tuple[str, list[str]]],
+    temp_host_dir: Path,
+) -> None:
+    connector_url, recorded_requests = password_auth_connector_stub(
+        is_email_verified=True, is_verified_status_code=500
+    )
+
+    result = _run_password_auth(command, connector_url, temp_host_dir)
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    error_body = _error_body(result)
+    assert error_body["error_class"] == "ImbueCloudAuthError"
+    assert "500" in str(error_body["error"])
+    assert _saved_accounts(temp_host_dir) == []
+    assert recorded_requests == [
+        f"POST /auth/{command}",
+        "POST /auth/email/is-verified",
+        "POST /auth/session/revoke-current",
+    ]
+
+
+def test_signup_signs_in_an_account_that_is_already_verified(
+    password_auth_connector_stub: Callable[..., tuple[str, list[str]]],
+    temp_host_dir: Path,
+) -> None:
+    connector_url, recorded_requests = password_auth_connector_stub(is_email_verified=True)
+
+    result = _run_password_auth("signup", connector_url, temp_host_dir)
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {
+        "user_id": "user-password-auth-7306",
+        "email": str(_PASSWORD_AUTH_ACCOUNT),
+        "display_name": None,
+        "profile_picture_url": None,
+        "is_signed_in": True,
+    }
+    assert _saved_accounts(temp_host_dir) == [_PASSWORD_AUTH_ACCOUNT]
+    assert recorded_requests == ["POST /auth/signup", "POST /auth/email/is-verified"]
+
+
+def test_signup_of_an_unverified_account_succeeds_without_signing_in(
+    password_auth_connector_stub: Callable[..., tuple[str, list[str]]],
+    temp_host_dir: Path,
+) -> None:
+    connector_url, recorded_requests = password_auth_connector_stub(is_email_verified=False)
+
+    result = _run_password_auth("signup", connector_url, temp_host_dir)
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr == ""
+    payload = json.loads(result.stdout)
+    assert payload["user_id"] == "user-password-auth-7306"
+    assert payload["email"] == str(_PASSWORD_AUTH_ACCOUNT)
+    assert payload["is_signed_in"] is False
+    assert "Click the link in the verification email" in payload["message"]
+    assert f"mngr imbue_cloud auth signin --account {_PASSWORD_AUTH_ACCOUNT}" in payload["message"]
+    assert _saved_accounts(temp_host_dir) == []
+    assert recorded_requests == [
+        "POST /auth/signup",
+        "POST /auth/email/is-verified",
+        "POST /auth/session/revoke-current",
+    ]

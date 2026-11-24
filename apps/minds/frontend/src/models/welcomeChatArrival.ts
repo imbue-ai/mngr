@@ -1,6 +1,6 @@
 // Knowing when a new workspace's welcome chat, or the AI-provider chooser, is
-// really on screen, so the wash over the workspace can stay up until then.
-// Outlives the creation page, like the wash it releases: the page is gone once
+// really on screen, so the cover over the workspace offers Continue only then.
+// Outlives the creation page, like the cover it readies: the page is gone once
 // the workspace is mounted, and the answer only comes from the workspace's
 // frame after that.
 
@@ -85,22 +85,12 @@ export class WelcomeChatArrival {
     if (this.wait !== null) this.finish(this.wait, "PROVIDER_CHOOSER_ON_SCREEN");
   }
 
-  /**
-   * The workspace's page announced itself; one that does not promise the chat report will never
-   * send it. Answers whether to ask that page to show its chat root window now, so the chooser can
-   * come up before the welcome chat exists: only while waiting, only for a page that reports the
-   * chooser (and so takes that ask), and only before the seed has answered, after which the ask to
-   * show the welcome chat itself is already on its way.
-   */
-  noteWorkspaceReady(reporting: WorkspaceReporting): boolean {
+  /** The workspace's page announced itself; one that does not promise the chat report will never send it. */
+  noteWorkspaceReady(reporting: WorkspaceReporting): void {
     const wait = this.wait;
-    if (wait === null) return false;
-    const isChatRootWanted = reporting.reportsProviderChooserOnScreen && wait.chatId === null;
-    if (!reporting.reportsChatOnScreen) {
-      wait.isWorkspaceSilent = true;
-      this.finishIfAnswered(wait);
-    }
-    return isChatRootWanted;
+    if (wait === null || reporting.reportsChatOnScreen) return;
+    wait.isWorkspaceSilent = true;
+    this.finishIfAnswered(wait);
   }
 
   cancel(): void {

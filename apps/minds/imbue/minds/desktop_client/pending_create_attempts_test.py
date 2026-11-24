@@ -68,6 +68,22 @@ def test_read_record_tolerates_unknown_fields_from_newer_versions(tmp_path: Path
     assert read_back.create_attempt_id == create_attempt_id
 
 
+def test_read_record_loads_a_record_written_while_the_request_carried_the_onboarding_examples_flag(
+    tmp_path: Path,
+) -> None:
+    """A create interrupted under an older build left its record behind; its retry reads the same request."""
+    store = PendingCreateAttemptStore(records_dir=tmp_path / "pending")
+    create_attempt_id = f"create-attempt-{uuid4().hex}"
+    record = _make_record(create_attempt_id)
+    store.write_record(record)
+    path = tmp_path / "pending" / f"{create_attempt_id}.json"
+    raw = json.loads(path.read_text())
+    raw["request"]["is_onboarding_driven_by_agent"] = True
+    path.write_text(json.dumps(raw))
+
+    assert store.read_record(create_attempt_id) == record
+
+
 def test_list_records_skips_malformed_files(tmp_path: Path) -> None:
     store = PendingCreateAttemptStore(records_dir=tmp_path / "pending")
     create_attempt_id = f"create-attempt-{uuid4().hex}"

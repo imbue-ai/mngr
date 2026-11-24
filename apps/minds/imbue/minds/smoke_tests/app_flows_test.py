@@ -1,5 +1,6 @@
 import pytest
 
+from imbue.minds.smoke_tests.app_flows import is_sharing_enabled
 from imbue.minds.smoke_tests.app_flows import is_workspace_gone
 from imbue.minds.smoke_tests.app_flows import share_url_for_service
 
@@ -28,6 +29,14 @@ def test_a_service_s_share_link_is_its_label_on_the_share_s_domain() -> None:
 )
 def test_a_share_without_a_url_or_without_the_service_s_label_has_no_link_yet(status: dict[str, object]) -> None:
     assert share_url_for_service(status, "hello") is None
+
+
+def test_sharing_reads_as_enabled_only_once_the_status_says_so_and_names_the_share_s_host() -> None:
+    assert is_sharing_enabled(_SHARING_STATUS) is True
+    assert is_sharing_enabled({**_SHARING_STATUS, "enabled": False}) is False
+    assert is_sharing_enabled({**_SHARING_STATUS, "host_id": None}) is False
+    assert is_sharing_enabled({"enabled": "true", "host_id": "host-0123456789abcdef"}) is False
+    assert is_sharing_enabled({}) is False
 
 
 def test_a_workspace_is_gone_when_unlisted_or_listed_without_a_live_host() -> None:

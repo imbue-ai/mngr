@@ -2,8 +2,10 @@
 
 The flow encoded here is the same one the apps/minds Electron e2e test
 asserts on: launch the Electron app, drive its create form via Playwright
-over CDP, and wait until the workspace's ``system_interface`` desktop
-renders through the desktop client's subdomain proxy.
+over CDP, go through the first run the new workspace opens on (the cover's
+Continue, then the workspace's provider page), and wait until the workspace's
+``system_interface`` desktop renders through the desktop client's subdomain
+proxy.
 
 Everything in this module is non-pytest -- callers pass plain arguments
 and own the environment / cleanup story themselves.
@@ -31,6 +33,7 @@ from typing import Any
 from typing import Final
 from typing import IO
 from typing import Literal
+from typing import assert_never
 from urllib.parse import urlsplit
 
 import httpx2
@@ -125,6 +128,21 @@ DEV_CHECKOUT_LAUNCH_TARGET: Final[ElectronLaunchTarget] = ElectronLaunchTarget(
     executable=_ELECTRON_BINARY, main_js=_ELECTRON_MAIN_JS, extra_arguments=()
 )
 
+
+class LeaveFirstRunProviderPageSignedOut(FrozenModel):
+    """Leave the first run's provider page without signing in: its Skip, or its Next where the workspace already
+    holds an account."""
+
+
+class SignInOnFirstRunProviderPage(FrozenModel):
+    """Sign in on the first run's provider page from its Anthropic tile, with an API key, then press its Next."""
+
+    api_key: SecretStr = Field(description="The Anthropic API key typed into the chooser the tile opens.")
+
+
+# How a caller that creates a workspace leaves the provider page the new workspace's first run ends on.
+FirstRunProviderChoice = LeaveFirstRunProviderPageSignedOut | SignInOnFirstRunProviderPage
+
 # Per-phase wall-clock budgets. Tight enough to fail with a useful
 # "stuck in <phase>" error before a wrapping suite-level timeout fires.
 _CDP_READY_TIMEOUT_SECONDS: Final[int] = 120
@@ -162,12 +180,10 @@ _CREATE_OUTCOME_POLL_INTERVAL_MS: Final[int] = 500
 # (docs/system/blueprint/desktop-interface/contracts.md section 12 in default-workspace-template).
 DESKTOP_BACKDROP_SELECTOR: Final[str] = "[data-desktop-id]"
 
-# The creating page's welcome-chat hand-over, whose statuses ``_handle_seed_welcome_chat`` documents
-# (``ui_api_create.py``).
-_WELCOME_CHAT_HAND_OVER_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"/ui/api/create/attempts/[^/]+/welcome-chat$"
-)
-_WELCOME_CHAT_HELD_STATUS: Final[int] = 202
+# The creating page's request for the welcome chat's seed, whose statuses ``_handle_seed_welcome_chat``
+# documents (``ui_api_create.py``).
+_WELCOME_CHAT_SEED_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(r"/ui/api/create/attempts/[^/]+/welcome-chat$")
+_WELCOME_CHAT_OWED_STATUS: Final[int] = 202
 _WELCOME_CHAT_SEEDED_STATUS: Final[int] = 200
 # Past the desktop client's own bound on the seed, so a slow seed ends in its verdict rather than this wait's.
 _WELCOME_CHAT_SEED_TIMEOUT_SECONDS: Final[float] = SEED_TIMEOUT_SECONDS + 30.0
@@ -670,8 +686,8 @@ def _ensure_field_value(page: Page, selector: str, expected_value: str) -> None:
 
 
 # The failure view a failed create draws, and the ids named from it: its See
-# details toggle and the panel that toggle opens (CreatingPage.ts failureTurn,
-# which names them the way every error names its details).
+# details toggle and the panel that toggle opens (CreateFailure.ts, which
+# names them the way every error names its details).
 _FAILURE_VIEW_ID: Final[str] = "failure-view"
 _FAILURE_DETAILS_ID: Final[str] = f"{_FAILURE_VIEW_ID}-details"
 
@@ -786,20 +802,20 @@ def _find_workspace_frame(browser: Browser) -> Frame | None:
 def _is_welcome_chat_seed_answer(response: Response) -> bool:
     return (
         response.request.method == "POST"
-        and _WELCOME_CHAT_HAND_OVER_PATH_PATTERN.search(urlsplit(response.url).path) is not None
-        and response.status != _WELCOME_CHAT_HELD_STATUS
+        and _WELCOME_CHAT_SEED_PATH_PATTERN.search(urlsplit(response.url).path) is not None
+        and response.status != _WELCOME_CHAT_OWED_STATUS
     )
 
 
 def _wait_for_welcome_chat_seed(page: Page, responses_so_far: Sequence[Response], timeout_seconds: float) -> None:
     """Block until the desktop client answers the new workspace's welcome-chat seed; raise if it failed.
 
-    The workspace is entered while its welcome chat is still being seeded, so the workspace being on
-    screen says nothing about the seed. A caller that tears the app down at that point kills the
-    seed's ``mngr`` call and leaves a half-seeded chat in the workspace.
+    The creation page enters the workspace once the seed has answered, whichever way it answered, so
+    the workspace being on screen does not say the seed landed: a seed that failed leaves a workspace
+    with no first run to go through.
 
     ``responses_so_far`` are the responses ``page`` received from the create form's submission on: the
-    seed can be answered before the desktop renders.
+    seed is answered before the workspace is entered.
     """
     answer: Response | None = next(
         (response for response in responses_so_far if _is_welcome_chat_seed_answer(response)), None
@@ -851,12 +867,16 @@ def drive_create_flow(
     workspace_name: str,
     launch_mode: str = "DOCKER",
     region: str | None = None,
+    *,
+    first_run_provider_choice: FirstRunProviderChoice,
 ) -> Frame:
-    """Drive the create form to a ready workspace whose welcome chat is seeded; return the workspace frame.
+    """Drive the create form to a ready workspace, seeded and past its first run; return the workspace frame.
 
     ``page`` is the chrome page the form is driven on; the ready workspace
     opens inside that page's sandboxed content iframe, whose frame this
-    returns (see ``wait_for_workspace_ready_or_failure``).
+    returns (see ``wait_for_workspace_ready_or_failure``). The workspace opens
+    under the first run every create ends on, which this goes through the way
+    ``first_run_provider_choice`` says (see ``complete_first_run``).
 
     Runs exactly once per successful Electron attach; any failure here is a real
     test failure (not a wedged-launch flake) and propagates to fail the test.
@@ -867,7 +887,7 @@ def drive_create_flow(
     and ignored (the row is hidden) for others.
 
     There is no AI-provider or API-key field: workspaces boot unauthenticated
-    and sign in through the workspace's own provider chooser afterwards.
+    and sign in on the provider page their first run ends on.
     """
     backend_origin = backend_origin_from_page(page)
     logger.info("Backend origin: {}", backend_origin)
@@ -921,16 +941,10 @@ def drive_create_flow(
         # navigation budget. The ready workspace opens inside the chrome page's
         # content iframe once the page routes onto /workspace/<id>.
         workspace_page = wait_for_workspace_ready_or_failure(browser, page, _CREATE_FORM_TIMEOUT_SECONDS)
-        logger.info("Machine ready at {}", workspace_page.url)
-
-        workspace_page.wait_for_selector(
-            DESKTOP_BACKDROP_SELECTOR,
-            state="visible",
-            timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000,
-        )
-        logger.info("system_interface desktop rendered; waiting for the welcome chat's seed")
+        logger.info("Machine ready at {}; waiting for the welcome chat's seed", workspace_page.url)
         _wait_for_welcome_chat_seed(page, response_log.responses, _WELCOME_CHAT_SEED_TIMEOUT_SECONDS)
-    logger.info("Welcome chat seeded; machine create attempt complete")
+    complete_first_run(page, workspace_page, first_run_provider_choice, label="create")
+    logger.info("Welcome chat seeded and first run completed; machine create attempt complete")
     return workspace_page
 
 
@@ -963,6 +977,8 @@ def _attempt_create_workspace_via_electron(
     launch_mode: str = "DOCKER",
     region: str | None = None,
     on_workspace_ready: Callable[[Frame], None] | None = None,
+    *,
+    first_run_provider_choice: FirstRunProviderChoice,
 ) -> None:
     """One Electron launch + CDP attach + create-flow drive.
 
@@ -971,10 +987,10 @@ def _attempt_create_workspace_via_electron(
     create flow itself propagate unchanged so real test failures are not retried.
 
     ``on_workspace_ready``, if given, is called with the workspace (content-iframe)
-    page once the workspace's ``system_interface`` has rendered and its welcome
-    chat is seeded, while the browser is still connected (e.g. to send a chat
-    message). Its exceptions propagate unchanged -- they are real failures, not
-    launch flakes, so they are not retried.
+    page once its welcome chat is seeded, its first run is behind it and its
+    ``system_interface`` has rendered, while the browser is still connected
+    (e.g. to send a chat message). Its exceptions propagate unchanged -- they
+    are real failures, not launch flakes, so they are not retried.
     """
     with _launched_electron(default_workspace_template_path, debug_port, host_config_dir):
         with sync_playwright() as playwright:
@@ -997,6 +1013,7 @@ def _attempt_create_workspace_via_electron(
                     workspace_name,
                     launch_mode=launch_mode,
                     region=region,
+                    first_run_provider_choice=first_run_provider_choice,
                 )
                 if on_workspace_ready is not None:
                     on_workspace_ready(workspace_page)
@@ -1076,6 +1093,8 @@ def create_workspace_via_electron(
     launch_mode: str = "DOCKER",
     region: str | None = None,
     on_workspace_ready: Callable[[Frame], None] | None = None,
+    *,
+    first_run_provider_choice: FirstRunProviderChoice,
 ) -> None:
     """Drive Electron to create a workspace from ``default_workspace_template_path``.
 
@@ -1084,13 +1103,17 @@ def create_workspace_via_electron(
     modes (aws/vultr/imbue_cloud); it is required by the form for those modes
     and ignored (the row is hidden) for others.
 
+    ``first_run_provider_choice`` is how the first run the new workspace opens
+    on is left: without signing in, or signed in from the provider page (see
+    ``complete_first_run``).
+
     ``on_workspace_ready`` is called with the workspace (content-view) page once
-    the workspace has rendered and its welcome chat is seeded, before teardown --
+    the workspace is seeded, past its first run and rendered, before teardown --
     e.g. to send a chat message and await the reply on the same Electron session.
 
-    Returns once the workspace's ``system_interface`` desktop has
-    rendered through the desktop client proxy and its welcome chat is seeded,
-    so the caller may close the app at once. Does NOT clean up the
+    Returns once the workspace's welcome chat is seeded, its first run is
+    behind it and its ``system_interface`` desktop has rendered through the
+    desktop client proxy, so the caller may close the app at once. Does NOT clean up the
     resulting mngr agent or its Docker container -- the caller decides
     whether to destroy or to capture the state.
 
@@ -1123,6 +1146,7 @@ def create_workspace_via_electron(
                 launch_mode=launch_mode,
                 region=region,
                 on_workspace_ready=on_workspace_ready,
+                first_run_provider_choice=first_run_provider_choice,
             )
             return
         except _ElectronConnectError as exc:
@@ -1172,11 +1196,9 @@ _LAUNCHER_ROW_TIMEOUT_SECONDS: Final[int] = 60
 # label prefix -- the trailing hyphen keeps it from matching an unrelated
 # service whose name merely starts with "terminal".
 TERMINAL_IFRAME_SELECTOR: Final[str] = 'iframe[src^="https://terminal-"], iframe[src^="http://terminal-"]'
-# The welcome chat's composer is on its page before any agent exists, but the workspace is
-# entered before that chat is seeded and the chat app frames it only once it is (as late as the
-# seed's own timeout), the shell frames it only once its app list has arrived, and a chat minted
-# from a row is created asynchronously (a sign-in through its provider chooser launches it), so a
-# chat input can take a while to appear on a fresh first boot.
+# The welcome chat's composer is on its page before any agent exists, but the shell frames that
+# page only once its app list has arrived, and a chat minted from a row is created asynchronously,
+# so a chat input can take a while to appear on a fresh first boot.
 _CHAT_INPUT_TIMEOUT_SECONDS: Final[int] = 240
 _CHAT_REPLY_TIMEOUT_SECONDS: Final[int] = 240
 
@@ -1277,9 +1299,9 @@ def _chat_frame_other_than(workspace: Page | Frame, known_chat_ids: frozenset[st
 def chat_frame(workspace: Page | Frame, timeout_seconds: float) -> Frame:
     """The first chat page's frame inside the workspace, once the workspace has opened one.
 
-    A fresh workspace shows the welcome chat the creation page seeds once it is
-    seeded, so that is the frame this returns -- and it returns before the
-    composer renders, which is what a caller that has to sign the chat in first needs.
+    A fresh workspace shows the welcome chat the creation page seeds, so that is
+    the frame this returns -- and it returns before the composer renders, which
+    a workspace with no provider account never shows.
 
     Raises WorkspaceFlowError when no chat frame appears within ``timeout_seconds``.
     """
@@ -1302,30 +1324,6 @@ def send_to_main_chat_from_launcher(workspace: Page | Frame, text: str) -> None:
     logger.info("Sent a text to the main chat from the launcher")
 
 
-# The welcome chat's window in the desktop shell: the chat app's pinned window, the one
-# its auto-open restores. Every other window a fresh workspace opens is unpinned.
-_CHAT_WINDOW: Final[str] = '[data-window-id][data-pinned="true"]'
-
-
-def _raise_chat_window(workspace: Page | Frame, *, label: str) -> None:
-    """Focus the welcome chat's window so pointer clicks reach its page.
-
-    The shell shields every window but the focused one and makes the pages under the
-    shield ``pointer-events: none``, so a click aimed into an unfocused window's page is
-    intercepted by ``[data-window-shield]`` and Playwright never dispatches the press
-    that would raise it. A fresh workspace's welcome chat opens alone and focused, so
-    the chat is normally unshielded and this returns at once; the shell shields it when
-    another window is shown above it or a menu or the launcher is open, and then the
-    shell's own two-step raises it: press the shield, then act on the page.
-    """
-    shield = workspace.query_selector(f"{_CHAT_WINDOW} [data-window-shield]")
-    if shield is None:
-        return
-    logger.info("[{}] the welcome chat's window is shielded; pressing the shield to raise it", label)
-    shield.click()
-    workspace.wait_for_selector(f'{_CHAT_WINDOW}[data-focused="true"]', timeout=10_000)
-
-
 def _describe_chat_frame(chat: Frame) -> str:
     """The chat frame's URL and the start of its document's text, for a failure that found nothing in it."""
     try:
@@ -1337,97 +1335,196 @@ def _describe_chat_frame(chat: Frame) -> str:
     return f"url={chat.url} detached={chat.is_detached()} document={body!r}"
 
 
-def _click_in_chat(workspace: Page | Frame, frame: Frame, selector: str, *, label: str) -> None:
-    """Click ``selector`` in a frame of the chat window, raising the window first if a shield takes the press."""
-    try:
-        frame.click(selector, timeout=10_000)
-    except PlaywrightTimeoutError:
-        _raise_chat_window(workspace, label=label)
-        try:
-            frame.click(selector, timeout=20_000)
-        except PlaywrightTimeoutError:
-            logger.warning(
-                "[{}] could not click {} in the chat window: {}", label, selector, _describe_chat_frame(frame)
-            )
-            raise
-
-
+# The cover the Studio shell keeps over a workspace it has just created (``views/shell/FirstRunCover.ts``), in the
+# chrome page, and the Continue it offers once the workspace reports its provider page on screen, or once the
+# shell has waited long enough for that report.
+_STUDIO_COVER_SELECTOR: Final[str] = "#first-run-cover"
+_STUDIO_COVER_CONTINUE_SELECTOR: Final[str] = "#creating-continue"
+# The template's own cover over the new workspace's desktop, in the workspace's frame: a frame of the chat app's
+# provider page (``FirstRunProvidersPage.ts``), which the system interface gives the same id the Studio cover has.
+_WORKSPACE_COVER_SELECTOR: Final[str] = "iframe#first-run-cover"
+_FIRST_RUN_PROVIDERS_SELECTOR: Final[str] = "#first-run-providers"
+_FIRST_RUN_SKIP_SELECTOR: Final[str] = "#first-run-skip"
+_FIRST_RUN_NEXT_SELECTOR: Final[str] = "#first-run-next"
+_FIRST_RUN_ANTHROPIC_TILE_SELECTOR: Final[str] = '[data-first-run-lane="anthropic"]'
+# One row per account the workspace holds, under the page's "Connected" heading; the attribute's value is the
+# account's id.
+FIRST_RUN_ACCOUNT_SELECTOR_TEMPLATE: Final[str] = '[data-first-run-account="{account_id}"]'
+_FIRST_RUN_ANY_ACCOUNT_SELECTOR: Final[str] = "[data-first-run-account]"
+# The chooser a tile opens, drawn in the provider page's own frame, on the tile's lane.
 _PROVIDER_CHOOSER_SELECTOR: Final[str] = "[data-e2e=provider-chooser]"
-_PROVIDER_CHOOSER_TIMEOUT_SECONDS: Final[float] = 120.0
+_ACCOUNTS_API_PATH: Final[str] = "/api/accounts"
+# Well past the bound after which the shell offers Continue without the workspace's report
+# (``WELCOME_CHAT_WAIT_BOUND_MS`` in ``welcomeChatArrival.ts``).
+_STUDIO_COVER_CONTINUE_TIMEOUT_SECONDS: Final[float] = 120.0
+_STUDIO_COVER_DOWN_TIMEOUT_MS: Final[float] = 30_000.0
+# A Continue the shell offered because it stopped waiting lands on a workspace still booting its apps, so the
+# provider page gets the budget a fresh workspace's first chat page does.
+FIRST_RUN_PROVIDERS_TIMEOUT_SECONDS: Final[float] = 240.0
+_FIRST_RUN_CONTROL_TIMEOUT_MS: Final[float] = 60_000.0
+# The page finishes the step with the chat app, and the template takes its cover down once the Studio shell's
+# color has grown over the window.
+_FIRST_RUN_COVER_DOWN_TIMEOUT_MS: Final[float] = 60_000.0
 
 
-def _find_provider_chooser_frame(candidates: Sequence[Frame]) -> Frame | None:
-    """The first of ``candidates`` the provider chooser is drawn in, or None while it is in none."""
-    return next((frame for frame in candidates if frame.query_selector(_PROVIDER_CHOOSER_SELECTOR) is not None), None)
+def continue_from_first_run_cover(page: Page) -> None:
+    """Press Continue on the cover the app keeps over a workspace it has just created, once the cover offers it."""
+    page.wait_for_selector(
+        _STUDIO_COVER_CONTINUE_SELECTOR, state="visible", timeout=_STUDIO_COVER_CONTINUE_TIMEOUT_SECONDS * 1000
+    )
+    page.click(_STUDIO_COVER_CONTINUE_SELECTOR)
+    page.wait_for_selector(_STUDIO_COVER_SELECTOR, state="detached", timeout=_STUDIO_COVER_DOWN_TIMEOUT_MS)
+    logger.info("Pressed Continue on the cover over the new workspace")
 
 
-def _provider_chooser_frame(chat: Frame, *, label: str, timeout_seconds: float) -> Frame:
-    """The frame the provider chooser opens in, once it has opened: the chat list framing ``chat`` (the chat root,
-    which owns the chooser in the current template), or the chat's own page (where an older template opens it).
+def _find_workspace_cover_frame(workspace: Frame) -> Frame | None:
+    """The frame of the template's cover over the workspace's desktop, or None while the cover is not up.
 
-    Raises WorkspaceFlowError when neither shows the chooser within ``timeout_seconds``.
+    Resolved from the cover's own element rather than from the frame tree, which over a CDP connection can
+    lag behind a frame the page added after it was first read.
     """
-    parent = chat.parent_frame
-    candidates = [chat] if parent is None else [parent, chat]
+    try:
+        cover = workspace.query_selector(_WORKSPACE_COVER_SELECTOR)
+    except PlaywrightError as exc:
+        logger.debug("Could not read the workspace's frame at {} while it was loading: {}", workspace.url, exc)
+        return None
+    return None if cover is None else cover.content_frame()
+
+
+def _is_first_run_providers_page_drawn(cover_frame: Frame) -> bool:
+    try:
+        return cover_frame.query_selector(_FIRST_RUN_PROVIDERS_SELECTOR) is not None
+    except PlaywrightError as exc:
+        logger.debug("Could not read the cover's frame at {} while it was loading: {}", cover_frame.url, exc)
+        return False
+
+
+def _find_first_run_providers_frame(workspace: Frame) -> Frame | None:
+    """The frame of the workspace's cover once it draws the first run's provider page, or None until it does."""
+    cover_frame = _find_workspace_cover_frame(workspace)
+    if cover_frame is None or not _is_first_run_providers_page_drawn(cover_frame):
+        return None
+    return cover_frame
+
+
+def first_run_providers_frame(workspace: Frame, timeout_seconds: float) -> Frame:
+    """The frame of the provider page the template covers a new workspace's desktop with, once the page is drawn.
+
+    Raises WorkspaceFlowError when the page is not drawn within ``timeout_seconds``, saying whether the
+    template put its cover up at all.
+    """
     deadline = time.monotonic() + timeout_seconds
-    chooser = _find_provider_chooser_frame(candidates)
-    while chooser is None and time.monotonic() < deadline:
-        chat.wait_for_timeout(_CHAT_FRAME_POLL_INTERVAL_MS)
-        chooser = _find_provider_chooser_frame(candidates)
-    if chooser is None:
-        logger.warning("[{}] no provider chooser opened: {}", label, _describe_chat_frame(chat))
+    providers = _find_first_run_providers_frame(workspace)
+    while providers is None and time.monotonic() < deadline:
+        workspace.wait_for_timeout(_CHAT_FRAME_POLL_INTERVAL_MS)
+        providers = _find_first_run_providers_frame(workspace)
+    if providers is None:
+        cover_frame = _find_workspace_cover_frame(workspace)
+        cover = (
+            "no cover over its desktop"
+            if cover_frame is None
+            else f"its cover up without the page: {_describe_chat_frame(cover_frame)}"
+        )
         raise WorkspaceFlowError(
-            f"No provider chooser opened in the chat or the chat list around it within {timeout_seconds:.0f}s"
+            f"The workspace at {workspace.url} did not draw the first run's provider page within "
+            f"{timeout_seconds:.0f}s; it has {cover}"
         )
-    return chooser
+    logger.info("The first run's provider page is drawn at {}", providers.url)
+    return providers
 
 
-def sign_in_via_provider_chooser(workspace: Page | Frame, chat: Frame, *, api_key: SecretStr, label: str) -> None:
-    """Drive the provider chooser the welcome chat asks for through the Anthropic API-key path.
+def _press_first_run_exit(workspace: Frame, providers: Frame, exit_selector: str) -> None:
+    """Press the provider page's Skip or Next, and wait for the template to take its cover off the desktop."""
+    providers.click(exit_selector, timeout=_FIRST_RUN_CONTROL_TIMEOUT_MS)
+    try:
+        workspace.wait_for_selector(
+            _WORKSPACE_COVER_SELECTOR, state="detached", timeout=_FIRST_RUN_COVER_DOWN_TIMEOUT_MS
+        )
+    except PlaywrightTimeoutError as exc:
+        raise WorkspaceFlowError(
+            f"The first run's provider page stayed up after {exit_selector} was pressed: "
+            f"{_describe_chat_frame(providers)}"
+        ) from exc
+    workspace.wait_for_selector(
+        DESKTOP_BACKDROP_SELECTOR, state="visible", timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000
+    )
+    logger.info("Left the first run's provider page with {}; the desktop rendered", exit_selector)
 
-    A freshly created workspace has no provider accounts, so its welcome chat (the
-    conversation the creation page seeded) disables its composer and the chooser opens --
-    the designed first-boot step. It opens in the chat list that frames the chat (or, on an
-    older template, in the chat's own page), so this drives it wherever it is. Signing in
-    mints a provider account holding the key rather than writing a shared settings block,
-    launches the chat's agent on that account, and enables the composer; a message sent
-    before the chat app has reported the chat creating waits for the chat and goes to it.
 
-    Every control this clicks is targeted by a ``data-e2e`` attribute rather than copy or a
-    tailwind class: this drives the template's dialog from the other repo, so it has to
-    survive a wording change or a re-port of the UI.
+def press_first_run_next(workspace: Frame, providers: Frame) -> None:
+    """Press the provider page's Next, which it enables once an account is connected, and wait for the desktop."""
+    _press_first_run_exit(workspace, providers, _FIRST_RUN_NEXT_SELECTOR)
+
+
+def _is_account_connected(providers: Frame) -> bool:
+    """Whether the workspace holds a provider account, as the chat app's own listing says."""
+    answer = request_chat_api(providers, HTTPMethod.GET, _ACCOUNTS_API_PATH, None)
+    if answer.status != HTTPStatus.OK:
+        raise WorkspaceFlowError(
+            f"The chat app's accounts answered {answer.status}: {answer.body[:_CHAT_API_ANSWER_EXCERPT_LENGTH]!r}"
+        )
+    return len(answer.json_body()["accounts"]) > 0
+
+
+def _leave_first_run_providers_page_signed_out(workspace: Frame, providers: Frame) -> None:
+    """Leave the provider page as it stands: the page offers Skip with nothing connected, and only Next once
+    something is (a workspace whose credentials were synced into it)."""
+    exit_selector = _FIRST_RUN_NEXT_SELECTOR if _is_account_connected(providers) else _FIRST_RUN_SKIP_SELECTOR
+    _press_first_run_exit(workspace, providers, exit_selector)
+
+
+def _sign_in_from_first_run_tile(providers: Frame, api_key: SecretStr, *, label: str) -> None:
+    """Sign in from the provider page's Anthropic tile, through the API-key path of the chooser it opens.
+
+    The tile opens the provider chooser on Anthropic's own sign-in, in the page's frame. The sign-in mints a
+    provider account holding the key, which the page then lists under "Connected".
+
+    Every control this clicks in the chooser is targeted by a ``data-e2e`` attribute rather than copy or a
+    tailwind class: this drives the template's dialog from the other repo, so it has to survive a wording
+    change or a re-port of the UI.
     """
-    logger.info("[{}] waiting for the provider chooser to appear around the welcome chat", label)
-    chooser = _provider_chooser_frame(chat, label=label, timeout_seconds=_PROVIDER_CHOOSER_TIMEOUT_SECONDS)
-    _raise_chat_window(workspace, label=label)
-    # Try again shows only once the chooser has stopped asking for its provider list by itself;
-    # press it the way a user would.
-    chooser.wait_for_selector("[data-e2e=lane-anthropic], [data-e2e=retry-providers]", timeout=60_000)
-    if chooser.query_selector("[data-e2e=lane-anthropic]") is None:
-        logger.warning(
-            "[{}] the chooser could not load its providers; pressing Try again: {!r}",
-            label,
-            chooser.inner_text(_PROVIDER_CHOOSER_SELECTOR),
-        )
-        _click_in_chat(workspace, chooser, "[data-e2e=retry-providers]", label=label)
-    # Anthropic's lane, then its API-key method under "Other ways to sign in" --
-    # the lane's primary method is the browser sign-in, which needs a human. When the
-    # desktop app relays that sign-in, the chooser waits on the browser, and the other
-    # ways in are behind "Try another way".
-    _click_in_chat(workspace, chooser, "[data-e2e=lane-anthropic]", label=label)
-    chooser.wait_for_selector("[data-e2e=method-api_key], [data-e2e=sign-in-another-way]", timeout=30_000)
-    if chooser.query_selector("[data-e2e=method-api_key]") is None:
-        _click_in_chat(workspace, chooser, "[data-e2e=sign-in-another-way]", label=label)
-        chooser.wait_for_selector("[data-e2e=method-api_key]", timeout=30_000)
-    _click_in_chat(workspace, chooser, "[data-e2e=method-api_key]", label=label)
-    chooser.wait_for_selector("[data-e2e=api-key-input]", timeout=30_000)
-    chooser.fill("[data-e2e=api-key-input]", api_key.get_secret_value())
+    providers.click(_FIRST_RUN_ANTHROPIC_TILE_SELECTOR, timeout=_FIRST_RUN_CONTROL_TIMEOUT_MS)
+    # The lane's primary method is the browser sign-in, which needs a human, so its API-key method is under
+    # "Other ways to sign in". When the desktop app relays the browser sign-in, the chooser waits on the
+    # browser, and the other ways in are behind "Try another way".
+    providers.wait_for_selector("[data-e2e=method-api_key], [data-e2e=sign-in-another-way]", timeout=60_000)
+    if providers.query_selector("[data-e2e=method-api_key]") is None:
+        providers.click("[data-e2e=sign-in-another-way]")
+        providers.wait_for_selector("[data-e2e=method-api_key]", timeout=30_000)
+    providers.click("[data-e2e=method-api_key]")
+    providers.wait_for_selector("[data-e2e=api-key-input]", timeout=30_000)
+    providers.fill("[data-e2e=api-key-input]", api_key.get_secret_value())
     logger.info("[{}] submitting the API key through the chooser", label)
-    _click_in_chat(workspace, chooser, "[data-e2e=save-key]", label=label)
+    providers.click("[data-e2e=save-key]")
     # An accepted key closes the chooser by itself, which ends the sign-in. The success screen it
     # can show on the way out is not a step: its Done may be gone before a click lands.
-    chooser.wait_for_selector(_PROVIDER_CHOOSER_SELECTOR, state="detached", timeout=300_000)
-    logger.info("[{}] signed in via the chooser", label)
+    providers.wait_for_selector(_PROVIDER_CHOOSER_SELECTOR, state="detached", timeout=300_000)
+    providers.wait_for_selector(
+        _FIRST_RUN_ANY_ACCOUNT_SELECTOR, state="visible", timeout=_FIRST_RUN_CONTROL_TIMEOUT_MS
+    )
+    logger.info("[{}] signed in from the provider page's Anthropic tile", label)
+
+
+def complete_first_run(page: Page, workspace: Frame, provider_choice: FirstRunProviderChoice, *, label: str) -> None:
+    """Go through the first run a just-created workspace opens on; return once its desktop has rendered.
+
+    Every create that goes through the creation page loads its workspace under the app's cover, which offers
+    Continue; the workspace under it is itself covered by its provider page until its owner presses Skip, or
+    connects a provider and presses Next. ``page`` is the chrome page the cover is on, and ``workspace`` the
+    frame ``wait_for_workspace_ready_or_failure`` returned. Signing in here starts the main chat's agent as
+    the page is left, so the chat the desktop opens on can be messaged at once.
+    """
+    continue_from_first_run_cover(page)
+    providers = first_run_providers_frame(workspace, FIRST_RUN_PROVIDERS_TIMEOUT_SECONDS)
+    match provider_choice:
+        case LeaveFirstRunProviderPageSignedOut():
+            _leave_first_run_providers_page_signed_out(workspace, providers)
+        case SignInOnFirstRunProviderPage():
+            _sign_in_from_first_run_tile(providers, provider_choice.api_key, label=label)
+            press_first_run_next(workspace, providers)
+        case _ as unreachable:
+            assert_never(unreachable)
+    logger.info("[{}] the workspace's first run is complete", label)
 
 
 def wait_for_chat_input(page: Page | Frame) -> Frame:

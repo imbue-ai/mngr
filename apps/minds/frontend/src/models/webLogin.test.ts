@@ -351,12 +351,12 @@ describe("WebLoginModel a failed sign-in", () => {
 });
 
 describe("WebLoginModel's landed account", () => {
-  it("keeps the user id and email the poll reports, and clears them for the next flow", async () => {
+  it("keeps the user id, email and workspace count the poll reports, and clears them for the next flow", async () => {
     vi.useFakeTimers();
     try {
       const bodies = [
-        { state: "waiting" },
-        { state: "done", user_id: "user-9", email: "nine@example.com" },
+        { state: "waiting", active_workspace_count: null },
+        { state: "done", user_id: "user-9", email: "nine@example.com", active_workspace_count: 3 },
         { state: "waiting" },
       ];
       const model = new WebLoginModel(
@@ -369,13 +369,18 @@ describe("WebLoginModel's landed account", () => {
       );
       await model.start();
       await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
-      expect([model.state, model.userId, model.email]).toEqual(["waiting", "", ""]);
+      expect([model.state, model.userId, model.email, model.activeWorkspaceCount]).toEqual(["waiting", "", "", null]);
       await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
-      expect([model.state, model.userId, model.email]).toEqual(["done", "user-9", "nine@example.com"]);
+      expect([model.state, model.userId, model.email, model.activeWorkspaceCount]).toEqual([
+        "done",
+        "user-9",
+        "nine@example.com",
+        3,
+      ]);
 
       model.dismiss();
       await model.start();
-      expect([model.userId, model.email]).toEqual(["", ""]);
+      expect([model.userId, model.email, model.activeWorkspaceCount]).toEqual(["", "", null]);
     } finally {
       vi.useRealTimers();
     }

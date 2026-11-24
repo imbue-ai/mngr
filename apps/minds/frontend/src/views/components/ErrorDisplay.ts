@@ -4,8 +4,8 @@
 // bug", which opens the help page's report form with the details attached.
 //
 // The pieces are exported on their own for surfaces that draw an error in
-// their own shape (a transcript turn, a card's meta line) but still owe the
-// details and the report button.
+// their own shape (the creation page's failure, a card's meta line) but still
+// owe the details and the report button.
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";

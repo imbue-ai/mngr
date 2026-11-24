@@ -1,7 +1,7 @@
-// The wash: the workspace's accent color growing out of the creation page's
-// loading box until it covers the window, the screen changing underneath, and
-// the color lifting off the finished workspace. Owned by neither page -- it
-// outlives the route change -- so the shell renders it from this one model.
+// The wash: the workspace's accent color growing from an origin until it
+// covers the window, the screen changing underneath, and the color lifting
+// off what took its place. Owned by no page, so the shell renders it from
+// this one model.
 
 import m from "mithril";
 

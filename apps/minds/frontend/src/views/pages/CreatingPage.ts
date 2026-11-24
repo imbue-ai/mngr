@@ -1,99 +1,50 @@
-// The creation page (/creating/<create_attempt_id>): a create attempt's
-// progress, told as the tail of a conversation. The manifesto exchange opens
-// it (already on the page, since every workspace's conversation starts there),
-// then a user turn restates the settings the attempt was submitted with, the
-// agent says it is setting the workspace up, and a loading box tracks the real
-// attempt (status polling + the op-log SSE). Reached from the start flow in
-// the same session, the flow's transcript renders between the two.
+// The creation page (/creating/<create_attempt_id>), the one page every create attempt shows
+// (specs/onboarding-tweaks, section 2): a heading, and under it the build's progress, or what went wrong and the
+// ways forward.
 //
-// An onboarding attempt (the start flow's creates, or the form's "Show
-// onboarding examples?") shows a recording of apps built in Studio, under a
-// line introducing it, between the setup line and the loading box.
+// Everything it draws comes from the attempt's detail, so the page is the same whoever submitted the create and
+// after any reload: a live attempt tracks the real create (status polling + the op-log SSE), a failed one offers
+// Retry, Run on this computer and Dismiss, and one the app closed on offers Retry and Discard. Retry reopens the
+// create form as a modal prefilled from the attempt's record.
 //
-// A first-run create (the sign-in page's, models/firstRun.ts) shows the welcome
-// instead (specs/ftue-onboarding-v2): "Welcome, <name>!" and the build's
-// progress under it; when the workspace is ready the user presses Continue.
-//
-// The whole conversation is handed over as the new workspace's first chat
-// (models/welcomeChat.ts) as soon as the page knows the attempt's settings, so
-// it is seeded even if the page is left before the workspace is ready. When
-// the attempt is ready the agent says so as the wash comes up: the workspace
-// mounts behind it, and it lifts once the workspace reports the welcome chat or
-// the provider chooser on screen (models/welcomeChatArrival.ts). A failure or
-// an interrupted record becomes an agent turn with Retry and Dismiss / Discard,
-// the retry reopening the create form as a modal prefilled from the attempt's
-// record.
+// The page asks the desktop client to seed the new workspace's first chat as soon as it knows the attempt is
+// live, so the workspace is seeded even if the page is left before it is ready. When the attempt is done the
+// workspace loads under the shell's cover (models/firstRunCover.ts), which carries this page's heading on and
+// offers Continue once the workspace has its provider page, or its chat, on screen.
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
 import type {
   CreateAttemptDetail,
   CreateAttemptFailure,
+  CreateAttemptOwner,
   CreateAttemptRequestSummary,
 } from "../../models/create";
 import { CreateAttemptWatcher, fetchCreateAttemptDetail } from "../../models/create";
-import { ProgressDisplay } from "../../models/progress";
-import type { FailureCopy, ShowcaseApp } from "../../models/creationTranscript";
-import {
-  READY_LINE,
-  SETUP_LINE,
-  SHOWCASE_APP,
-  SHOWCASE_INTRO_LINE,
-  SUMMARY_HEADING,
-  failureCopy,
-  interruptedLine,
-  summarySettingLines,
-} from "../../models/creationTranscript";
+import type { FailureCopy } from "../../models/createFailureCopy";
+import { failureCopy, interruptedLine } from "../../models/createFailureCopy";
 import type { ErrorAction, UserFacingError } from "../../models/errors";
 import { errorFromResponse, fallbackErrorSentence } from "../../models/errors";
-import { firstRun } from "../../models/firstRun";
+import { SETTING_UP_LINE, SETTING_UP_LONG_LINE, creationHeading, firstNameOf } from "../../models/firstRun";
 import { firstRunCover } from "../../models/firstRunCover";
-import {
-  FLOW_THINK_MS,
-  MANIFESTO_HEADING,
-  MANIFESTO_OPENER,
-  MANIFESTO_OPENER_EMPHASIS,
-  MANIFESTO_POINTS,
-  MANIFESTO_QUESTION,
-  REPORTING_ASK,
-  REPORTING_MORE_DETAIL,
-  REPORTING_MORE_LABEL,
-} from "../../models/manifesto";
-import { isReducedMotion, wash } from "../../models/wash";
-import {
-  firstRunWelcomeChatBody,
-  postWelcomeChat,
-  postWelcomeChatLanding,
-  welcomeChatBody,
-} from "../../models/welcomeChat";
+import { ProgressDisplay } from "../../models/progress";
+import { postWelcomeChat, postWelcomeChatLanding } from "../../models/welcomeChat";
 import { welcomeChatArrival } from "../../models/welcomeChatArrival";
 import { defaultFetchJson } from "../../models/workspaceOptions";
-import { Button } from "../components/Button";
 import { updateAppActions } from "../components/ErrorDisplay";
-import type { ErrorTone } from "../components/errorDesign";
-import { ChatError } from "./start/ChatError";
-import { ImageLightbox } from "../components/ImageLightbox";
-import { PageContainer } from "../components/Layout";
 import { Spinner } from "../components/Spinner";
 import { createFormModal } from "./CreatePage";
+import { CreateFailure } from "./create/CreateFailure";
 import { firstRunWelcome, settingUpStatus } from "./create/FirstRunWelcome";
-import { SETTING_UP_LINE, SETTING_UP_LONG_LINE } from "./StartPage";
-import { TRANSCRIPT_COLUMN_CLASS, agentTurn, disclosureList, scrollAnchor, userTurn } from "./start/transcript";
 
 /** How often a running discard is checked on. */
 const DISCARD_POLL_MS = 1000;
 /** The most create-log lines a failure's details carry. */
 const FAILURE_LOG_MAX_LINES = 1000;
-/** The mithril key a failed create's turn is drawn under. */
-const FAILURE_EXTRAS_KEY = "creation-failure";
-/** The space over the ready heading: twice a turn's, so it reads as the conversation's close. */
-const READY_MARGIN_CLASS = "mt-20";
-/** The one bold line of the loading box, over its bar. */
-const SETUP_BOX_HEADING = "Setting up your workspace";
-/** The toggle under the settings turn that opens the settings themselves. */
-const SUMMARY_DETAILS_LABEL = "Details";
 /** How far from the log's end the reader may be and still count as reading its end. */
 const LOG_PIN_SLACK_PX = 4;
+/** The column a failure or a notice is read in, under the heading. */
+const NOTICE_COLUMN_CLASS = "mt-[60px] w-full max-w-[720px] text-primary";
 
 interface CreatingState {
   createAttemptId: string;
@@ -101,10 +52,8 @@ interface CreatingState {
   watcher: CreateAttemptWatcher | null;
   isDone: boolean;
   isFailed: boolean;
-  redirectUrl: string;
   /** Why a live attempt failed, once it has. */
   failure: CreateAttemptFailure | null;
-  stageText: string;
   /** The bar, fed by the status polls and extrapolated between them. */
   progress: ProgressDisplay;
   logLines: string[];
@@ -113,13 +62,6 @@ interface CreatingState {
   isLogPinnedToEnd: boolean;
   /** How many lines the log was last pinned at, so a redraw with no new line moves nothing. */
   pinnedLogLineCount: number;
-  /** Whether the settings turn's lines are open under its heading. */
-  isSummaryDetailsOpen: boolean;
-  /** The manifesto points the reader has opened. */
-  openManifestoIds: Set<string>;
-  isReportingMoreOpen: boolean;
-  /** Settles when the wash over the new workspace may lift. */
-  coverUntil: Promise<void>;
   isActionPending: boolean;
   isRetryFormOpen: boolean;
   /** The retry form runs the attempt on this computer ("Run on this computer"). */
@@ -129,15 +71,9 @@ interface CreatingState {
   /** A discard of what an interrupted attempt left: running, or why it failed. */
   discard: { phase: "removing" } | { phase: "failed"; error: UserFacingError } | null;
   discardTimer: ReturnType<typeof setTimeout> | null;
-  /** Set once the page is left or a later attempt takes it over, so a discard's pending answer is dropped. */
+  /** Set once the page is left or a later attempt takes it over, so a pending answer is dropped. */
   isStopped: boolean;
-  /** Whether the showcase recording is open enlarged over the page. */
-  isShowcaseLightboxOpen: boolean;
   progressTimer: ReturnType<typeof setInterval> | null;
-  /** Whether this window's sign-in page sent the create: the page shows the welcome instead of the transcript. */
-  isFirstRun: boolean;
-  /** Set once the first-run entry began: the workspace loads under the shell's cover from then on. */
-  isFirstRunEntryStarted: boolean;
 }
 
 /** The workspace id in a /goto/<workspace-id>/ URL; the shell resolves either coordinate. */
@@ -154,32 +90,6 @@ export function enterWorkspaceFromRedirect(redirectUrl: string): void {
   }
 }
 
-/**
- * A failure in the creation chat: the sentence as an agent turn, its raw text
- * behind See details, and the ways forward as the user's answer row.
- *
- * It carries the ids the Electron e2e workspace runner
- * (desktop_client/e2e_workspace_runner.py) polls to fail a create fast:
- * `#failure-view`, around its sentence `#error-message`, and -- named from
- * `#failure-view` as every error's details are -- the `#failure-view-details`
- * toggle and the `#failure-view-details-panel` holding the raw cause.
- */
-export function failureTurn(
-  error: UserFacingError,
-  actions: ErrorAction[] = [],
-  options: { tone?: ErrorTone; isBugReportOffered?: boolean } = {},
-): m.Children {
-  return m(ChatError, {
-    key: FAILURE_EXTRAS_KEY,
-    id: "failure-view",
-    textId: "error-message",
-    error,
-    actions,
-    tone: options.tone,
-    isBugReportOffered: options.isBugReportOffered,
-  });
-}
-
 /** Everything under a failed create: the raw error, then the end of its create log. */
 function failureDetails(error: string, logLines: readonly string[]): string {
   const log = logLines.slice(-FAILURE_LOG_MAX_LINES).join("\n");
@@ -193,18 +103,12 @@ function freshState(createAttemptId: string): CreatingState {
     watcher: null,
     isDone: false,
     isFailed: false,
-    redirectUrl: "",
     failure: null,
-    stageText: "",
     progress: new ProgressDisplay(),
     logLines: [],
     isLogOpen: false,
     isLogPinnedToEnd: true,
     pinnedLogLineCount: 0,
-    isSummaryDetailsOpen: false,
-    openManifestoIds: new Set<string>(),
-    isReportingMoreOpen: false,
-    coverUntil: Promise.resolve(),
     isActionPending: false,
     isRetryFormOpen: false,
     isRetryRunHere: false,
@@ -212,15 +116,30 @@ function freshState(createAttemptId: string): CreatingState {
     discard: null,
     discardTimer: null,
     isStopped: false,
-    isShowcaseLightboxOpen: false,
     progressTimer: null,
-    isFirstRun: firstRun.isFirstRunCreate(createAttemptId),
-    isFirstRunEntryStarted: false,
   };
 }
 
 function attemptIdOf(vnode: m.Vnode): string {
   return (vnode.attrs as { agentId?: string }).agentId ?? "";
+}
+
+/** The attempt's owner facts and its workspace's name, from whichever form of the detail carries them. */
+function attemptFacts(detail: CreateAttemptDetail): { owner: CreateAttemptOwner; workspaceName: string } {
+  const source = detail.kind === "record" ? detail.record : detail.live;
+  return {
+    owner: { is_first_workspace: source?.is_first_workspace ?? false, account_id: source?.account_id ?? "" },
+    workspaceName: source?.workspace_name ?? "",
+  };
+}
+
+/** The page's heading: the welcome, by the owner's first name, for a first workspace; else the workspace's name. */
+export function headingFor(detail: CreateAttemptDetail): string {
+  const { owner, workspaceName } = attemptFacts(detail);
+  const entry = getAppContext().stores.accounts.accounts.find((account) => account.user_id === owner.account_id);
+  const firstName =
+    entry === undefined ? "" : firstNameOf({ displayName: entry.display_name ?? "", email: entry.email });
+  return creationHeading(owner.is_first_workspace, firstName, workspaceName);
 }
 
 export const CreatingPage: m.ClosureComponent = () => {
@@ -229,113 +148,63 @@ export const CreatingPage: m.ClosureComponent = () => {
   // reads the variable rather than a captured object.
   let state: CreatingState = freshState("");
 
-  // Where the wash grows from: the loading box's accent blob, measured at the
-  // moment the wash starts (the transcript scrolls as it grows, so an earlier
-  // measurement would name where the box was).
-  function washOrigin(): { x: number; y: number } {
-    const blob = document.getElementById("creating-continue") ?? document.getElementById("creating-blob");
-    if (blob === null) return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
-    const rect = blob.getBoundingClientRect();
-    return {
-      x: Math.min(Math.max(rect.left + rect.width / 2, 0), window.innerWidth),
-      y: Math.min(Math.max(rect.top + rect.height / 2, 0), window.innerHeight),
-    };
-  }
-
-  function enter(): void {
-    if (state.redirectUrl) enterWorkspaceFromRedirect(state.redirectUrl);
-  }
-
-  // The workspace's color takes the window, the shell enters the workspace while
-  // the cover is whole, and the cover stays until the welcome chat or the
-  // provider chooser is on screen.
-  function startEntry(): void {
-    const isInstant = isReducedMotion();
-    wash.start(
-      accentForAttempt(),
-      // Nothing grows under reduced motion, so the corner covers the window as well as the box would.
-      isInstant ? { x: 0, y: 0 } : washOrigin(),
-      { width: window.innerWidth, height: window.innerHeight },
-      enter,
-      state.coverUntil,
-      isInstant,
-    );
-  }
-
-  /** Whether the attempt is an onboarding create, which shows the recording under the setup line. */
-  function isShowcaseShown(): boolean {
-    return state.detail?.live?.request.is_onboarding_driven_by_agent ?? false;
-  }
-
   /**
-   * Hand the conversation so far to the new workspace as its first chat: posted once the page knows
-   * the attempt's settings, while the workspace is still being built, so the desktop client seeds it
-   * when the attempt finishes even if this page has been left by then. Posted again once the attempt
-   * is done, which starts the seed at once and answers with the chat's id. Answers null when the
-   * page has no settings to send or the hand-over failed, with the reason in the console.
+   * Ask for the workspace's first chat to be seeded. Asked once the page knows the attempt is live, while the
+   * workspace is still being built, so the desktop client seeds it when the attempt finishes even if this page
+   * has been left by then; asked again once the attempt is done, which answers with the chat's id. Answers null
+   * when the seed failed, with the reason in the console.
    */
-  function handOverWelcomeChat(): Promise<string | null> {
-    const request = state.detail?.live?.request;
-    if (request === undefined || request === null) return Promise.resolve(null);
-    const body = state.isFirstRun ? firstRunWelcomeChatBody() : welcomeChatBody(request, isShowcaseShown());
-    return postWelcomeChat(state.createAttemptId, body).then(
+  function seedWelcomeChat(): Promise<string | null> {
+    return postWelcomeChat(state.createAttemptId).then(
       (chatId) => (chatId === "" ? null : chatId),
       (error: unknown) => {
-        console.warn("The conversation could not be handed to the new workspace:", error);
+        console.warn("The new workspace's first chat could not be seeded:", error);
         return null;
       },
     );
   }
 
   /**
-   * Seed the welcome chat and wait for it, or the provider chooser, to be on screen; settles when the
-   * wash may lift. A chat the workspace knows about is asked for at once, even after the chooser has
-   * lifted the wash, since left alone its app only looks for the workspace's page every few seconds.
+   * The create is done: once the workspace has its seed (which is what tells it to play its arrival), load the
+   * workspace under the shell's cover, which carries this page's heading on and offers Continue only when the
+   * workspace has its provider page, or its chat, on screen.
    */
-  function awaitWelcomeChatOnScreen(redirectUrl: string): Promise<void> {
-    const createAttemptId = state.createAttemptId;
+  function beginEntry(redirectUrl: string): void {
+    const own = state;
+    const detail = own.detail;
+    if (detail === null) return;
     const startedAtMs = Date.now();
-    const seed = handOverWelcomeChat();
-    const workspaceId = workspaceIdFromRedirect(redirectUrl);
-    void seed.then((chatId) => {
-      if (chatId === null || workspaceId === null) return;
-      const { shell } = getAppContext();
-      shell.requestFocusChat(shell.stores.workspaces.toAgentScopedId(workspaceId), chatId);
-    });
-    return welcomeChatArrival.begin(seed).then((landing) => {
-      if (landing === null) return;
-      void postWelcomeChatLanding(createAttemptId, landing, Date.now() - startedAtMs).catch((error: unknown) => {
-        console.warn("The landing in the new workspace could not be recorded:", error);
+    void seedWelcomeChat().then((chatId) => {
+      if (state !== own || own.isStopped) return;
+      firstRunCover.raise(own.createAttemptId, headingFor(detail));
+      const workspaceId = workspaceIdFromRedirect(redirectUrl);
+      if (chatId !== null && workspaceId !== null) {
+        // Left alone, the chat's app only looks for the workspace's page every few seconds.
+        const { shell } = getAppContext();
+        shell.requestFocusChat(shell.stores.workspaces.toAgentScopedId(workspaceId), chatId);
+      }
+      void welcomeChatArrival.begin(Promise.resolve(chatId)).then((landing) => {
+        firstRunCover.markReady(own.createAttemptId);
+        if (landing === null) return;
+        void postWelcomeChatLanding(own.createAttemptId, landing, Date.now() - startedAtMs).catch(
+          (error: unknown) => {
+            console.warn("The landing in the new workspace could not be recorded:", error);
+          },
+        );
       });
+      enterWorkspaceFromRedirect(redirectUrl);
     });
-  }
-
-  function accentForAttempt(): string {
-    const cached = getAppContext().stores.workspaces.accentEntry(state.createAttemptId);
-    return cached?.accent ?? "#000000";
   }
 
   function startWatching(): void {
     state.watcher = new CreateAttemptWatcher(state.createAttemptId, {
       onDone(redirectUrl) {
         state.isDone = true;
-        state.redirectUrl = redirectUrl;
-        if (state.isFirstRun) {
-          beginFirstRunEntry(redirectUrl);
-          return;
-        }
-        state.coverUntil = awaitWelcomeChatOnScreen(redirectUrl);
-        // The ready line streams while the wash grows, so nothing stands between the attempt being
-        // done and the workspace starting to load.
-        startEntry();
+        beginEntry(redirectUrl);
       },
       onFailed(failure) {
         state.isFailed = true;
         state.failure = failure;
-        state.stageText = "";
-      },
-      onStageText(text) {
-        if (!state.isFailed) state.stageText = text;
       },
       onLogLines(lines) {
         state.logLines.push(...lines);
@@ -416,26 +285,6 @@ export const CreatingPage: m.ClosureComponent = () => {
     });
   }
 
-  /** The user turn restating the settings; the reload path rebuilds it from the record. */
-  function summaryTurn(request: CreateAttemptRequestSummary): m.Children {
-    // The settings sit behind a toggle: the heading is what was said, the lines are what it meant.
-    return userTurn({
-      key: "creation-summary",
-      delayMs: 0,
-      isInstant: true,
-      text: SUMMARY_HEADING,
-      details: {
-        id: "creation-summary-details",
-        label: SUMMARY_DETAILS_LABEL,
-        lines: summarySettingLines(request),
-        isOpen: state.isSummaryDetailsOpen,
-        onToggle: () => {
-          state.isSummaryDetailsOpen = !state.isSummaryDetailsOpen;
-        },
-      },
-    });
-  }
-
   /** Keep the log's end in view as lines arrive, unless the reader has scrolled up to read something. */
   function pinLogToEnd(element: HTMLElement): void {
     if (!state.isLogPinnedToEnd || state.logLines.length === state.pinnedLogLineCount) return;
@@ -443,89 +292,7 @@ export const CreatingPage: m.ClosureComponent = () => {
     element.scrollTop = element.scrollHeight;
   }
 
-  function loadingBox(arriveAtMs: number): m.Children {
-    const percent = state.progress.percentAt(Date.now(), state.isDone);
-    const remainingText = state.isDone ? "" : state.progress.remainingText();
-    return m(
-      "div",
-      {
-        key: "creation-box",
-        id: "creating-box",
-        class: "start-chat-in mt-8 w-full rounded-lg border border-default bg-surface-primary p-4",
-        style: `--start-chat-delay: ${arriveAtMs}ms; --start-chat-fade: 280ms;`,
-      },
-      [
-        m("div", { class: "flex items-center gap-2" }, [
-          m("span", {
-            id: "creating-blob",
-            class: "creating-blob inline-block h-5 w-5 shrink-0",
-            style: `background-color: ${accentForAttempt()};`,
-            "aria-hidden": "true",
-          }),
-          m("span", { class: "font-semibold" }, SETUP_BOX_HEADING),
-        ]),
-        m(
-          "div",
-          { class: "mt-3 h-1.5 bg-fill-subtle rounded-full overflow-hidden" },
-          m("div", {
-            id: "bar-fill",
-            class: "h-full rounded-full transition-[width] duration-300 ease-out",
-            style: `width: ${percent.toFixed(1)}%`,
-          }),
-        ),
-        m(
-          "p",
-          { id: "stage", class: "mt-2 type-helper text-secondary min-h-5" },
-          state.isDone ? state.stageText : state.progress.labelOr(state.stageText),
-        ),
-        remainingText !== ""
-          ? m("p", { id: "remaining", class: "type-helper text-tertiary" }, remainingText)
-          : null,
-        m(
-          "div",
-          { class: "mt-1" },
-          m(
-            Button,
-            {
-              variant: "ghost",
-              extra: "!p-0 !bg-transparent !type-helper !text-tertiary hover:!bg-transparent hover:underline",
-              onclick: () => {
-                state.isLogOpen = !state.isLogOpen;
-              },
-            },
-            state.isLogOpen ? "Hide details" : "Show details",
-          ),
-        ),
-        state.isLogOpen
-          ? m(
-              "pre",
-              {
-                id: "logs",
-                class: "mt-3 type-helper font-mono bg-fill-subtle rounded-md p-3 max-h-[22vh] overflow-y-auto",
-                // Opened at its end, then kept there only while the reader stays there: the
-                // progress timer redraws several times a second, and pinning on every redraw
-                // would undo any scroll up the moment it was made.
-                oncreate: (vnode) => {
-                  state.isLogPinnedToEnd = true;
-                  state.pinnedLogLineCount = 0;
-                  pinLogToEnd(vnode.dom as HTMLElement);
-                },
-                onupdate: (vnode) => pinLogToEnd(vnode.dom as HTMLElement),
-                onscroll: (event: Event) => {
-                  const element = event.target as HTMLElement;
-                  state.isLogPinnedToEnd =
-                    element.scrollHeight - element.scrollTop - element.clientHeight <= LOG_PIN_SLACK_PX;
-                },
-              },
-              state.logLines.join("\n"),
-            )
-          : null,
-      ],
-    );
-  }
-
   function retryForm(): m.Children {
-    if (!state.isRetryFormOpen) return null;
     return createFormModal({
       key: "creating-retry-form",
       id: "creating-retry-form",
@@ -535,6 +302,7 @@ export const CreatingPage: m.ClosureComponent = () => {
       retryId: state.createAttemptId,
       initialPreset: state.isRetryRunHere ? "local" : undefined,
       isImbueCloudRefused: state.isRetryImbueCloudRefused,
+      backdrop: "wash",
       onSubmitted: (operationId: string) => {
         state.isRetryFormOpen = false;
         m.route.set(`/creating/${operationId}`);
@@ -609,67 +377,74 @@ export const CreatingPage: m.ClosureComponent = () => {
     return isRetryHeld ? [discard, retry] : [retry, discard];
   }
 
-  /** A failed attempt: our sentence, its details and report button, and the ways forward it allows. */
-  function failureTurns(
+  /**
+   * A failed attempt: our sentence, its details and report button, and the ways forward it allows.
+   *
+   * It carries the ids the Electron e2e workspace runner
+   * (desktop_client/e2e_workspace_runner.py) polls to fail a create fast:
+   * `#failure-view`, around its sentence `#error-message`, and -- named from
+   * `#failure-view` as every error's details are -- the `#failure-view-details`
+   * toggle and the `#failure-view-details-panel` holding the raw cause.
+   */
+  function failureNotice(
     workspaceName: string,
     failure: CreateAttemptFailure,
     request: CreateAttemptRequestSummary | null,
     logLines: readonly string[],
-    retryUnavailableReason = "",
-  ): m.Children[] {
+    retryUnavailableReason: string,
+  ): m.Children {
     const copy = failureCopy(workspaceName, failure, request, retryUnavailableReason);
-    const error: UserFacingError = { message: copy.message, details: failureDetails(failure.error, logLines) };
-    return [failureTurn(error, failureActions(copy, retryUnavailableReason))];
+    return m(
+      "div",
+      { class: NOTICE_COLUMN_CLASS },
+      m(CreateFailure, {
+        id: "failure-view",
+        textId: "error-message",
+        error: { message: copy.message, details: failureDetails(failure.error, logLines) },
+        actions: failureActions(copy, retryUnavailableReason),
+      }),
+    );
   }
 
   /** An interrupted attempt: nothing failed outright, so it reads as a
    * warning the user answers -- or the discard it asked for, under way or
    * failed. */
-  function interruptedTurns(workspaceName: string, retryUnavailableReason: string): m.Children[] {
+  function interruptedNotice(workspaceName: string, retryUnavailableReason: string): m.Children {
     const discard = state.discard;
     if (discard?.phase === "removing") {
-      return [
-        agentTurn({
-          key: "creation-interrupted",
-          text: interruptedLine(retryUnavailableReason),
-          startAtMs: FLOW_THINK_MS,
-          isInstant: true,
-        }),
-        agentTurn({
-          key: "creation-discarding",
-          id: "discarding",
-          text: `Removing what was left of ${workspaceName || "the workspace"}…`,
-          startAtMs: 0,
-          isInstant: true,
-        }),
-      ];
+      return m("div", { class: `${NOTICE_COLUMN_CLASS} text-center` }, [
+        m("p", { class: "m-0" }, interruptedLine(retryUnavailableReason)),
+        m("p", { id: "discarding", class: "mt-4" }, `Removing what was left of ${workspaceName || "the workspace"}…`),
+      ]);
     }
     if (discard?.phase === "failed") {
       // The attempt is still there to be dealt with, so the question it was
       // answering stands beside the report.
-      return [
-        m(ChatError, {
-          key: "creation-discard-failure",
+      return m(
+        "div",
+        { class: NOTICE_COLUMN_CLASS },
+        m(CreateFailure, {
           id: "discard-failed",
           error: discard.error,
           actions: interruptedActions(retryUnavailableReason),
         }),
-      ];
+      );
     }
-    return [
-      m(ChatError, {
-        key: "creation-interrupted",
+    return m(
+      "div",
+      { class: NOTICE_COLUMN_CLASS },
+      m(CreateFailure, {
         id: "creation-interrupted",
         tone: "warn",
         isBugReportOffered: false,
         error: { message: interruptedLine(retryUnavailableReason), details: "" },
         actions: interruptedActions(retryUnavailableReason),
       }),
-    ];
+    );
   }
 
-  /** A record-backed attempt with no live thread: the failure with its log tail, or the interrupted notice. */
-  function recordTurns(record: NonNullable<CreateAttemptDetail["record"]>): m.Children[] {
+  /** A record-backed attempt with no live create behind it: the failure with its log tail, or the interrupted notice. */
+  function recordStatus(record: NonNullable<CreateAttemptDetail["record"]>): m.Children {
     if (record.state === "failed") {
       const failure: CreateAttemptFailure = {
         error: record.error ?? "",
@@ -677,7 +452,7 @@ export const CreatingPage: m.ClosureComponent = () => {
         quotaRefusal: record.quota_refusal ?? null,
         providerRemediation: record.provider_remediation ?? "",
       };
-      return failureTurns(
+      return failureNotice(
         record.workspace_name,
         failure,
         record.request,
@@ -685,161 +460,27 @@ export const CreatingPage: m.ClosureComponent = () => {
         record.retry_unavailable_reason,
       );
     }
-    return interruptedTurns(record.workspace_name, record.retry_unavailable_reason);
+    return interruptedNotice(record.workspace_name, record.retry_unavailable_reason);
   }
 
-  /** The recording of an app built in Studio, drawn the width of an agent turn. It opens enlarged on a click:
-   *  it holds more detail than the column width shows. */
-  function showcaseBlock(app: ShowcaseApp, arriveAtMs: number): m.Children {
-    return m(
-      "div",
-      {
-        key: `showcase-${app.id}`,
-        "data-showcase": app.id,
-        class:
-          "start-chat-in mt-10 w-full max-w-[calc(100%-100px)] overflow-hidden rounded-lg border border-default " +
-          "bg-surface-primary",
-        style: `--start-chat-delay: ${arriveAtMs}ms; --start-chat-fade: 280ms;`,
-      },
-      [
-        m(
-          "button",
-          {
-            type: "button",
-            "aria-label": "View the recording larger",
-            class: "block w-full cursor-zoom-in",
-            onclick: () => {
-              state.isShowcaseLightboxOpen = true;
-            },
-          },
-          m("img", { src: app.gifUrl, alt: app.label, class: "block w-full bg-fill-subtle object-contain" }),
-        ),
-      ],
-    );
-  }
-
-  function readyTurn(startAtMs: number): m.Children {
-    return agentTurn({
-      key: "creation-ready",
-      text: READY_LINE,
-      startAtMs,
-      class: "type-heading",
-      marginClass: READY_MARGIN_CLASS,
-    });
-  }
-
-  /**
-   * A live attempt: the setup line, then either the live failure, or the recording under its intro line (for
-   * an onboarding attempt) and the loading box, with the ready line under them once the attempt is done. Every
-   * turn but the ready line is already on the page: the page is reached from the create form or a reload.
-   */
-  function liveTurns(request: CreateAttemptRequestSummary | null, workspaceName: string): m.Children[] {
-    const turns: m.Children[] = [
-      agentTurn({ key: "creation-setup", text: SETUP_LINE, startAtMs: 0, isInstant: true }),
-    ];
+  /** A live attempt: the build's progress, or its failure. */
+  function liveStatus(live: NonNullable<CreateAttemptDetail["live"]>): m.Children {
     if (state.isFailed && state.failure !== null) {
-      turns.push(...failureTurns(workspaceName, state.failure, request, state.logLines));
-      return turns;
-    }
-    if (isShowcaseShown()) {
-      turns.push(
-        agentTurn({ key: "creation-showcase-intro", text: SHOWCASE_INTRO_LINE, startAtMs: 0, isInstant: true }),
-      );
-      turns.push(showcaseBlock(SHOWCASE_APP, 0));
-    }
-    turns.push(loadingBox(0));
-    if (state.isDone) turns.push(readyTurn(0));
-    return turns;
-  }
-
-  /** The manifesto exchange, already on the page: every workspace's conversation opens with it. */
-  function manifestoTurns(): m.Children[] {
-    return [
-      agentTurn({
-        key: "manifesto-opener",
-        text: MANIFESTO_OPENER,
-        emphasis: MANIFESTO_OPENER_EMPHASIS,
-        startAtMs: 0,
-        isInstant: true,
-      }),
-      userTurn({ key: "manifesto-question", delayMs: 0, isInstant: true, text: MANIFESTO_QUESTION }),
-      agentTurn({ key: "manifesto-answer", text: MANIFESTO_HEADING, startAtMs: 0, isInstant: true }),
-      disclosureList({
-        key: "manifesto-points",
-        startAtMs: 0,
-        isInstant: true,
-        points: MANIFESTO_POINTS,
-        openIds: state.openManifestoIds,
-        onToggle: (id) => {
-          if (state.openManifestoIds.has(id)) state.openManifestoIds.delete(id);
-          else state.openManifestoIds.add(id);
-        },
-      }),
-      agentTurn({
-        key: "manifesto-reporting",
-        text: REPORTING_ASK,
-        startAtMs: 0,
-        isInstant: true,
-        more: {
-          label: REPORTING_MORE_LABEL,
-          detail: REPORTING_MORE_DETAIL,
-          isOpen: state.isReportingMoreOpen,
-          onToggle: () => {
-            state.isReportingMoreOpen = !state.isReportingMoreOpen;
-          },
-        },
-      }),
-    ];
-  }
-
-  /** The page's own turns: the settings, then the attempt as it stands. */
-  function creationTurns(detail: CreateAttemptDetail): m.Children[] {
-    const request =
-      detail.kind === "record" ? detail.record?.request : detail.live?.request;
-    const workspaceName =
-      (detail.kind === "record"
-        ? detail.record?.workspace_name
-        : detail.live?.workspace_name) ?? "";
-    const summary =
-      request !== undefined && request !== null
-        ? [summaryTurn(request)]
-        : [];
-    if (detail.kind === "record" && detail.record !== null) {
-      return [...summary, ...recordTurns(detail.record)];
-    }
-    return [...summary, ...liveTurns(request ?? null, workspaceName)];
-  }
-
-  /**
-   * A first-run create is done: once the workspace has its seed (which is what tells it this is a first run),
-   * load the workspace under the shell's cover, which carries this welcome on and offers Continue only when the
-   * workspace has its provider page up.
-   */
-  function beginFirstRunEntry(redirectUrl: string): void {
-    const own = state;
-    own.isFirstRunEntryStarted = true;
-    void handOverWelcomeChat().then(() => {
-      if (state !== own || own.isStopped) return;
-      firstRunCover.raise(own.createAttemptId);
-      void awaitWelcomeChatOnScreen(redirectUrl).then(() => firstRunCover.markReady(own.createAttemptId));
-      enterWorkspaceFromRedirect(redirectUrl);
-    });
-  }
-
-  /** Under the greeting: the build's progress, or its failure. */
-  function welcomeStatus(): m.Children {
-    const request = state.detail?.live?.request ?? null;
-    const workspaceName = state.detail?.live?.workspace_name ?? "";
-    if (state.isFailed && state.failure !== null) {
-      return m("div", { class: "mt-[60px] w-full max-w-[720px] text-primary" }, failureTurns(workspaceName, state.failure, request, state.logLines));
+      return failureNotice(live.workspace_name, state.failure, live.request, state.logLines, "");
     }
     const percent = state.progress.percentAt(Date.now(), state.isDone);
     // A wait of minutes is not "just a sec": the line says so plainly and the estimate stands under the bar.
     const isLongWait = !state.isDone && state.progress.isOverAMinuteLeft();
-    return settingUpStatus(isLongWait ? SETTING_UP_LONG_LINE : SETTING_UP_LINE, percent, [
+    // Only a first workspace is talked to here; a later one's heading already says what is being set up.
+    const line = !live.is_first_workspace ? "" : isLongWait ? SETTING_UP_LONG_LINE : SETTING_UP_LINE;
+    return settingUpStatus(line, percent, [
       m("div", { class: "mt-4 flex items-center gap-6 type-body" }, [
         isLongWait
-          ? m("span", { id: "creating-remaining", class: "text-[color:var(--first-run-ink-muted)]" }, state.progress.remainingText())
+          ? m(
+              "span",
+              { id: "creating-remaining", class: "text-[color:var(--first-run-ink-muted)]" },
+              state.progress.remainingText(),
+            )
           : null,
         m(
           "button",
@@ -858,7 +499,12 @@ export const CreatingPage: m.ClosureComponent = () => {
             "pre",
             {
               id: "logs",
-              class: "mt-3 w-[min(720px,90vw)] type-helper font-mono bg-fill-subtle rounded-md p-3 max-h-[22vh] overflow-y-auto text-left",
+              class:
+                "mt-3 w-[min(720px,90vw)] type-helper font-mono bg-fill-subtle rounded-md p-3 max-h-[22vh] " +
+                "overflow-y-auto text-left",
+              // Opened at its end, then kept there only while the reader stays there: the
+              // progress timer redraws several times a second, and pinning on every redraw
+              // would undo any scroll up the moment it was made.
               oncreate: (vnode) => {
                 state.isLogPinnedToEnd = true;
                 state.pinnedLogLineCount = 0;
@@ -867,18 +513,14 @@ export const CreatingPage: m.ClosureComponent = () => {
               onupdate: (vnode) => pinLogToEnd(vnode.dom as HTMLElement),
               onscroll: (event: Event) => {
                 const element = event.target as HTMLElement;
-                state.isLogPinnedToEnd = element.scrollHeight - element.scrollTop - element.clientHeight <= LOG_PIN_SLACK_PX;
+                state.isLogPinnedToEnd =
+                  element.scrollHeight - element.scrollTop - element.clientHeight <= LOG_PIN_SLACK_PX;
               },
             },
             state.logLines.join("\n"),
           )
         : null,
     ]);
-  }
-
-  /** A first-run create: the welcome, and the build under it. */
-  function welcomeView(): m.Children {
-    return firstRunWelcome({ id: "creating", attemptId: state.createAttemptId, status: welcomeStatus() });
   }
 
   /** Leave `state` behind: the page is being removed, or a later attempt is taking it over. */
@@ -900,7 +542,7 @@ export const CreatingPage: m.ClosureComponent = () => {
         if (state !== own) return;
         own.detail = detail;
         if (detail.kind === "live") {
-          void handOverWelcomeChat();
+          void seedWelcomeChat();
           startWatching();
         } else if (detail.kind === "gone") {
           getAppContext().shell.routeToHub();
@@ -927,40 +569,21 @@ export const CreatingPage: m.ClosureComponent = () => {
     },
     view() {
       const detail = state.detail;
-      if (detail === null) {
-        return m(PageContainer, { id: "creating", "data-agent-id": state.createAttemptId }, [
-          m("div", { class: "flex justify-center pt-24" }, m(Spinner, { size: "lg" })),
-        ]);
-      }
-      if (state.isFirstRun && detail.kind === "live") {
-        return welcomeView();
-      }
-      const prelude = manifestoTurns();
-      const turns = creationTurns(detail);
-      return m(
-        "div",
-        { id: "creating", "data-agent-id": state.createAttemptId, class: TRANSCRIPT_COLUMN_CLASS },
-        // Every child is keyed: Mithril rejects a fragment that mixes keyed
-        // vnodes with holes, so the modal is appended only while open.
-        [
-          ...prelude,
-          ...turns,
-          scrollAnchor(prelude.length + turns.length),
-          ...(state.isRetryFormOpen ? [retryForm()] : []),
-          ...(state.isShowcaseLightboxOpen
-            ? [
-                m(ImageLightbox, {
-                  key: "showcase-lightbox",
-                  imageUrl: SHOWCASE_APP.gifUrl,
-                  title: SHOWCASE_APP.label,
-                  onClose: () => {
-                    state.isShowcaseLightboxOpen = false;
-                  },
-                }),
-              ]
-            : []),
-        ],
-      );
+      const status =
+        detail === null || detail.kind === "gone"
+          ? m("div", { class: "mt-10" }, m(Spinner, { size: "lg" }))
+          : detail.kind === "record" && detail.record !== null
+            ? recordStatus(detail.record)
+            : detail.live !== null
+              ? liveStatus(detail.live)
+              : null;
+      return firstRunWelcome({
+        id: "creating",
+        attemptId: state.createAttemptId,
+        heading: detail === null || detail.kind === "gone" ? "" : headingFor(detail),
+        status,
+        overlays: state.isRetryFormOpen ? [retryForm()] : [],
+      });
     },
   };
 };

@@ -411,13 +411,6 @@ class CreateWorkspaceRequest(ApiRequestModel):
             "grants nobody."
         ),
     )
-    is_onboarding_driven_by_agent: bool | None = Field(
-        default=None,
-        description=(
-            "Show the onboarding examples on the creation page while the workspace is built "
-            "(default off; the first-run start flow turns it on for its creates)"
-        ),
-    )
 
 
 class MachineSizeChangeRequest(ApiRequestModel):

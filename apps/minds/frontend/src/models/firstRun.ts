@@ -1,10 +1,10 @@
-// The first run (specs/ftue-onboarding-v2): sign in, then the cloud workspace
-// starts at once while the welcome greets the user. This module holds the
-// sign-in page's stage as a pure reducer and the one window-wide record that
-// carries what the sign-in page learned (who signed in, which create it sent)
-// over to the creation page.
+// The first run (specs/onboarding-tweaks): sign in, then the account's first workspace starts at once while the
+// creation page welcomes the user. This module holds the sign-in page's stage as a pure reducer, and the words of
+// the creation page's heading.
 
-import type { ResendOutcome } from "./emailVerification";
+export const SETTING_UP_LINE = "Just a sec, we're setting up your workspace";
+/** The setting-up line once the build is known to take minutes, when "just a sec" would not be true. */
+export const SETTING_UP_LONG_LINE = "We're setting up your workspace";
 
 /** The account the first run settled on: the one the browser sign-in reported. */
 export interface FirstRunAccount {
@@ -18,9 +18,7 @@ export interface FirstRunAccount {
  *
  * - `sign-in`: the page at rest, its Sign in button live.
  * - `signing-in`: the browser sign-in is open; an account landing moves on.
- * - `landing`: signed in, asking whether the account already has workspaces.
- * - `checking`: no workspaces; checking the email is verified before the create.
- * - `verify`: the email is not verified yet; waiting on the emailed link.
+ * - `landing`: signed in by a hand-off that did not say how many workspaces the account has, so the page asks.
  * - `creating`: the create request is on its way.
  * - `refused`: the create was refused; `message` says why, Try again resends it.
  */
@@ -28,12 +26,19 @@ export type FirstRunStage =
   | { kind: "sign-in" }
   | { kind: "signing-in" }
   | { kind: "landing"; account: FirstRunAccount }
-  | { kind: "checking"; account: FirstRunAccount }
-  | { kind: "verify"; account: FirstRunAccount; lastResend: ResendOutcome | null }
   | { kind: "creating"; account: FirstRunAccount }
   | { kind: "refused"; account: FirstRunAccount; message: string };
 
 export const SIGN_IN_STAGE: FirstRunStage = { kind: "sign-in" };
+
+/** Where a landed account goes: its home page, its first workspace's create, or a question the page has to ask. */
+export type LandingVerdict = "home" | "create" | "ask";
+
+/** What the sign-in hand-off's workspace count means; null is a hand-off that carried none. */
+export function landingVerdict(activeWorkspaceCount: number | null): LandingVerdict {
+  if (activeWorkspaceCount === null) return "ask";
+  return activeWorkspaceCount > 0 ? "home" : "create";
+}
 
 export function startSignIn(stage: FirstRunStage): FirstRunStage {
   return stage.kind === "sign-in" ? { kind: "signing-in" } : stage;
@@ -44,32 +49,27 @@ export function cancelSignIn(stage: FirstRunStage): FirstRunStage {
   return stage.kind === "signing-in" ? SIGN_IN_STAGE : stage;
 }
 
-/** An account landed while the page waited on one. */
-export function landAccount(stage: FirstRunStage, account: FirstRunAccount): FirstRunStage {
+/**
+ * An account landed while the page waited on one. An account known to have no workspaces goes straight to its
+ * first create; one whose count is unknown is asked about first. (One with workspaces leaves for its home page:
+ * the caller navigates, and the stage is left as it was.)
+ */
+export function landAccount(stage: FirstRunStage, account: FirstRunAccount, verdict: LandingVerdict): FirstRunStage {
   if (stage.kind !== "signing-in" && stage.kind !== "sign-in") return stage;
-  return { kind: "landing", account };
+  switch (verdict) {
+    case "home":
+      return stage;
+    case "create":
+      return { kind: "creating", account };
+    case "ask":
+      return { kind: "landing", account };
+  }
 }
 
-/**
- * The landing verdict: an account with workspaces leaves for its home page
- * (the caller navigates; the stage is left as it was), one without goes on to
- * the email check that precedes its first create.
- */
+/** The asked-about account has no workspaces: on to its first create. */
 export function settleLanding(stage: FirstRunStage, hasWorkspaces: boolean): FirstRunStage {
   if (stage.kind !== "landing" || hasWorkspaces) return stage;
-  return { kind: "checking", account: stage.account };
-}
-
-/** The email check answered: verified goes on to the create, unverified waits on the link. */
-export function settleVerification(stage: FirstRunStage, isVerified: boolean): FirstRunStage {
-  if (stage.kind !== "checking" && stage.kind !== "verify") return stage;
-  if (isVerified) return { kind: "creating", account: stage.account };
-  if (stage.kind === "verify") return stage;
-  return { kind: "verify", account: stage.account, lastResend: null };
-}
-
-export function noteResend(stage: FirstRunStage, outcome: ResendOutcome): FirstRunStage {
-  return stage.kind === "verify" ? { ...stage, lastResend: outcome } : stage;
+  return { kind: "creating", account: stage.account };
 }
 
 export function refuseCreate(stage: FirstRunStage, message: string): FirstRunStage {
@@ -77,7 +77,7 @@ export function refuseCreate(stage: FirstRunStage, message: string): FirstRunSta
 }
 
 export function retryCreate(stage: FirstRunStage): FirstRunStage {
-  return stage.kind === "refused" ? { kind: "checking", account: stage.account } : stage;
+  return stage.kind === "refused" ? { kind: "creating", account: stage.account } : stage;
 }
 
 /** The account a stage is working under, or null before one has landed. */
@@ -100,23 +100,10 @@ export function welcomeHeading(firstName: string): string {
 }
 
 /**
- * What the sign-in page hands the creation page: the create it sent and the
- * account it sent it under. One per window; a create submitted elsewhere
- * (the create form, a retry) leaves `createAttemptId` naming another attempt,
- * so the creation page shows its ordinary progress for it.
+ * The creation page's heading: the welcome for its owner's first workspace, the workspace's name for any later
+ * one.
  */
-export class FirstRunRecord {
-  createAttemptId = "";
-  account: FirstRunAccount | null = null;
-
-  noteCreate(createAttemptId: string, account: FirstRunAccount | null): void {
-    this.createAttemptId = createAttemptId;
-    this.account = account;
-  }
-
-  isFirstRunCreate(createAttemptId: string): boolean {
-    return createAttemptId !== "" && this.createAttemptId === createAttemptId;
-  }
+export function creationHeading(isFirstWorkspace: boolean, firstName: string, workspaceName: string): string {
+  if (isFirstWorkspace) return welcomeHeading(firstName);
+  return workspaceName === "" ? "Setting up your workspace" : `Setting up ${workspaceName}`;
 }
-
-export const firstRun = new FirstRunRecord();

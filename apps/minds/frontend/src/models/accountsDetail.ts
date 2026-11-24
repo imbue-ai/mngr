@@ -29,8 +29,6 @@ import {
   responseDetails,
 } from "./errors";
 import { isReconnectNeeded } from "./reconnect";
-import { resendOutcomeOf } from "./emailVerification";
-import type { ResendOutcome } from "./emailVerification";
 
 export interface PlanUsageRow {
   label: string;
@@ -98,19 +96,6 @@ export interface AccountPlanState {
   privacyPolicyUrl: string;
 }
 
-/** The contextual "verify your email" prompt shown after a plan switch was
- * refused with the connector's structured email_not_verified 403. The server
- * tries to auto-send a verification email as part of that refusal;
- * `wasAutoSent` is false when a cooldown suppressed that send (or it failed),
- * so the prompt must not claim a link was just sent. */
-export interface VerifyEmailPrompt {
-  email: string;
-  wasAutoSent: boolean;
-  isResending: boolean;
-  /** How the last press of the prompt's resend ended, once it has. */
-  resendOutcome: ResendOutcome | null;
-}
-
 interface CachedAccountPlan {
   planView: AccountPlanView;
   privacyPolicyUrl: string;
@@ -153,7 +138,6 @@ export class AccountsDetailModel {
     string,
     NotificationPreferencesState
   >();
-  verifyEmailPromptByUserId = new Map<string, VerifyEmailPrompt>();
   loggingOutUserIds = new Set<string>();
   switchingPlanUserIds = new Set<string>();
 
@@ -393,10 +377,6 @@ export class AccountsDetailModel {
     return this.loggingOutUserIds.has(userId);
   }
 
-  verifyEmailPromptFor(userId: string): VerifyEmailPrompt | null {
-    return this.verifyEmailPromptByUserId.get(userId) ?? null;
-  }
-
   /** `planLabel` is the plan as the page names it ("Limited" for free). */
   async switchPlan(
     userId: string,
@@ -411,29 +391,18 @@ export class AccountsDetailModel {
     this.switchingPlanUserIds.add(userId);
     this.redraw();
     try {
-      this.verifyEmailPromptByUserId.delete(userId);
       const isSwitched = await this.submitAccountForm(
         `/accounts/${encodeURIComponent(userId)}/plan`,
         { plan },
         `Couldn't switch ${email} to the ${planLabel} plan`,
         (status, body) => {
           const planRefusal = parsePlanRefused(status, body);
-          if (planRefusal !== null) {
-            // Imbue Cloud's stated reason, which no retry changes.
-            this.actionError = {
-              message: `Imbue Cloud won't switch ${email} to the ${planLabel} plan. It said: "${planRefusal}"`,
-              details: `HTTP ${status}`,
-            };
-            return true;
-          }
-          const refusal = parseEmailNotVerified(status, body);
-          if (refusal === null) return false;
-          this.verifyEmailPromptByUserId.set(userId, {
-            email: refusal.email,
-            wasAutoSent: refusal.wasAutoSent,
-            isResending: false,
-            resendOutcome: null,
-          });
+          if (planRefusal === null) return false;
+          // Imbue Cloud's stated reason, which no retry changes.
+          this.actionError = {
+            message: `Imbue Cloud won't switch ${email} to the ${planLabel} plan. It said: "${planRefusal}"`,
+            details: `HTTP ${status}`,
+          };
           return true;
         },
       );
@@ -446,36 +415,6 @@ export class AccountsDetailModel {
 
   isSwitchingPlan(userId: string): boolean {
     return this.switchingPlanUserIds.has(userId);
-  }
-
-  /** The verify-email prompt's resend button (the server applies a cooldown). */
-  async resendVerification(userId: string): Promise<void> {
-    const prompt = this.verifyEmailPromptByUserId.get(userId);
-    if (prompt === undefined || prompt.isResending) return;
-    this.verifyEmailPromptByUserId.set(userId, {
-      ...prompt,
-      isResending: true,
-      resendOutcome: null,
-    });
-    this.redraw();
-    const resendOutcome = await resendOutcomeOf(() =>
-      this.fetchImpl(
-        `/accounts/${encodeURIComponent(userId)}/resend-verification`,
-        { method: "POST", credentials: "same-origin" },
-      ),
-    );
-    // The prompt may have been removed while the request was in flight (a
-    // concurrent plan switch deletes it first); a deleted prompt must not be
-    // resurrected here.
-    const current = this.verifyEmailPromptByUserId.get(userId);
-    if (current !== undefined) {
-      this.verifyEmailPromptByUserId.set(userId, {
-        ...current,
-        isResending: false,
-        resendOutcome,
-      });
-    }
-    this.redraw();
   }
 
   async trimBackups(userId: string): Promise<void> {
@@ -639,18 +578,4 @@ function notificationPreferencesUrl(userId: string): string {
 function parsePlanRefused(status: number, body: ResponseBody): string | null {
   if (status !== 403 || errorCodeFromBody(body) !== "plan_refused") return null;
   return reasonFromBody(body);
-}
-
-/** The email and auto-send outcome from a structured email_not_verified 403
- * body, or null when the response is not that refusal. A missing `sent` flag
- * counts as not sent, so the prompt never claims a link the server did not
- * confirm. */
-function parseEmailNotVerified(
-  status: number,
-  body: ResponseBody,
-): { email: string; wasAutoSent: boolean } | null {
-  if (status !== 403 || errorCodeFromBody(body) !== "email_not_verified") return null;
-  if (body === null || body instanceof TextResponseBody) return null;
-  const email = body["email"];
-  return typeof email === "string" ? { email, wasAutoSent: body["sent"] === true } : null;
 }

@@ -1,12 +1,15 @@
-"""The smoke journey: the build under test, as a user, against the deployed tier.
+"""The smoke journey: the build under test, as a user on a fresh install, against the deployed tier.
 
-Launch the app and reach its landing page; sign in to Imbue Cloud through the
-app's own web-login flow, completing the hosted page in the suite's browser;
-create an Imbue Cloud workspace; run default-workspace-template's CI test
-suites and its OOM drill inside it; have its agent build and register a hello-world web app;
-stop the workspace from the home page, start it again, and have the agent
-bring the app back; share the workspace from its Sharing page in Settings and open the app's
-route through the share as the owner; turn sharing off; destroy the workspace.
+Launch the app and reach its first-run sign-in page; sign in to Imbue Cloud
+from that page, completing the hosted page in the suite's browser; let the app
+create the account's first Imbue Cloud workspace by itself, and press Continue
+when it is ready; connect the account's AI provider on the workspace's provider
+page and press Next; run default-workspace-template's CI test suites and its
+OOM drill inside the workspace; have its agent build and register a hello-world
+web app; stop the workspace from the home page, start it again, and have the
+agent bring the app back; open the app's route through the share the create
+turned on, as the owner; turn sharing off from its Sharing page in Settings;
+destroy the workspace.
 Every resource created on the way is recorded in the run manifest, so the
 teardown job releases it however this test ends.
 
@@ -32,6 +35,7 @@ from playwright.sync_api import Frame
 from playwright.sync_api import Page
 
 from imbue.minds.desktop_client.e2e_workspace_runner import enter_workspace_from_home_page
+from imbue.minds.desktop_client.e2e_workspace_runner import press_first_run_next
 from imbue.minds.desktop_client.e2e_workspace_runner import start_workspace_from_home_page
 from imbue.minds.desktop_client.workspace_lifecycle import HOST_START_TIMEOUT_SECONDS
 from imbue.minds.desktop_client.workspace_lifecycle import HOST_STOP_TIMEOUT_SECONDS
@@ -46,25 +50,28 @@ from imbue.minds.smoke_tests.accounts import sign_in
 from imbue.minds.smoke_tests.accounts import wait_for_workspace
 from imbue.minds.smoke_tests.app_flows import adopt_imbue_credentials
 from imbue.minds.smoke_tests.app_flows import agent_id_of_workspace_frame
-from imbue.minds.smoke_tests.app_flows import create_imbue_cloud_workspace
+from imbue.minds.smoke_tests.app_flows import continue_to_provider_page
 from imbue.minds.smoke_tests.app_flows import destroy_workspace_from_settings
 from imbue.minds.smoke_tests.app_flows import is_workspace_gone
 from imbue.minds.smoke_tests.app_flows import list_workspaces
 from imbue.minds.smoke_tests.app_flows import mint_workspace_llm_credentials
 from imbue.minds.smoke_tests.app_flows import open_welcome_chat
-from imbue.minds.smoke_tests.app_flows import publish_share_from_panel
 from imbue.minds.smoke_tests.app_flows import read_sharing_status
 from imbue.minds.smoke_tests.app_flows import screenshot_every_page
 from imbue.minds.smoke_tests.app_flows import send_prompt_to_known_main_chat
 from imbue.minds.smoke_tests.app_flows import send_prompt_to_main_chat
-from imbue.minds.smoke_tests.app_flows import start_web_login
+from imbue.minds.smoke_tests.app_flows import start_web_login_from_sign_in_page
 from imbue.minds.smoke_tests.app_flows import stop_workspace_from_account_home
 from imbue.minds.smoke_tests.app_flows import unpublish_share_from_panel
-from imbue.minds.smoke_tests.app_flows import wait_for_account_in_create_form
+from imbue.minds.smoke_tests.app_flows import wait_for_account_on_provider_page
 from imbue.minds.smoke_tests.app_flows import wait_for_destroy_done
-from imbue.minds.smoke_tests.app_flows import wait_for_landing_page
+from imbue.minds.smoke_tests.app_flows import wait_for_first_workspace
+from imbue.minds.smoke_tests.app_flows import wait_for_first_workspace_creation_page
 from imbue.minds.smoke_tests.app_flows import wait_for_reply
 from imbue.minds.smoke_tests.app_flows import wait_for_share_url
+from imbue.minds.smoke_tests.app_flows import wait_for_sharing_enabled
+from imbue.minds.smoke_tests.app_flows import wait_for_sign_in_page
+from imbue.minds.smoke_tests.app_flows import wait_for_signed_in_account
 from imbue.minds.smoke_tests.browser import complete_hosted_login
 from imbue.minds.smoke_tests.browser import is_hosted_login_page
 from imbue.minds.smoke_tests.browser import visitor_browser_context
@@ -86,7 +93,6 @@ from imbue.minds.smoke_tests.oom_drill import OOM_DRILL_TIMEOUT_SECONDS
 from imbue.minds.smoke_tests.oom_drill import OOM_DRILL_WORKSPACE_RESULTS_ROOT
 from imbue.minds.smoke_tests.oom_drill import oom_drill_markdown
 from imbue.minds.smoke_tests.oom_drill import run_oom_drill_in_workspace
-from imbue.minds.smoke_tests.primitives import SMOKE_EMAIL_PREFIX
 from imbue.minds.smoke_tests.primitives import SMOKE_EXPECTED_TEMPLATE_REF_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_SKIP_DWT_TESTS_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SmokeRunId
@@ -110,14 +116,15 @@ _OOM_DRILL_POLL_INTERVAL_SECONDS: Final[float] = 15.0
 # Starting the drill's runner and fetching its verdict, around the run itself.
 _OOM_DRILL_STEP_OVERHEAD_SECONDS: Final[int] = 3 * 60
 # The journey's steps, as its run report's step table names them.
-_LAUNCH_STEP_LABEL: Final[str] = "Step 1: launch the app and reach its landing page"
-_SIGN_IN_STEP_LABEL: Final[str] = "Step 2: sign in to Imbue Cloud through the app's web login"
-_CREATE_STEP_LABEL: Final[str] = "Step 3: create an Imbue Cloud workspace"
+_LAUNCH_STEP_LABEL: Final[str] = "Step 1: launch the app and reach its first-run sign-in page"
+_SIGN_IN_STEP_LABEL: Final[str] = "Step 2: sign in to Imbue Cloud from the sign-in page"
+_CREATE_STEP_LABEL: Final[str] = "Step 3: let the app create the account's first workspace, and press Continue"
+_PROVIDER_STEP_LABEL: Final[str] = "Step 3a: connect the account's AI provider on the workspace's provider page"
 _DWT_STEP_LABEL: Final[str] = "Step 3b: run default-workspace-template's CI suites in the workspace"
 _OOM_DRILL_STEP_LABEL: Final[str] = "Step 3c: run default-workspace-template's OOM drill in the workspace"
 _BUILD_STEP_LABEL: Final[str] = "Step 4: have the workspace's agent build and register the hello app"
 _STOP_START_STEP_LABEL: Final[str] = "Step 4b: stop and start the workspace from the home page"
-_SHARE_STEP_LABEL: Final[str] = "Step 5: share the workspace and open the app through the share"
+_SHARE_STEP_LABEL: Final[str] = "Step 5: open the app through the share the create turned on"
 _UNSHARE_STEP_LABEL: Final[str] = "Step 6: turn sharing off"
 _DESTROY_STEP_LABEL: Final[str] = "Step 7: destroy the workspace"
 _DWT_RESULTS_DIR_NAME: Final[str] = "dwt"
@@ -134,8 +141,10 @@ _JOURNEY_TIMEOUT_SECONDS: Final[int] = (
 )
 _HOSTED_LOGIN_REDIRECT_TIMEOUT_MS: Final[float] = 90_000.0
 _ACCOUNT_LISTED_TIMEOUT_SECONDS: Final[float] = 120.0
+# The create shares the workspace in a step that follows the create itself.
+_SHARE_ENABLED_TIMEOUT_SECONDS: Final[float] = 300.0
 _AGENT_REPLY_TIMEOUT_SECONDS: Final[float] = 12 * 60
-# A fresh share needs a certificate before its link answers.
+# The share has to be live again after the stop and start, and to list the hello app, before its link answers.
 _SHARE_LINK_TIMEOUT_SECONDS: Final[float] = 300.0
 _SHARE_VISIT_TIMEOUT_SECONDS: Final[float] = 300.0
 _SHARE_VISIT_POLL_SECONDS: Final[float] = 5.0
@@ -178,15 +187,11 @@ _HELLO_RESTART_PROMPT_TEMPLATE: Final[str] = (
     "with only: BACK {nonce}"
 )
 _BACK_REPLY_TEMPLATE: Final[str] = "BACK {nonce}"
+# How the creation page's heading opens for its owner's first workspace; any other is headed by its name.
+_WELCOME_HEADING_PREFIX: Final[str] = "Welcome"
 # The web-login flow's loopback listener, where the hosted page lands once the sign-in is handed off.
 _LOGIN_CALLBACK_URL_PATTERN: Final[re.Pattern[str]] = re.compile(r"^http://127\.0\.0\.1:\d+/callback")
 _SHARE_URL_PATTERN: Final[re.Pattern[str]] = re.compile(r"^https://[a-z0-9-]+\.[a-z0-9.-]+/$")
-
-
-def _workspace_name(run_id: SmokeRunId) -> str:
-    """``studio-smoke-<run id>-<random>``: the prefix teardown sweeps by, the id this run is known as, and a
-    suffix so a rerun of the same run id never collides with a leftover."""
-    return f"{SMOKE_EMAIL_PREFIX}{run_id}-{get_short_random_string()}"
 
 
 def _sign_in_through_the_app(
@@ -194,11 +199,10 @@ def _sign_in_through_the_app(
     visitor: BrowserContext,
     backend: SmokeBackend,
     account: SmokeAccountCredentials,
-    landed_on: str,
     output_dir: Path,
 ) -> None:
-    """Start the app's web-login flow and complete the hosted page it hands out in the suite's browser."""
-    login_url = start_web_login(studio_app, landed_on)
+    """Press the sign-in page's Sign in and complete the hosted page it hands out in the suite's browser."""
+    login_url = start_web_login_from_sign_in_page(studio_app)
     assert login_url.startswith(origin_of(backend.accounts_origin)), (
         f"The app's sign-in page {login_url} is not on {backend.env_name}'s accounts origin {backend.accounts_origin}"
     )
@@ -215,7 +219,7 @@ def _sign_in_through_the_app(
     except PlaywrightError as exc:
         logger.warning("The hosted login's redirect back to the app did not settle: {}", exc)
     login_page.close()
-    wait_for_account_in_create_form(studio_app, str(account.email), _ACCOUNT_LISTED_TIMEOUT_SECONDS)
+    wait_for_signed_in_account(studio_app, str(account.email), _ACCOUNT_LISTED_TIMEOUT_SECONDS)
 
 
 def _leased_pool_row(backend: SmokeBackend, account: SmokeAccountCredentials, host_id: str) -> tuple[str, str | None]:
@@ -240,7 +244,7 @@ def _assert_workspace_is_at_expected_template(
     assert leased_template_ref == expected_template_ref, (
         f"Pool row {host_db_id} was baked at template {leased_template_ref!r}, not at "
         f"{expected_template_ref!r} ({SMOKE_EXPECTED_TEMPLATE_REF_ENV_VAR}): either the pool had no available "
-        f"row at that tag in the form's region and the create rebuilt another row's container (the slow path), "
+        f"row at that tag in the app's region and the create rebuilt another row's container (the slow path), "
         f"or the build under test asks for a different tag than this run expects."
     )
 
@@ -462,51 +466,70 @@ def test_the_build_signs_in_creates_builds_stops_starts_shares_and_destroys_a_wo
     storage_restore_wait_seconds: float | None,
     expected_template_ref: str | None,
     backend: SmokeBackend,
+    first_run_account: SmokeAccountCredentials,
+    first_workspace_name: str,
     studio_app: StudioAppSession,
-    persistent_account: SmokeAccountCredentials,
     run_manifest: Path,
     smoke_run_id: SmokeRunId,
     smoke_output_dir: Path,
     smoke_steps_path: Path,
     subtests: pytest.Subtests,
 ) -> None:
-    """The first-shape journey, end to end, through the app's own UI."""
-    owner_email = str(persistent_account.email)
+    """The first-shape journey, end to end, through the app's own UI, from a fresh install's first run."""
+    owner_email = str(first_run_account.email)
     nonce = get_short_random_string()
-    workspace_name = _workspace_name(smoke_run_id)
 
     with recorded_step(smoke_steps_path, _LAUNCH_STEP_LABEL):
-        landed_on = wait_for_landing_page(studio_app)
-        logger.info("Step 1: the app launched and landed on {}", landed_on)
+        wait_for_sign_in_page(studio_app)
+        logger.info("Step 1: the app launched and opened on its first-run sign-in page")
         screenshot_every_page(studio_app.browser, smoke_output_dir, "01-landing")
 
     with visitor_browser_context(studio_app.browser.browser_type) as visitor:
         with recorded_step(smoke_steps_path, _SIGN_IN_STEP_LABEL):
-            _sign_in_through_the_app(studio_app, visitor, backend, persistent_account, landed_on, smoke_output_dir)
+            _sign_in_through_the_app(studio_app, visitor, backend, first_run_account, smoke_output_dir)
             logger.info("Step 2: signed in as {}", owner_email)
             screenshot_every_page(studio_app.browser, smoke_output_dir, "03-signed-in")
 
         with recorded_step(smoke_steps_path, _CREATE_STEP_LABEL):
-            workspace_frame = create_imbue_cloud_workspace(studio_app, workspace_name, owner_email)
+            heading = wait_for_first_workspace_creation_page(studio_app)
+            assert heading.startswith(_WELCOME_HEADING_PREFIX), (
+                f"The creation page of the account's first workspace is headed {heading!r}, not by a welcome"
+            )
+            workspace_frame = wait_for_first_workspace(studio_app)
             agent_id = agent_id_of_workspace_frame(studio_app, workspace_frame)
             row = _workspace_row(studio_app, agent_id)
-            assert row.get("account_email") == owner_email, row
             assert row.get("host_id"), row
-            host_db_id, leased_template_ref = _leased_pool_row(backend, persistent_account, str(row["host_id"]))
+            host_db_id, leased_template_ref = _leased_pool_row(backend, first_run_account, str(row["host_id"]))
             # Recorded before any check of the row, so teardown releases it however the check comes out.
             record_created_resource(
                 run_manifest, kind=SmokeResourceKind.WORKSPACE, identifier=host_db_id, owner_email=owner_email
             )
+            assert row.get("account_email") == owner_email, row
+            # The create named no workspace, so the app named it what its launch said to.
+            assert row.get("name") == first_workspace_name, row
             logger.info(
-                "Step 3: created workspace {} ({}, pool row {} baked at template {})",
-                workspace_name,
+                "Step 3: the app created workspace {} ({}, pool row {} baked at template {})",
+                first_workspace_name,
                 agent_id,
                 host_db_id,
                 leased_template_ref,
             )
-            screenshot_every_page(studio_app.browser, smoke_output_dir, "04-workspace-ready")
             if expected_template_ref is not None:
                 _assert_workspace_is_at_expected_template(expected_template_ref, leased_template_ref, host_db_id)
+            providers_page = continue_to_provider_page(studio_app, workspace_frame)
+            screenshot_every_page(studio_app.browser, smoke_output_dir, "04-workspace-ready")
+            sharing = wait_for_sharing_enabled(studio_app, agent_id, _SHARE_ENABLED_TIMEOUT_SECONDS)
+            record_created_resource(
+                run_manifest, kind=SmokeResourceKind.SHARE, identifier=str(sharing["host_id"]), owner_email=owner_email
+            )
+
+        with recorded_step(smoke_steps_path, _PROVIDER_STEP_LABEL):
+            account_id = adopt_imbue_credentials(providers_page, mint_workspace_llm_credentials(studio_app, agent_id))
+            wait_for_account_on_provider_page(providers_page, account_id)
+            screenshot_every_page(studio_app.browser, smoke_output_dir, "04a-provider-connected")
+            press_first_run_next(workspace_frame, providers_page)
+            logger.info("Step 3a: the workspace runs on the account's credentials, and its desktop rendered")
+            screenshot_every_page(studio_app.browser, smoke_output_dir, "04b-desktop")
 
         if is_dwt_tests_skipped:
             skip_reason = f"{SMOKE_SKIP_DWT_TESTS_ENV_VAR}=1 skips default-workspace-template's CI tests and OOM drill"
@@ -536,7 +559,6 @@ def test_the_build_signs_in_creates_builds_stops_starts_shares_and_destroys_a_wo
 
         with recorded_step(smoke_steps_path, _BUILD_STEP_LABEL):
             welcome_chat = open_welcome_chat(workspace_frame)
-            adopt_imbue_credentials(welcome_chat, mint_workspace_llm_credentials(studio_app, agent_id))
             prompt = _HELLO_PROMPT_TEMPLATE.format(port=_HELLO_PORT, nonce=nonce, service=_HELLO_SERVICE)
             main_chat_id = send_prompt_to_main_chat(workspace_frame, welcome_chat, prompt, nonce)
             reply_seconds = wait_for_reply(
@@ -550,7 +572,7 @@ def test_the_build_signs_in_creates_builds_stops_starts_shares_and_destroys_a_wo
             workspace_frame = _stop_and_start_from_the_home_page(
                 studio_app,
                 backend,
-                persistent_account,
+                first_run_account,
                 agent_id,
                 host_db_id,
                 storage_restore_wait_seconds,
@@ -577,17 +599,10 @@ def test_the_build_signs_in_creates_builds_stops_starts_shares_and_destroys_a_wo
             screenshot_every_page(studio_app.browser, smoke_output_dir, "05c-started-again")
 
         with recorded_step(smoke_steps_path, _SHARE_STEP_LABEL):
-            publish_share_from_panel(studio_app, agent_id)
-            sharing = read_sharing_status(studio_app, agent_id)
-            assert sharing.get("enabled") is True, sharing
-            assert sharing.get("host_id"), sharing
-            record_created_resource(
-                run_manifest, kind=SmokeResourceKind.SHARE, identifier=str(sharing["host_id"]), owner_email=owner_email
-            )
             share_url = wait_for_share_url(studio_app, agent_id, _HELLO_SERVICE, _SHARE_LINK_TIMEOUT_SECONDS)
             assert _SHARE_URL_PATTERN.match(share_url), share_url
             screenshot_every_page(studio_app.browser, smoke_output_dir, "06-shared")
-            _open_share_as_owner(visitor, share_url, persistent_account, _HELLO_BODY_TEMPLATE.format(nonce=nonce))
+            _open_share_as_owner(visitor, share_url, first_run_account, _HELLO_BODY_TEMPLATE.format(nonce=nonce))
             logger.info("Step 5: the share link {} served the hello app", share_url)
 
         with recorded_step(smoke_steps_path, _UNSHARE_STEP_LABEL):

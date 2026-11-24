@@ -11,28 +11,18 @@ import type {
   AccountReadFailure,
   AccountSection,
   AccountsDetailModel,
-  VerifyEmailPrompt,
 } from "../../../models/accountsDetail";
 import { accountReadError } from "../../../models/accountsDetail";
-import { verificationEmailSentNote } from "../../../models/emailVerification";
 import type { ErrorAction } from "../../../models/errors";
 import { Button } from "../../components/Button";
 import { ErrorNotice, restartAppActions, updateAppActions } from "../../components/ErrorDisplay";
 import { webLogin } from "../../../models/webLogin";
 import { Card } from "../../components/Card";
 import { Link } from "../../components/Link";
-import { Notice } from "../../components/Notice";
 import { routeLinkAttrs } from "../../components/route-link";
 import { Select } from "../../components/FormControls";
 import { Spinner } from "../../components/Spinner";
 import { renderSwitch, renderSwitchWord } from "../../components/Switch";
-
-function verifyPromptLead(prompt: VerifyEmailPrompt): string {
-  if (prompt.resendOutcome === "already_verified") return "You can switch plans now.";
-  return prompt.wasAutoSent
-    ? `Switching plans requires a verified email. We just sent a link to ${prompt.email} -- click it, then switch again.`
-    : `Switching plans requires a verified email. Use "Resend email" to get a link at ${prompt.email}, click it, then switch again.`;
-}
 
 interface AccountCardAttrs {
   model: AccountsDetailModel;
@@ -205,7 +195,6 @@ function planSection(
   const trim = plan.trimStatus;
   const isTrimRunning = trim?.is_running === true;
   const isTrimUnfinished = trim !== null && !trim.is_running && trim.error_detail !== "";
-  const verifyPrompt = model.verifyEmailPromptFor(account.user_id);
   // The draft lives in component state (keyed by user_id): a per-render
   // local would be reset by the redraw that follows the select's onchange.
   const selectedPlan =
@@ -216,34 +205,6 @@ function planSection(
     selectedPlan === "explorer" && selectedPlan !== view.plan_name;
   const isSwitchingPlan = model.isSwitchingPlan(account.user_id);
   return m("div", [
-    verifyPrompt !== null
-      ? m(Notice, { variant: "warn" }, [
-          m("div", verifyPromptLead(verifyPrompt)),
-          m("div", { class: "flex items-center gap-2 mt-1" }, [
-            verifyPrompt.resendOutcome === "already_verified"
-              ? null
-              : m(
-                  Button,
-                  {
-                    variant: "secondary",
-                    disabled: verifyPrompt.isResending,
-                    onclick: () => void model.resendVerification(account.user_id),
-                  },
-                  verifyPrompt.isResending ? "Sending…" : "Resend email",
-                ),
-            verifyPrompt.resendOutcome !== null
-              ? m(
-                  "span",
-                  { class: "type-helper" },
-                  verificationEmailSentNote(
-                    verifyPrompt.email,
-                    verifyPrompt.resendOutcome,
-                  ),
-                )
-              : null,
-          ]),
-        ])
-      : null,
     m("div", { class: "flex items-center justify-between mb-2" }, [
       m("div", { class: "flex items-center gap-2 type-label text-secondary" }, [
         m("span", [

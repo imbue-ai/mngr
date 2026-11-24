@@ -31,11 +31,13 @@ from imbue.minds.envs.primitives import VaultReadError
 from imbue.minds.smoke_tests.accounts import SMOKE_USER_AGENT
 from imbue.minds.smoke_tests.accounts import persistent_account_credentials_from_env_or_none
 from imbue.minds.smoke_tests.accounts import read_persistent_account_credentials_or_none
+from imbue.minds.smoke_tests.accounts import require_account_holds_no_workspace
 from imbue.minds.smoke_tests.app_flows import screenshot_every_page
 from imbue.minds.smoke_tests.backend import resolve_smoke_backend
 from imbue.minds.smoke_tests.backend import resolve_smoke_client_config_path
 from imbue.minds.smoke_tests.backend import stop_retention_wait_seconds
 from imbue.minds.smoke_tests.binary import BINARY_SELECTION_ENV_VARS
+from imbue.minds.smoke_tests.binary import default_workspace_name_base_for_run
 from imbue.minds.smoke_tests.binary import is_studio_binary_selected
 from imbue.minds.smoke_tests.binary import launched_studio_app
 from imbue.minds.smoke_tests.binary import resolve_studio_binary
@@ -72,6 +74,7 @@ from imbue.minds.smoke_tests.testing import SMOKE_RUN_ID_KEY
 from imbue.minds.smoke_tests.testing import SMOKE_RUN_MANIFEST_KEY
 from imbue.minds.smoke_tests.testing import SMOKE_STUDIO_BINARY_KEY
 from imbue.minds.smoke_tests.testing import smoke_run_report_of_session
+from imbue.mngr.utils.testing import get_short_random_string
 
 # Captured from /etc/passwd at import, before the autouse HOME redirect, so the
 # browsers ``playwright install chromium`` put under the real home are found.
@@ -161,6 +164,18 @@ def persistent_account(backend: SmokeBackend) -> SmokeAccountCredentials:
             f"run `just minds-smoke-create-persistent-account {tier}` first."
         )
     return from_vault
+
+
+@pytest.fixture(scope="session")
+def first_run_account(backend: SmokeBackend, persistent_account: SmokeAccountCredentials) -> SmokeAccountCredentials:
+    """The persistent account, for a scenario that signs in through the app's first run: checked to hold no workspace.
+
+    The first run creates a workspace only for an account that has none, so a
+    leftover fails the scenario here, named. Session-scoped, which is what has
+    pytest make the check before it launches the function-scoped app.
+    """
+    require_account_holds_no_workspace(connector_url=backend.connector_url, credentials=persistent_account)
+    return persistent_account
 
 
 @pytest.fixture(scope="session")
@@ -289,16 +304,27 @@ def smoke_steps_path(smoke_output_dir: Path) -> Path:
 
 
 @pytest.fixture
+def first_workspace_name(smoke_run_id: SmokeRunId) -> str:
+    """What the launched app names the workspace its first run creates: ``studio-smoke-<run id>-<random>``."""
+    return default_workspace_name_base_for_run(smoke_run_id, get_short_random_string())
+
+
+@pytest.fixture
 def studio_app(
     request: pytest.FixtureRequest,
     studio_binary: StudioBinary,
     backend: SmokeBackend,
     smoke_display: str | None,
+    first_workspace_name: str,
     tmp_path: Path,
 ) -> Iterator[StudioAppSession]:
-    """The build under test, launched on a throwaway data home with Playwright attached; one per test."""
+    """The build under test, launched on a throwaway data home with Playwright attached; one per test.
+
+    A throwaway data home is a fresh install, so the app opens on its first run,
+    and names the workspace that creates ``first_workspace_name``.
+    """
     with launched_studio_app(
-        studio_binary, backend, tmp_path / "studio-data-home", find_free_port(), smoke_display
+        studio_binary, backend, tmp_path / "studio-data-home", find_free_port(), smoke_display, first_workspace_name
     ) as session:
         request.node.stash[SMOKE_APP_STATE_DIR_KEY] = session.state_dir
         yield session

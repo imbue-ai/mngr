@@ -1,92 +1,30 @@
 import m from "mithril";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAppContextForTests, registerAppContext } from "../../app-context";
 import type { AppContext } from "../../app-context";
 import { createEmptyStores } from "../../models/boot";
 import type { CreateAttemptDetail } from "../../models/create";
 import type { ErrorAction, UserFacingError } from "../../models/errors";
-import {
-  SETUP_LINE,
-  SHOWCASE_APP,
-  SHOWCASE_INTRO_LINE,
-  readyTurnMarkdown,
-  showcaseMarkdown,
-} from "../../models/creationTranscript";
-import { firstRun } from "../../models/firstRun";
+import { SETTING_UP_LINE, SETTING_UP_LONG_LINE } from "../../models/firstRun";
 import { firstRunCover } from "../../models/firstRunCover";
-import { MANIFESTO_OPENER, MANIFESTO_QUESTION, REPORTING_ASK } from "../../models/manifesto";
-import { wash } from "../../models/wash";
-import { manifestoOpenerMarkdown } from "../../models/welcomeChat";
 import { WELCOME_CHAT_WAIT_BOUND_MS, welcomeChatArrival } from "../../models/welcomeChatArrival";
-import type { WelcomeChatBody } from "../../models/welcomeChat";
 import type { AnyVnode } from "../../testing";
 import {
   InertEventSource,
   allText,
   attrsOf,
   byId,
-  classTokensOf,
   classesOf,
-  collectText,
+  classTokensOf,
   collectVnodes,
   jsonResponse,
   renderDeep,
   withAttr,
   withMindsNative,
 } from "../../testing";
-import { Button } from "../components/Button";
-import { BTN_VARIANTS } from "../components/constants";
-import { ChatError } from "./start/ChatError";
-import type { ChatErrorAttrs } from "./start/ChatError";
 import { ShellState } from "../shell/shell-state";
-import { CreatingPage, failureTurn } from "./CreatingPage";
-import { SETTING_UP_LINE } from "./StartPage";
-
-describe("failureTurn", () => {
-  /** The turn as one live component, so its See details stays open across a
-   * redraw the way it does on the page the e2e runner drives. */
-  function drawFailureTurn(error: UserFacingError): () => unknown {
-    const turn = failureTurn(error) as m.Vnode<ChatErrorAttrs>;
-    const component = (turn.tag as () => m.Component<ChatErrorAttrs>)();
-    return () => renderDeep(component.view(turn));
-  }
-
-  /** The node carrying `id`; throws when the turn does not name one. */
-  function nodeById(tree: unknown, id: string): AnyVnode {
-    const node = collectVnodes(tree).find((candidate) => attrsOf(candidate).id === id);
-    if (node === undefined) throw new Error(`no #${id} in the failure turn`);
-    return node;
-  }
-
-  it("keeps the ids the e2e workspace runner polls, around our sentence, landed whole", () => {
-    const turn = renderDeep(
-      failureTurn({
-        message: "Couldn't create alpha. Try again. If this persists, report a bug.",
-        details: "",
-      }),
-    );
-    const nodes = collectVnodes(turn);
-    expect(nodes.find((node) => attrsOf(node).id === "failure-view")).toBeDefined();
-    const message = nodes.find((node) => attrsOf(node).id === "error-message");
-    expect(allText(message)).toBe("Couldn't create alpha. Try again. If this persists, report a bug.");
-    // An error is read, not followed: streamed a character at a time it reads as the app hanging.
-    expect(nodes.filter((node) => String(attrsOf(node).class ?? "").includes("start-char"))).toHaveLength(0);
-  });
-
-  it("names the See details toggle and the panel it opens from the failure view the runner polls", () => {
-    const draw = drawFailureTurn({
-      message: "Couldn't create alpha. Try again. If this persists, report a bug.",
-      details: "mngr create failed (exit code 1):\nunknown or invalid runtime name: runsc",
-    });
-    // The runner clicks `#failure-view-details` and reads the panel it
-    // opens; without that panel's id it has the sentence alone, which names
-    // no cause.
-    (attrsOf(nodeById(draw(), "failure-view-details")).onclick as () => void)();
-    expect(allText(nodeById(draw(), "failure-view-details-panel"))).toContain(
-      "unknown or invalid runtime name: runsc",
-    );
-  });
-});
+import { CreatingPage } from "./CreatingPage";
+import { CreateFailure } from "./create/CreateFailure";
 
 /** What the page puts on screen, with its components rendered through. */
 function shownText(view: unknown): string {
@@ -110,22 +48,31 @@ function answers(view: unknown): Map<string, () => void> {
   );
 }
 
-/** The chat error keyed `key`. */
-function failureNoticeIn(view: unknown, key: string): AnyVnode | undefined {
+/** The answers as drawn, in order, each filled (the leading fix) or quiet. */
+function drawnAnswers(view: unknown): [unknown, string][] {
+  return withAttr(renderDeep(view), "data-answer").map((node) => {
+    const classes = classesOf(node);
+    const isFilled = classes.includes("first-run-button") && !classes.includes("first-run-button--secondary");
+    return [attrsOf(node)["data-answer"], isFilled ? "filled" : "quiet"];
+  });
+}
+
+/** The failure notice named `id`. */
+function failureNoticeIn(view: unknown, id: string): AnyVnode | undefined {
   return collectVnodes(view).find(
-    (node) => node.tag === ChatError && attrsOf(node).key === key,
+    (node) => node.tag === CreateFailure && attrsOf(node).id === id,
   );
 }
 
-/** The ways forward the failure's chat error offers, by label, in order. */
+/** The ways forward the failure notice offers, by label, in order. */
 function failureActions(view: unknown): Map<string, ErrorAction> {
-  const actions = (attrsOf(failureNoticeIn(view, "creation-failure") ?? {}).actions ?? []) as ErrorAction[];
+  const actions = (attrsOf(failureNoticeIn(view, "failure-view") ?? {}).actions ?? []) as ErrorAction[];
   return new Map(actions.map((action) => [action.label, action]));
 }
 
-/** What the page keeps behind the See details of the chat error keyed `key`. */
-function failureDetailsIn(view: unknown, key: string): string {
-  const error = attrsOf(failureNoticeIn(view, key) ?? {}).error as UserFacingError | undefined;
+/** What the page keeps behind the See details of the failure notice named `id`. */
+function failureDetailsIn(view: unknown, id: string): string {
+  const error = attrsOf(failureNoticeIn(view, id) ?? {}).error as UserFacingError | undefined;
   return error?.details ?? "";
 }
 
@@ -135,11 +82,14 @@ function retryFormAttrs(view: unknown): Record<string, unknown> | undefined {
   return form === undefined ? undefined : attrsOf(form);
 }
 
-describe("CreatingPage across a route change", () => {
+describe("CreatingPage", () => {
+  beforeEach(() => {
+    const shell = new ShellState(createEmptyStores());
+    registerAppContext({ stores: shell.stores, shell });
+  });
+
   afterEach(() => {
-    firstRun.noteCreate("", null);
     firstRunCover.lower();
-    wash.cancel();
     welcomeChatArrival.cancel();
     vi.useRealTimers();
     clearAppContextForTests();
@@ -147,7 +97,22 @@ describe("CreatingPage across a route change", () => {
     vi.restoreAllMocks();
   });
 
-  function liveDetail(createAttemptId: string, isDriven = false): CreateAttemptDetail {
+  const REQUEST = {
+    launch_mode: "LIMA",
+    cloud_account: "",
+    cloud_account_alias: "",
+    cloud_account_backend_label: "",
+    backup_provider: "CONFIGURE_LATER",
+    region: "",
+    instance_type: "",
+    cpu_count: null,
+    memory_gb: null,
+    disk_gb: null,
+    repository: "https://example.com/repo.git",
+    branch: "",
+  };
+
+  function liveDetail(createAttemptId: string, isFirstWorkspace = false, accountId = ""): CreateAttemptDetail {
     return {
       kind: "live",
       record: null,
@@ -155,22 +120,9 @@ describe("CreatingPage across a route change", () => {
         workspace_name: `workspace-${createAttemptId}`,
         provider_label: "",
         is_remote: false,
-        request: {
-          is_onboarding_driven_by_agent: isDriven,
-          display_name: `workspace-${createAttemptId}`,
-          launch_mode: "LIMA",
-          cloud_account: "",
-          cloud_account_alias: "",
-          cloud_account_backend_label: "",
-          backup_provider: "CONFIGURE_LATER",
-          region: "",
-          instance_type: "",
-          cpu_count: null,
-          memory_gb: null,
-          disk_gb: null,
-          repository: "https://example.com/repo.git",
-          branch: "",
-        },
+        is_first_workspace: isFirstWorkspace,
+        account_id: accountId,
+        request: { ...REQUEST, display_name: `workspace-${createAttemptId}` },
       },
     };
   }
@@ -186,22 +138,9 @@ describe("CreatingPage across a route change", () => {
         error_kind: "",
         log_tail: [],
         provider_label: "",
-        request: {
-          is_onboarding_driven_by_agent: false,
-          display_name: `workspace-${createAttemptId}`,
-          launch_mode: "LIMA",
-          cloud_account: "",
-          cloud_account_alias: "",
-          cloud_account_backend_label: "",
-          backup_provider: "CONFIGURE_LATER",
-          region: "",
-          instance_type: "",
-          cpu_count: null,
-          memory_gb: null,
-          disk_gb: null,
-          repository: "https://example.com/repo.git",
-          branch: "",
-        },
+        is_first_workspace: false,
+        account_id: "",
+        request: { ...REQUEST, display_name: `workspace-${createAttemptId}` },
         retry_unavailable_reason: "",
       },
     };
@@ -215,96 +154,47 @@ describe("CreatingPage across a route change", () => {
     } as m.Attributes) as m.VnodeDOM;
   }
 
-  /** The keys of the page's column, in order: the turns as they stand. */
-  function columnKeys(rendered: m.Vnode): string[] {
-    return (rendered.children as m.Vnode[]).map((child) => String(attrsOf(child).key));
-  }
-
-  /** The turn of the page's column keyed `key`. */
-  function columnTurn(rendered: m.Vnode, key: string): AnyVnode {
-    const turn = (rendered.children as m.Vnode[]).find((child) => attrsOf(child).key === key);
-    expect(turn, `the ${key} turn`).toBeDefined();
-    return turn as AnyVnode;
-  }
-
-  it("opens with the manifesto exchange even for an attempt the start flow did not submit", async () => {
-    vi.stubGlobal("fetch", (url: string) =>
-      Promise.resolve(
-        jsonResponse(failedRecord(url.slice(url.lastIndexOf("/") + 1))),
-      ),
-    );
-    vi.spyOn(m, "redraw").mockImplementation(() => undefined);
-    const page = CreatingPage(vnodeFor("create-attempt-c"));
-    const render = (vnode: m.Vnode): m.Vnode =>
-      (page.view as (v: m.Vnode) => m.Vnode).call(page, vnode);
-    (page.oninit as (v: m.VnodeDOM) => void).call(
-      page,
-      vnodeFor("create-attempt-c"),
-    );
-
-    await vi.waitFor(() =>
-      expect(allText(render(vnodeFor("create-attempt-c")))).toContain(
-        "workspace-create-attempt-c",
-      ),
-    );
-
-    const text = allText(render(vnodeFor("create-attempt-c")));
-    expect(text.indexOf(MANIFESTO_OPENER)).toBeLessThan(
-      text.indexOf(MANIFESTO_QUESTION),
-    );
-    expect(text.indexOf(MANIFESTO_QUESTION)).toBeLessThan(
-      text.indexOf("Honest Software:"),
-    );
-    expect(text.indexOf("Honest Software:")).toBeLessThan(
-      text.indexOf("Create a workspace with these settings:"),
-    );
-  });
-
   /** The op-log stream as the page opens it: its `onmessage` is where a log line arrives. */
   interface LogSource {
     onmessage: unknown;
   }
 
+  const GLEB = { user_id: "user-1", email: "gleb@example.com", display_name: "Gleb Denisov" };
+
   /**
-   * A live attempt whose status polls answer `status` (DONE unless given, until `setStatus` says
-   * otherwise), with every welcome-chat post held open until the returned `settleSeed` or `failSeed` is called. Reduced
-   * motion, so the wash covers at once instead of growing from the loading box, which measures the DOM.
+   * A live attempt under Gleb's account whose status polls answer `status`, with every welcome-chat post held
+   * open until the returned `settleSeed` or `failSeed` is called.
    */
-  function mountDoneAttempt(
+  function mountLiveAttempt(
     createAttemptId: string,
-    status = "DONE",
-    isDriven = false,
+    status: string,
+    isFirstWorkspace = true,
   ): {
     page: m.Component;
+    render: () => m.Vnode;
     entered: string[];
     focusRequests: [string, string][];
     landings: unknown[];
-    seedBodies: WelcomeChatBody[];
+    seedPosts: (RequestInit | undefined)[];
     logSources: LogSource[];
     settleSeed: () => void;
     failSeed: () => void;
-    setStatus: (next: string) => void;
   } {
     vi.useFakeTimers();
-    let currentStatus = status;
     const entered: string[] = [];
     const focusRequests: [string, string][] = [];
     const landings: unknown[] = [];
     const logSources: LogSource[] = [];
-    const workspaces = { accentEntry: () => undefined, toAgentScopedId: (id: string) => id };
+    const workspaces = { toAgentScopedId: (id: string) => id };
+    const stores = { workspaces, accounts: { accounts: [GLEB] } };
     registerAppContext({
-      stores: { workspaces },
+      stores,
       shell: {
-        stores: { workspaces },
+        stores,
         enterWorkspace: (id: string) => entered.push(id),
         requestFocusChat: (workspaceId: string, chatId: string) => focusRequests.push([workspaceId, chatId]),
       },
     } as unknown as AppContext);
-    vi.stubGlobal("window", {
-      matchMedia: () => ({ matches: true }),
-      innerWidth: 800,
-      innerHeight: 600,
-    });
     vi.stubGlobal(
       "EventSource",
       class extends InertEventSource {
@@ -314,11 +204,11 @@ describe("CreatingPage across a route change", () => {
         }
       },
     );
-    const seedBodies: WelcomeChatBody[] = [];
+    const seedPosts: (RequestInit | undefined)[] = [];
     const seedResolvers: ((response: Response) => void)[] = [];
     vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
       if (url.endsWith("/welcome-chat")) {
-        seedBodies.push(JSON.parse(init?.body as string) as WelcomeChatBody);
+        seedPosts.push(init);
         return new Promise<Response>((resolve) => {
           seedResolvers.push(resolve);
         });
@@ -328,11 +218,11 @@ describe("CreatingPage across a route change", () => {
         return Promise.resolve(new Response(null, { status: 204 }));
       }
       if (url.startsWith("/ui/api/create/attempts/"))
-        return Promise.resolve(jsonResponse(liveDetail(createAttemptId, isDriven)));
+        return Promise.resolve(jsonResponse(liveDetail(createAttemptId, isFirstWorkspace, GLEB.user_id)));
       return Promise.resolve(
         jsonResponse({
-          status: currentStatus,
-          redirect_url: currentStatus === "DONE" ? "/goto/agent-0123abcd/" : "",
+          status,
+          redirect_url: status === "DONE" ? "/goto/agent-0123abcd/" : "",
         }),
       );
     });
@@ -344,10 +234,11 @@ describe("CreatingPage across a route change", () => {
     );
     return {
       page,
+      render: () => (page.view as (v: m.Vnode) => m.Vnode).call(page, vnodeFor(createAttemptId)),
       entered,
       focusRequests,
       landings,
-      seedBodies,
+      seedPosts,
       logSources,
       settleSeed: () => {
         for (const resolve of seedResolvers)
@@ -357,144 +248,153 @@ describe("CreatingPage across a route change", () => {
         for (const resolve of seedResolvers)
           resolve(new Response(JSON.stringify({ error: "no chat app" }), { status: 502 }));
       },
-      setStatus: (next: string) => {
-        currentStatus = next;
-      },
     };
   }
 
-  /** Run a mounted, finished attempt to its entry: the workspace mounted under the cover and the page gone. */
-  async function runToEntry(mounted: ReturnType<typeof mountDoneAttempt>): Promise<void> {
-    await vi.waitFor(() => expect(mounted.seedBodies).toHaveLength(2));
+  /** Run a mounted, finished attempt to its entry: seeded, the workspace mounted under the cover, the page gone. */
+  async function runToEntry(mounted: ReturnType<typeof mountLiveAttempt>): Promise<void> {
+    await vi.waitFor(() => expect(mounted.seedPosts).toHaveLength(2));
+    mounted.settleSeed();
     await vi.advanceTimersByTimeAsync(1);
     expect(mounted.entered).toEqual(["agent-0123abcd"]);
     (mounted.page.onremove as () => void).call(mounted.page);
   }
 
-  it("hands the conversation to the finished attempt's workspace and keeps the cover up until the chat is on screen", async () => {
-    const { page, entered, focusRequests, landings, seedBodies, settleSeed } =
-      mountDoneAttempt("create-attempt-d");
-    const render = (vnode: m.Vnode): m.Vnode =>
-      (page.view as (v: m.Vnode) => m.Vnode).call(page, vnode);
+  it("welcomes the owner of a first workspace with its progress alone, and asks for the seed with no body", async () => {
+    const { page, render, seedPosts } = mountLiveAttempt("create-attempt-w", "CREATING_WORKSPACE");
+    await vi.waitFor(() => expect(seedPosts).toHaveLength(1));
 
-    // Handed over once the page knows the settings, and again once the attempt is done, which starts the seed.
-    await vi.waitFor(() => expect(seedBodies).toHaveLength(2));
-    expect(seedBodies[1]).toEqual(seedBodies[0]);
-    const turns = seedBodies[0].turns;
-    expect(turns[0]).toEqual({
-      role: "assistant",
-      text: manifestoOpenerMarkdown(),
-    });
-    expect(turns[1]).toEqual({ role: "user", text: MANIFESTO_QUESTION });
-    expect(turns[3].text).toContain(REPORTING_ASK);
-    expect(turns[4].text).toContain("Name — workspace-create-attempt-d");
-    expect(turns[turns.length - 1].text).toBe(readyTurnMarkdown());
-    const root = render(vnodeFor("create-attempt-d"));
-    const nodes = collectVnodes(root);
-    // The settings turn, the setup line, the loading box at once (no recording), and the ready
-    // line, which stands further from the box than one turn from the next.
-    const keys = columnKeys(root);
-    expect(keys.indexOf("creation-summary")).toBeLessThan(keys.indexOf("creation-setup"));
-    expect(keys.indexOf("creation-setup")).toBeLessThan(keys.indexOf("creation-box"));
-    expect(keys.indexOf("creation-box")).toBeLessThan(keys.indexOf("creation-ready"));
-    expect(keys.indexOf("creation-ready")).toBeLessThan(keys.indexOf("scroll-anchor"));
-    expect(keys).not.toContain("showcase-todo-list");
-    const ready = nodes.find((node) => attrsOf(node).key === "creation-ready") as AnyVnode;
-    expect(classTokensOf(ready)).toContain("mt-20");
-    // The ready line streams at once, under the wash that is already coming up.
-    const readyStyles = collectVnodes(ready).map((node) => String(attrsOf(node).style ?? ""));
-    expect(readyStyles.some((style) => style.includes("--start-char-delay: 0ms;"))).toBe(true);
-    expect(wash.active).not.toBeNull();
+    const building = renderDeep(render());
+    expect(attrsOf(building as AnyVnode)["data-first-run"]).toBe("true");
+    expect(attrsOf(building as AnyVnode)["data-agent-id"]).toBe("create-attempt-w");
+    expect(classTokensOf(building as AnyVnode)).toContain("light");
+    expect(allText(byId(building, "creating-welcome"))).toBe("Welcome, Gleb!");
+    expect(allText(byId(building, "creating-setting-up"))).toBe(SETTING_UP_LINE);
+    expect(byId(building, "creating-welcome-bar")).toBeDefined();
+    // Nothing to pick and no Continue while it builds: the one control is the log's toggle.
+    const buttons = collectVnodes(building).filter((node) => node.tag === "button");
+    expect(buttons.map((button) => allText(button))).toEqual(["Show details"]);
+    expect(collectVnodes(building).filter((node) => node.tag === "input")).toEqual([]);
+    // The seed's body is the desktop client's, so the ask carries none.
+    expect(seedPosts[0]?.method).toBe("POST");
+    expect(seedPosts[0]?.body).toBeUndefined();
+    (page.onremove as () => void).call(page);
+  });
 
-    // The workspace mounts behind the cover with the seed still in flight, and the page goes away.
+  it("names a later workspace in its heading, over the bar alone", async () => {
+    const { page, render, seedPosts } = mountLiveAttempt("create-attempt-l", "CREATING_WORKSPACE", false);
+    await vi.waitFor(() => expect(seedPosts).toHaveLength(1));
+
+    const building = renderDeep(render());
+    expect(allText(byId(building, "creating-welcome"))).toBe("Setting up workspace-create-attempt-l");
+    expect(byId(building, "creating-setting-up")).toBeUndefined();
+    expect(byId(building, "creating-welcome-bar")).toBeDefined();
+    (page.onremove as () => void).call(page);
+  });
+
+  it("draws the same page when the same attempt is mounted again, as after a reload", async () => {
+    const first = mountLiveAttempt("create-attempt-r", "CREATING_WORKSPACE");
+    await vi.waitFor(() => expect(first.seedPosts).toHaveLength(1));
+    const firstText = shownText(first.render());
+    (first.page.onremove as () => void).call(first.page);
+
+    const second = mountLiveAttempt("create-attempt-r", "CREATING_WORKSPACE");
+    await vi.waitFor(() => expect(second.seedPosts).toHaveLength(1));
+    expect(shownText(second.render())).toBe(firstText);
+    expect(firstText).toContain("Welcome, Gleb!");
+    (second.page.onremove as () => void).call(second.page);
+  });
+
+  it("enters under the cover only once the workspace has its seed, and offers Continue when its chat is on screen", async () => {
+    const { page, render, entered, focusRequests, landings, seedPosts, settleSeed } = mountLiveAttempt(
+      "create-attempt-d",
+      "DONE",
+    );
+    // Asked once the page knew the attempt was live, and again once it was done.
+    await vi.waitFor(() => expect(seedPosts).toHaveLength(2));
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(byId(renderDeep(render()), "creating-continue")).toBeUndefined();
+    expect(entered).toEqual([]);
+    expect(firstRunCover.state).toBeNull();
+
+    // The seed is what tells the workspace to play its arrival, so the workspace is entered only after it.
+    settleSeed();
     await vi.advanceTimersByTimeAsync(1);
     expect(entered).toEqual(["agent-0123abcd"]);
-    (page.onremove as () => void).call(page);
-    expect(wash.active).not.toBeNull();
-
-    // The seed's answer asks the workspace for the chat, and is not yet the chat on screen.
-    settleSeed();
-    await vi.advanceTimersByTimeAsync(10_000);
     expect(focusRequests).toEqual([["agent-0123abcd", "agent-seeded"]]);
-    expect(wash.active?.isLifting).toBe(false);
+    expect(firstRunCover.state).toEqual({
+      createAttemptId: "create-attempt-d",
+      heading: "Welcome, Gleb!",
+      isReady: false,
+    });
+    (page.onremove as () => void).call(page);
 
-    // Only the seeded chat's own report lifts it.
+    // Only the seeded chat's own report makes the cover ready.
     welcomeChatArrival.noteChatOnScreen("agent-99999999");
     await vi.advanceTimersByTimeAsync(0);
-    expect(wash.active?.isLifting).toBe(false);
+    expect(firstRunCover.state?.isReady).toBe(false);
     welcomeChatArrival.noteChatOnScreen("agent-seeded");
     await vi.advanceTimersByTimeAsync(0);
-    expect(wash.active).toBeNull();
+    expect(firstRunCover.state?.isReady).toBe(true);
     expect(landings).toEqual([{ landing: "ON_SCREEN", waited_ms: expect.any(Number) }]);
   });
 
-  it("lifts the cover at once when the seed definitively fails, and records why", async () => {
-    const mounted = mountDoneAttempt("create-attempt-s");
-    const { focusRequests, landings, failSeed } = mounted;
-    await runToEntry(mounted);
+  it("offers Continue at once when the seed definitively fails, and records why", async () => {
+    const { page, entered, focusRequests, landings, seedPosts, failSeed } = mountLiveAttempt(
+      "create-attempt-s",
+      "DONE",
+    );
+    await vi.waitFor(() => expect(seedPosts).toHaveLength(2));
 
     failSeed();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(wash.active).toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(entered).toEqual(["agent-0123abcd"]);
+    expect(firstRunCover.state?.isReady).toBe(true);
     expect(focusRequests).toEqual([]);
     expect(landings).toEqual([{ landing: "SEED_FAILED", waited_ms: expect.any(Number) }]);
-  });
-
-  it("lifts the cover once the provider chooser is on screen, before the seed answers, and still asks for the chat", async () => {
-    const mounted = mountDoneAttempt("create-attempt-p");
-    const { focusRequests, landings, settleSeed } = mounted;
-    await runToEntry(mounted);
-
-    welcomeChatArrival.noteProviderChooserOnScreen();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(wash.active).toBeNull();
-    expect(landings).toEqual([{ landing: "PROVIDER_CHOOSER_ON_SCREEN", waited_ms: expect.any(Number) }]);
-
-    settleSeed();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(focusRequests).toEqual([["agent-0123abcd", "agent-seeded"]]);
-    expect(landings).toHaveLength(1);
-  });
-
-  it("lifts the cover at the bound when the chat never shows, so the user is not stranded", async () => {
-    const mounted = mountDoneAttempt("create-attempt-t");
-    const { landings, settleSeed } = mounted;
-    await runToEntry(mounted);
-    settleSeed();
-
-    await vi.advanceTimersByTimeAsync(WELCOME_CHAT_WAIT_BOUND_MS - 1000);
-    expect(wash.active?.isLifting).toBe(false);
-    await vi.advanceTimersByTimeAsync(2000);
-    expect(wash.active).toBeNull();
-    expect(landings).toEqual([{ landing: "TIMED_OUT", waited_ms: expect.any(Number) }]);
-  });
-
-  it("folds the settings behind a toggle in the user's turn, and lists them once it is opened", async () => {
-    const { page, seedBodies } = mountDoneAttempt("create-attempt-j", "CREATING_WORKSPACE");
-    const render = (vnode: m.Vnode): m.Vnode =>
-      (page.view as (v: m.Vnode) => m.Vnode).call(page, vnode);
-    await vi.waitFor(() => expect(seedBodies).toHaveLength(1));
-
-    const closed = render(vnodeFor("create-attempt-j"));
-    expect(allText(closed)).toContain("Create a workspace with these settings:");
-    const detailsOf = (rendered: m.Vnode): AnyVnode =>
-      collectVnodes(rendered).find((node) => attrsOf(node).id === "creation-summary-details") as AnyVnode;
-    expect(attrsOf(detailsOf(closed)).isOpen).toBe(false);
-    expect(allText(detailsOf(closed))).toContain("Name — workspace-create-attempt-j");
-    (attrsOf(detailsOf(closed)).onToggle as () => void)();
-    expect(attrsOf(detailsOf(render(vnodeFor("create-attempt-j")))).isOpen).toBe(true);
     (page.onremove as () => void).call(page);
   });
 
+  it("offers Continue once the provider chooser is on screen", async () => {
+    const mounted = mountLiveAttempt("create-attempt-p", "DONE");
+    await runToEntry(mounted);
+    expect(firstRunCover.state?.isReady).toBe(false);
+
+    welcomeChatArrival.noteProviderChooserOnScreen();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(firstRunCover.state?.isReady).toBe(true);
+    expect(mounted.landings).toEqual([{ landing: "PROVIDER_CHOOSER_ON_SCREEN", waited_ms: expect.any(Number) }]);
+  });
+
+  it("offers Continue at the bound when the chat never shows, so the user is not stranded", async () => {
+    const mounted = mountLiveAttempt("create-attempt-t", "DONE");
+    await runToEntry(mounted);
+
+    await vi.advanceTimersByTimeAsync(WELCOME_CHAT_WAIT_BOUND_MS - 1000);
+    expect(firstRunCover.state?.isReady).toBe(false);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(firstRunCover.state?.isReady).toBe(true);
+    expect(mounted.landings).toEqual([{ landing: "TIMED_OUT", waited_ms: expect.any(Number) }]);
+  });
+
+  it("asks for the seed while the workspace is still being built, so leaving the page cannot lose it", async () => {
+    const { page, entered, seedPosts } = mountLiveAttempt("create-attempt-f", "CREATING_WORKSPACE");
+
+    await vi.waitFor(() => expect(seedPosts).toHaveLength(1));
+    await vi.advanceTimersByTimeAsync(30_000);
+    (page.onremove as () => void).call(page);
+    expect(seedPosts).toHaveLength(1);
+    expect(entered).toEqual([]);
+    expect(firstRunCover.state).toBeNull();
+  });
+
   it("keeps the log's end in view as lines arrive, but not once the reader has scrolled up", async () => {
-    const { page, logSources } = mountDoneAttempt("create-attempt-n", "CREATING_WORKSPACE");
-    const render = (): m.Vnode => (page.view as (v: m.Vnode) => m.Vnode).call(page, vnodeFor("create-attempt-n"));
-    await vi.waitFor(() => expect(columnKeys(render())).toContain("creation-box"));
-    expect(logSources).toHaveLength(1);
+    const { page, render, logSources } = mountLiveAttempt("create-attempt-n", "CREATING_WORKSPACE");
+    await vi.waitFor(() => expect(logSources).toHaveLength(1));
     const feedLine = (line: string): void =>
       (logSources[0].onmessage as (event: { data: string }) => void)({ data: JSON.stringify({ log: line }) });
-    const showDetails = collectVnodes(render()).find(
-      (node) => node.tag === Button && allText(node) === "Show details",
+    const showDetails = collectVnodes(renderDeep(render())).find(
+      (node) => node.tag === "button" && allText(node) === "Show details",
     ) as AnyVnode;
     (attrsOf(showDetails).onclick as () => void)();
 
@@ -504,7 +404,7 @@ describe("CreatingPage across a route change", () => {
       oncreate: (vnode: { dom: unknown }) => void;
       onupdate: (vnode: { dom: unknown }) => void;
       onscroll: (event: { target: unknown }) => void;
-    } => attrsOf(byId(render(), "logs") as AnyVnode) as ReturnType<typeof logHooks>;
+    } => attrsOf(byId(renderDeep(render()), "logs") as AnyVnode) as ReturnType<typeof logHooks>;
 
     // Opened empty, there is nothing to pin to.
     logHooks().oncreate({ dom: element });
@@ -534,166 +434,6 @@ describe("CreatingPage across a route change", () => {
     logHooks().onupdate({ dom: element });
     expect(element.scrollTop).toBe(800);
     (page.onremove as () => void).call(page);
-  });
-
-  it("shows an onboarding attempt's recording under its intro line, with no caption, before the box, and hands it over at once", async () => {
-    const { page, entered, seedBodies, settleSeed, setStatus } = mountDoneAttempt("create-attempt-k", "CREATING_WORKSPACE", true);
-    const render = (): m.Vnode => (page.view as (v: m.Vnode) => m.Vnode).call(page, vnodeFor("create-attempt-k"));
-    await vi.waitFor(() => expect(seedBodies).toHaveLength(1));
-
-    // The intro and the recording sit under the setup line, the box under them.
-    const building = render();
-    const keys = columnKeys(building);
-    expect(keys.indexOf("creation-setup")).toBeLessThan(keys.indexOf("creation-showcase-intro"));
-    expect(keys.indexOf("creation-showcase-intro")).toBeLessThan(keys.indexOf("showcase-todo-list"));
-    expect(keys.indexOf("showcase-todo-list")).toBeLessThan(keys.indexOf("creation-box"));
-    expect(keys).not.toContain("creation-ready");
-    expect(collectText(columnTurn(building, "creation-showcase-intro")).join("")).toContain(SHOWCASE_INTRO_LINE);
-    const showcase = columnTurn(building, "showcase-todo-list");
-    expect(collectText(showcase).join("").trim()).toBe("");
-    const image = collectVnodes(showcase).find((node) => node.tag === "img") as AnyVnode;
-    expect(attrsOf(image).src).toBe(SHOWCASE_APP.gifUrl);
-    expect(attrsOf(image).alt).toBe(SHOWCASE_APP.label);
-    // Reached from the form, everything up to the box is already on the page.
-    expect(String(attrsOf(showcase).style)).toContain("--start-chat-delay: 0ms");
-    expect(String(attrsOf(columnTurn(building, "creation-box")).style)).toContain("--start-chat-delay: 0ms");
-
-    // The conversation went over with the recording in it, ahead of the welcome.
-    const tail = seedBodies[0].turns.slice(-3).map((turn) => turn.text);
-    expect(tail).toEqual([SETUP_LINE, showcaseMarkdown(SHOWCASE_APP), readyTurnMarkdown()]);
-
-    // The attempt finishes: the ready line lands under the box, and the workspace is entered with
-    // the seed still in flight.
-    setStatus("DONE");
-    await vi.advanceTimersByTimeAsync(2000);
-    expect(seedBodies).toHaveLength(2);
-    const done = columnKeys(render());
-    expect(done.indexOf("creation-box")).toBeLessThan(done.indexOf("creation-ready"));
-    await vi.advanceTimersByTimeAsync(30_000);
-    expect(entered).toEqual(["agent-0123abcd"]);
-    settleSeed();
-    (page.onremove as () => void).call(page);
-  });
-
-  it("welcomes a first-run create with its progress alone, and enters under the cover once the workspace has its seed", async () => {
-    firstRun.noteCreate("create-attempt-w", { userId: "user-1", email: "gleb@example.com", displayName: "Gleb Denisov" });
-    const { page, entered, seedBodies, settleSeed, setStatus } = mountDoneAttempt(
-      "create-attempt-w",
-      "CREATING_WORKSPACE",
-      true,
-    );
-    const render = (): m.Vnode => (page.view as (v: m.Vnode) => m.Vnode).call(page, vnodeFor("create-attempt-w"));
-    await vi.waitFor(() => expect(seedBodies).toHaveLength(1));
-
-    // The welcome, not the transcript: the greeting, the progress under it with its details toggle, nothing to
-    // pick, and no Continue while it builds.
-    const building = renderDeep(render());
-    expect(attrsOf(building as AnyVnode)["data-first-run"]).toBe("true");
-    expect(allText(byId(building, "creating-welcome"))).toBe("Welcome, Gleb!");
-    expect(allText(byId(building, "creating-setting-up"))).toBe(SETTING_UP_LINE);
-    expect(byId(building, "creating-welcome-bar")).toBeDefined();
-    const buttons = collectVnodes(building).filter((node) => node.tag === "button");
-    expect(buttons.map((button) => allText(button))).toEqual(["Show details"]);
-    expect(collectVnodes(building).filter((node) => node.tag === "input")).toEqual([]);
-    expect(collectText(building).join("")).not.toContain(MANIFESTO_OPENER);
-    // The hand-over at load carries the arrival flag and nothing else.
-    expect(seedBodies).toEqual([{ title: "Welcome", turns: [], is_first_run: true }]);
-
-    // Done: nothing is offered here. The workspace is entered only once it has the hand-over (which tells it this
-    // is a first run), under the shell's cover, and the cover is ready only when the workspace says so.
-    setStatus("DONE");
-    await vi.advanceTimersByTimeAsync(5_000);
-    expect(byId(renderDeep(render()), "creating-continue")).toBeUndefined();
-    expect(entered).toEqual([]);
-    expect(firstRunCover.state).toBeNull();
-    settleSeed();
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(entered).toEqual(["agent-0123abcd"]);
-    expect(firstRunCover.state).toMatchObject({ createAttemptId: "create-attempt-w", isReady: false });
-    settleSeed();
-    await vi.advanceTimersByTimeAsync(WELCOME_CHAT_WAIT_BOUND_MS + 1_000);
-    expect(firstRunCover.state?.isReady).toBe(true);
-    // The hand-overs at done carry the same body: nothing was asked on the page, so nothing more travels.
-    expect(seedBodies.slice(1)).toEqual([seedBodies[0], seedBodies[0]]);
-    (page.onremove as () => void).call(page);
-  });
-
-  it("greets a first-run create with no name to use plainly", async () => {
-    firstRun.noteCreate("create-attempt-n", null);
-    const { page, seedBodies } = mountDoneAttempt("create-attempt-n", "CREATING_WORKSPACE", true);
-    const render = (): m.Vnode => (page.view as (v: m.Vnode) => m.Vnode).call(page, vnodeFor("create-attempt-n"));
-    await vi.waitFor(() => expect(seedBodies).toHaveLength(1));
-    expect(allText(byId(renderDeep(render()), "creating-welcome"))).toBe("Welcome!");
-    (page.onremove as () => void).call(page);
-  });
-
-  it("opens the recording enlarged on a click and closes it again", async () => {
-    const { page } = mountDoneAttempt("create-attempt-q", "DONE", true);
-    const render = (): m.Vnode => (page.view as (v: m.Vnode) => m.Vnode).call(page, vnodeFor("create-attempt-q"));
-    await vi.waitFor(() => expect(columnKeys(render())).toContain("showcase-todo-list"));
-
-    // The recording is a control; nothing is enlarged until it is pressed.
-    const settled = renderDeep(render());
-    expect(collectVnodes(settled).find((node) => attrsOf(node).role === "dialog")).toBeUndefined();
-    const opener = collectVnodes(settled).find(
-      (node) => attrsOf(node)["aria-label"] === "View the recording larger",
-    ) as AnyVnode;
-    expect(opener.tag).toBe("button");
-    (attrsOf(opener).onclick as () => void)();
-
-    // Enlarged: the same recording in a dialog, over the page.
-    const enlarged = renderDeep(render());
-    const dialog = collectVnodes(enlarged).find((node) => attrsOf(node).role === "dialog") as AnyVnode;
-    expect(dialog).toBeDefined();
-    expect(attrsOf(dialog)["aria-label"]).toBe(SHOWCASE_APP.label);
-    const enlargedImage = collectVnodes(dialog).find(
-      (node) => node.tag === "img" && attrsOf(node).src === SHOWCASE_APP.gifUrl,
-    );
-    expect(enlargedImage).toBeDefined();
-
-    // Its close control takes it down again.
-    const close = collectVnodes(enlarged).find(
-      (node) => attrsOf(node)["aria-label"] === "Close image viewer",
-    ) as AnyVnode;
-    (attrsOf(close).onclick as () => void)();
-    expect(collectVnodes(renderDeep(render())).find((node) => attrsOf(node).role === "dialog")).toBeUndefined();
-    (page.onremove as () => void).call(page);
-  });
-
-  it("leaves the cover up when another creating page opens during the wait for the chat", async () => {
-    const first = mountDoneAttempt("create-attempt-w");
-    await runToEntry(first);
-    first.settleSeed();
-    await vi.advanceTimersByTimeAsync(0);
-
-    const second = mountDoneAttempt("create-attempt-x", "CREATING");
-    await vi.advanceTimersByTimeAsync(0);
-    expect(wash.active?.isLifting).toBe(false);
-    (second.page.onremove as () => void).call(second.page);
-    expect(wash.active?.isLifting).toBe(false);
-
-    welcomeChatArrival.noteChatOnScreen("agent-seeded");
-    await vi.advanceTimersByTimeAsync(0);
-    expect(wash.active).toBeNull();
-  });
-
-  it("hands the conversation over while the workspace is still being built, so leaving the page cannot lose it", async () => {
-    const { page, entered, seedBodies } = mountDoneAttempt(
-      "create-attempt-f",
-      "CREATING_WORKSPACE",
-    );
-
-    await vi.waitFor(() => expect(seedBodies).toHaveLength(1));
-    const turns = seedBodies[0].turns;
-    expect(turns[0]).toEqual({
-      role: "assistant",
-      text: manifestoOpenerMarkdown(),
-    });
-    expect(turns[turns.length - 1].text).toBe(readyTurnMarkdown());
-    await vi.advanceTimersByTimeAsync(30_000);
-    (page.onremove as () => void).call(page);
-    expect(seedBodies).toHaveLength(1);
-    expect(entered).toEqual([]);
   });
 
   it("picks up the attempt the route now names instead of keeping the first one", async () => {
@@ -738,6 +478,7 @@ describe("CreatingPage across a route change", () => {
       "/ui/api/create/attempts/create-attempt-b",
     ]);
   });
+
   type AttemptRecord = NonNullable<CreateAttemptDetail["record"]>;
 
   function recordWith(createAttemptId: string, record: Partial<AttemptRecord>): CreateAttemptDetail {
@@ -776,8 +517,6 @@ describe("CreatingPage across a route change", () => {
       Promise.resolve(url.startsWith("/ui/api/create/attempts/") ? jsonResponse(detail) : route(url, init)),
     );
     const mounted = mountPage(createAttemptId);
-    // The name is in the settings the user turn folds away, so this waits on
-    // the markup rather than on what a reader would see.
     await vi.waitFor(() => expect(allText(mounted.render())).toContain(`workspace-${createAttemptId}`));
     return mounted;
   }
@@ -796,11 +535,10 @@ describe("CreatingPage across a route change", () => {
       "Couldn't create workspace-create-attempt-f. Try again. If this persists, report a bug.",
     );
     expect(shownText(view)).not.toContain("exit code");
-    const details = failureDetailsIn(view, "creation-failure");
+    const details = failureDetailsIn(view, "failure-view");
     expect(details).toContain("mngr create failed (exit code 1)");
     expect(details).toContain("[Imbue Studio] Creating...");
-    // The ways forward are the user's answer row: the way out among its quiet
-    // links at the left, the fix as the answer at its right.
+    // The way out stands among the quiet links at the row's left, the fix as the button at its right.
     expect([...answers(view).keys()]).toEqual([
       "failure-view-dismissal-0",
       "failure-view-fix-0",
@@ -828,8 +566,8 @@ describe("CreatingPage across a route change", () => {
     const view = render();
     const message = shownById(view, "error-message");
     expect(allText(message)).toContain("https://example.com/repo has no branch or tag called v9.");
-    expect(allText(renderDeep(failureNoticeIn(view, "creation-failure")))).toContain("Report a bug");
-    expect(failureDetailsIn(view, "creation-failure")).toContain("couldn't find remote ref v9");
+    expect(allText(renderDeep(failureNoticeIn(view, "failure-view")))).toContain("Report a bug");
+    expect(failureDetailsIn(view, "failure-view")).toContain("couldn't find remote ref v9");
     expect([...failureActions(view).keys()]).toEqual(["Retry", "Dismiss"]);
   });
 
@@ -904,14 +642,9 @@ describe("CreatingPage across a route change", () => {
     expect(retry).toMatchObject({ isDisabled: true, tooltip: reason });
     retry?.onclick();
     expect(retryFormAttrs(render())).toBeUndefined();
-    // A held Retry is never the emphasized answer: with nothing pressable in
+    // A held Retry is never the filled button: with nothing pressable in
     // the row, nothing in it is filled.
-    expect(
-      withAttr(renderDeep(render()), "data-answer").map((node) => [
-        attrsOf(node)["data-answer"],
-        classesOf(node).includes(BTN_VARIANTS.success) ? "success" : "quiet",
-      ]),
-    ).toEqual([
+    expect(drawnAnswers(render())).toEqual([
       ["failure-view-dismissal-0", "quiet"],
       ["failure-view-fix-0", "quiet"],
     ]);
@@ -1014,7 +747,7 @@ describe("CreatingPage across a route change", () => {
           "Try again. If this persists, report a bug.",
       ),
     );
-    expect(failureDetailsIn(render(), "creation-discard-failure")).toBe("mngr destroy: host busy");
+    expect(failureDetailsIn(render(), "discard-failed")).toBe("mngr destroy: host busy");
     expect(routed).not.toHaveBeenCalled();
     // Discard stays on offer as the way to try again.
     expect([...answers(render()).keys()]).toEqual(["retry", "discard"]);
@@ -1029,15 +762,11 @@ describe("CreatingPage across a route change", () => {
     const view = render();
     expect(shownText(view)).toContain(`${reason} You can discard the partial workspace.`);
     expect(shownText(view)).not.toContain("You can retry");
-    // Discard leads the row and carries the emphasis; the held Retry follows
+    // Discard leads the row and is the filled button; the held Retry follows
     // it, quieter and unpressable.
-    const drawn = withAttr(renderDeep(view), "data-answer").map((node) => [
-      attrsOf(node)["data-answer"],
-      classesOf(node).includes(BTN_VARIANTS.success) ? "success" : "secondary",
-    ]);
-    expect(drawn).toEqual([
-      ["discard", "success"],
-      ["retry", "secondary"],
+    expect(drawnAnswers(view)).toEqual([
+      ["discard", "filled"],
+      ["retry", "quiet"],
     ]);
   });
 
@@ -1085,9 +814,119 @@ describe("CreatingPage across a route change", () => {
     sources[0].onmessage?.({ data: JSON.stringify({ log: "[Imbue Studio] Creating workspace..." }) });
 
     await vi.waitFor(() => expect(shownText(render())).toContain("There's already a workspace called"));
-    const details = failureDetailsIn(render(), "creation-failure");
+    const details = failureDetailsIn(render(), "failure-view");
     expect(details).toContain("Host name already exists: alpha");
     expect(details).toContain("[Imbue Studio] Creating workspace...");
     (page.onremove as () => void).call(page);
+  });
+
+  it("opens the create form from a first workspace's failed create, for Retry and for Run on this computer", async () => {
+    vi.stubGlobal("EventSource", InertEventSource);
+    vi.stubGlobal("fetch", (url: string) =>
+      Promise.resolve(
+        url.startsWith("/ui/api/create/attempts/")
+          ? jsonResponse(liveDetail("create-attempt-u", true))
+          : jsonResponse({ status: "FAILED", error: "This account is on the waitlist.", error_kind: "WAITLISTED" }),
+      ),
+    );
+    const { page, render } = mountPage("create-attempt-u");
+    await vi.waitFor(() => expect(shownText(render())).toContain("still on the waitlist"));
+    expect(allText(shownById(render(), "creating-welcome"))).toBe("Welcome!");
+
+    failureActions(render()).get("Run on this computer")?.onclick();
+    expect(retryFormAttrs(render())).toMatchObject({
+      retryId: "create-attempt-u",
+      initialPreset: "local",
+      isImbueCloudRefused: true,
+    });
+    failureActions(render()).get("Retry")?.onclick();
+    expect(retryFormAttrs(render())).toMatchObject({ retryId: "create-attempt-u", isImbueCloudRefused: false });
+    expect(retryFormAttrs(render())?.initialPreset).toBeUndefined();
+    (page.onremove as () => void).call(page);
+  });
+
+  /** Mount a live attempt whose build says it has minutes left, and wait for the page to show that estimate. */
+  async function mountLongBuild(createAttemptId: string, isFirstWorkspace: boolean): Promise<MountedPage> {
+    const progress = {
+      percent: 10,
+      percent_cap: 50,
+      percent_per_second: 0,
+      remaining_text: "About 4 minutes left",
+      is_over_a_minute_left: true,
+      current_label: "",
+      steps: [],
+    };
+    vi.stubGlobal("EventSource", InertEventSource);
+    vi.stubGlobal("fetch", (url: string) => {
+      if (url.endsWith("/welcome-chat")) return Promise.resolve(jsonResponse({ chat_id: "" }, 202));
+      if (url.startsWith("/ui/api/create/attempts/"))
+        return Promise.resolve(jsonResponse(liveDetail(createAttemptId, isFirstWorkspace)));
+      return Promise.resolve(jsonResponse({ status: "CREATING_WORKSPACE", progress }));
+    });
+    const mounted = mountPage(createAttemptId);
+    await vi.waitFor(() =>
+      expect(allText(shownById(mounted.render(), "creating-remaining"))).toBe("About 4 minutes left"),
+    );
+    return mounted;
+  }
+
+  it("says plainly that a first workspace is being set up once the build has minutes left", async () => {
+    const { page, render } = await mountLongBuild("create-attempt-m", true);
+    expect(allText(shownById(render(), "creating-setting-up"))).toBe(SETTING_UP_LONG_LINE);
+    (page.onremove as () => void).call(page);
+  });
+
+  it("stands a later workspace's estimate under the bar with no line over it", async () => {
+    const { page, render } = await mountLongBuild("create-attempt-n", false);
+    expect(shownById(render(), "creating-setting-up")).toBeUndefined();
+    (page.onremove as () => void).call(page);
+  });
+
+  it("welcomes the owner of a first workspace whose attempt is read back from its record", async () => {
+    const stores = { accounts: { accounts: [GLEB] } };
+    registerAppContext({ stores, shell: { stores } } as unknown as AppContext);
+    const detail = recordWith("create-attempt-h", { is_first_workspace: true, account_id: GLEB.user_id });
+    vi.stubGlobal("fetch", () => Promise.resolve(jsonResponse(detail)));
+    const { render } = mountPage("create-attempt-h");
+    await vi.waitFor(() => expect(allText(shownById(render(), "creating-welcome"))).toBe("Welcome, Gleb!"));
+    expect(allText(shownById(render(), "error-message"))).toContain("Couldn't create workspace-create-attempt-h.");
+  });
+
+  it("deletes a dismissed attempt and leaves for the home page", async () => {
+    const requested: string[] = [];
+    const { render } = await mountRecord("create-attempt-x", failedRecord("create-attempt-x"), (url, init) => {
+      requested.push(`${init?.method ?? "GET"} ${url}`);
+      return new Response(null, { status: 204 });
+    });
+    const shell = registerShell();
+    const routed = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    failureActions(render()).get("Dismiss")?.onclick();
+
+    await vi.waitFor(() => expect(routed).toHaveBeenCalledWith(shell.hubRoute(), undefined, undefined));
+    expect(requested).toEqual(["DELETE /api/v1/workspaces/create-attempts/create-attempt-x"]);
+  });
+
+  it("routes a submitted retry to the new attempt's creation page and closes the form", async () => {
+    const { render } = await mountRecord("create-attempt-y", failedRecord("create-attempt-y"));
+    const routed = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    failureActions(render()).get("Retry")?.onclick();
+
+    (retryFormAttrs(render())?.onSubmitted as (operationId: string) => void)("create-attempt-z");
+
+    expect(routed).toHaveBeenCalledWith("/creating/create-attempt-z");
+    expect(retryFormAttrs(render())).toBeUndefined();
+  });
+
+  it("neither enters the workspace nor raises the cover when the page is left before the seed answers", async () => {
+    const { page, entered, seedPosts, settleSeed } = mountLiveAttempt("create-attempt-g", "DONE");
+    await vi.waitFor(() => expect(seedPosts).toHaveLength(2));
+    (page.onremove as () => void).call(page);
+
+    settleSeed();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(entered).toEqual([]);
+    expect(firstRunCover.state).toBeNull();
   });
 });

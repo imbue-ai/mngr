@@ -1,6 +1,5 @@
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { firstRun } from "../../models/firstRun";
 import { firstRunCover } from "../../models/firstRunCover";
 import type { AnyVnode } from "../../testing";
 import { allText, attrsOf, byId, renderDeep } from "../../testing";
@@ -16,7 +15,6 @@ function render(routePath: string): AnyVnode | null {
 describe("FirstRunCover", () => {
   afterEach(() => {
     firstRunCover.lower();
-    firstRun.noteCreate("", null);
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -32,8 +30,7 @@ describe("FirstRunCover", () => {
       requestedUrls.push(url);
       return Promise.reject(new Error("the cover asks the desktop client for nothing"));
     });
-    firstRun.noteCreate("create-attempt-a", { userId: "u", email: "gleb@example.com", displayName: "Gleb" });
-    firstRunCover.raise("create-attempt-a");
+    firstRunCover.raise("create-attempt-a", "Welcome, Gleb!");
 
     const loading = render("/workspace/agent-1") as AnyVnode;
     expect(allText(byId(loading, "creating-welcome"))).toBe("Welcome, Gleb!");
@@ -56,7 +53,7 @@ describe("FirstRunCover", () => {
 
   it("drops when the user goes somewhere that is neither the creation page nor a workspace", async () => {
     vi.spyOn(m, "redraw").mockImplementation(() => undefined);
-    firstRunCover.raise("create-attempt-a");
+    firstRunCover.raise("create-attempt-a", "Setting up workspace-2");
 
     expect(render("/settings")).toBeNull();
     await Promise.resolve();

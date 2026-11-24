@@ -163,6 +163,42 @@ def is_host_being_created(rows: Sequence[CreateAttemptRow], provider_instance_na
     )
 
 
+class OwnerActiveWorkspace(FrozenModel):
+    """One active workspace this install associates with a create attempt's owner."""
+
+    agent_id: str = Field(description="The workspace's agent id")
+    provider_instance_name: str = Field(description="Provider instance the workspace's host lives under, if known")
+    host_name: str = Field(description="The workspace's host name, if known")
+
+
+@pure
+def is_first_workspace_of_owner(
+    owner_active_workspaces: Sequence[OwnerActiveWorkspace],
+    attempt_agent_id: str | None,
+    attempt_provider_instance_name: str,
+    attempt_host_name: str,
+) -> bool:
+    """Whether a create attempt's owner has no active workspace other than the attempt's own.
+
+    The attempt's own workspace is the one with its agent id. Until ``mngr create`` returns
+    that id the workspace can already be listed (the connector writes a cloud record at lease
+    time, and a failed attempt may leave its host behind), so it is then recognized by the
+    host the attempt targets, as ``is_host_being_created`` does.
+    """
+    folded_host_name = attempt_host_name.casefold()
+    for workspace in owner_active_workspaces:
+        if attempt_agent_id is not None:
+            is_own = workspace.agent_id == attempt_agent_id
+        else:
+            is_own = (
+                workspace.provider_instance_name == attempt_provider_instance_name
+                and workspace.host_name.casefold() == folded_host_name
+            )
+        if not is_own:
+            return False
+    return True
+
+
 @pure
 def derive_create_attempt_rows(
     live_infos: Sequence[AgentCreateAttemptInfo],

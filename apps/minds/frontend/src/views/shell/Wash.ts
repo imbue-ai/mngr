@@ -1,8 +1,7 @@
-// The wash layer: the workspace's accent color growing out of the creation
-// page's loading box until it covers the window, then lifting off the finished
-// workspace. Mounted by the Shell over everything else, titlebar and modals
-// included, because the whole window has to be covered while the screen
-// changes underneath it (see models/wash.ts).
+// The wash layer: the workspace's accent color growing from its origin until
+// it covers the window, then lifting. Mounted by the Shell over everything
+// else, titlebar and modals included, because the whole window has to be
+// covered while the screen changes underneath it (see models/wash.ts).
 
 import m from "mithril";
 import { WASH_COVER_MS, WASH_DISC_PX, WASH_LIFT_MS, wash } from "../../models/wash";

@@ -15,8 +15,9 @@ Flow:
   1. Launch Imbue Studio.app via Playwright Electron, UI auth via
      /authenticate?one_time_code=... (minted on disk)
   2. Workspace 1 (W1): click Create, fill form with HOST_NAME, wait for
-     agent DONE, send first message ("pong"), wait for reply (screenshots
-     03-06)
+     agent DONE, go through the workspace's first run (Continue, then its
+     provider page), send first message ("pong"), wait for reply
+     (screenshots 03-06)
   2b. Reload the window showing W1 (Cmd-R surrogate), assert "pong"
      history still rendered -- catches session/event-stream re-attach
      regressions (screenshot 06b)
@@ -103,8 +104,11 @@ from pydantic import SecretStr
 from imbue.minds.bootstrap import MindsPathRole
 from imbue.minds.bootstrap import minds_dir_for_role
 from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
+from imbue.minds.desktop_client.e2e_workspace_runner import FirstRunProviderChoice
+from imbue.minds.desktop_client.e2e_workspace_runner import LeaveFirstRunProviderPageSignedOut
+from imbue.minds.desktop_client.e2e_workspace_runner import SignInOnFirstRunProviderPage
+from imbue.minds.desktop_client.e2e_workspace_runner import complete_first_run
 from imbue.minds.desktop_client.e2e_workspace_runner import descendant_frames
-from imbue.minds.desktop_client.e2e_workspace_runner import sign_in_via_provider_chooser
 from imbue.minds.desktop_client.ui_account_scope import account_hub_route
 from imbue.minds.desktop_client.welcome_chat import SEED_TIMEOUT_SECONDS
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
@@ -210,10 +214,9 @@ REPLY_TIMEOUT = 480
 # id, inside the chat root's frame the desktop opened; the shell frames it once its app list has
 # arrived, so the frame can still be on its way when the backdrop is first visible.
 CHAT_FRAME_TIMEOUT = 60
-# The creation page enters a fresh workspace without waiting for the welcome chat's seed, and the
-# chat app frames that chat only once it is seeded, so its frame can arrive as late as the seed's
-# own timeout on top of the framing.
-WELCOME_CHAT_FRAME_TIMEOUT = SEED_TIMEOUT_SECONDS + CHAT_FRAME_TIMEOUT
+# The creation page enters a fresh workspace only once the welcome chat's seed has answered, so the
+# workspace's frame can arrive as late as the seed's own timeout after the create is done.
+WORKSPACE_ENTRY_TIMEOUT = SEED_TIMEOUT_SECONDS + 180
 CHAT_PAGE_URL_RE = re.compile(r"/agent-[a-f0-9]+/?$")
 # The in-chat permission card's opener. Matched by label, not by class: the card's classes
 # are DEFAULT_WORKSPACE_TEMPLATE styling internals, its label is what the user is shown.
@@ -1132,13 +1135,14 @@ def _create_workspace_and_first_message(
     """Drive create-form -> first-message for one workspace.
 
     Steps: navigate to /create, fill the form for `host_name`, submit,
-    poll /api/v1/workspaces/operations/create/<id> until DONE, wait for the
-    workspace to show the welcome chat the creation page seeds,
-    send FIRST_PROMPT there, sign in through the provider chooser that first
-    send opens in the chat's frame (API_KEY mode only -- the create flow
-    injects no AI credentials, so the workspace boots unauthenticated), wait
-    for a >=2-occurrence reply of FIRST_EXPECT. Snaps each milestone with
-    names from `snaps`.
+    poll /api/v1/workspaces/operations/create/<id> until DONE, go through the
+    first run the workspace opens on (the cover's Continue, then the
+    workspace's provider page: signed in from its Anthropic tile in API_KEY
+    mode, since the create flow injects no AI credentials and the workspace
+    boots unauthenticated; left with Next in SUBSCRIPTION mode), send
+    FIRST_PROMPT in the chat the desktop then shows, wait for a
+    >=2-occurrence reply of FIRST_EXPECT. Snaps each milestone with names
+    from `snaps`.
 
     One page, two surfaces. `chrome` is the window's page and stays on local
     routes throughout -- the create form, then /creating/<id>, then
@@ -1161,7 +1165,7 @@ def _create_workspace_and_first_message(
     # opens the sign-in modal instead of creating. The explicit launch_mode
     # selection below overrides the preset's compute choice. There is no
     # AI-provider or API-key field anymore: the workspace boots
-    # unauthenticated and signs in through its own provider chooser afterwards.
+    # unauthenticated and signs in on its first run's provider page afterwards.
     chrome.click('[data-preset="local"]')
     chrome.click("#toggle-advanced")
     chrome.wait_for_selector("#advanced-view:not(.hidden)", timeout=5_000)
@@ -1170,10 +1174,7 @@ def _create_workspace_and_first_message(
     with chrome.expect_navigation(url=re.compile(r"/creating/[a-z0-9-]+")):
         chrome.click("#create-submit")
     with contextlib.suppress(Exception):
-        chrome.wait_for_function(
-            "document.body.innerText.includes('Setting up your machine')",
-            timeout=15_000,
-        )
+        chrome.wait_for_selector("#creating-welcome", timeout=15_000)
     snap_page(chrome, snaps.submitted)
     m = re.search(r"/creating/([a-z0-9-]+)", chrome.url)
     if not m:
@@ -1279,20 +1280,23 @@ def _create_workspace_and_first_message(
     created_host_match = re.search(r"((?:agent|host)-[a-f0-9]+)", done_redirect_url)
     created_host = created_host_match.group(1) if created_host_match else None
     logger.info("[{}] create attempt DONE; waiting for the app to open {}", label, created_host or "the workspace")
-    workspace = wait_for_chat_window(ctx, label=label, host=created_host)
+    workspace = wait_for_chat_window(ctx, label=label, timeout=WORKSPACE_ENTRY_TIMEOUT, host=created_host)
     chat_url = live_url(workspace)
     logger.info("[{}] agent DONE; workspace URL={}", label, chat_url)
     snap_page(workspace, snaps.done)
 
-    # The welcome chat the creation page handed over opens once it is seeded, framed in its own
-    # frame at the chat app's origin, with a composer under the seeded turns before any agent
-    # exists. The create flow injects no AI credentials, so in API_KEY mode the composer is
-    # disabled and the provider chooser opens until a sign-in through it gives the chat an
-    # account, and that sign-in launches the chat's first agent; in SUBSCRIPTION mode the synced
-    # Claude credentials are already an account, and the first message sent there launches it.
-    chat = wait_for_chat_frame(workspace, label=label, timeout=WELCOME_CHAT_FRAME_TIMEOUT)
-    if ai_provider == "API_KEY":
-        sign_in_via_provider_chooser(workspace, chat, api_key=anthropic_key, label=label)
+    # The workspace loads under the app's cover and then its own provider page. The create flow
+    # injects no AI credentials, so in API_KEY mode the page is where the workspace gets its
+    # account; in SUBSCRIPTION mode the synced Claude credentials are already one, which the page
+    # lists, so it is left as it stands. Leaving the page with an account connected starts the
+    # agent of the chat the desktop opens on, framed in its own frame at the chat app's origin.
+    provider_choice: FirstRunProviderChoice = (
+        SignInOnFirstRunProviderPage(api_key=anthropic_key)
+        if ai_provider == "API_KEY"
+        else LeaveFirstRunProviderPageSignedOut()
+    )
+    complete_first_run(chrome, workspace, provider_choice, label=label)
+    chat = wait_for_chat_frame(workspace, label=label)
     inp = chat.wait_for_selector('textarea, [contenteditable="true"]', timeout=180_000)
     inp.fill(FIRST_PROMPT)
     inp.press("Enter")
@@ -1539,9 +1543,9 @@ def run_e2e() -> int:
 
         # 4-6. Create agent via UI click and drive to first message. Mirrors
         # what a user does (Configure panel, launch_mode field, host_name fill,
-        # submit, poll until DONE, send FIRST_PROMPT in the welcome chat the
-        # workspace shows, sign in through the provider chooser that send
-        # opens in API_KEY mode, wait for >=2 occurrences of FIRST_EXPECT in body).
+        # submit, poll until DONE, press Continue on the cover, sign in on the
+        # workspace's provider page in API_KEY mode, send FIRST_PROMPT in the chat
+        # the workspace shows, wait for >=2 occurrences of FIRST_EXPECT in body).
         # See _create_workspace_and_first_message for the exact step list.
         ai_provider = os.environ.get("MINDS_AI_PROVIDER", "API_KEY").upper()
         if ai_provider not in ("API_KEY", "SUBSCRIPTION"):

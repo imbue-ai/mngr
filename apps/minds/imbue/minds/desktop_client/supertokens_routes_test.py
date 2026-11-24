@@ -12,6 +12,7 @@ import json
 import time
 import tomllib
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -33,7 +34,6 @@ from imbue.minds.desktop_client.conftest import make_connection_store_for_test
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_provider_materializer_for_test
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
-from imbue.minds.desktop_client.conftest import record_web_login_flow_for_test
 from imbue.minds.desktop_client.conftest import session_store_account_source
 from imbue.minds.desktop_client.connections.account_lifecycle import CREATE_IN_FLIGHT_ON_ACCOUNT_MESSAGE
 from imbue.minds.desktop_client.connections.data_types import ProviderMaterializationOutcome
@@ -42,6 +42,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthAccount
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthFailedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthSession
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudWebLoginIncompleteCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import WebLoginIncompleteReason
 from imbue.minds.desktop_client.minds_config import MindsConfig
@@ -53,7 +54,7 @@ from imbue.minds.desktop_client.supertokens_routes import _read_web_login_status
 from imbue.minds.desktop_client.supertokens_routes import _record_web_login_status
 from imbue.minds.desktop_client.supertokens_routes import _run_web_login_subprocess
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
-from imbue.minds.desktop_client.supertokens_routes import is_email_verified_by_web_login
+from imbue.minds.desktop_client.ui_api_onboarding import FORCE_FIRST_RUN_ENV_VAR
 from imbue.minds.errors import MindError
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.testing import stub_mngr_host_dir
@@ -431,21 +432,34 @@ def test_run_web_login_subprocess_marks_finishing_before_mirroring(tmp_path: Pat
     assert final.state == "done"
 
 
-def test_run_web_login_subprocess_keeps_the_sign_ins_verification_verdict(tmp_path: Path) -> None:
-    email = f"user-{uuid4().hex}@example.com"
+@pytest.mark.parametrize(
+    ("email", "expected_message"),
+    [
+        (
+            "alice@example.com",
+            "Your email isn't verified yet. Click the link we sent to alice@example.com, then sign in again.",
+        ),
+        (None, "Your email isn't verified yet. Click the link we sent, then sign in again."),
+    ],
+    ids=["address-known", "address-unknown"],
+)
+def test_run_web_login_subprocess_tells_a_sign_in_that_ended_on_an_unverified_email_to_verify_and_try_again(
+    tmp_path: Path, email: str | None, expected_message: str
+) -> None:
+    """The one place the app speaks of verification: Try again reopens the browser on the hosted check-inbox page."""
     cli = make_fake_imbue_cloud_cli()
-    cli.login_session_to_return = ImbueCloudAuthSession(
-        user_id=f"user-{uuid4().hex}", email=email, display_name=None, is_email_verified=True
-    )
+    refusal = ImbueCloudEmailNotVerifiedCliError("auth login: Verify your email to finish signing in")
+    refusal.email = email
+    cli.login_error_to_raise = refusal
+    session_store = make_session_store_for_test(tmp_path, cli)
     flow_id = f"flow-{uuid4().hex}"
     _record_web_login_status(flow_id, _WebLoginFlowStatus(state="running", deadline=time.monotonic() + 60))
-    assert not is_email_verified_by_web_login(email)
 
     _run_web_login_subprocess(
         flow_id=flow_id,
         url_file=tmp_path / "login-url.txt",
         imbue_cloud_cli=cli,
-        session_store=make_session_store_for_test(tmp_path, cli),
+        session_store=session_store,
         sync_scheduler=None,
         output_format=OutputFormat.JSON,
         notify_accounts_changed=_do_nothing,
@@ -454,50 +468,13 @@ def test_run_web_login_subprocess_keeps_the_sign_ins_verification_verdict(tmp_pa
 
     status = _read_web_login_status(flow_id)
     assert status is not None
-    assert status.state == "done"
-    assert status.is_email_verified is True
-    assert is_email_verified_by_web_login(email.upper())
-    assert not is_email_verified_by_web_login(f"other-{uuid4().hex}@example.com")
-
-
-@pytest.mark.parametrize(
-    ("state", "is_email_verified", "expected"),
-    [
-        ("finishing", True, True),
-        ("done", True, True),
-        ("done", False, False),
-        ("done", None, False),
-        ("running", True, False),
-        ("error", True, False),
-    ],
-)
-def test_is_email_verified_by_web_login_trusts_only_a_finished_sign_ins_positive_verdict(
-    state: str, is_email_verified: bool | None, expected: bool
-) -> None:
-    email = f"user-{uuid4().hex}@example.com"
-    record_web_login_flow_for_test(email, is_email_verified, state=state)
-
-    assert is_email_verified_by_web_login(email) is expected
-
-
-@pytest.mark.parametrize(
-    ("earlier", "later", "expected"), [(True, False, False), (False, True, True), (True, None, False)]
-)
-def test_is_email_verified_by_web_login_goes_by_the_latest_sign_in(
-    earlier: bool | None, later: bool | None, expected: bool
-) -> None:
-    email = f"user-{uuid4().hex}@example.com"
-    for is_email_verified in (earlier, later):
-        record_web_login_flow_for_test(email, is_email_verified)
-
-    assert is_email_verified_by_web_login(email) is expected
-
-
-def test_is_email_verified_by_web_login_forgets_an_expired_flow() -> None:
-    email = f"user-{uuid4().hex}@example.com"
-    record_web_login_flow_for_test(email, is_email_verified=True, ttl_seconds=-1.0)
-
-    assert not is_email_verified_by_web_login(email)
+    assert status.state == "error"
+    assert status.error == expected_message
+    assert status.error_details == "auth login: Verify your email to finish signing in"
+    assert status.is_retry_offered
+    # Nobody was signed in.
+    assert status.user_id is None
+    assert session_store.list_accounts() == []
 
 
 def test_run_web_login_subprocess_records_error_when_the_plugin_fails(tmp_path: Path) -> None:
@@ -642,6 +619,25 @@ def _build_auth_test_client(
     return app.test_client(), minds_config
 
 
+def _run_web_login_to_done(client: FlaskClient) -> dict[str, Any]:
+    """Start a browser sign-in, poll it to its end, and answer the status body it finished ``done`` on."""
+    start = client.post("/auth/api/web-login/start")
+    assert start.status_code == 200
+    flow_id = start.get_json()["flow_id"]
+    # The background thread completes quickly with the in-memory fake; poll
+    # (bounded) rather than sleeping a fixed interval.
+    deadline = time.monotonic() + 10.0
+    body: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        response = client.get(f"/auth/api/web-login/status/{flow_id}")
+        assert response.status_code == 200
+        body = response.get_json()
+        if body["state"] in ("done", "error"):
+            break
+    assert body["state"] == "done"
+    return body
+
+
 def test_web_login_start_and_status_round_trip(tmp_path: Path, root_concurrency_group: ConcurrencyGroup) -> None:
     """POST start returns a pollable flow that resolves to "done" with the account identity."""
     email = f"user-{uuid4().hex}@example.com"
@@ -653,23 +649,68 @@ def test_web_login_start_and_status_round_trip(tmp_path: Path, root_concurrency_
     )
     client, minds_config = _build_auth_test_client(tmp_path, cli, root_concurrency_group)
 
-    start = client.post("/auth/api/web-login/start")
-    assert start.status_code == 200
-    flow_id = start.get_json()["flow_id"]
+    body = _run_web_login_to_done(client)
 
-    # The background thread completes quickly with the in-memory fake; poll
-    # (bounded) rather than sleeping a fixed interval.
-    deadline = time.monotonic() + 10.0
-    body: dict[str, object] = {}
-    while time.monotonic() < deadline:
-        resp = client.get(f"/auth/api/web-login/status/{flow_id}")
-        assert resp.status_code == 200
-        body = resp.get_json()
-        if body["state"] in ("done", "error"):
-            break
-    assert body["state"] == "done"
     assert body["email"] == email
     assert body["login_url"] == cli.login_url_to_write
+    # The hand-off did not say how many workspaces the account has.
+    assert body["active_workspace_count"] is None
+    assert "is_email_verified" not in body
+
+
+def _finished_web_login_status_body(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, active_workspace_count: int | None
+) -> dict[str, Any]:
+    """Run a browser sign-in whose hand-off carried ``active_workspace_count`` and answer its final status body."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.login_session_to_return = ImbueCloudAuthSession(
+        user_id=f"user-{uuid4().hex}",
+        email=f"user-{uuid4().hex}@example.com",
+        display_name=None,
+        active_workspace_count=active_workspace_count,
+    )
+    client, _minds_config = _build_auth_test_client(tmp_path, cli, root_concurrency_group)
+    return _run_web_login_to_done(client)
+
+
+@pytest.mark.parametrize("active_workspace_count", [0, 4])
+def test_web_login_status_carries_the_accounts_active_workspace_count_once_the_sign_in_has_landed(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, active_workspace_count: int
+) -> None:
+    body = _finished_web_login_status_body(tmp_path, root_concurrency_group, active_workspace_count)
+
+    assert body["active_workspace_count"] == active_workspace_count
+
+
+@pytest.mark.parametrize("active_workspace_count", [4, None])
+def test_web_login_status_reports_no_workspaces_when_a_developer_forces_the_first_run(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    monkeypatch: pytest.MonkeyPatch,
+    active_workspace_count: int | None,
+) -> None:
+    monkeypatch.setenv(FORCE_FIRST_RUN_ENV_VAR, "1")
+
+    body = _finished_web_login_status_body(tmp_path, root_concurrency_group, active_workspace_count)
+
+    assert body["active_workspace_count"] == 0
+
+
+def test_web_login_status_carries_no_workspace_count_before_the_sign_in_lands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A forced first run answers for a signed-in account only: a running or failed flow has no account to route."""
+    monkeypatch.setenv(FORCE_FIRST_RUN_ENV_VAR, "1")
+    client, _minds_config = _build_auth_test_client(tmp_path, make_fake_imbue_cloud_cli())
+    running_flow_id, failed_flow_id = f"flow-{uuid4().hex}", f"flow-{uuid4().hex}"
+    _record_web_login_status(running_flow_id, _WebLoginFlowStatus(state="running", deadline=time.monotonic() + 60))
+    _record_web_login_status(failed_flow_id, _WebLoginFlowStatus(state="error", deadline=time.monotonic() + 60))
+
+    running = client.get(f"/auth/api/web-login/status/{running_flow_id}").get_json()
+    failed = client.get(f"/auth/api/web-login/status/{failed_flow_id}").get_json()
+
+    assert running["active_workspace_count"] is None
+    assert failed["active_workspace_count"] is None
 
 
 def test_web_login_start_joins_the_flow_already_in_flight(

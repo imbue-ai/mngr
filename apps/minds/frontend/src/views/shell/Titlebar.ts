@@ -88,10 +88,8 @@ export function leftWindowControls(shell: ShellState): m.Children {
 export const SHARE_NOT_YET_CREATED_MESSAGE = "Check back here after the workspace is created to share it.";
 
 /**
- * The start flow's titlebar: the lockup, centered, in the brand color, and at
- * the right the returning user's way in, there from the first frame so the
- * flow never has to be sat through to reach it. Every other control points at
- * something that does not exist yet.
+ * The start flow's titlebar: the lockup, centered, in the brand color. Every
+ * other control points at something that does not exist yet.
  */
 function startTitlebar(shell: ShellState): m.Children {
   const isDesktop = electronBridge.isDesktop;
@@ -140,7 +138,7 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
       // attempt's list row carries the name and accent, and Share opens a
       // dialog instead of a workspace that is not there yet.
       const isCreating = context.kind === "creating";
-      // The dialog belongs to the creation page: a route change (the wash
+      // The dialog belongs to the creation page: a route change (the page
       // entering the workspace, the home button) takes it down with the page.
       if (!isCreating) shell.isShareNotYetCreatedDialogOpen = false;
       const isWorkspace = context.kind === "workspace" || isCreating;

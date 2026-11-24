@@ -1,6 +1,8 @@
 Feature: Signing in on the first run
   The page shows one line, "Reimagine your personal computer", a Sign in button, a "Help improve Studio" checkbox, and a "Use without an account" link.
   Signing in is done in the browser; the page moves on as soon as an account lands.
+  Where it moves on to is decided by the reported workspace count: the account's home page when the count is greater than 0, a first cloud workspace when it is 0.
+  The page waits on the record sync only for an account that landed without a reported workspace count.
 
   @sign-in-in-browser
   Scenario: Sign in opens the browser sign-in
@@ -38,19 +40,38 @@ Feature: Signing in on the first run
     Then the page offers "Sign in" again
 
   @first-cloud-workspace
-  Scenario: A new account's first cloud workspace starts at once
+  Scenario: An account with no workspaces gets its first cloud workspace at once
     Given the user pressed "Sign in"
-    When the account "alice@example.com", named "Alice Smith", lands and has no workspaces
+    When the account "alice@example.com", named "Alice Smith", lands with a reported workspace count of 0
     Then the page greets "Welcome, Alice!"
-    And a first cloud workspace is created under "alice@example.com" with no further question
+    And a first cloud workspace is created under "alice@example.com" with no further question, without waiting on the record sync
     And the flow hands over to the creation page
 
   @existing-workspace-sign-in
-  Scenario: Signing in to an account that has workspaces leaves for its home page
+  Scenario Outline: Signing in to an account that has workspaces leaves for its home page
     Given the user pressed "Sign in"
-    When an account that already has workspaces lands
-    Then the app leaves the start flow for that account's home page
+    When an account lands with a reported workspace count of <count>
+    Then the app leaves the start flow for that account's home page, without waiting on the record sync
     And no workspace is created
+
+    Examples:
+      | count |
+      | 1     |
+      | 4     |
+
+  @count-not-reported
+  Scenario Outline: An account that lands without a reported workspace count is settled by the record sync
+    Given the user pressed "Sign in"
+    When the account "alice@example.com" lands without a reported workspace count
+    And the record sync <record sync>
+    Then <outcome>
+
+    Examples:
+      | record sync                              | outcome                                                      |
+      | finds that the account has workspaces    | the app leaves the start flow for that account's home page   |
+      | finds that the account has no workspaces | a first cloud workspace is created under "alice@example.com" |
+      | fails                                    | a first cloud workspace is created under "alice@example.com" |
+      | has not finished after 15 seconds        | a first cloud workspace is created under "alice@example.com" |
 
   @without-account
   Scenario: Using Studio without an account opens the create form
@@ -67,4 +88,4 @@ Feature: Signing in on the first run
   Scenario: The page shown afresh starts over
     Given the user had pressed "Sign in"
     When the start flow is shown afresh
-    Then the page offers "Sign in" again, while signed-in accounts and verified emails persist
+    Then the page offers "Sign in" again, while signed-in accounts persist

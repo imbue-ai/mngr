@@ -6,9 +6,9 @@ import m from "mithril";
 import { getAppContext } from "../../app-context";
 import {
   REPORTING_CONSENT_QUESTION,
+  REPORTING_MORE_DETAIL,
   recordErrorReportingConsent,
 } from "../../models/onboarding";
-import { REPORTING_MORE_DETAIL } from "../../models/manifesto";
 import { Button } from "../components/Button";
 import { Link } from "../components/Link";
 

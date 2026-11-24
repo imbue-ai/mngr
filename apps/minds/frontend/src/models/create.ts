@@ -75,8 +75,6 @@ export interface CreateRetryPrefill {
   memory_gb: number | null;
   disk_gb: number | null;
   color: string;
-  /** Whether the attempt's creation page shows the onboarding examples, which a retry keeps. */
-  is_onboarding_driven_by_agent: boolean;
   /** Why the attempt cannot be retried as recorded (its connection was removed); empty when it can. */
   unavailable_reason: string;
 }
@@ -134,7 +132,7 @@ export interface LandingExtras {
   has_restorable_workspaces: boolean;
 }
 
-/** The settings a create attempt was submitted with, as the creation page restates them. */
+/** The settings a create attempt was submitted with, as its detail carries them; the creation page words a failure from them. */
 export interface CreateAttemptRequestSummary {
   display_name: string;
   launch_mode: string;
@@ -150,11 +148,17 @@ export interface CreateAttemptRequestSummary {
   disk_gb: number | null;
   repository: string;
   branch: string;
-  /** Whether the creation page shows its onboarding examples while the workspace is built; not a setting it restates. */
-  is_onboarding_driven_by_agent: boolean;
 }
 
-export interface LiveCreateAttemptDetail {
+/** What the creation page's heading turns on, the same on a live attempt and on one read back from its record. */
+export interface CreateAttemptOwner {
+  /** Whether no other active workspace is associated with the attempt's owner on this install. */
+  is_first_workspace: boolean;
+  /** The account the attempt creates under; "" for a create under no account. */
+  account_id: string;
+}
+
+export interface LiveCreateAttemptDetail extends CreateAttemptOwner {
   workspace_name: string;
   provider_label: string;
   is_remote: boolean;
@@ -181,7 +185,7 @@ export interface CreateAttemptFailure {
 export interface CreateAttemptDetail {
   kind: "live" | "record" | "gone";
   live: LiveCreateAttemptDetail | null;
-  record: {
+  record: (CreateAttemptOwner & {
     state: "interrupted" | "failed";
     workspace_name: string;
     error: string | null;
@@ -193,7 +197,7 @@ export interface CreateAttemptDetail {
     request: CreateAttemptRequestSummary;
     /** Why the attempt cannot be retried as recorded (its connection was removed); empty when it can. */
     retry_unavailable_reason: string;
-  } | null;
+  }) | null;
 }
 
 export async function fetchJson<T>(url: string): Promise<T> {
@@ -417,7 +421,6 @@ export type LifecycleActionResult = { isOk: true } | { isOk: false; outcome: Req
 
 export interface CreateOperationStatus {
   status?: string;
-  status_text?: string;
   redirect_url?: string;
   error?: string;
   error_kind?: string;
@@ -429,7 +432,6 @@ export interface CreateOperationStatus {
 export interface CreateAttemptWatcherHooks {
   onDone(redirectUrl: string): void;
   onFailed(failure: CreateAttemptFailure): void;
-  onStageText(text: string): void;
   onLogLines(lines: string[]): void;
   /** The attempt's progress as the poll carried it, every poll that carries one. */
   onProgress(progress: OperationProgress): void;
@@ -439,7 +441,7 @@ export interface CreateAttemptWatcherHooks {
 export const STATUS_POLL_INTERVAL_MS = 2000;
 /**
  * How often it is polled while the new workspace boots: DONE comes the moment the boot does, and
- * the ready turn and the way into the workspace start on the poll that sees it.
+ * the way into the workspace starts on the poll that sees it.
  */
 export const READY_WAIT_STATUS_POLL_INTERVAL_MS = 250;
 /** A status read that has not answered by now is dropped, so one hung request cannot end the polling. */
@@ -520,7 +522,6 @@ export class CreateAttemptWatcher {
       });
       return;
     }
-    if (data.status_text) this.hooks.onStageText(data.status_text);
     const intervalMs = statusPollIntervalMs(data.status);
     if (this.pollTimer !== null && intervalMs !== this.pollIntervalMs) this.pollEvery(intervalMs);
   }

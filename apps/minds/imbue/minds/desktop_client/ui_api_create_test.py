@@ -2,8 +2,10 @@ import json
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
+import httpx2
 import pytest
 from flask.testing import FlaskClient
 
@@ -11,15 +13,19 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import add_modal_connection_for_test
+from imbue.minds.desktop_client.conftest import associate_hosted_workspace
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
 from imbue.minds.desktop_client.conftest import build_desktop_client_with_accounts
 from imbue.minds.desktop_client.conftest import lock_account_for_test
 from imbue.minds.desktop_client.conftest import make_connection_store_for_test
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
+from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
+from imbue.minds.desktop_client.conftest import push_remote_workspace_record
 from imbue.minds.desktop_client.conftest import unlock_account_with_master_password_for_test
 from imbue.minds.desktop_client.connections.connection_store import ConnectionStore
 from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
@@ -33,9 +39,13 @@ from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAtte
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptStore
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.testing import FIXED_WELCOME_CHAT_SEED_BODY
+from imbue.minds.desktop_client.testing import answering_forward
 from imbue.minds.desktop_client.testing import install_stub_mngr_on_path
+from imbue.minds.desktop_client.testing import make_fake_chat_app_forward_route
 from imbue.minds.desktop_client.testing import mngr_create_stub_body
 from imbue.minds.desktop_client.testing import scripted_workspace_probe_server
+from imbue.minds.desktop_client.testing import welcome_chat_seed_body_sent_through_mngr_exec
 from imbue.minds.desktop_client.testing import write_dead_destroy_marker
 from imbue.minds.desktop_client.ui_api_create import RETRY_CONNECTION_REMOVED_REASON
 from imbue.minds.desktop_client.welcome_chat import WelcomeChatSeeder
@@ -60,25 +70,13 @@ def test_create_area_routes_require_a_session_cookie(tmp_path: Path) -> None:
     ):
         response = client.get(path)
         assert response.status_code == 401, path
-    seeded = client.post(
-        f"/ui/api/create/attempts/{CreateAttemptId.generate()}/welcome-chat", json=_welcome_chat_body()
-    )
+    seeded = client.post(f"/ui/api/create/attempts/{CreateAttemptId.generate()}/welcome-chat")
     assert seeded.status_code == 401
     landed = client.post(
         f"/ui/api/create/attempts/{CreateAttemptId.generate()}/welcome-chat/landing",
         json={"landing": "ON_SCREEN", "waited_ms": 1},
     )
     assert landed.status_code == 401
-
-
-def _welcome_chat_body() -> dict[str, object]:
-    return {
-        "title": "Welcome",
-        "turns": [
-            {"role": "user", "text": "Wait.. what is honest software?"},
-            {"role": "assistant", "text": "Software that works for you."},
-        ],
-    }
 
 
 def test_form_defaults_exclude_connection_only_launch_modes_and_carry_region_context(tmp_path: Path) -> None:
@@ -509,7 +507,6 @@ def _record(
     cpu_count: int | None = None,
     memory_gb: int | None = None,
     disk_gb: int | None = None,
-    is_onboarding_driven_by_agent: bool = False,
 ) -> PendingCreateAttemptRecord:
     now = datetime.now(timezone.utc)
     return PendingCreateAttemptRecord(
@@ -535,7 +532,6 @@ def _record(
             cpu_count=cpu_count,
             memory_gb=memory_gb,
             disk_gb=disk_gb,
-            is_onboarding_driven_by_agent=is_onboarding_driven_by_agent,
         ),
     )
 
@@ -546,12 +542,16 @@ def _make_client_with_store(
     mngr_caller: MngrCaller | None = None,
     session_store: MultiAccountSessionStore | None = None,
     connection_store: ConnectionStore | None = None,
+    backend_resolver: BackendResolverInterface | None = None,
+    welcome_chat_seeder: WelcomeChatSeeder | None = None,
 ) -> tuple[FlaskClient, PendingCreateAttemptStore, AgentCreator]:
     """A desktop-client test app whose agent creator carries a pending-create-attempt store.
 
     ``mngr_caller`` is what the app reaches workspaces through; the default leaves the app on
     the process-wide caller, which the routes here never use unless a test seeds a chat.
     ``session_store`` holds the signed-in accounts; the default has none.
+    ``backend_resolver`` is what discovery knows; the default knows no workspace.
+    ``welcome_chat_seeder`` seeds a finished attempt's workspace; the default is the app's own, over ``mngr_caller``.
     """
     store = PendingCreateAttemptStore(records_dir=tmp_path / "pending")
     creator = AgentCreator(
@@ -569,6 +569,8 @@ def _make_client_with_store(
         mngr_caller=mngr_caller,
         session_store=session_store,
         connection_store=connection_store,
+        backend_resolver=backend_resolver,
+        welcome_chat_seeder=welcome_chat_seeder,
     )
     return client, store, creator
 
@@ -595,7 +597,6 @@ def test_form_defaults_prefill_the_form_from_a_known_retry_record(
             cpu_count=6,
             memory_gb=12,
             disk_gb=250,
-            is_onboarding_driven_by_agent=True,
         )
     )
 
@@ -611,8 +612,7 @@ def test_form_defaults_prefill_the_form_from_a_known_retry_record(
     assert prefill["color"] == "#a1b2c3"
     assert prefill["instance_type"] == "e2-standard-4"
     assert (prefill["cpu_count"], prefill["memory_gb"], prefill["disk_gb"]) == (6, 12, 250)
-    # A retry keeps showing the onboarding examples when the attempt did.
-    assert prefill["is_onboarding_driven_by_agent"] is True
+    assert "is_onboarding_driven_by_agent" not in prefill
     assert prefill["cloud_account"].startswith("gcp_")
     assert prefill["unavailable_reason"] == RETRY_CONNECTION_REMOVED_REASON
 
@@ -734,8 +734,9 @@ def test_create_attempt_detail_carries_the_request_summary_for_a_live_attempt(
         "disk_gb": None,
         "repository": "file:///nonexistent-repo-for-request-summary-test",
         "branch": "v9.9.9-summary",
-        "is_onboarding_driven_by_agent": False,
     }
+    assert live["account_id"] == ""
+    assert live["is_first_workspace"] is True
 
 
 def test_create_attempt_detail_carries_the_request_summary_for_a_record(
@@ -773,7 +774,6 @@ def test_create_attempt_detail_carries_the_request_summary_for_a_record(
         "disk_gb": 100,
         "repository": "https://example.com/some-repo.git",
         "branch": "feature-branch-7",
-        "is_onboarding_driven_by_agent": False,
     }
 
 
@@ -830,6 +830,180 @@ def test_create_attempt_detail_says_a_record_cannot_be_retried_once_its_connecti
     assert payload["record"]["retry_unavailable_reason"] == RETRY_CONNECTION_REMOVED_REASON
 
 
+def _resolver_with_workspace(agent_id: AgentId, provider_name: str, host_name: str) -> MngrCliBackendResolver:
+    """Discovery listing one workspace, on ``provider_name`` and a host named ``host_name``."""
+    agent = {
+        "id": str(agent_id),
+        "labels": {"is_primary": "true"},
+        "provider": provider_name,
+        "host": {"id": str(HostId.generate()), "name": host_name},
+    }
+    return make_resolver_with_data(agents_json=json.dumps({"agents": [agent]}))
+
+
+def _record_detail(client: FlaskClient, create_attempt_id: str) -> dict[str, Any]:
+    payload = json.loads(client.get(f"/ui/api/create/attempts/{create_attempt_id}").get_data(as_text=True))
+    assert payload["kind"] == "record"
+    return payload["record"]
+
+
+def test_create_attempt_detail_calls_a_device_create_the_first_workspace_until_the_device_has_another(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    lone_client, lone_store, _lone_creator = _make_client_with_store(tmp_path / "lone", root_concurrency_group)
+    crowded_client, crowded_store, _crowded_creator = _make_client_with_store(
+        tmp_path / "crowded",
+        root_concurrency_group,
+        backend_resolver=_resolver_with_workspace(AgentId.generate(), "docker", "an-earlier-workspace"),
+    )
+    create_attempt_id = str(CreateAttemptId.generate())
+    lone_store.write_record(_record(create_attempt_id, PendingCreateAttemptState.FAILED))
+    crowded_store.write_record(_record(create_attempt_id, PendingCreateAttemptState.FAILED))
+
+    lone = _record_detail(lone_client, create_attempt_id)
+    crowded = _record_detail(crowded_client, create_attempt_id)
+
+    assert (lone["account_id"], lone["is_first_workspace"]) == ("", True)
+    assert (crowded["account_id"], crowded["is_first_workspace"]) == ("", False)
+
+
+def test_create_attempt_detail_does_not_count_the_host_a_failed_attempt_left_behind(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """The record names no agent yet, so the leftover is known as the attempt's by the host it was building."""
+    client, store, _creator = _make_client_with_store(
+        tmp_path,
+        root_concurrency_group,
+        backend_resolver=_resolver_with_workspace(AgentId.generate(), "lima", "Row-Test-Name"),
+    )
+    create_attempt_id = str(CreateAttemptId.generate())
+    store.write_record(_record(create_attempt_id, PendingCreateAttemptState.FAILED))
+
+    assert _record_detail(client, create_attempt_id)["is_first_workspace"] is True
+
+
+def test_create_attempt_detail_counts_an_accounts_workspaces_and_not_the_devices(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """The owner is the attempt's account: its synced workspace on another device counts, the device's own does not."""
+    cli = make_fake_imbue_cloud_cli()
+    new_user_id, seasoned_user_id = f"user-{uuid4().hex}", f"user-{uuid4().hex}"
+    cli.add_account(user_id=new_user_id, email=f"{new_user_id}@example.com")
+    cli.add_account(user_id=seasoned_user_id, email=f"{seasoned_user_id}@example.com")
+    push_remote_workspace_record(tmp_path / "other-devices", cli, seasoned_user_id)
+    session_store = make_session_store_for_test(tmp_path / "minds", cli)
+    record_store = session_store.record_store
+    assert record_store is not None
+    record_store.pull(seasoned_user_id, f"{seasoned_user_id}@example.com")
+    client, store, _creator = _make_client_with_store(
+        tmp_path,
+        root_concurrency_group,
+        session_store=session_store,
+        backend_resolver=_resolver_with_workspace(AgentId.generate(), "docker", "the-devices-own"),
+    )
+    new_attempt_id, seasoned_attempt_id = str(CreateAttemptId.generate()), str(CreateAttemptId.generate())
+    store.write_record(_record(new_attempt_id, PendingCreateAttemptState.FAILED, account_id=new_user_id))
+    store.write_record(_record(seasoned_attempt_id, PendingCreateAttemptState.FAILED, account_id=seasoned_user_id))
+
+    new = _record_detail(client, new_attempt_id)
+    seasoned = _record_detail(client, seasoned_attempt_id)
+
+    assert (new["account_id"], new["is_first_workspace"]) == (new_user_id, True)
+    assert (seasoned["account_id"], seasoned["is_first_workspace"]) == (seasoned_user_id, False)
+
+
+def test_create_attempt_detail_does_not_count_the_attempts_own_workspace_against_its_account(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    user_id = f"user-{uuid4().hex}"
+    cli.add_account(user_id=user_id, email=f"{user_id}@example.com")
+    session_store = make_session_store_for_test(tmp_path / "minds", cli)
+    own_agent_id = AgentId.generate()
+    resolver = _resolver_with_workspace(own_agent_id, "docker", "some-other-name")
+    associate_hosted_workspace(session_store, own_agent_id, resolver, user_id)
+    client, store, _creator = _make_client_with_store(
+        tmp_path, root_concurrency_group, session_store=session_store, backend_resolver=resolver
+    )
+    own_attempt_id, later_attempt_id = str(CreateAttemptId.generate()), str(CreateAttemptId.generate())
+    own_record = _record(own_attempt_id, PendingCreateAttemptState.FAILED, account_id=user_id)
+    store.write_record(own_record.model_copy_update(to_update(own_record.field_ref().agent_id, str(own_agent_id))))
+    store.write_record(_record(later_attempt_id, PendingCreateAttemptState.FAILED, account_id=user_id))
+
+    assert _record_detail(client, own_attempt_id)["is_first_workspace"] is True
+    assert _record_detail(client, later_attempt_id)["is_first_workspace"] is False
+
+
+def _live_detail(client: FlaskClient, create_attempt_id: CreateAttemptId) -> dict[str, Any]:
+    payload = json.loads(client.get(f"/ui/api/create/attempts/{create_attempt_id}").get_data(as_text=True))
+    assert payload["kind"] == "live"
+    return payload["live"]
+
+
+def test_create_attempt_detail_knows_the_host_a_live_attempt_is_building_as_its_own(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """Discovery can list a live attempt's host before ``mngr create`` names its agent; another host is another workspace."""
+    own_client, _own_store, own_creator = _make_client_with_store(
+        tmp_path / "own",
+        root_concurrency_group,
+        backend_resolver=_resolver_with_workspace(AgentId.generate(), "docker", "Live-Owner-Test"),
+    )
+    crowded_client, _crowded_store, crowded_creator = _make_client_with_store(
+        tmp_path / "crowded",
+        root_concurrency_group,
+        backend_resolver=_resolver_with_workspace(AgentId.generate(), "docker", "an-earlier-workspace"),
+    )
+    own_attempt_id, crowded_attempt_id = (
+        creator.start_create_attempt(
+            "file:///nonexistent-repo-for-live-owner-test", host_name="live-owner-test", launch_mode=LaunchMode.DOCKER
+        )
+        for creator in (own_creator, crowded_creator)
+    )
+
+    own = _live_detail(own_client, own_attempt_id)
+    crowded = _live_detail(crowded_client, crowded_attempt_id)
+
+    assert (own["account_id"], own["is_first_workspace"]) == ("", True)
+    assert (crowded["account_id"], crowded["is_first_workspace"]) == ("", False)
+
+
+def test_create_attempt_detail_names_a_live_attempts_account_and_counts_its_workspaces(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    new_user_id, seasoned_user_id = f"user-{uuid4().hex}", f"user-{uuid4().hex}"
+    cli.add_account(user_id=new_user_id, email=f"{new_user_id}@example.com")
+    cli.add_account(user_id=seasoned_user_id, email=f"{seasoned_user_id}@example.com")
+    push_remote_workspace_record(tmp_path / "other-devices", cli, seasoned_user_id)
+    session_store = make_session_store_for_test(tmp_path / "minds", cli)
+    record_store = session_store.record_store
+    assert record_store is not None
+    record_store.pull(seasoned_user_id, f"{seasoned_user_id}@example.com")
+    client, _store, creator = _make_client_with_store(tmp_path, root_concurrency_group, session_store=session_store)
+    new_attempt_id, seasoned_attempt_id = (
+        creator.start_create_attempt(
+            "file:///nonexistent-repo-for-live-account-test",
+            host_name=f"live-account-test-{index}",
+            launch_mode=LaunchMode.DOCKER,
+            account_id=user_id,
+        )
+        for index, user_id in enumerate((new_user_id, seasoned_user_id))
+    )
+
+    new = _live_detail(client, new_attempt_id)
+    seasoned = _live_detail(client, seasoned_attempt_id)
+
+    assert (new["account_id"], new["is_first_workspace"]) == (new_user_id, True)
+    assert (seasoned["account_id"], seasoned["is_first_workspace"]) == (seasoned_user_id, False)
+
+
 _WORKSPACE_AGENT_ID = AgentId("agent-0123456789abcdef0123456789abcdef")
 
 
@@ -845,7 +1019,7 @@ def _done_record(create_attempt_id: str) -> PendingCreateAttemptRecord:
 def _received_welcome_chat_line(create_attempt_id: str) -> str:
     """The route's log line for the creating page's post once the attempt is done."""
     return (
-        f"Received the creating page's welcome chat for finished create attempt {create_attempt_id} "
+        f"Received the creating page's welcome chat request for finished create attempt {create_attempt_id} "
         f"(workspace {_WORKSPACE_AGENT_ID})"
     )
 
@@ -854,20 +1028,21 @@ def test_the_welcome_chat_is_seeded_in_the_finished_attempts_workspace(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
 ) -> None:
-    """A DONE record names the workspace; the conversation goes to it through the template's script."""
+    """A DONE record names the workspace; the fixed seed goes to it through the template's script, with no body asked of the page."""
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout='{"chat_id": "agent-seeded"}\n'))
     client, store, _creator = _make_client_with_store(tmp_path, root_concurrency_group, mngr_caller=caller)
     create_attempt_id = str(CreateAttemptId.generate())
     store.write_record(_done_record(create_attempt_id))
 
     with capture_loguru(level="DEBUG") as log_output:
-        response = client.post(f"/ui/api/create/attempts/{create_attempt_id}/welcome-chat", json=_welcome_chat_body())
+        response = client.post(f"/ui/api/create/attempts/{create_attempt_id}/welcome-chat")
 
     assert response.status_code == 200
     assert json.loads(response.get_data(as_text=True)) == {"chat_id": "agent-seeded"}
     (argv,) = caller.calls
     assert argv[:3] == ["exec", "--agent", str(_WORKSPACE_AGENT_ID)]
     assert "system/scripts/seed_welcome_chat.py" in argv[3]
+    assert welcome_chat_seed_body_sent_through_mngr_exec(argv) == FIXED_WELCOME_CHAT_SEED_BODY
     # The post is the moment the page saw the attempt done, which the hand-off is measured from.
     lines = log_output.getvalue().splitlines()
     received = _received_welcome_chat_line(create_attempt_id)
@@ -951,18 +1126,14 @@ def test_the_welcome_chat_is_refused_while_the_attempt_has_no_workspace(
     in_flight = str(CreateAttemptId.generate())
     store.write_record(_record(in_flight, PendingCreateAttemptState.IN_FLIGHT))
 
-    assert (
-        client.post(f"/ui/api/create/attempts/{in_flight}/welcome-chat", json=_welcome_chat_body()).status_code == 409
-    )
-    unknown = client.post(
-        f"/ui/api/create/attempts/{CreateAttemptId.generate()}/welcome-chat", json=_welcome_chat_body()
-    )
+    assert client.post(f"/ui/api/create/attempts/{in_flight}/welcome-chat").status_code == 409
+    unknown = client.post(f"/ui/api/create/attempts/{CreateAttemptId.generate()}/welcome-chat")
     assert unknown.status_code == 409
-    assert client.post("/ui/api/create/attempts/not-an-id/welcome-chat", json=_welcome_chat_body()).status_code == 409
+    assert client.post("/ui/api/create/attempts/not-an-id/welcome-chat").status_code == 409
     assert caller.calls == []
 
 
-def test_the_welcome_chat_refuses_a_body_without_turns_and_reports_a_workspace_that_would_not_take_it(
+def test_the_welcome_chat_reports_a_workspace_that_would_not_take_the_seed(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
 ) -> None:
@@ -979,13 +1150,8 @@ def test_the_welcome_chat_refuses_a_body_without_turns_and_reports_a_workspace_t
     client, store, _creator = _make_client_with_store(tmp_path, root_concurrency_group, mngr_caller=caller)
     create_attempt_id = str(CreateAttemptId.generate())
     store.write_record(_done_record(create_attempt_id))
-    path = f"/ui/api/create/attempts/{create_attempt_id}/welcome-chat"
 
-    assert client.post(path, json={"title": "Welcome", "turns": []}).status_code == 400
-    assert client.post(path, data="not json", content_type="application/json").status_code == 400
-    assert caller.calls == []
-
-    refused = client.post(path, json=_welcome_chat_body())
+    refused = client.post(f"/ui/api/create/attempts/{create_attempt_id}/welcome-chat")
 
     assert refused.status_code == 502
     assert json.loads(refused.get_data(as_text=True)) == {
@@ -994,16 +1160,64 @@ def test_the_welcome_chat_refuses_a_body_without_turns_and_reports_a_workspace_t
     }
 
 
-def test_a_conversation_handed_over_while_the_workspace_is_built_is_seeded_when_it_finishes_without_the_page(
+@pytest.mark.parametrize(
+    "sent_body",
+    [
+        pytest.param({"data": "not json", "content_type": "application/json"}, id="malformed"),
+        pytest.param({"json": {"title": "Mine", "turns": [{"role": "user", "text": "hi"}]}}, id="a-conversation"),
+        pytest.param({"json": []}, id="not-an-object"),
+    ],
+)
+def test_a_body_sent_with_the_welcome_chat_request_is_ignored(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, sent_body: dict[str, Any]
+) -> None:
+    """A page from before the seed was fixed still posts its conversation; the workspace gets the fixed seed."""
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout='{"chat_id": "agent-seeded"}\n'))
+    client, store, _creator = _make_client_with_store(tmp_path, root_concurrency_group, mngr_caller=caller)
+    create_attempt_id = str(CreateAttemptId.generate())
+    store.write_record(_done_record(create_attempt_id))
+
+    response = client.post(f"/ui/api/create/attempts/{create_attempt_id}/welcome-chat", **sent_body)
+
+    assert response.status_code == 200
+    (argv,) = caller.calls
+    assert welcome_chat_seed_body_sent_through_mngr_exec(argv) == FIXED_WELCOME_CHAT_SEED_BODY
+
+
+def test_the_fixed_seed_goes_to_the_chat_app_through_the_forward_when_the_app_has_that_route(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    requests, handler = answering_forward(httpx2.Response(201, json={"chat_id": "agent-over-forward"}))
+    caller = RecordingMngrCaller()
+    seeder = WelcomeChatSeeder(
+        mngr_caller=caller,
+        backend_resolver=MngrCliBackendResolver(),
+        chat_app_route=make_fake_chat_app_forward_route(handler),
+    )
+    client, store, _creator = _make_client_with_store(tmp_path, root_concurrency_group, welcome_chat_seeder=seeder)
+    create_attempt_id = str(CreateAttemptId.generate())
+    store.write_record(_done_record(create_attempt_id))
+
+    response = client.post(f"/ui/api/create/attempts/{create_attempt_id}/welcome-chat")
+
+    assert response.status_code == 200
+    assert json.loads(response.get_data(as_text=True)) == {"chat_id": "agent-over-forward"}
+    (request,) = requests
+    assert json.loads(request.content) == FIXED_WELCOME_CHAT_SEED_BODY
+    assert caller.calls == []
+
+
+def test_a_seed_asked_for_while_the_workspace_is_built_runs_when_it_finishes_without_the_page(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The user may leave the creation page and enter the workspace from the list; it must still open on its chat.
 
-    The page hands the conversation over while the attempt waits for the workspace (the probe's first request
-    stands in for that moment), and nothing asks again: the attempt finishing is what seeds it. A page that does
-    ask afterwards is answered the same chat rather than seeding a second one.
+    The page asks for the seed while the attempt waits for the workspace (the probe's first request stands in
+    for that moment), and nothing asks again: the attempt finishing is what seeds it. A page that does ask
+    afterwards is answered the same chat rather than seeding a second one.
     """
     install_stub_mngr_on_path(
         tmp_path / "fake-bin", monkeypatch, mngr_create_stub_body(_WORKSPACE_AGENT_ID, HostId.generate())
@@ -1012,16 +1226,16 @@ def test_a_conversation_handed_over_while_the_workspace_is_built_is_seeded_when_
         result=MngrCallResult(returncode=0, stdout='{"chat_id": "agent-seeded"}\n', is_mngr_output=True)
     )
     seeder = WelcomeChatSeeder(mngr_caller=caller, backend_resolver=MngrCliBackendResolver())
-    handed_over: list[int] = []
+    asked_statuses: list[int] = []
     clients: list[FlaskClient] = []
 
-    def hand_over_while_waiting_for_the_workspace() -> None:
+    def ask_for_the_seed_while_waiting_for_the_workspace() -> None:
         path = f"/ui/api/create/attempts/{create_attempt_id}/welcome-chat"
-        handed_over.append(clients[0].post(path, json=_welcome_chat_body()).status_code)
+        asked_statuses.append(clients[0].post(path).status_code)
 
     ca_cert_path = tmp_path / "forward-ca.pem"
     with scripted_workspace_probe_server(
-        not_ready_count=0, ca_cert_path=ca_cert_path, on_first_request=hand_over_while_waiting_for_the_workspace
+        not_ready_count=0, ca_cert_path=ca_cert_path, on_first_request=ask_for_the_seed_while_waiting_for_the_workspace
     ) as port:
         creator = AgentCreator(
             paths=InstallationPaths(data_dir=tmp_path / "minds"),
@@ -1030,7 +1244,7 @@ def test_a_conversation_handed_over_while_the_workspace_is_built_is_seeded_when_
             mngr_forward_port=port,
             mngr_forward_preauth_cookie="any-preauth",
             mngr_forward_ca_cert_path=ca_cert_path,
-            on_create_attempt_done=seeder.seed_held,
+            on_create_attempt_done=seeder.seed_if_owed,
         )
         client, _app, _auth_store = build_desktop_client_for_test(
             tmp_path,
@@ -1049,14 +1263,13 @@ def test_a_conversation_handed_over_while_the_workspace_is_built_is_seeded_when_
         assert caller.called_event.wait(timeout=30.0)
         creator.wait_for_all()
 
-    assert handed_over == [202]
+    assert asked_statuses == [202]
     (argv,) = caller.calls
     assert argv[:3] == ["exec", "--agent", str(_WORKSPACE_AGENT_ID)]
+    assert welcome_chat_seed_body_sent_through_mngr_exec(argv) == FIXED_WELCOME_CHAT_SEED_BODY
 
     with capture_loguru(level="DEBUG") as log_output:
-        asked_after = client.post(
-            f"/ui/api/create/attempts/{create_attempt_id}/welcome-chat", json=_welcome_chat_body()
-        )
+        asked_after = client.post(f"/ui/api/create/attempts/{create_attempt_id}/welcome-chat")
 
     assert asked_after.status_code == 200
     assert json.loads(asked_after.get_data(as_text=True)) == {"chat_id": "agent-seeded"}

@@ -23,6 +23,7 @@ interface FlowStatusBody {
   login_url?: string | null;
   user_id?: string | null;
   email?: string | null;
+  active_workspace_count?: number | null;
   error?: string | null;
   error_details?: string | null;
   is_retry_offered?: boolean;
@@ -54,6 +55,8 @@ export class WebLoginModel {
   // lists the account can arrive after the poll reads "done".
   userId = "";
   email = "";
+  // How many workspaces the signed-in account has, as the sign-in's hand-off reported it; null when it did not say.
+  activeWorkspaceCount: number | null = null;
   error: UserFacingError | null = null;
   /** Signing in again can help; it can't when the sign-in went through but couldn't be saved here. */
   isRetryOffered = true;
@@ -105,6 +108,7 @@ export class WebLoginModel {
     this.isRetryOffered = true;
     this.userId = "";
     this.email = "";
+    this.activeWorkspaceCount = null;
     this.hasRaisedApp = false;
     const generation = ++this.generation;
     this.redraw();
@@ -233,6 +237,8 @@ export class WebLoginModel {
     this.loginUrl = body.login_url ?? this.loginUrl;
     this.userId = body.user_id ?? this.userId;
     this.email = body.email ?? this.email;
+    this.activeWorkspaceCount =
+      typeof body.active_workspace_count === "number" ? body.active_workspace_count : this.activeWorkspaceCount;
     if (body.state === "done") {
       this.raiseApp();
       if (this.isClosedOnSignIn) {

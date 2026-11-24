@@ -20,14 +20,14 @@ renders:
   and the discovery-completeness flag driving the empty-state choice).
 - ``GET /ui/api/create/attempts/<create_attempt_id>`` -- the creation page's
   detail: the live in-flight attempt or the record-backed interrupted/failed
-  view (both carrying the attempt's persisted request so the page can restate
-  the chosen settings after a reload), or "gone".
-- ``POST /ui/api/create/attempts/<create_attempt_id>/welcome-chat`` -- hands the
-  onboarding conversation to the attempt's workspace as its first chat
-  (``welcome_chat.py``): held while the workspace is built and seeded when it is
+  view (both carrying the attempt's persisted request, its account, and
+  whether it is its owner's first workspace), or "gone".
+- ``POST /ui/api/create/attempts/<create_attempt_id>/welcome-chat`` -- asks for
+  the attempt's workspace to be seeded with its welcome chat
+  (``welcome_chat.py``): owed while the workspace is built and seeded when it is
   done, answering the chat's id once it is.
 - ``POST /ui/api/create/attempts/<create_attempt_id>/welcome-chat/landing`` --
-  logs how the wash over the attempt's new workspace came to lift.
+  logs how the cover over the attempt's new workspace came to lift.
 
 Some small derivations here (suggested color, locked emails, destroy statuses)
 mirror private helpers in ``app.py``; importing them would be circular
@@ -65,6 +65,10 @@ from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER
 from imbue.minds.desktop_client.connections.primitives import is_local_profile_supported_for_backend
 from imbue.minds.desktop_client.connections.primitives import is_region_pinned_for_backend
 from imbue.minds.desktop_client.connections.primitives import mngr_backend_name
+from imbue.minds.desktop_client.connections.primitives import provider_instance_name_for_synced_row
+from imbue.minds.desktop_client.create_attempt_rows import OwnerActiveWorkspace
+from imbue.minds.desktop_client.create_attempt_rows import derive_settling_create_owners
+from imbue.minds.desktop_client.create_attempt_rows import is_first_workspace_of_owner
 from imbue.minds.desktop_client.data_types import CreateAttemptQuotaRefusal
 from imbue.minds.desktop_client.data_types import MachineSizeSelection
 from imbue.minds.desktop_client.destroying import DestroyingRecord
@@ -98,7 +102,6 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_account_scope import ACCOUNT_QUERY_PARAMETER
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.ui_models import AccountPanelState
-from imbue.minds.desktop_client.welcome_chat import WelcomeChatRequest
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import pick_create_color
 from imbue.minds.desktop_client.workspace_create import CONNECTION_ONLY_LAUNCH_MODES
@@ -109,6 +112,7 @@ from imbue.minds.desktop_client.workspace_create import default_region_for_provi
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_git_url
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
 from imbue.minds.desktop_client.workspace_defaults import is_local_workspace_defaults_opt_in
+from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CONFIGURED_AWS_INSTANCE_TYPES
 from imbue.minds.primitives import CONFIGURED_AWS_REGIONS
@@ -165,9 +169,6 @@ class CreateRetryPrefill(FrozenModel):
     memory_gb: int | None = Field(default=None, description="Chosen memory in GB, for the modes sized by numbers")
     disk_gb: int | None = Field(default=None, description="Chosen data disk in GB, for the modes sized by numbers")
     color: str = Field(description="Accent color of the interrupted attempt")
-    is_onboarding_driven_by_agent: bool = Field(
-        description="Whether the attempt's creation page shows the onboarding examples, which a retry keeps"
-    )
     unavailable_reason: str = Field(
         description=(
             "Why the attempt cannot be retried as recorded (its connection was removed), shown instead of "
@@ -305,11 +306,6 @@ class CreateAttemptRequestSummary(FrozenModel):
     disk_gb: int | None = Field(default=None, description="Chosen data disk in GB, for the modes sized by numbers")
     repository: str = Field(description="Template repository URL or local path")
     branch: str = Field(description="Requested branch/tag, empty for the repo default")
-    is_onboarding_driven_by_agent: bool = Field(
-        default=False,
-        description="Whether the creation page shows its onboarding examples while the workspace is built; "
-        "not a setting the page restates",
-    )
 
 
 class LiveCreateAttemptDetail(FrozenModel):
@@ -319,6 +315,10 @@ class LiveCreateAttemptDetail(FrozenModel):
     provider_label: str = Field(description="Friendly compute-provider label")
     is_remote: bool = Field(description="Whether the machine runs in the cloud")
     request: CreateAttemptRequestSummary = Field(description="The settings the attempt was submitted with")
+    account_id: str = Field(description="The account the attempt was made under; empty for a create under no account")
+    is_first_workspace: bool = Field(
+        description="Whether the attempt's owner has no other active workspace on this install"
+    )
 
 
 class RecordCreateAttemptDetail(FrozenModel):
@@ -341,18 +341,22 @@ class RecordCreateAttemptDetail(FrozenModel):
     retry_unavailable_reason: str = Field(
         description="Why the attempt cannot be retried as recorded (its connection was removed); empty when it can"
     )
+    account_id: str = Field(description="The account the attempt was made under; empty for a create under no account")
+    is_first_workspace: bool = Field(
+        description="Whether the attempt's owner has no other active workspace on this install"
+    )
 
 
 class WelcomeChatResponse(FrozenModel):
     """Response for POST /ui/api/create/attempts/<id>/welcome-chat: the seeded chat's id."""
 
     chat_id: str = Field(
-        description="The id of the chat the conversation continues in; empty while it is held for a workspace being built"
+        description="The id of the workspace's welcome chat; empty while the seed is owed to a workspace being built"
     )
 
 
 class WelcomeChatLanding(UpperCaseStrEnum):
-    """How the wash over a new workspace came to lift."""
+    """How the cover over a new workspace came to offer Continue."""
 
     ON_SCREEN = auto()
     PROVIDER_CHOOSER_ON_SCREEN = auto()
@@ -364,8 +368,10 @@ class WelcomeChatLanding(UpperCaseStrEnum):
 class WelcomeChatLandingRequest(FrozenModel):
     """Body of POST /ui/api/create/attempts/<id>/welcome-chat/landing."""
 
-    landing: WelcomeChatLanding = Field(description="How the wash came to lift")
-    waited_ms: NonNegativeInt = Field(description="From the page seeing the attempt done to the wash being released")
+    landing: WelcomeChatLanding = Field(description="How the cover came to offer Continue")
+    waited_ms: NonNegativeInt = Field(
+        description="From the page seeing the attempt done to the cover offering Continue"
+    )
 
 
 class CreateAttemptDetailResponse(FrozenModel):
@@ -460,7 +466,6 @@ def _read_retry_prefill(
         memory_gb=retry_request.memory_gb,
         disk_gb=retry_request.disk_gb,
         color=retry_request.color or DEFAULT_WORKSPACE_COLOR,
-        is_onboarding_driven_by_agent=retry_request.is_onboarding_driven_by_agent,
         unavailable_reason=_retry_unavailable_reason(retry_request.cloud_account, cloud_accounts),
     )
 
@@ -696,8 +701,55 @@ def _request_summary(request_record: PendingCreateAttemptRequest) -> CreateAttem
         disk_gb=request_record.disk_gb,
         repository=request_record.repo_source,
         branch=request_record.branch,
-        is_onboarding_driven_by_agent=request_record.is_onboarding_driven_by_agent,
     )
+
+
+def _owner_active_workspaces(owner_account_id: str) -> tuple[OwnerActiveWorkspace, ...]:
+    """The active workspaces this install associates with an owner (an account's user id, or the device's).
+
+    The ones discovery lists under the owner, by the rule the workspace list
+    names a row's account with, and for an account its active synced records,
+    which also name its workspaces on other devices.
+    """
+    state = get_state()
+    backend_resolver = state.backend_resolver
+    session_store = state.session_store
+    agent_creator = state.agent_creator
+    store = agent_creator.pending_create_attempt_store if agent_creator is not None else None
+    settling_owner_by_agent_id = derive_settling_create_owners(
+        agent_creator.list_create_attempt_infos() if agent_creator is not None else (),
+        store.list_records() if store is not None else (),
+    )
+    workspace_by_agent_id: dict[str, OwnerActiveWorkspace] = {}
+    for agent_id in backend_resolver.list_active_workspace_ids():
+        associated_account_id = (
+            session_store.get_owner_user_id_for_workspace(str(agent_id)) if session_store is not None else None
+        )
+        settling_owner = settling_owner_by_agent_id.get(str(agent_id))
+        workspace_owner_id = associated_account_id or (
+            settling_owner.account_id if settling_owner is not None else LOCAL_PROFILE_USER_ID
+        )
+        if workspace_owner_id != owner_account_id:
+            continue
+        display_info = backend_resolver.get_agent_display_info(agent_id)
+        workspace_by_agent_id[str(agent_id)] = OwnerActiveWorkspace(
+            agent_id=str(agent_id),
+            provider_instance_name=(display_info.provider_name or "") if display_info is not None else "",
+            host_name=backend_resolver.get_host_name(agent_id) or "",
+        )
+    record_store = session_store.record_store if session_store is not None else None
+    if owner_account_id != LOCAL_PROFILE_USER_ID and record_store is not None:
+        for synced_record in record_store.list_records(owner_account_id):
+            if synced_record.state != RECORD_STATE_ACTIVE or synced_record.agent_id in workspace_by_agent_id:
+                continue
+            workspace_by_agent_id[synced_record.agent_id] = OwnerActiveWorkspace(
+                agent_id=synced_record.agent_id,
+                provider_instance_name=provider_instance_name_for_synced_row(
+                    owner_account_id, synced_record.provider_kind
+                ),
+                host_name=synced_record.display_name,
+            )
+    return tuple(workspace_by_agent_id.values())
 
 
 def _handle_create_attempt_detail(create_attempt_id: str) -> Response:
@@ -732,11 +784,19 @@ def _handle_create_attempt_detail(create_attempt_id: str) -> Response:
                 branch="",
             )
         )
+        live_account_id = record.request.account_id if record is not None else ""
         live = LiveCreateAttemptDetail(
             workspace_name=request_summary.display_name,
             provider_label=friendly_provider_label(record.provider_instance_name if record else None),
             is_remote=info.launch_mode is LaunchMode.IMBUE_CLOUD,
             request=request_summary,
+            account_id=live_account_id,
+            is_first_workspace=is_first_workspace_of_owner(
+                _owner_active_workspaces(live_account_id or LOCAL_PROFILE_USER_ID),
+                attempt_agent_id=str(info.agent_id) if info.agent_id is not None else None,
+                attempt_provider_instance_name=info.provider_instance_name,
+                attempt_host_name=info.host_name,
+            ),
         )
         return _json_response(CreateAttemptDetailResponse(kind="live", live=live))
     if record is None or record.state is PendingCreateAttemptState.DONE:
@@ -753,6 +813,13 @@ def _handle_create_attempt_detail(create_attempt_id: str) -> Response:
         request=_request_summary(record.request),
         retry_unavailable_reason=_retry_unavailable_reason(
             record.request.cloud_account, available_cloud_account_options(get_state().connection_store)
+        ),
+        account_id=record.request.account_id,
+        is_first_workspace=is_first_workspace_of_owner(
+            _owner_active_workspaces(record.request.account_id or LOCAL_PROFILE_USER_ID),
+            attempt_agent_id=record.agent_id,
+            attempt_provider_instance_name=record.provider_instance_name,
+            attempt_host_name=record.request.host_name,
         ),
     )
     return _json_response(CreateAttemptDetailResponse(kind="record", record=record_detail))
@@ -786,25 +853,17 @@ def _is_attempt_in_flight(create_attempt_id: str) -> bool:
 
 
 def _handle_seed_welcome_chat(create_attempt_id: str) -> Response:
-    """Hand the onboarding conversation to the attempt's workspace as its first chat.
+    """Seed the attempt's workspace with its welcome chat.
 
-    The body is a :class:`WelcomeChatRequest`. While the attempt is still being built the
-    conversation is held and seeded the moment the attempt finishes, whether or not the page
-    is still open: 202. Once the attempt is done it is seeded now, or the seed already under
-    way is waited on: 200 with the chat's id, or 502 with the script's own words when the
-    workspace refused or could not be reached. 409 for an attempt that is neither (failed, gone,
-    or unknown).
+    The request takes no body; the seed is the same for every workspace. While the attempt is
+    still being built the seed is owed and runs the moment the attempt finishes, whether or not
+    the page is still open: 202. Once the attempt is done the workspace is seeded now, or the
+    seed already under way is waited on: 200 with the chat's id, or 502 with the script's own
+    words when the workspace refused or could not be reached. 409 for an attempt that is neither
+    (failed, gone, or unknown).
     """
     if not is_ui_request_authenticated():
         return _unauthenticated_response()
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return make_json_error_response("Invalid JSON body", 400)
-    try:
-        welcome_chat = WelcomeChatRequest.model_validate(body)
-    except ValidationError as e:
-        logger.debug("Rejected a malformed welcome-chat body: {}", e)
-        return make_json_error_response("Invalid JSON body", 400)
     seeder = get_state().welcome_chat_seeder
     if seeder is None:
         return make_json_error_response("This app does not seed welcome chats", 503)
@@ -812,15 +871,15 @@ def _handle_seed_welcome_chat(create_attempt_id: str) -> Response:
     if workspace_agent_id is None:
         if not _is_attempt_in_flight(create_attempt_id):
             return make_json_error_response("The attempt has no workspace to seed", 409)
-        seeder.hold(CreateAttemptId(create_attempt_id), welcome_chat)
+        seeder.owe(CreateAttemptId(create_attempt_id))
         return _json_response(WelcomeChatResponse(chat_id=""), status=202)
     # The hand-off into the new workspace is timed from this line.
     logger.debug(
-        "Received the creating page's welcome chat for finished create attempt {} (workspace {})",
+        "Received the creating page's welcome chat request for finished create attempt {} (workspace {})",
         create_attempt_id,
         workspace_agent_id,
     )
-    outcome = seeder.seed(CreateAttemptId(create_attempt_id), workspace_agent_id, welcome_chat)
+    outcome = seeder.seed(CreateAttemptId(create_attempt_id), workspace_agent_id)
     if not outcome.is_seeded:
         return make_json_error_response(
             "Couldn't open the welcome chat in the workspace.", 502, detail=outcome.failure_detail
@@ -829,7 +888,7 @@ def _handle_seed_welcome_chat(create_attempt_id: str) -> Response:
 
 
 def _handle_welcome_chat_landing(create_attempt_id: str) -> Response:
-    """Log how the wash over the attempt's new workspace came to lift; a landing without the chat is a warning."""
+    """Log how the cover over the attempt's new workspace came to lift; a landing without the chat is a warning."""
     if not is_ui_request_authenticated():
         return _unauthenticated_response()
     try:

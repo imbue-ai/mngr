@@ -519,7 +519,7 @@ describe("Titlebar on a creation page", () => {
   });
 
   it("drops an open dialog once the route leaves the creation page", () => {
-    // The wash enters the finished workspace on its own timer; a dialog left
+    // The creation page enters the finished workspace by itself; a dialog left
     // up on the creation page must not follow it onto the workspace.
     const shell = makeShell();
     press(renderBar(shell, CREATING_PATH), "share-btn");

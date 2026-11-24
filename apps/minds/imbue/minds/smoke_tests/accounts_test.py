@@ -5,6 +5,7 @@ from pydantic import SecretStr
 from imbue.minds.smoke_tests.accounts import ACCOUNT_DELETION_TOKEN_HEADER
 from imbue.minds.smoke_tests.accounts import SMOKE_USER_AGENT
 from imbue.minds.smoke_tests.accounts import active_share_host_ids_of
+from imbue.minds.smoke_tests.accounts import held_workspaces_refusal
 from imbue.minds.smoke_tests.accounts import is_connector_unavailable
 from imbue.minds.smoke_tests.accounts import is_workspace_held_only_in_storage
 from imbue.minds.smoke_tests.accounts import is_workspace_running
@@ -161,3 +162,10 @@ def test_a_deletion_is_read_as_done_only_when_the_account_was_finalized() -> Non
     # A scalar would mean the route's contract moved under us; refuse rather than guess.
     with pytest.raises(SmokeAccountError):
         parse_finalize_answer({"user_id": "u1", "finalized_at": "2026-10-22T00:00:00+00:00", "rows_deleted": 3})
+
+
+def test_an_account_that_still_holds_workspaces_is_refused_naming_each_pool_row() -> None:
+    refusal = held_workspaces_refusal("studio-smoke-persistent@example.test", ["row-71203", "row-71204"])
+    assert "studio-smoke-persistent@example.test still holds 2 workspace(s)" in refusal
+    assert "row-71203, row-71204" in refusal
+    assert "minds-smoke-teardown" in refusal

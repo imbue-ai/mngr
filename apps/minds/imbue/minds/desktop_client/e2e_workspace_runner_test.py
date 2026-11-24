@@ -14,11 +14,14 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Frame
 from playwright.sync_api import Page
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from pydantic import SecretStr
 
 from imbue.minds.desktop_client.e2e_workspace_runner import DESKTOP_BACKDROP_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import E2E_HARNESS_MARKER_ENV_VAR
 from imbue.minds.desktop_client.e2e_workspace_runner import HomeRowState
+from imbue.minds.desktop_client.e2e_workspace_runner import LeaveFirstRunProviderPageSignedOut
 from imbue.minds.desktop_client.e2e_workspace_runner import MAIN_CHAT_ROW_SELECTOR
+from imbue.minds.desktop_client.e2e_workspace_runner import SignInOnFirstRunProviderPage
 from imbue.minds.desktop_client.e2e_workspace_runner import TERMINAL_IFRAME_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import WorkspaceCreateAttemptFailedError
 from imbue.minds.desktop_client.e2e_workspace_runner import WorkspaceFlowError
@@ -28,15 +31,18 @@ from imbue.minds.desktop_client.e2e_workspace_runner import _START_WORKSPACE_CON
 from imbue.minds.desktop_client.e2e_workspace_runner import _STOP_WORKSPACE_CONTROL_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _build_electron_env
 from imbue.minds.desktop_client.e2e_workspace_runner import _drain_byte_stream_to_loguru
-from imbue.minds.desktop_client.e2e_workspace_runner import _provider_chooser_frame
 from imbue.minds.desktop_client.e2e_workspace_runner import _read_failure_message
 from imbue.minds.desktop_client.e2e_workspace_runner import chat_frame
+from imbue.minds.desktop_client.e2e_workspace_runner import complete_first_run
+from imbue.minds.desktop_client.e2e_workspace_runner import continue_from_first_run_cover
 from imbue.minds.desktop_client.e2e_workspace_runner import enter_workspace_from_home_page
 from imbue.minds.desktop_client.e2e_workspace_runner import find_chat_frame
+from imbue.minds.desktop_client.e2e_workspace_runner import first_run_providers_frame
 from imbue.minds.desktop_client.e2e_workspace_runner import is_home_row_running
 from imbue.minds.desktop_client.e2e_workspace_runner import is_home_row_stopped
 from imbue.minds.desktop_client.e2e_workspace_runner import model_of_assistant_reply_containing
 from imbue.minds.desktop_client.e2e_workspace_runner import open_account_home_page
+from imbue.minds.desktop_client.e2e_workspace_runner import press_first_run_next
 from imbue.minds.desktop_client.e2e_workspace_runner import read_model_of_chat_reply
 from imbue.minds.desktop_client.e2e_workspace_runner import send_to_main_chat_from_launcher
 from imbue.minds.desktop_client.e2e_workspace_runner import start_workspace_from_home_page
@@ -116,8 +122,8 @@ class _FakeCreatingPage:
     ``is_visible_results`` entry that is an exception is raised, simulating an
     execution-context-destroyed error when the page routes onto ``/workspace/<id>``.
 
-    The selectors it answers are the ids ``failureTurn`` puts on screen
-    (``CreatingPage.ts``): ``#error-message`` around the sentence, the
+    The selectors it answers are the ids a failed create puts on screen
+    (``CreateFailure.ts``): ``#error-message`` around the sentence, the
     ``#failure-view-details`` toggle and the ``#failure-view-details-panel`` it
     opens. Anything else returns nothing, as it would on the real page.
     """
@@ -365,51 +371,228 @@ def test_chat_frame_raises_when_no_chat_opens_in_time() -> None:
         chat_frame(cast(Frame, workspace), timeout_seconds=0)
 
 
-class _FakeChooserFrame:
-    """A frame of the chat window for the chooser lookup: ``chooser_reads`` says, one entry per read, whether the
-    chooser is drawn in it (the final entry repeats); ``parent_frame`` is the frame that frames it."""
+_FIRST_RUN_PROVIDERS_URL = f"https://chat-x7k9q2w1.{_WORKSPACE_AGENT_ID}.localhost:8421/?view=first-run"
+_STUDIO_COVER = "#first-run-cover"
+_WORKSPACE_COVER = "iframe#first-run-cover"
+_PROVIDERS_PAGE = "#first-run-providers"
+_ANTHROPIC_TILE = '[data-first-run-lane="anthropic"]'
+_API_KEY_METHOD = "[data-e2e=method-api_key]"
+_ANOTHER_WAY = "[data-e2e=sign-in-another-way]"
 
-    def __init__(self, chooser_reads: Sequence[bool], parent_frame: "_FakeChooserFrame | None" = None) -> None:
-        self._chooser_reads = list(chooser_reads)
-        self.parent_frame = parent_frame
-        self.wait_for_timeout_calls = 0
+
+class _FakeCoveredChromePage:
+    """The chrome page while the app's cover is over a new workspace: records every wait and click, in order."""
+
+    def __init__(self) -> None:
+        self.actions: list[tuple[str, ...]] = []
+
+    def wait_for_selector(self, selector: str, *, state: str, timeout: float) -> None:
+        self.actions.append(("wait", selector, state))
+
+    def click(self, selector: str) -> None:
+        self.actions.append(("click", selector))
+
+
+class _FakeProvidersFrame:
+    """The frame of the template's cover over a new workspace's desktop.
+
+    ``drawn_reads`` says, one entry per read, whether the provider page is drawn in it (the final entry
+    repeats); ``account_ids`` are the accounts the chat app lists to it. The chooser a tile opens offers its
+    API-key method at once unless ``is_browser_sign_in_relayed``, where it is behind "Try another way". Every
+    click and fill is recorded, in order.
+    """
+
+    def __init__(
+        self,
+        *,
+        drawn_reads: Sequence[bool] = (True,),
+        account_ids: Sequence[str] = (),
+        is_browser_sign_in_relayed: bool = False,
+    ) -> None:
+        self.url = _FIRST_RUN_PROVIDERS_URL
+        self._drawn_reads = list(drawn_reads)
+        self._account_ids = list(account_ids)
+        self._is_api_key_method_offered = not is_browser_sign_in_relayed
+        self.actions: list[tuple[str, ...]] = []
 
     def query_selector(self, selector: str) -> _FakeElement | None:
-        assert selector == "[data-e2e=provider-chooser]"
-        is_drawn = self._chooser_reads.pop(0) if len(self._chooser_reads) > 1 else self._chooser_reads[0]
-        return _FakeElement("Choose a provider") if is_drawn else None
+        if selector == _PROVIDERS_PAGE:
+            is_drawn = self._drawn_reads.pop(0) if len(self._drawn_reads) > 1 else self._drawn_reads[0]
+            return _FakeElement("Your own cloud computer, any AI") if is_drawn else None
+        if selector == _API_KEY_METHOD and self._is_api_key_method_offered:
+            return _FakeElement("API key")
+        return None
 
-    def wait_for_timeout(self, timeout_ms: float) -> None:
-        self.wait_for_timeout_calls += 1
+    def evaluate(self, expression: str, arg: Mapping[str, object] | None = None) -> object:
+        if arg is None:
+            return "Connect an AI provider | That didn't go through. Try again."
+        assert (arg["method"], arg["path"]) == ("GET", "/api/accounts")
+        accounts = [{"id": account_id} for account_id in self._account_ids]
+        return {"status": 200, "body": json.dumps({"accounts": accounts})}
 
-    def evaluate(self, expression: str) -> str:
-        return "chat"
+    def click(self, selector: str, timeout: float | None = None) -> None:
+        self.actions.append(("click", selector))
+        if selector == _ANOTHER_WAY:
+            self._is_api_key_method_offered = True
+
+    def fill(self, selector: str, value: str) -> None:
+        self.actions.append(("fill", selector, value))
+
+    def wait_for_selector(self, selector: str, state: str = "visible", timeout: float | None = None) -> None:
+        pass
 
     def is_detached(self) -> bool:
         return False
 
-    @property
-    def url(self) -> str:
-        return _WELCOME_CHAT_PAGE_URL
+
+class _FakeCoverElement:
+    """The ``iframe`` element of the template's cover, which answers with the frame it holds."""
+
+    def __init__(self, frame: _FakeProvidersFrame) -> None:
+        self._frame = frame
+
+    def content_frame(self) -> _FakeProvidersFrame:
+        return self._frame
 
 
-def test_the_provider_chooser_is_found_in_the_chat_list_that_frames_the_chat() -> None:
-    root = _FakeChooserFrame(chooser_reads=[True])
-    chat = _FakeChooserFrame(chooser_reads=[False], parent_frame=root)
-    assert _provider_chooser_frame(cast(Frame, chat), label="t", timeout_seconds=5) is cast(Frame, root)
+class _FakeFirstRunWorkspace:
+    """The workspace frame of a just-created workspace.
+
+    ``cover_reads`` says, one entry per read, the frame its cover holds, or None while it has no cover up (the
+    final entry repeats). What it is asked to wait for is recorded, in order, and ``is_cover_kept_up`` makes
+    the wait for the cover to go time out.
+    """
+
+    def __init__(self, cover_reads: Sequence[_FakeProvidersFrame | None], *, is_cover_kept_up: bool = False) -> None:
+        self.url = _WORKSPACE_SHELL_URL
+        self._cover_reads = list(cover_reads)
+        self._is_cover_kept_up = is_cover_kept_up
+        self.waits: list[tuple[str, str]] = []
+        self.wait_for_timeout_calls = 0
+
+    def query_selector(self, selector: str) -> _FakeCoverElement | None:
+        assert selector == _WORKSPACE_COVER
+        cover_frame = self._cover_reads.pop(0) if len(self._cover_reads) > 1 else self._cover_reads[0]
+        return None if cover_frame is None else _FakeCoverElement(cover_frame)
+
+    def wait_for_selector(self, selector: str, *, state: str, timeout: float) -> None:
+        if selector == _WORKSPACE_COVER and self._is_cover_kept_up:
+            raise PlaywrightTimeoutError(f"{selector} not {state} within {timeout}ms")
+        self.waits.append((selector, state))
+
+    def wait_for_timeout(self, timeout_ms: float) -> None:
+        self.wait_for_timeout_calls += 1
 
 
-def test_the_provider_chooser_is_found_in_the_chats_own_page_on_an_older_template() -> None:
-    root = _FakeChooserFrame(chooser_reads=[False])
-    chat = _FakeChooserFrame(chooser_reads=[False, True], parent_frame=root)
-    assert _provider_chooser_frame(cast(Frame, chat), label="t", timeout_seconds=5) is cast(Frame, chat)
-    assert chat.wait_for_timeout_calls == 1
+def test_continuing_from_the_cover_presses_continue_once_offered_and_waits_for_the_cover_to_go() -> None:
+    page = _FakeCoveredChromePage()
+    continue_from_first_run_cover(cast(Page, page))
+    assert page.actions == [
+        ("wait", "#creating-continue", "visible"),
+        ("click", "#creating-continue"),
+        ("wait", _STUDIO_COVER, "detached"),
+    ]
 
 
-def test_no_provider_chooser_in_time_raises() -> None:
-    chat = _FakeChooserFrame(chooser_reads=[False], parent_frame=_FakeChooserFrame(chooser_reads=[False]))
-    with pytest.raises(WorkspaceFlowError):
-        _provider_chooser_frame(cast(Frame, chat), label="t", timeout_seconds=0)
+def test_the_provider_page_s_frame_is_the_one_the_workspace_s_cover_holds() -> None:
+    providers = _FakeProvidersFrame()
+    workspace = _FakeFirstRunWorkspace(cover_reads=[providers])
+    assert first_run_providers_frame(cast(Frame, workspace), timeout_seconds=5) is cast(Frame, providers)
+    assert workspace.wait_for_timeout_calls == 0
+
+
+def test_the_provider_page_s_frame_is_waited_for_until_the_cover_is_up_and_draws_the_page() -> None:
+    providers = _FakeProvidersFrame(drawn_reads=[False, True])
+    workspace = _FakeFirstRunWorkspace(cover_reads=[None, providers])
+    assert first_run_providers_frame(cast(Frame, workspace), timeout_seconds=5) is cast(Frame, providers)
+    assert workspace.wait_for_timeout_calls == 2
+
+
+def test_a_workspace_that_never_puts_its_cover_up_raises_saying_so() -> None:
+    workspace = _FakeFirstRunWorkspace(cover_reads=[None])
+    with pytest.raises(WorkspaceFlowError, match="no cover over its desktop"):
+        first_run_providers_frame(cast(Frame, workspace), timeout_seconds=0)
+
+
+def test_a_cover_that_never_draws_the_provider_page_raises_with_what_its_frame_shows() -> None:
+    workspace = _FakeFirstRunWorkspace(cover_reads=[_FakeProvidersFrame(drawn_reads=[False])])
+    with pytest.raises(WorkspaceFlowError, match="its cover up without the page") as raised:
+        first_run_providers_frame(cast(Frame, workspace), timeout_seconds=0)
+    assert _FIRST_RUN_PROVIDERS_URL in str(raised.value)
+
+
+def test_the_first_run_is_left_with_skip_on_a_workspace_that_holds_no_account() -> None:
+    page = _FakeCoveredChromePage()
+    providers = _FakeProvidersFrame(account_ids=[])
+    workspace = _FakeFirstRunWorkspace(cover_reads=[providers])
+
+    complete_first_run(cast(Page, page), cast(Frame, workspace), LeaveFirstRunProviderPageSignedOut(), label="test")
+
+    assert ("click", "#creating-continue") in page.actions
+    assert providers.actions == [("click", "#first-run-skip")]
+    assert workspace.waits == [(_WORKSPACE_COVER, "detached"), (DESKTOP_BACKDROP_SELECTOR, "visible")]
+
+
+def test_the_first_run_is_left_with_next_on_a_workspace_that_already_holds_an_account() -> None:
+    # The page offers Skip only while nothing is connected.
+    providers = _FakeProvidersFrame(account_ids=["account-synced-64113"])
+    workspace = _FakeFirstRunWorkspace(cover_reads=[providers])
+
+    complete_first_run(
+        cast(Page, _FakeCoveredChromePage()),
+        cast(Frame, workspace),
+        LeaveFirstRunProviderPageSignedOut(),
+        label="test",
+    )
+
+    assert providers.actions == [("click", "#first-run-next")]
+
+
+def test_signing_in_on_the_first_run_goes_from_the_anthropic_tile_through_the_api_key_method_to_next() -> None:
+    providers = _FakeProvidersFrame()
+    workspace = _FakeFirstRunWorkspace(cover_reads=[providers])
+
+    complete_first_run(
+        cast(Page, _FakeCoveredChromePage()),
+        cast(Frame, workspace),
+        SignInOnFirstRunProviderPage(api_key=SecretStr("sk-ant-test-80417")),
+        label="test",
+    )
+
+    assert providers.actions == [
+        ("click", _ANTHROPIC_TILE),
+        ("click", _API_KEY_METHOD),
+        ("fill", "[data-e2e=api-key-input]", "sk-ant-test-80417"),
+        ("click", "[data-e2e=save-key]"),
+        ("click", "#first-run-next"),
+    ]
+    assert workspace.waits == [(_WORKSPACE_COVER, "detached"), (DESKTOP_BACKDROP_SELECTOR, "visible")]
+
+
+def test_signing_in_on_the_first_run_takes_another_way_when_the_chooser_waits_on_a_relayed_browser_sign_in() -> None:
+    providers = _FakeProvidersFrame(is_browser_sign_in_relayed=True)
+    workspace = _FakeFirstRunWorkspace(cover_reads=[providers])
+
+    complete_first_run(
+        cast(Page, _FakeCoveredChromePage()),
+        cast(Frame, workspace),
+        SignInOnFirstRunProviderPage(api_key=SecretStr("sk-ant-test-22906")),
+        label="test",
+    )
+
+    assert providers.actions[:3] == [("click", _ANTHROPIC_TILE), ("click", _ANOTHER_WAY), ("click", _API_KEY_METHOD)]
+
+
+def test_a_provider_page_that_stays_up_after_next_is_pressed_raises_with_what_the_page_shows() -> None:
+    providers = _FakeProvidersFrame(account_ids=["account-kept-39050"])
+    workspace = _FakeFirstRunWorkspace(cover_reads=[providers], is_cover_kept_up=True)
+
+    with pytest.raises(WorkspaceFlowError, match="provider page stayed up") as raised:
+        press_first_run_next(cast(Frame, workspace), cast(Frame, providers))
+
+    assert "#first-run-next" in str(raised.value)
+    assert "That didn't go through" in str(raised.value)
+    assert workspace.waits == []
 
 
 class _FakeTypingLauncherWorkspace(_FakeWorkspaceFrame):

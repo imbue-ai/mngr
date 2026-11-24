@@ -22,11 +22,6 @@ import {
 } from "@tanstack/query-core";
 import { span } from "../profiling";
 import m from "mithril";
-import {
-  resendVerificationEmail,
-  verificationEmailSentNote,
-} from "./emailVerification";
-import type { ResendOutcome } from "./emailVerification";
 import { getAppQueryClient } from "./queryClient";
 import type {
   FetchJson,
@@ -124,8 +119,6 @@ const INVITE_REFUSAL_MESSAGES: Record<string, string> = {
   not_published: "Turn on sharing before inviting anyone.",
   no_workspace_link:
     "This workspace's link isn't ready yet. Invite again in a minute.",
-  email_not_verified:
-    "Verify your email to invite people: click the link we emailed you.",
 };
 
 /** What the panel says when the route refuses: the target has no address to
@@ -138,9 +131,6 @@ function mobileLinkNoAccessPointMessage(isWhole: boolean): string {
   );
 }
 
-const MOBILE_LINK_UNVERIFIED_MESSAGE =
-  "Verify your email first: click the link we emailed you.";
-
 /** What the panel's mobile-link control is doing, as a single typed value so
  * exactly one of "idle", "in flight", "sent" and "refused" is ever on screen. */
 export type MobileLinkState =
@@ -149,14 +139,7 @@ export type MobileLinkState =
   /** Shown until the panel is loaded again, so the confirmation outlives the
    * redraw that follows the send. */
   | { readonly state: "sent"; readonly recipientEmail: string }
-  | {
-      readonly state: "refused";
-      readonly failure: ShareFailure;
-      /** The account's address, when the refusal is that it is unverified. */
-      readonly unverifiedEmail?: string;
-      /** How the last resend ended, once the failure is that resend's note. */
-      readonly resendOutcome?: ResendOutcome;
-    };
+  | { readonly state: "refused"; readonly failure: ShareFailure };
 /** What the visiting-agents section is doing about an invite: exactly one of
  * nothing, minting, holding a minted code, and refused is ever on screen. A
  * code carries the scope of the pane it was minted on (`target`), so only
@@ -282,14 +265,7 @@ export type InviteState =
   | { readonly state: "inviting" }
   /** Said on the row at the moment of refusal, and never again after the
    * next invite or load (spec O5). */
-  | {
-      readonly state: "refused";
-      readonly failure: ShareFailure;
-      /** The granter's address, when the refusal is that it is unverified. */
-      readonly unverifiedEmail?: string;
-      /** How the last resend ended, once the failure is that resend's note. */
-      readonly resendOutcome?: ResendOutcome;
-    };
+  | { readonly state: "refused"; readonly failure: ShareFailure };
 
 /** The one thing a grant's invitation status indicator shows, as a single typed value so exactly one
  * state is ever on screen (never a status and a stale button at once). The first invitation is
@@ -308,8 +284,6 @@ export type InvitationStatusIndicator =
       readonly kind: "refused";
       readonly failure: ShareFailure;
       readonly canReinvite: boolean;
-      readonly unverifiedEmail?: string;
-      readonly resendOutcome?: ResendOutcome;
     }
   | {
       readonly kind: "joined";
@@ -915,13 +889,7 @@ export class SharePanelModel {
     if (invite.state === "inviting") return { kind: "inviting" };
     const canReinvite = this.canInvite(target, grant);
     if (invite.state === "refused")
-      return {
-        kind: "refused",
-        failure: invite.failure,
-        canReinvite,
-        unverifiedEmail: invite.unverifiedEmail,
-        resendOutcome: invite.resendOutcome,
-      };
+      return { kind: "refused", failure: invite.failure, canReinvite };
     const outcome = this.outcomeFor(target, grant);
     if (outcome === null) return { kind: "none" };
     if (outcome.kind === "joined")
@@ -1423,27 +1391,7 @@ export class SharePanelModel {
         code !== null
           ? plainShareFailure(INVITE_REFUSAL_MESSAGES[code], result)
           : shareFailureFrom("invite", result, this.failureContext()),
-      unverifiedEmail: unverifiedEmailOf(result.body, this.granterEmail),
     };
-  }
-
-  /** Send the link a refused invite is waiting on, and say on the row what became of it. */
-  async resendVerification(key: GrantKey, email: string): Promise<void> {
-    const outcome = await resendVerificationEmail(email);
-    const invite = this.inviteStateFor(key);
-    if (
-      this.isDisposed ||
-      invite.state !== "refused" ||
-      invite.unverifiedEmail === undefined
-    )
-      return;
-    this.inviteStateByKey.set(key, {
-      state: "refused",
-      failure: plainShareFailure(verificationEmailSentNote(email, outcome)),
-      unverifiedEmail: outcome === "already_verified" ? undefined : email,
-      resendOutcome: outcome,
-    });
-    this.redraw();
   }
 
   /** What the current target's mobile-link control is doing. */
@@ -1504,27 +1452,6 @@ export class SharePanelModel {
         isWhole,
       ),
     );
-    this.redraw();
-  }
-
-  /** Send the link a refused mobile-link request is waiting on, and say beside
-   * the control what became of it. */
-  async resendVerificationForMobileLink(email: string): Promise<void> {
-    const target = this.currentTarget;
-    const outcome = await resendVerificationEmail(email);
-    const current = this.mobileLinkByTarget.get(target);
-    if (
-      this.isDisposed ||
-      current?.state !== "refused" ||
-      current.unverifiedEmail === undefined
-    )
-      return;
-    this.mobileLinkByTarget.set(target, {
-      state: "refused",
-      failure: plainShareFailure(verificationEmailSentNote(email, outcome)),
-      unverifiedEmail: outcome === "already_verified" ? undefined : email,
-      resendOutcome: outcome,
-    });
     this.redraw();
   }
 
@@ -2456,15 +2383,9 @@ function adoptMobileLinkAnswer(
       ),
     };
   }
-  const unverifiedEmail = unverifiedEmailOf(result.body, granterEmail);
-  if (unverifiedEmail !== undefined)
-    return {
-      state: "refused",
-      failure: plainShareFailure(MOBILE_LINK_UNVERIFIED_MESSAGE, result),
-      unverifiedEmail,
-    };
-  // Any other 409 means the same thing to a reader: there is no address to send yet.
-  if (result.status === 409)
+  // Any 409 but the unverified-email refusal means the same thing to a reader:
+  // there is no address to send yet.
+  if (result.status === 409 && errorCodeOf(result.body) !== "email_not_verified")
     return {
       state: "refused",
       failure: plainShareFailure(mobileLinkNoAccessPointMessage(isWhole), result),
@@ -2502,18 +2423,6 @@ function errorCodeOf(body: ResponseBody): string | null {
 function refusalCodeOf(body: ResponseBody): string | null {
   const code = errorCodeOf(body);
   return code !== null && code in INVITE_REFUSAL_MESSAGES ? code : null;
-}
-
-/** The address an unverified-email refusal is waiting on, or undefined for any
- * other answer. The connector can refuse without naming one, and the resend
- * still has to be offered then. */
-function unverifiedEmailOf(
-  body: ResponseBody,
-  granterEmail: string,
-): string | undefined {
-  if (errorCodeOf(body) !== "email_not_verified") return undefined;
-  const email = (body as { email?: unknown }).email;
-  return typeof email === "string" && email !== "" ? email : granterEmail;
 }
 
 function grantRefusalsFrom(

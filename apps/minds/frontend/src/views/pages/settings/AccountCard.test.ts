@@ -21,10 +21,7 @@ import {
   attrsOf,
   collectText,
   collectVnodes,
-  jsonResponse,
-  planRefusedAsUnverified,
   renderDeep,
-  settle,
   withMindsNative,
 } from "../../../testing";
 import { Spinner } from "../../components/Spinner";
@@ -549,69 +546,4 @@ describe("the shared-workspaces link", () => {
       "/account/local/workspaces/shared",
     );
   });
-});
-
-describe("the verification prompt's resend", () => {
-  /** A card whose plan switch was refused as unverified, its resend answered by `answer`. */
-  async function refusedCard(answer: () => Response): Promise<() => m.Children> {
-    const model = modelOnPlan("free", async (input) =>
-      String(input).endsWith("/plan")
-        ? planRefusedAsUnverified("person@example.com", true)
-        : answer(),
-    );
-    await model.switchPlan(ACCOUNT.user_id, ACCOUNT.email, "ally", "Ally");
-    return mountCard(model);
-  }
-
-  function resendButton(tree: m.Children): AnyVnode | undefined {
-    return collectVnodes(tree).find(
-      (node) =>
-        attrsOf(node).onclick !== undefined &&
-        collectText(node).join("").trim() === "Resend email",
-    );
-  }
-
-  it("stops offering the resend once a press finds the address already verified", async () => {
-    const render = await refusedCard(() =>
-      jsonResponse({ sent: false, already_verified: true }),
-    );
-
-    (attrsOf(resendButton(render()) as AnyVnode).onclick as () => void)();
-    await settle();
-
-    const text = collectText(render()).join("");
-    expect(text).toContain("person@example.com is already verified.");
-    expect(text).toContain("You can switch plans now.");
-    expect(text).not.toContain("Resend email");
-    expect(resendButton(render())).toBeUndefined();
-  });
-
-  it.each([
-    [
-      "sent",
-      () => jsonResponse({ sent: true }),
-      "Sent another email to person@example.com.",
-    ],
-    [
-      "suppressed",
-      () => jsonResponse({ sent: false }),
-      "An email went out to person@example.com moments ago. Check your inbox and spam folder.",
-    ],
-    [
-      "failed",
-      () => new Response("Could not send", { status: 502 }),
-      "Could not send the email to person@example.com. Please try again.",
-    ],
-  ])(
-    "says what became of a press that ended %s",
-    async (_outcome, answer, note) => {
-      const render = await refusedCard(answer);
-      expect(collectText(render()).join("")).not.toContain(note);
-
-      (attrsOf(resendButton(render()) as AnyVnode).onclick as () => void)();
-      await settle();
-
-      expect(collectText(render()).join("")).toContain(note);
-    },
-  );
 });

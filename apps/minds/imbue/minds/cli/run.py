@@ -105,6 +105,7 @@ from imbue.minds.desktop_client.forward_identity import ForwardHeadersFile
 from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
 from imbue.minds.desktop_client.forward_identity import remove_legacy_forward_identity_file
 from imbue.minds.desktop_client.full_disk_access_probe import start_full_disk_access_probe
+from imbue.minds.desktop_client.host_names import read_configured_host_name_base
 from imbue.minds.desktop_client.host_timezone import read_host_timezone
 from imbue.minds.desktop_client.identity_records import IDENTITY_CACHE_FILENAME
 from imbue.minds.desktop_client.identity_records import IdentityCache
@@ -278,6 +279,7 @@ def run(
     profile_path: Path | None,
 ) -> None:
     """Run the Imbue Studio bare-origin server with `mngr forward` as a subprocess."""
+    configured_host_name_base = read_configured_host_name_base(os.environ)
     try:
         client_config_path = resolve_client_config_path(config_file)
     except EnvConfigError as exc:
@@ -915,8 +917,8 @@ def run(
     forward_ca_cert_path = local_ca_cert_path(mngr_host_dir)
     # Shared by the welcome chat's seed and the settings that live only in a workspace's chat app.
     chat_app_route = make_chat_app_forward_route(mngr_forward_port, preauth_cookie, forward_ca_cert_path)
-    # Shared by the agent creator (it seeds a finished attempt's held conversation) and the creation
-    # page's route (it hands the conversation over, and waits on the seed while the page is open).
+    # Shared by the agent creator (it seeds a finished attempt's workspace when a seed is owed) and the
+    # creation page's route (it asks for the seed, and waits on it while the page is open).
     welcome_chat_seeder = WelcomeChatSeeder(
         mngr_caller=mngr_caller,
         backend_resolver=backend_resolver,
@@ -1085,6 +1087,7 @@ def run(
         imbue_cloud_cli=imbue_cloud_cli,
         notification_dispatcher=notification_dispatcher,
         paths=paths,
+        configured_host_name_base=configured_host_name_base,
         welcome_chat_seeder=welcome_chat_seeder,
         chat_app_route=chat_app_route,
         envelope_stream_consumer=consumer,
@@ -1266,12 +1269,12 @@ def _finish_create_attempt(
     create_attempt_id: CreateAttemptId,
     workspace_agent_id: AgentId,
 ) -> None:
-    """The creator's done hook: seed the held welcome chat, then materialize the profile snapshot.
+    """The creator's done hook: seed the welcome chat when it is owed, then materialize the profile snapshot.
 
     The snapshot write rides right after the seed (spec section 8.2) and carries the device's
     zone for the once-at-create timezone file (spec section 8.4).
     """
-    welcome_chat_seeder.seed_held(create_attempt_id, workspace_agent_id)
+    welcome_chat_seeder.seed_if_owed(create_attempt_id, workspace_agent_id)
     workspace_profile_writer.write_profile_for_create(workspace_agent_id, read_host_timezone())
 
 

@@ -1,12 +1,12 @@
-"""/ui/api routes for the first-run flow: the consent answer, onboarding completion, and the sign-in landing.
+"""/ui/api routes for the first run: the consent answer, onboarding completion, and the sign-in landing.
 
 Two tiny state transitions and one question, all session-authed: answering the
-error-reporting consent question (on the consent screen, or on the start flow's
-run question), marking onboarding complete, and answering where the start
-flow's existing-login sign-in should land (whether the signed-in account has
-any workspaces yet). The SPA routes to ``/consent`` while
-``needs_error_reporting_consent`` (from ``/ui/api/app-status``) is true, and to
-``/start`` while ``is_onboarding_complete`` is false and no workspace exists.
+error-reporting consent question (on the consent screen, or with the sign-in
+page's checkbox), marking onboarding complete, and answering where a sign-in
+whose hand-off did not say how many workspaces the account has should land.
+The SPA routes to ``/consent`` while ``needs_error_reporting_consent`` (from
+``/ui/api/app-status``) is true, and to ``/start`` while
+``is_onboarding_complete`` is false and no workspace exists.
 """
 
 import json
@@ -52,7 +52,7 @@ def _unauthenticated_response() -> Response:
 def _handle_consent_answer() -> Response:
     """Record the user's answer to the error-reporting consent question (POST /ui/api/onboarding/consent).
 
-    The consent screen and the start flow's run question both post here. The body's ``report_unexpected_errors``
+    The consent screen and the sign-in page both post here. The body's ``report_unexpected_errors``
     is their checkbox, which starts checked: it becomes the reporting setting Settings -> Error reporting shows.
     An empty body, or one without it, only marks the question answered and leaves the setting as it was. Either
     way the latchkey daemon's consent file is synced.
@@ -82,15 +82,14 @@ def _handle_consent_answer() -> Response:
 
 
 def _handle_onboarding_complete() -> Response:
-    """Record that the installation is past the start flow (POST /ui/api/onboarding/complete).
+    """Record that the installation is past the first run (POST /ui/api/onboarding/complete).
 
-    The SPA posts this when the start flow's title-bar "Already set up? Log in"
-    signs in to an account that already has workspaces, since that path creates
-    nothing (the create front door records the same fact for every create
-    attempt on its own, which is how a sign-in landing on a workspace-less
-    account completes onboarding: by the create its continued conversation
-    submits). Persisted, so the next launch lands on the home page rather than
-    on the start flow again.
+    The SPA posts this when the sign-in page signs in to an account that
+    already has workspaces, since that path creates nothing (the create front
+    door records the same fact for every create attempt on its own, which is
+    how a sign-in to an account with no workspaces completes onboarding: by
+    the first workspace's create). Persisted, so the next launch lands on the
+    home page rather than on the sign-in page again.
     """
     if not is_ui_request_authenticated():
         return _unauthenticated_response()
@@ -105,16 +104,18 @@ def _handle_onboarding_complete() -> Response:
 FORCE_FIRST_RUN_ENV_VAR: Final[str] = "MINDS_DEV_FORCE_FIRST_RUN"
 
 
+# CLEANUP: remove this route (and the sign-in page's poll of it) once every tier's connector sends the
+# ``workspaces`` parameter on the sign-in hand-off, so that the web-login status always carries the count.
 def _handle_signin_landing() -> Response:
-    """Answer where the start flow's existing-login sign-in should land (GET /ui/api/onboarding/signin-landing).
+    """Answer where a sign-in should land (GET /ui/api/onboarding/signin-landing).
 
-    The flow asks after its title-bar "Already set up? Log in" sign-in completes, with
-    the signed-in account id as ``?account=``: ``done`` with the account's
+    The sign-in page asks when its sign-in landed without a workspace count,
+    with the signed-in account id as ``?account=``: ``done`` with the account's
     active synced-workspace count once the first record pull has finished (or
     the records were already local), ``pending`` while that pull is still in
     flight, and ``failed`` when the last pass could not fetch the records (the
-    sync loop keeps retrying on its own). An account with workspaces leaves the
-    flow for its home page; one with none continues the conversation.
+    sync loop keeps retrying on its own). An account with workspaces leaves
+    for its home page; one with none gets its first workspace created.
     """
     if not is_ui_request_authenticated():
         return _unauthenticated_response()

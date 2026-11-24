@@ -14,6 +14,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
 from typing import NoReturn
+from urllib.parse import parse_qs
+from urllib.parse import urlsplit
 
 import httpx2
 import pytest
@@ -191,6 +193,34 @@ def list_leased_host_db_ids(connector_url: str, user: VerifiedUserHandle) -> lis
     leased_host_db_ids = list_leased_host_db_ids_or_none(connector_url, user)
     assert leased_host_db_ids is not None, "/hosts listing failed (see the warning above)"
     return leased_host_db_ids
+
+
+def sign_in_browser_session(client: httpx2.Client, connector_url: str, user: VerifiedUserHandle) -> None:
+    """Sign ``client``'s cookie session in to ``user`` through the hosted accounts API.
+
+    The session replaces whichever one the client held, as signing in from the
+    hosted login page does in a browser.
+    """
+    signin = client.post(
+        f"{connector_url}/accounts/api/signin",
+        json={"email": str(user.email), "password": user.password.get_secret_value(), "turnstile_token": ""},
+    )
+    assert signin.status_code == 200, signin.text
+    assert signin.json()["status"] == "OK", signin.text
+
+
+def check_inbox_continuation(response: httpx2.Response) -> str:
+    """The authorize URL that a device hand-off's bounce to the check-inbox page continues to.
+
+    Asserts that ``response`` is that bounce: the 302 an unverified session's
+    confirmed ``/accounts/authorize`` gets in place of a code.
+    """
+    assert response.status_code == 302, response.text
+    location = response.headers["location"]
+    assert location.startswith("/check-inbox?next="), location
+    continuation = parse_qs(urlsplit(location).query)["next"][0]
+    assert continuation.startswith("/accounts/authorize?"), continuation
+    return continuation
 
 
 def initialize_and_sign_in(

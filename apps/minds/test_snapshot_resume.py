@@ -65,6 +65,8 @@ from imbue.minds.desktop_client.backup_update import run_backup_restore_sequence
 from imbue.minds.desktop_client.backup_verification import MINIMUM_BACKUP_SERVICE_TAG
 from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
 from imbue.minds.desktop_client.e2e_workspace_runner import CHEAPEST_CHAT_MODEL_REPLY_PREFIX
+from imbue.minds.desktop_client.e2e_workspace_runner import LeaveFirstRunProviderPageSignedOut
+from imbue.minds.desktop_client.e2e_workspace_runner import SignInOnFirstRunProviderPage
 from imbue.minds.desktop_client.e2e_workspace_runner import _E2E_DATA_HOME_DIR_NAME
 from imbue.minds.desktop_client.e2e_workspace_runner import _REPO_ROOT
 from imbue.minds.desktop_client.e2e_workspace_runner import await_chat_reply
@@ -79,7 +81,6 @@ from imbue.minds.desktop_client.e2e_workspace_runner import open_account_home_pa
 from imbue.minds.desktop_client.e2e_workspace_runner import read_model_of_chat_reply
 from imbue.minds.desktop_client.e2e_workspace_runner import resolve_default_workspace_template_path
 from imbue.minds.desktop_client.e2e_workspace_runner import send_chat_message
-from imbue.minds.desktop_client.e2e_workspace_runner import sign_in_via_provider_chooser
 from imbue.minds.desktop_client.e2e_workspace_runner import start_workspace_from_home_page
 from imbue.minds.desktop_client.e2e_workspace_runner import stop_workspace_from_home_page
 from imbue.minds.desktop_client.e2e_workspace_runner import switch_chat_to_cheapest_model
@@ -498,10 +499,10 @@ def test_minds_recovery_restores_dead_system_interface(
 # snapshot *build* drives that same toolchain to create the first workspace).
 # This test reuses that warm toolchain to drive the real Electron app and create
 # a SECOND workspace -- which boots unauthenticated (the create flow injects no
-# AI credentials) and shows the welcome chat the creation page seeds. The first
-# message sent there opens the provider chooser in the chat's own frame; the
-# test signs in through it with a raw API key (the designed first-boot step) and
-# asserts the agent replies. It runs in the same offload snapshot stage (carries
+# AI credentials) and opens on the first run's provider page. The test signs in
+# from that page's Anthropic tile with a raw API key (the designed first-boot
+# step), messages the chat the desktop then opens on, and asserts the agent
+# replies. It runs in the same offload snapshot stage (carries
 # minds_snapshot_resume), so all the "drive Electron" coverage lives in one
 # place. It does NOT use the baked first workspace (it creates its own), so it
 # is independent of the ``running_workspace`` fixture.
@@ -620,14 +621,13 @@ def _remove_containers_named_with_prefix(prefix: str) -> None:
         _run_docker(["rm", "--force", *container_ids], timeout=120)
 
 
-# How long the agent the sign-in launches can take to come up.
+# How long the agent that leaving the provider page signed in starts can take to come up.
 _CHAT_AGENT_UP_TIMEOUT_SECONDS: Final[float] = 240.0
 
 
-def _sign_in_and_chat(page: Page | Frame, api_key: str, token: str) -> None:
-    """Sign in from the welcome chat the creation page opened, move it to the cheapest model, then message it."""
+def _chat_on_cheapest_model(page: Page | Frame, token: str) -> None:
+    """Move the chat the signed-in workspace opened on to the cheapest model, then message it."""
     chat = wait_for_chat_input(page)
-    sign_in_via_provider_chooser(page, chat, api_key=SecretStr(api_key), label="sign-in")
     switch_chat_to_cheapest_model(chat, agent_up_timeout_seconds=_CHAT_AGENT_UP_TIMEOUT_SECONDS, label="sign-in")
     send_chat_message(chat, page, token)
     await_chat_reply(chat, page, token)
@@ -644,17 +644,18 @@ def test_create_workspace_and_sign_in_via_modal_then_chat_via_electron(
     monkeypatch: pytest.MonkeyPatch,
     xvfb_display: str,
 ) -> None:
-    """Create an unauthenticated Docker workspace, sign in via the chooser, chat.
+    """Create an unauthenticated Docker workspace, sign in on its first run's provider page, chat.
 
     The product-level first-boot round-trip: the create flow injects no AI
-    credentials, so the workspace boots unauthenticated and shows the welcome chat
-    the creation page seeds with the onboarding conversation, whose composer is
-    disabled while the provider chooser opens in the chat's own frame; the test
-    fills the API-key path in the real chooser UI (which mints a provider account
-    holding the key and launches the chat's agent on it), picks the cheapest model
-    for the chat through the endpoint its model picker posts to, sends the chat a
-    message, then asserts that model answers it (echoes a unique token) --
-    end-to-end through the real Electron app and the desktop client proxy.
+    credentials, so the workspace boots unauthenticated, under the app's cover
+    and then its own provider page; the test presses Continue, opens the
+    chooser from the page's Anthropic tile and fills its API-key path in the
+    real UI (which mints a provider account holding the key), and presses Next,
+    which starts the agent of the chat the desktop opens on. It then picks the
+    cheapest model for that chat through the endpoint its model picker posts
+    to, sends the chat a message, and asserts that model answers it (echoes a
+    unique token) -- end-to-end through the real Electron app and the desktop
+    client proxy.
 
     Runs in the snapshot offload sandbox, reusing the warm Electron toolchain
     baked into the image (the ``xvfb_display`` fixture supplies the display the
@@ -666,7 +667,7 @@ def test_create_workspace_and_sign_in_via_modal_then_chat_via_electron(
     """
     anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not anthropic_api_key:
-        pytest.skip("ANTHROPIC_API_KEY is required for the chooser sign-in workspace chat round-trip")
+        pytest.skip("ANTHROPIC_API_KEY is required for the first-run sign-in workspace chat round-trip")
 
     root_name = f"minds-ci-e2e{get_short_random_string()}"
     default_workspace_template_path, host_config_root = _prepare_electron_workspace_inputs(
@@ -690,7 +691,8 @@ def test_create_workspace_and_sign_in_via_modal_then_chat_via_electron(
             workspace_name,
             debug_port,
             host_config_dir=host_config_root,
-            on_workspace_ready=lambda page: _sign_in_and_chat(page, anthropic_api_key, token),
+            on_workspace_ready=lambda page: _chat_on_cheapest_model(page, token),
+            first_run_provider_choice=SignInOnFirstRunProviderPage(api_key=SecretStr(anthropic_api_key)),
         )
     finally:
         _remove_containers_named_with_prefix(mngr_prefix_for(root_name))
@@ -769,6 +771,7 @@ def test_workspace_stops_and_starts_from_the_home_page_via_electron(
             on_workspace_ready=lambda workspace: _stop_start_and_reenter_from_home_page(
                 workspace, container_name_prefix
             ),
+            first_run_provider_choice=LeaveFirstRunProviderPageSignedOut(),
         )
     finally:
         _remove_containers_named_with_prefix(container_name_prefix)

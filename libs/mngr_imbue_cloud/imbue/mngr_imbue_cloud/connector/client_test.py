@@ -2399,6 +2399,28 @@ def test_auth_device_token_parses_a_successful_exchange() -> None:
     assert response.tokens == {"access_token": "at", "refresh_token": "rt"}
 
 
+def test_auth_device_token_maps_structured_verification_403_to_typed_error() -> None:
+    """An exchange refused for an unverified account is that refusal, not a generic auth failure."""
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        assert request.url.path == "/auth/device/token"
+        return httpx2.Response(
+            403,
+            json={
+                "detail": {
+                    "code": "email_not_verified",
+                    "email": "alice@example.com",
+                    "message": "Signing in requires a verified email address (alice@example.com).",
+                }
+            },
+        )
+
+    client = _make_transport_client(handler)
+    with pytest.raises(ImbueCloudEmailNotVerifiedError, match="Signing in requires a verified email") as exc_info:
+        client.auth_device_token(code="c", code_verifier="v", redirect_uri="http://127.0.0.1:1/callback")
+    assert exc_info.value.email == "alice@example.com"
+
+
 def test_auth_revoke_current_session_treats_success_and_401_as_revoked(monkeypatch: pytest.MonkeyPatch) -> None:
     """200/204/401 all count as revoked (401 = already revoked); no fallback call is made."""
     for status_code in (200, 204, 401):

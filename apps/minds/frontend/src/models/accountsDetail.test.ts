@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   accountEntry,
   jsonResponse,
-  planRefusedAsUnverified,
   secondAccountEntry,
   settle,
   withReceiverGuardedGlobalFetch,
@@ -344,63 +343,45 @@ describe("the cached plan", () => {
   });
 });
 
-describe("verify-email prompt", () => {
+describe("a refused plan switch", () => {
   function makeModelWithPlanResponse(
     planResponse: () => Response,
-    onResend?: () => Response,
-  ): AccountsDetailModel {
-    return new AccountsDetailModel(
+  ): { model: AccountsDetailModel; requests: string[] } {
+    const requests: string[] = [];
+    const model = new AccountsDetailModel(
       async (input) => {
         const url = String(input);
+        requests.push(url);
         if (url === "/accounts/user-1/plan") return planResponse();
-        if (url === "/accounts/user-1/resend-verification" && onResend)
-          return onResend();
         return jsonResponse({ plan_view: null, trim_status: null });
       },
       () => {},
       (callback) => callback(),
     );
+    return { model, requests };
   }
 
-  it("shows the prompt on a structured email_not_verified 403 instead of the page error", async () => {
-    const model = makeModelWithPlanResponse(() =>
-      planRefusedAsUnverified("alice@example.com", true),
-    );
+  it("reports an unverified-email refusal as the switch's ordinary failure, the refusal behind See details", async () => {
+    const refusal = "account set-plan: this action requires a verified email";
+    const { model, requests } = makeModelWithPlanResponse(() => jsonResponse({ detail: refusal }, 502));
 
     await model.switchPlan("user-1", "alice@example.com", "ally", "Ally");
 
-    expect(model.actionError).toBeNull();
-    expect(model.verifyEmailPromptFor("user-1")).toEqual({
-      email: "alice@example.com",
-      wasAutoSent: true,
-      isResending: false,
-      resendOutcome: null,
-    });
-  });
-
-  it("records a suppressed auto-send so the prompt does not claim a link was sent", async () => {
-    const model = makeModelWithPlanResponse(() =>
-      planRefusedAsUnverified("alice@example.com", false),
+    expect(model.actionError?.message).toBe(
+      "Couldn't switch alice@example.com to the Ally plan. Try again. If this persists, report a bug.",
     );
-
-    await model.switchPlan("user-1", "alice@example.com", "ally", "Ally");
-
-    expect(model.verifyEmailPromptFor("user-1")).toEqual({
-      email: "alice@example.com",
-      wasAutoSent: false,
-      isResending: false,
-      resendOutcome: null,
-    });
+    expect(model.actionError?.details).toContain("HTTP 502");
+    expect(model.actionError?.details).toContain(refusal);
+    expect(requests).toEqual(["/accounts/user-1/plan"]);
   });
 
   it("says Imbue Cloud's stated reason for a refused switch, without asking for another try", async () => {
-    const model = makeModelWithPlanResponse(() =>
+    const { model } = makeModelWithPlanResponse(() =>
       jsonResponse({ code: "plan_refused", reason: "The 'ally' plan requires partner access" }, 403),
     );
 
     await model.switchPlan("user-1", "alice@example.com", "ally", "Ally");
 
-    expect(model.verifyEmailPromptFor("user-1")).toBeNull();
     expect(model.actionError).toEqual({
       message:
         "Imbue Cloud won't switch alice@example.com to the Ally plan. It said: \"The 'ally' plan requires partner access\"",
@@ -409,8 +390,8 @@ describe("verify-email prompt", () => {
     expect(model.actionErrorRetry).toBeNull();
   });
 
-  it("keeps any other 403 as the page error (no prompt), its text behind See details", async () => {
-    const model = makeModelWithPlanResponse(
+  it("keeps any other 403 as the page error, its text behind See details", async () => {
+    const { model } = makeModelWithPlanResponse(
       () =>
         new Response("The 'ally' plan requires partner access", {
           status: 403,
@@ -419,51 +400,12 @@ describe("verify-email prompt", () => {
 
     await model.switchPlan("user-1", "alice@example.com", "ally", "Ally");
 
-    expect(model.verifyEmailPromptFor("user-1")).toBeNull();
     expect(model.actionError?.message).toBe(
       "Couldn't switch alice@example.com to the Ally plan. Try again. If this persists, report a bug.",
     );
     expect(model.actionError?.details).toBe(
       "HTTP 403\nThe 'ally' plan requires partner access",
     );
-  });
-
-  it.each([
-    ["suppressed", () => jsonResponse({ sent: false, email: "a@b.com" })],
-    ["failed", () => new Response("Could not send", { status: 502 })],
-  ] as const)(
-    "keeps a resend that ended %s apart from one that went out",
-    async (outcome, onResend) => {
-      const model = makeModelWithPlanResponse(
-        () => planRefusedAsUnverified("alice@example.com", true),
-        onResend,
-      );
-      await model.switchPlan("user-1", "alice@example.com", "ally", "Ally");
-
-      await model.resendVerification("user-1");
-
-      expect(model.verifyEmailPromptFor("user-1")?.resendOutcome).toBe(outcome);
-      expect(model.verifyEmailPromptFor("user-1")?.isResending).toBe(false);
-    },
-  );
-
-  it("clears the prompt on the next switch attempt and marks a resend", async () => {
-    let planCalls = 0;
-    const model = makeModelWithPlanResponse(
-      () => {
-        planCalls += 1;
-        return planRefusedAsUnverified("alice@example.com", true);
-      },
-      () => jsonResponse({ sent: true, email: "alice@example.com" }),
-    );
-    await model.switchPlan("user-1", "alice@example.com", "ally", "Ally");
-
-    await model.resendVerification("user-1");
-    expect(model.verifyEmailPromptFor("user-1")?.resendOutcome).toBe("sent");
-
-    await model.switchPlan("user-1", "alice@example.com", "ally", "Ally");
-    expect(planCalls).toBe(2);
-    expect(model.verifyEmailPromptFor("user-1")?.resendOutcome).toBeNull();
   });
 });
 

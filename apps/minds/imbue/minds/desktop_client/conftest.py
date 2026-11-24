@@ -1,7 +1,6 @@
 import base64
 import json
 import tempfile
-import time
 from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
@@ -87,8 +86,6 @@ from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.share_targets import WHOLE_MACHINE_SERVICE
 from imbue.minds.desktop_client.shared_with_me_store import SharedWithMeDocumentStore
 from imbue.minds.desktop_client.shared_with_me_store import SharedWithMeStore
-from imbue.minds.desktop_client.supertokens_routes import _WebLoginFlowStatus
-from imbue.minds.desktop_client.supertokens_routes import _record_web_login_status
 from imbue.minds.desktop_client.supertokens_routes import _web_login_flows
 from imbue.minds.desktop_client.supertokens_routes import _web_login_flows_lock
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
@@ -107,7 +104,6 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr_imbue_cloud.data_types import VerificationEmailSendResult
 from imbue.mngr_imbue_cloud.errors import GRANTS_REFUSED_CODE
 from imbue.mngr_imbue_cloud.errors import SHARED_WITH_ME_UNAVAILABLE_CODE
 
@@ -193,27 +189,6 @@ class FakeImbueCloudCli(ImbueCloudCli):
         ),
     )
 
-    resent_verification_emails: list[str] = Field(
-        default_factory=list, description="Every email auth_resend_verification was called with, in order"
-    )
-    is_resend_suppressed: bool = Field(
-        default=False, description="When True, auth_resend_verification reports the server cooldown (sent=False)"
-    )
-    is_resend_already_verified: bool = Field(
-        default=False, description="When True, auth_resend_verification reports the address as already verified"
-    )
-    resend_error_to_raise: ImbueCloudCliError | None = Field(
-        default=None, description="When set, auth_resend_verification raises it instead of answering"
-    )
-    verified_emails: set[str] = Field(
-        default_factory=set, description="Accounts auth_is_email_verified reports as verified"
-    )
-    is_verified_checks: list[str] = Field(
-        default_factory=list, description="Every email auth_is_email_verified was called with, in order"
-    )
-    is_verified_error_to_raise: ImbueCloudCliError | None = Field(
-        default=None, description="When set, auth_is_email_verified raises it instead of answering"
-    )
     set_plan_calls: list[tuple[str, str]] = Field(
         default_factory=list, description="(account email, plan) for every set_account_plan call, in order"
     )
@@ -248,21 +223,6 @@ class FakeImbueCloudCli(ImbueCloudCli):
 
     def remove_account_by_email(self, email: str) -> None:
         self.accounts_to_return = [a for a in self.accounts_to_return if a.email != email]
-
-    def auth_resend_verification(self, account: str) -> VerificationEmailSendResult:
-        self.resent_verification_emails.append(account)
-        if self.resend_error_to_raise is not None:
-            raise self.resend_error_to_raise
-        return VerificationEmailSendResult(
-            is_sent=not self.is_resend_suppressed and not self.is_resend_already_verified,
-            is_already_verified=self.is_resend_already_verified,
-        )
-
-    def auth_is_email_verified(self, account: str) -> bool:
-        self.is_verified_checks.append(account)
-        if self.is_verified_error_to_raise is not None:
-            raise self.is_verified_error_to_raise
-        return account in self.verified_emails
 
     def set_account_plan(self, account: str, plan: str) -> dict[str, Any]:
         self.set_plan_calls.append((account, plan))
@@ -1680,21 +1640,6 @@ def make_resolver_with_data(
             resolver.update_services(AgentId(agent_id_str), services, labels, display_names=display_names)
 
     return resolver
-
-
-def record_web_login_flow_for_test(
-    email: str, is_email_verified: bool | None, state: str = "done", ttl_seconds: float = 60.0
-) -> None:
-    """Track a browser sign-in flow for ``email`` whose hosted page gave ``is_email_verified``.
-
-    A negative ``ttl_seconds`` records a flow that has already expired.
-    """
-    _record_web_login_status(
-        f"flow-{uuid4().hex}",
-        _WebLoginFlowStatus(
-            state=state, email=email, is_email_verified=is_email_verified, deadline=time.monotonic() + ttl_seconds
-        ),
-    )
 
 
 @pytest.fixture(autouse=True)

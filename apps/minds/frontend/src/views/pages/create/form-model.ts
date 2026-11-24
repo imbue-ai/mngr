@@ -104,7 +104,6 @@ export interface CreateSubmitBody {
   region: string;
   instance_type: string;
   enable_web_access: boolean;
-  is_onboarding_driven_by_agent: boolean;
   runtime?: string;
   cpu_count?: number;
   memory_gb?: number;
@@ -194,10 +193,6 @@ export class CreateFormModel {
   // new workspace right after its create. On by default under an account
   // (syncAccountDefaults), off without one, since a share needs an owner.
   enableWebAccess = false;
-  // The advanced view's "Show onboarding examples?": whether the creation page
-  // shows its recording while the workspace is built. Off from the form; the
-  // start flow's creates turn it on (its form opens with it on).
-  isOnboardingDrivenByAgent = false;
   // Whether the user set the switch or the backup provider by hand: an
   // explicit pick survives account changes, a default follows the account.
   private isWebAccessTouched = false;
@@ -258,7 +253,6 @@ export class CreateFormModel {
       this.isBackupProviderTouched = true;
       this.backupApiKeyEnv = prefill.backup_api_key_env;
       this.runtime = prefill.docker_runtime;
-      this.isOnboardingDrivenByAgent = prefill.is_onboarding_driven_by_agent;
       this.launchValue =
         prefill.cloud_account !== ""
           ? `${CONNECTION_LAUNCH_PREFIX}${prefill.cloud_account}`
@@ -811,7 +805,6 @@ export class CreateFormModel {
           ? this.selectedInstanceType()
           : "",
       enable_web_access: this.enableWebAccess,
-      is_onboarding_driven_by_agent: this.isOnboardingDrivenByAgent,
     };
     if (this.isRuntimeShown()) body.runtime = this.runtime;
     const sizeDefaults = this.machineSizeDefaults();

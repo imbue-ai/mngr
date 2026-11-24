@@ -111,7 +111,6 @@ from imbue.minds.desktop_client.host_timezone import read_host_timezone
 from imbue.minds.desktop_client.identity_records import IdentityCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
-from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudPlanRefusedCliError
 from imbue.minds.desktop_client.kernel_fix import KernelFixRunner
 from imbue.minds.desktop_client.kernel_security import KernelMachineAccess
@@ -173,7 +172,6 @@ from imbue.minds.desktop_client.state import set_state
 from imbue.minds.desktop_client.static_pages import build_error_page_html
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.supertokens_routes import create_supertokens_blueprint
-from imbue.minds.desktop_client.supertokens_routes import is_email_verified_by_web_login
 from imbue.minds.desktop_client.supertokens_routes import signout_user_via_plugin
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import AgentFailureLogGate
@@ -268,6 +266,7 @@ from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.errors import ProviderCredentialSourceMissingError
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.primitives import BROWSER_BRIDGE_PATH
@@ -1920,18 +1919,6 @@ def _handle_account_set_plan(user_id: str) -> Response:
         return _account_action_account_missing_response()
     try:
         cli.set_account_plan(str(account.email), plan)
-    except ImbueCloudEmailNotVerifiedCliError as exc:
-        # The verification-gated refusal is the contextual trigger for the
-        # verification email: auto-send it (the connector's per-user cooldown
-        # bounds repeats) and return the structured 403 so the SPA renders the
-        # "we just sent a link to ..." prompt with a resend button.
-        email = exc.email or str(account.email)
-        is_sent = _send_verification_email_best_effort(cli, email)
-        return make_response(
-            status_code=403,
-            content=json.dumps({"code": "email_not_verified", "email": email, "sent": is_sent}),
-            media_type="application/json",
-        )
     except ImbueCloudPlanRefusedCliError as exc:
         # The connector's stated reason, which no retry changes; the page words it.
         return make_response(
@@ -1963,103 +1950,6 @@ def _account_action_account_missing_response() -> Response:
 def _account_action_unavailable_response() -> Response:
     """The refusal of an account action on a copy of Imbue Studio with no Imbue Cloud set up."""
     return make_json_error_response("Imbue Studio can't do that on this computer.", 503)
-
-
-def _send_verification_email_best_effort(cli: ImbueCloudCli, email: str) -> bool:
-    """Send the verification email for ``email``; False when nothing was sent.
-
-    Best-effort: the caller's response already tells the user a link is on the
-    way (or to use resend), so a failed send must not turn the whole
-    plan-switch response into an error.
-    """
-    try:
-        return cli.auth_resend_verification(email).is_sent
-    except ImbueCloudCliError as exc:
-        logger.warning("Could not send the verification email for {}: {}", email, exc)
-        return False
-
-
-def _handle_account_resend_verification(user_id: str) -> Response:
-    """(Re-)send the verification email for one signed-in account (the SPA's resend button)."""
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content="Not authenticated")
-    session_store: MultiAccountSessionStore | None = get_state().session_store
-    cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
-    account = next(
-        (a for a in (session_store.list_accounts() if session_store else []) if str(a.user_id) == user_id),
-        None,
-    )
-    if account is None or cli is None:
-        return make_response(status_code=409, content="Account not found or imbue_cloud CLI unavailable.")
-    return _verification_send_response(cli, str(account.email))
-
-
-def _verification_send_response(cli: ImbueCloudCli, email: str) -> Response:
-    """Send the verification email for a user who asked for it.
-
-    A CLI failure answers 502, so ``"sent": false`` only ever means the
-    server's cooldown held the send back or the address is already verified,
-    which ``"already_verified"`` tells apart.
-    """
-    try:
-        send_result = cli.auth_resend_verification(email)
-    except ImbueCloudCliError as exc:
-        logger.warning("Could not send the verification email for {}: {}", email, exc)
-        return make_response(status_code=502, content=f"Could not send the verification email: {exc}")
-    return make_response(
-        status_code=200,
-        content=json.dumps(
-            {"sent": send_result.is_sent, "already_verified": send_result.is_already_verified, "email": email}
-        ),
-        media_type="application/json",
-    )
-
-
-def _signed_in_account_for_email(email: str) -> str | None:
-    """The signed-in account matching ``email`` (case-insensitively), or None."""
-    session_store: MultiAccountSessionStore | None = get_state().session_store
-    if session_store is None:
-        return None
-    wanted = email.strip().lower()
-    for account in session_store.list_accounts():
-        if str(account.email).lower() == wanted:
-            return str(account.email)
-    return None
-
-
-def _handle_account_verification() -> Response:
-    """The email-verification gate for the account named by ``?email=``.
-
-    GET asks the connector whether the email is verified (a plain status
-    query the flow polls), unless a browser sign-in in this app already
-    reported it verified; POST sends the verification email. Both answer
-    only for an account this install has signed in, so a stranger's address
-    cannot be probed or spammed through the local app.
-    """
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content="Not authenticated")
-    cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
-    account = _signed_in_account_for_email(request.args.get("email", ""))
-    if account is None or cli is None:
-        return make_response(status_code=409, content="Account not found or imbue_cloud CLI unavailable.")
-    if request.method == "POST":
-        return _verification_send_response(cli, account)
-    if is_email_verified_by_web_login(account):
-        # Right after a sign-in the connector check is at its slowest: its mngr
-        # process cold-starts beside the sign-in's own record syncs.
-        logger.debug("Answered the verification check for {} from its sign-in", account)
-        is_verified = True
-    else:
-        try:
-            is_verified = cli.auth_is_email_verified(account)
-        except ImbueCloudCliError as exc:
-            logger.warning("Could not check the email verification for {}: {}", account, exc)
-            return make_response(status_code=502, content=f"Could not check the email verification: {exc}")
-    return make_response(
-        status_code=200,
-        content=json.dumps({"verified": is_verified, "email": account}),
-        media_type="application/json",
-    )
 
 
 def _find_predefined_permission_handler() -> LatchkeyPermissionGrantHandler | None:
@@ -3114,6 +3004,7 @@ def create_desktop_client(
     workspace_profile_writer: WorkspaceProfileWriter | None = None,
     shared_with_me_store: SharedWithMeStore | None = None,
     workspace_install_settings_store: WorkspaceInstallSettingsStore | None = None,
+    configured_host_name_base: HostName | None = None,
 ) -> Flask:
     """Create the bare-origin Imbue Studio Flask application.
 
@@ -3358,6 +3249,7 @@ def create_desktop_client(
         backend_resolver=backend_resolver,
         http_client=http_client,
         agent_creator=agent_creator,
+        configured_host_name_base=configured_host_name_base,
         # The live app shares one seeder with its agent creator's done hook; an app built without one seeds
         # only when the creation page asks.
         welcome_chat_seeder=(
@@ -3609,12 +3501,6 @@ def create_desktop_client(
     # Account management action routes
     app.add_url_rule("/settings/ai-keys/mint", view_func=_handle_mint_ai_key, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/plan", view_func=_handle_account_set_plan, methods=["POST"])
-    app.add_url_rule(
-        "/accounts/<user_id>/resend-verification",
-        view_func=_handle_account_resend_verification,
-        methods=["POST"],
-    )
-    app.add_url_rule("/accounts/verification", view_func=_handle_account_verification, methods=["GET", "POST"])
     app.add_url_rule("/accounts/<user_id>/trim-backups", view_func=_handle_account_trim_backups, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/logout", view_func=_handle_account_logout, methods=["POST"])
 

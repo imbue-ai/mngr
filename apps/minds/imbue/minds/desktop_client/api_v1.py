@@ -1565,7 +1565,8 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     ``launch_mode`` is ``IMBUE_CLOUD``), and ``region``. No AI-provider or
     Anthropic-key fields exist anymore: workspaces boot unauthenticated and the
     in-workspace sign-in modal is the sole auth surface (a stale ``ai_provider``
-    field from an old client is silently ignored). Returns ``202`` with an ``operation_id`` the
+    or ``is_onboarding_driven_by_agent`` field from an old client is silently
+    ignored). Returns ``202`` with an ``operation_id`` the
     caller polls at ``/api/v1/workspaces/operations/create/<operation_id>``; the
     canonical workspace id appears there once ``mngr create`` returns.
 
@@ -1575,7 +1576,8 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     applicable (agents ignore ``field``), and the no-account imbue_cloud backstop
     returns ``{"error", "redirect_url"}`` pointing at the sign-up flow. An empty
     ``host_name`` is auto-resolved to the next free ``workspace-N`` (the form no
-    longer asks for a name).
+    longer asks for a name), or from the operator's base when
+    ``MINDS_DEFAULT_WORKSPACE_NAME_BASE`` is set.
 
     Backup provisioning and account association match the desktop UI's
     create flow: the optional ``backup_*`` fields (``backup_provider``,
@@ -1616,7 +1618,6 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     backup_api_key_env = str(body.get("backup_api_key_env", ""))
     account_id = str(body.get("account_id", "")).strip()
     is_web_access_enabled = bool(body.get("enable_web_access", False))
-    is_onboarding_driven_by_agent = bool(body.get("is_onboarding_driven_by_agent", False))
     if is_web_access_enabled and not account_id:
         # A share is registered under the owning account, so without one there
         # is nothing to publish.
@@ -1685,7 +1686,7 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
 
     # The workspace name is chosen automatically unless one was submitted (the
     # advanced view's optional "Name" field): a submitted value, else the next
-    # free ``workspace-N`` name (computed from the host names already in use across
+    # free automatic name (computed from the host names already in use across
     # every provider). Resolve it eagerly so an invalid name surfaces as a 400
     # here rather than as a deferred FAILED status on the creating page.
     backend_resolver = get_state().backend_resolver
@@ -1697,6 +1698,7 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         resolved_host_name = resolve_create_host_name(
             host_name,
             existing_workspace_host_names(backend_resolver) | agent_creator.live_in_flight_host_names(),
+            configured_host_name_base=get_state().configured_host_name_base,
         )
     except InvalidName as exc:
         return _json_field_error(str(exc), "host_name")
@@ -1818,7 +1820,6 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
             docker_runtime=docker_runtime,
             original_minds_version=(branch_or_tag or branch or FALLBACK_BRANCH),
             account_id=account_id,
-            is_onboarding_driven_by_agent=is_onboarding_driven_by_agent,
         )
     except WorkspaceNameInUseError as exc:
         # A live in-flight create attempt already holds this name on the same

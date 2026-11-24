@@ -463,12 +463,6 @@ body:has(#notice-band) .workspace-surface {
   -webkit-app-region: no-drag;
 }
 
-/* The image lightbox paints over the titlebar the same way a modal does, so
-   its backdrop subtracts the drag region for the same reason. */
-.image-lightbox-overlay {
-  -webkit-app-region: no-drag;
-}
-
 .accent-spine::before {
   content: "";
   position: absolute;
@@ -1019,16 +1013,9 @@ body:has(#notice-band) .workspace-surface {
 }
 
 /*
- * The start flow and the creation page (views/pages/StartPage.ts,
- * views/pages/CreatingPage.ts, views/pages/start/transcript.ts).
- *
- * A transcript arrives in two motions. A turn RISES into place (the user's
- * bubble, a row of buttons, the table, the loading box): 10px up and a fade,
- * eased out, because a message being sent is an action that lands. An agent
- * turn STREAMS: every character is in the DOM from the first frame at opacity
- * 0 and fades in at its own delay, so the block is its final size at once and
- * nothing reflows as it fills. Both delays ride in as custom properties from
- * the models, which is where the schedule is worked out.
+ * A marker that streams in with the line it introduces (views/components/Disclosure.ts): the character is in the
+ * DOM from the first frame at opacity 0 and fades in at its own delay, so the block is its final size at once and
+ * nothing reflows as it fills. The delay rides in as a custom property from the caller.
  */
 @keyframes start-char-in {
   to { opacity: 1; }
@@ -1036,14 +1023,6 @@ body:has(#notice-band) .workspace-surface {
 .start-char {
   opacity: 0;
   animation: start-char-in var(--start-char-fade, 70ms) linear var(--start-char-delay, 0ms) both;
-}
-@keyframes start-chat-in {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-.start-chat-in {
-  animation: start-chat-in var(--start-chat-fade, 280ms) cubic-bezier(0.2, 0.8, 0.2, 1)
-    var(--start-chat-delay, 0ms) both;
 }
 
 /*
@@ -1056,30 +1035,9 @@ body:has(#notice-band) .workspace-surface {
 }
 
 /*
- * The creation page's accent blob: the workspace's color as the machines list
- * draws it, breathing while the workspace is being made.
- */
-@keyframes creating-blob-morph {
-  0%, 100% { border-radius: 62% 38% 58% 42% / 48% 60% 40% 52%; transform: scale(1, 1); }
-  25% { border-radius: 38% 62% 42% 58% / 62% 40% 60% 38%; transform: scale(1.08, 0.92); }
-  50% { border-radius: 58% 42% 65% 35% / 38% 58% 42% 62%; transform: scale(0.94, 1.06); }
-  75% { border-radius: 42% 58% 36% 64% / 58% 42% 62% 38%; transform: scale(1.05, 0.96); }
-}
-.creating-blob {
-  border-radius: 62% 38% 58% 42% / 48% 60% 40% 52%;
-  animation: creating-blob-morph 6s ease-in-out infinite;
-}
-
-/* The loading box's bar fills in the secondary ink. */
-#bar-fill {
-  background: var(--c-text-secondary);
-}
-
-/*
  * The wash (views/shell/Wash.ts, models/wash.ts): a disc of the workspace's
- * color grows from the loading box's blob until it covers the window, stays
- * whole while the workspace comes up underneath it, for as long as that takes,
- * and then lifts. --wash-scale is measured per window: a circle big enough to
+ * color grows from its origin until it covers the window, stays whole for as
+ * long as it is asked to, and then lifts. --wash-scale is measured per window: a circle big enough to
  * cover from the middle is not big enough to cover from a corner.
  */
 @keyframes wash-cover {
@@ -1097,15 +1055,11 @@ body:has(#notice-band) .workspace-surface {
   animation: wash-lift var(--wash-lift-ms, 312ms) cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 
-/* With motion unwelcome, every turn is simply there and nothing breathes. */
+/* With motion unwelcome, a streamed marker is simply there and the wash neither grows nor fades. */
 @media (prefers-reduced-motion: reduce) {
-  .start-char,
-  .start-chat-in {
+  .start-char {
     animation: none;
     opacity: 1;
-  }
-  .creating-blob {
-    animation: none;
   }
   .wash-disc {
     animation: none;
@@ -1282,6 +1236,11 @@ body.first-run-chrome #minds-titlebar {
   background: transparent;
   color: var(--first-run-ink);
 }
+/* A button in a row of several (a failed create's ways forward): the lesser action's size, filled or outlined. */
+.first-run-button--compact {
+  padding: 9px 19px;
+  border: 1px solid var(--first-run-ink);
+}
 .first-run-button:hover:not(:disabled) {
   background: color-mix(in srgb, var(--first-run-ink) 80%, var(--first-run-ground));
 }
@@ -1310,6 +1269,11 @@ body.first-run-chrome #minds-titlebar {
 /* The sign-in page's quiet links at its foot: no underline, only the ink on hover. */
 .first-run-link--plain {
   text-decoration: none;
+}
+/* A link inside a sentence (a failed create's See details): underlined as a link in running text is. */
+.first-run-link--inline {
+  text-decoration: underline;
+  text-underline-offset: auto;
 }
 .first-run-checkbox {
   width: 17px;

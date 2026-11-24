@@ -38,6 +38,7 @@ from imbue.minds.smoke_tests.primitives import SMOKE_ACCOUNT_EMAIL_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_ACCOUNT_PASSWORD_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SmokeAccountError
 from imbue.minds.smoke_tests.primitives import SmokeAccountExistsError
+from imbue.minds.smoke_tests.primitives import SmokeAccountHoldsWorkspacesError
 from imbue.minds.smoke_tests.primitives import SmokeSignInRefusedError
 from imbue.minds.smoke_tests.primitives import persistent_account_vault_dir
 
@@ -280,6 +281,24 @@ def list_workspace_host_db_ids(*, connector_url: AnyUrl, bearer: SecretStr) -> l
     if response.status_code != 200:
         raise SmokeAccountError(f"GET /workspaces answered {response.status_code}: {response.text[:300]!r}")
     return workspace_host_db_ids_of([entry for entry in response.json() if isinstance(entry, dict)])
+
+
+@pure
+def held_workspaces_refusal(email: str, host_db_ids: Sequence[str]) -> str:
+    """What a journey through the first run says of an account that still holds workspaces, naming each."""
+    return (
+        f"{email} still holds {len(host_db_ids)} workspace(s) (pool rows {', '.join(host_db_ids)}), and the "
+        "app's first run creates a workspace only for an account that has none. Release them first: "
+        "`just minds-smoke-teardown <tier> <run-id>` releases whatever the account holds."
+    )
+
+
+def require_account_holds_no_workspace(*, connector_url: AnyUrl, credentials: SmokeAccountCredentials) -> None:
+    """Fail, naming them, when the account still holds workspaces, running or stopped."""
+    bearer = sign_in(connector_url=connector_url, credentials=credentials)
+    host_db_ids = list_workspace_host_db_ids(connector_url=connector_url, bearer=bearer)
+    if host_db_ids:
+        raise SmokeAccountHoldsWorkspacesError(held_workspaces_refusal(str(credentials.email), host_db_ids))
 
 
 def _read_workspace_or_none(*, connector_url: AnyUrl, bearer: SecretStr, host_db_id: str) -> dict[str, Any] | None:

@@ -83,6 +83,7 @@ from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRe
 from imbue.minds.desktop_client.workspace_profile_writer import WorkspaceProfileWriter
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.mngr_caller import MngrCaller
+from imbue.mngr.primitives import HostName
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
@@ -112,6 +113,11 @@ class DesktopClientState(MutableModel):
     )
     agent_creator: AgentCreator | None = Field(
         default=None, frozen=True, description="In-flight agent create attempt manager"
+    )
+    configured_host_name_base: HostName | None = Field(
+        default=None,
+        frozen=True,
+        description="The operator's base for the name of a create that submits none; None names it workspace-N",
     )
     welcome_chat_seeder: WelcomeChatSeeder | None = Field(
         default=None,

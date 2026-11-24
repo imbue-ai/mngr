@@ -50,7 +50,7 @@ run. By area:
 | File / test | Marks | What it exercises |
 |---|---|---|
 | `test_aws_workspace_release.py::test_aws_workspace_runs_in_runsc_container_on_ec2` | `release`, `timeout(900)`, skip unless AWS creds + `MNGR_AWS_RELEASE_TESTS=1` | Provisions a real EC2 instance, asserts the agent runs in a runsc/gVisor container. Costs money. |
-| `test_snapshot_resume.py` (17 tests) | each `minds_snapshot_resume` + `docker` (+ `rsync` on the two Electron tests) + per-test `timeout` | Most assert against a Modal-snapshot sandbox (pre-baked, stopped DEFAULT_WORKSPACE_TEMPLATE workspace container): resume sanity checks, the backup-update chat gate against a stand-in agent held RUNNING, the backup-service check/update/force-update converge loop (real supervisord + `official`-remote tag fetch from GitHub), the backup enable / env-repair / destination-change flow (real minds-side restic provisioning + `mngr exec` injection; installs a pinned restic on the sandbox host when the image lacks the bundled one), and the in-place backup restore (the real restore worker + workspace script: pinned-restic install, safety snapshot, sync restore, services back). `test_create_workspace_and_sign_in_via_modal_then_chat_via_electron` reuses the snapshot image's warm Electron/Playwright/Xvfb toolchain to drive the real Electron app: it creates a fresh local Docker DEFAULT_WORKSPACE_TEMPLATE workspace (which boots with no AI credentials, open on the welcome chat the creation page seeded with the onboarding conversation, whose composer stays disabled, with the provider chooser open in the chat's own frame, until a provider is signed in), signs in through that chooser (the Anthropic API-key path) with a raw API key (needs `ANTHROPIC_API_KEY`), moves the chat to Haiku (the cheapest model its picker offers) through the endpoint the picker posts to, sends the chat a message, and asserts Haiku answers it. It runs under a minds root of its own, so its containers never share the snapshot workspace's name prefix, and removes them in `finally`. `test_workspace_stops_and_starts_from_the_home_page_via_electron` creates one more fresh local Docker workspace the same way, under a root of its own, and stops and starts it from the home page: it presses the row's Stop control (agreeing to the question it asks) and then its Start control, compares what the page shows with what Docker runs at each turn, and requires the desktop and a chat's page to come back when it presses the row again. It sends no message, so it needs no AI key. Both share their driver with `desktop_client/e2e_workspace_runner.py`. Only via `just test-offload-minds-snapshot`; locally, `just minds-test-electron` runs the create and chat test and `just minds-test-electron-stop-start` the stop and start one. See 1.5. |
+| `test_snapshot_resume.py` (17 tests) | each `minds_snapshot_resume` + `docker` (+ `rsync` on the two Electron tests) + per-test `timeout` | Most assert against a Modal-snapshot sandbox (pre-baked, stopped DEFAULT_WORKSPACE_TEMPLATE workspace container): resume sanity checks, the backup-update chat gate against a stand-in agent held RUNNING, the backup-service check/update/force-update converge loop (real supervisord + `official`-remote tag fetch from GitHub), the backup enable / env-repair / destination-change flow (real minds-side restic provisioning + `mngr exec` injection; installs a pinned restic on the sandbox host when the image lacks the bundled one), and the in-place backup restore (the real restore worker + workspace script: pinned-restic install, safety snapshot, sync restore, services back). `test_create_workspace_and_sign_in_via_modal_then_chat_via_electron` reuses the snapshot image's warm Electron/Playwright/Xvfb toolchain to drive the real Electron app: it creates a fresh local Docker DEFAULT_WORKSPACE_TEMPLATE workspace (which boots with no AI credentials, under the app's cover and then its own first-run provider page), presses Continue on the cover, signs in from the provider page's Anthropic tile (the API-key path of the chooser the tile opens) with a raw API key (needs `ANTHROPIC_API_KEY`), presses Next, moves the chat the desktop opens on to Haiku (the cheapest model its picker offers) through the endpoint the picker posts to, sends the chat a message, and asserts Haiku answers it. It runs under a minds root of its own, so its containers never share the snapshot workspace's name prefix, and removes them in `finally`. `test_workspace_stops_and_starts_from_the_home_page_via_electron` creates one more fresh local Docker workspace the same way, under a root of its own, leaves its provider page with Skip, and stops and starts it from the home page: it presses the row's Stop control (agreeing to the question it asks) and then its Start control, compares what the page shows with what Docker runs at each turn, and requires the desktop and a chat's page to come back when it presses the row again. It sends no message, so it needs no AI key. Both share their driver with `desktop_client/e2e_workspace_runner.py`. Only via `just test-offload-minds-snapshot`; locally, `just minds-test-electron` runs the create and chat test and `just minds-test-electron-stop-start` the stop and start one. See 1.5. |
 | `test_workspace_programs_e2e.py` | `minds_snapshot_resume` + `docker` + `timeout(600)` | Runs workspace programs inside the snapshot's real DEFAULT_WORKSPACE_TEMPLATE workspace container, through the same zip-application command the app ships them with: the backup gate probe answers without a `gate_error`, and the update program's refreshing `read` installs its own archive as `dispatcher.pyz` and the cron line, whose `tick` then runs from that archive. Only via `just test-offload-minds-snapshot`. |
 | `test_sse_redirect.py::test_sse_redirect_on_done` | `release` | Werkzeug server + Playwright; verifies the creating-page SSE stream delivers `done` and the JS redirects. No Docker/agent. |
 | `imbue/minds/test_claude_version_alignment.py::test_claude_code_version_matches_default_workspace_template_pin` | `release` | Checks the Claude Code CLI pin matches the DEFAULT_WORKSPACE_TEMPLATE pin. |
@@ -287,9 +287,12 @@ how to run them. The decisions behind the first shape are recorded in
 `specs/minds-smoke-tests/spec.md`.
 
 **The first shape.** One journey, driven through the installed Imbue Studio app
-against the production backend: launch the published build and reach the landing
-page; sign in to Imbue Cloud through the app's web-login flow, completing the
-hosted login page in the test's own browser; create an Imbue Cloud workspace;
+against the production backend, from a fresh install's first run on: launch the
+published build and reach its first-run sign-in page; sign in to Imbue Cloud
+from that page, completing the hosted login page in the test's own browser; let
+the app create the account's first Imbue Cloud workspace by itself and press
+Continue when it is ready; connect the account's AI provider on the workspace's
+provider page and press Next;
 run default-workspace-template's CI test suites inside it, then its OOM drill
 (see "The template's CI suites in the workspace" and "The template's OOM drill
 in the workspace" below);
@@ -297,10 +300,10 @@ send the chat a prompt that builds a hello-world scaffolding app (a web server
 with a route that answers 200, registered as a workspace app; the prompt is
 optimized to be minimally expensive while still building that server); stop the
 workspace from the home page and start it again (see "Stopping and starting the
-workspace" below); share the
-workspace from within the app, open the app's route through the share, and assert
-the 200 (the visitor is the owner -- grants are a later scenario); turn sharing
-off from within the app as the original user; destroy the workspace.
+workspace" below); open the app's route through the share the create turned
+on, and assert the 200 (the visitor is the owner -- grants are a later
+scenario); turn sharing off from within the app as the original user; destroy
+the workspace.
 
 Beside the journey, two cheaper tests:
 
@@ -372,6 +375,10 @@ smoke invocations run at the same time (a GitHub `concurrency` group per tier,
 queued rather than cancelled). The test step gets one rerun before the run counts
 as failed, unless its only failures are default-workspace-template tests, which
 fail the same way again (see below); `teardown` cleans up after both attempts.
+The rerun launches a fresh install too, so it goes through the first run again,
+and it fails before launching while the first attempt's workspace is still held
+by the persistent account (see "How the journey drives the app"): it helps only
+an attempt that failed before its create, or after its destroy.
 
 **CI keys that talk to production.** This is the first CI workflow holding
 production credentials. These are CI's keys, which happen to give one specific CI
@@ -403,41 +410,67 @@ the resource guards' shim directory on `PATH` are dropped, and
 `STUDIO_ROOTS_OVERRIDE`, `MINDS_ROOT_NAME`, the client config and `DISPLAY` are set
 explicitly. The `BROWSER` it is given is a no-op, so its web-login never
 reaches the operator's own browser (which would hand whatever account is
-signed in there to the app); on a fresh install the suite unticks the
-first-run page's "Help improve Studio" and takes "Use without an account",
-which records the answer, then loads that page with the shell's `web-login=1`
-param (the page's own Sign in would start the account's first workspace by
-itself, and the journey creates one it names; Settings cannot be opened before
-onboarding is complete), and completes the hosted sign-in the modal offers in
-its own headless Chromium.
+signed in there to the app).
 
-The workspace is created in the region the form already points at, which is
-the app's own choice for where this machine's workspaces run; a run therefore
-fails when that region is out of pool capacity, which is a true thing to
-report about the tier. The form shares a workspace on an account as it is
-created unless its sharing switch is turned off; the journey turns it off, so
-that its share step publishes the workspace from its Sharing page in Settings.
+The journey goes through the app's first run the way a new user does, so it
+needs a fresh install: the app has to open on its first-run sign-in page
+(`#start-flow`), and any other landing fails the journey saying so. The first
+run creates a workspace only for an account that has none, so before the app is
+launched (and before a channel's build is downloaded) the suite asks the
+connector, as the persistent account, for the workspaces it holds (`GET
+/workspaces`, which lists stopped ones too), and fails naming their pool rows
+if there are any; `just minds-smoke-teardown` releases them. On the sign-in
+page the suite unticks "Help improve Studio" (a test run is not a user's
+install), presses Sign in, which records that answer, and completes the hosted
+sign-in the modal offers in its own headless Chromium.
 
-A fresh workspace boots with no AI credentials. A user gives it the account's
-own through the chat's provider chooser: its "Sign in with Imbue" lane floats
-the desktop's AI-keys dialog, whose button mints a LiteLLM key and shows a
-two-line credential blob to paste back into the lane. The suite calls the two
-routes behind that lane directly -- `POST /settings/ai-keys/mint` on the
-desktop, then `POST /api/claude-auth/submit-credentials` into the chat,
+The app then creates the account's first workspace by itself and routes to its
+creation page; the journey types no name and fills no form. It requires the
+page's heading to be the welcome a first workspace gets, waits for the
+workspace or the create's failure, and presses Continue on the cover the app
+keeps over the new workspace, which lands on the workspace's own provider page.
+The workspace is created in the region the app picks for where this machine's
+workspaces run; a run therefore fails when that region is out of pool capacity,
+which is a true thing to report about the tier. A create that names no
+workspace is named by the app, so the launcher sets
+`MINDS_DEFAULT_WORKSPACE_NAME_BASE` in the app's environment to the run's
+`studio-smoke-<run id>-<random>` name, and the journey requires the app's
+listing to carry that name, under the persistent account. The app normalizes
+the base it reads (lowercase, each run of other characters one dash) and
+refuses to start on one longer than 59 characters, and the workspace gets the
+normalized base whole. The launcher therefore sets, and the journey expects,
+the name as the app reads it (the suite computes it with the app's own
+reader), and a run id too long for the name, past 37 characters, fails the run
+before the app is launched. The first run's
+create also shares the workspace: the journey waits for the share to report
+enabled and records it in the manifest then, and never presses the publish
+switch itself.
+
+A fresh workspace boots with no AI credentials, and its provider page covers
+its desktop until its owner connects a provider and presses Next, or presses
+Skip. A user gives it the account's own through the chooser a tile opens: its
+"Sign in with Imbue" lane floats the desktop's AI-keys dialog, whose button
+mints a LiteLLM key and shows a two-line credential blob to paste back into the
+lane. The suite calls the two routes behind that lane directly -- `POST
+/settings/ai-keys/mint` on the desktop, then `POST
+/api/claude-auth/submit-credentials` from the provider page's own frame,
 requiring the workspace to report back the proxied `imbue` auth mode -- without
 driving the lane's own controls; exercising those is a follow-up recorded in
-the spec. The prompt is then typed into the desktop's launcher field and sent
-with Enter, which sends a text to the workspace's main chat (the chat app's
-`main` launch path): in a fresh workspace that is the welcome chat, named
-"Main", still awaiting its first send. The prompt is that first send, so it
-launches the chat's agent on the account signed in by then. The suite reads
-the main chat's id from the chat app's own `GET /api/chats` (`main_chat_id`)
-before pressing Enter, then waits for that chat's page to show the prompt and
-the reply.
+the spec. It then requires the page to list that account under "Connected" and
+presses Next, which takes the page down and starts the main chat's agent, idle
+until it is sent something. The prompt is later typed into the desktop's
+launcher field and sent with Enter, which sends a text to the workspace's main
+chat (the chat app's `main` launch path): in a fresh workspace that is the
+welcome chat, named "Main", open on the first conversation's ways to start.
+The prompt is none of them, so the agent takes it as an ordinary request. The
+suite reads the main chat's id from the chat app's own `GET /api/chats`
+(`main_chat_id`) before pressing Enter, then waits for that chat's page to show
+the prompt and the reply.
 
 **Stopping and starting the workspace.** Step 4b, after the agent's first
-reply and before anything is shared (a stop takes a published workspace's link
-down with the machine). The journey opens the account's home page and presses
+reply and before the share is visited: the workspace is shared from its create,
+a stop takes its link down with the machine, and the share step waits for the
+link to be live again. The journey opens the account's home page and presses
 the workspace's Stop control, agreeing to the question it asks through a native
 dialog, then its Start control, and then the row itself, which re-enters the
 workspace:
@@ -481,8 +514,8 @@ runs its three pytest roots (the repo root, `system/apps/chat` and
 `system/apps/system_interface`) through offload, in Modal sandboxes built from
 the workspace image. A real workspace runs them in a gVisor container on a pool
 host, which differs in ways CI cannot see, and agents run the same suites there.
-So right after the journey creates its workspace, before anything else touches
-it, step 3b runs those suites inside it:
+So once the journey's workspace is past its first run, before anything is asked
+of its agent, step 3b runs those suites inside it:
 
 - What runs is read from the workspace itself: each `offload-modal*.toml` at the
   template's repo root, at the version the workspace was created from, gives a
@@ -506,8 +539,8 @@ it, step 3b runs those suites inside it:
   group is reported as such. The journey's timeout, one session's
   `PYTEST_MAX_DURATION_SECONDS` and the CI job's timeout all grow to fit.
 
-- The template under test is the one the build under test pins: the journey
-  leaves the create form's Branch field at the build's `FALLBACK_BRANCH`, so a
+- The template under test is the one the build under test pins: the first
+  run's create is made from the build's `FALLBACK_BRANCH`, so a
   channel's published build exercises that channel's tag and a checkout
   exercises its own. The journey reads the leased pool row's
   `repo_branch_or_tag` from the connector's lease listing, logs it at Step 3
@@ -563,7 +596,8 @@ in a gVisor container on a pool host, which no CI run of the template does:
 - It runs the way step 3b's runner does, detached under
   `/var/tmp/studio-smoke-oom-drill/<run id>/` through the app's own mngr, and
   is polled; it needs no preparation, since the drill stops the Screen's desktop
-  itself and the journey's chat has not started yet. The drill gives up after
+  itself. The main chat's agent is up by then, started when the provider page
+  was left, and has been sent nothing. The drill gives up after
   six minutes and the step after seven.
 - Its result is one template test, `dwt:oom-drill::system/services/oom_priority/bin/oom_drill.py`:
   a failed drill is a `SUBFAILED` result carrying the drill's reason, the order
@@ -636,7 +670,10 @@ MINDS_SMOKE_DEV_CHECKOUT=1 just minds-smoke <tier>                    # -k journ
 just minds-smoke-teardown <tier> <run-id> --state /tmp/smoke-<run-id>.json
 ```
 
-A run leases one pool row in the region the create form already points at:
+A run needs the persistent account to hold no workspace when it starts (the
+journey fails before launching otherwise, naming the pool rows; `just
+minds-smoke-teardown` releases them). It leases one pool row in the region the
+app picks for this machine:
 one baked at the build's template tag when the pool has one available there,
 else any row there, whose container the create rebuilds at the tag (the slow
 path; `MINDS_SMOKE_EXPECTED_TEMPLATE_REF=minds-v<version>` fails the journey

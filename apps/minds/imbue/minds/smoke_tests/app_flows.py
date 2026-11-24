@@ -1,22 +1,19 @@
 """The journey's steps inside the launched Imbue Studio app, driven through its own UI.
 
-Every control here is the one a user presses: the landing page and its
-consent screen, the first-run page's error-reporting checkbox and its way on
-without an account, the sign-in from Settings' Accounts tab, the create form, the
-desktop's launcher field, the home page's Stop and Start, Settings' Sharing page, and
-its General page's destroy.
+Every control here is the one a user presses on a fresh install: the first-run
+page's error-reporting checkbox and its Sign in, the Continue on the cover over
+the workspace the app then creates by itself, the Next on the workspace's
+provider page, the desktop's launcher field, the home page's Stop and Start,
+Settings' Sharing page, and its General page's destroy.
 What the UI did is then confirmed by reading the app's own routes,
 through a same-origin fetch on a page it already has open -- the chrome page
-for the desktop's routes, the chat's page for the workspace's -- so each
-one's session authenticates the call.
+for the desktop's routes, a page of the chat app's for the workspace's -- so
+each one's session authenticates the call.
 
-Two routes are called rather than driven through the chooser: the desktop's
-AI-key mint, and the workspace's adoption of the blob it mints. They are the
-routes behind the chooser's "Sign in with Imbue" lane; driving that lane's own
-controls is a follow-up recorded in the spec.
-
-A fresh install's sign-in is asked for rather than pressed: its first-run page
-is loaded with the shell's ``web-login=1`` param (``start_web_login`` says why).
+Two routes are called rather than driven through the provider page's tiles:
+the desktop's AI-key mint, and the workspace's adoption of the blob it mints.
+They are the routes behind the chooser's "Sign in with Imbue" lane; driving
+that lane's own controls is a follow-up recorded in the spec.
 """
 
 import re
@@ -34,14 +31,18 @@ from playwright.sync_api import Browser
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Frame
 from playwright.sync_api import Page
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from imbue.imbue_common.pure import pure
-from imbue.minds.desktop_client.e2e_workspace_runner import DESKTOP_BACKDROP_SELECTOR
+from imbue.minds.desktop_client.e2e_workspace_runner import FIRST_RUN_ACCOUNT_SELECTOR_TEMPLATE
+from imbue.minds.desktop_client.e2e_workspace_runner import FIRST_RUN_PROVIDERS_TIMEOUT_SECONDS
 from imbue.minds.desktop_client.e2e_workspace_runner import PageFetchAnswer
 from imbue.minds.desktop_client.e2e_workspace_runner import USER_TURN_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import chat_frame
+from imbue.minds.desktop_client.e2e_workspace_runner import continue_from_first_run_cover
 from imbue.minds.desktop_client.e2e_workspace_runner import fetch_from_page
 from imbue.minds.desktop_client.e2e_workspace_runner import find_chat_frame
+from imbue.minds.desktop_client.e2e_workspace_runner import first_run_providers_frame
 from imbue.minds.desktop_client.e2e_workspace_runner import open_account_home_page
 from imbue.minds.desktop_client.e2e_workspace_runner import request_chat_api
 from imbue.minds.desktop_client.e2e_workspace_runner import send_to_main_chat_from_launcher
@@ -51,47 +52,34 @@ from imbue.minds.desktop_client.e2e_workspace_runner import workspace_coordinate
 from imbue.minds.smoke_tests.data_types import StudioAppSession
 from imbue.minds.smoke_tests.primitives import SmokeAppError
 
-# The pages a fresh app lands on: the first-run sign-in page, the consent screen that can
-# precede it, the landing list of an install with workspaces, or a workspace.
-LANDING_SELECTORS: Final[tuple[str, ...]] = (
+# The pages an app can open on: the first-run sign-in page of a fresh install, the consent screen that can
+# precede it, the home page of an install with workspaces, or a workspace.
+_LANDING_SELECTORS: Final[tuple[str, ...]] = (
     "#start-flow",
     "#consent-continue",
     "#landing-minds-settings",
     "#content-frame",
 )
 _CONSENT_CONTINUE: Final[str] = "#consent-continue"
-_START_FLOW: Final[str] = "#start-flow"
-# The first-run sign-in page (``StartPage.ts``): its error-reporting checkbox, which starts
-# checked, and "Use without an account", which records the checkbox and opens the create form.
+_SIGN_IN_PAGE: Final[str] = "#start-flow"
+_HOME_PAGE: Final[str] = "#landing-minds-settings"
+# The first-run sign-in page (``StartPage.ts``): its error-reporting checkbox, which starts checked, its
+# Sign in, which records the checkbox and opens the web-login modal, and what it says when the create it
+# submits for the account that landed is refused.
 _REPORTING_CHECKBOX: Final[str] = "#start-reporting-checkbox"
-_WITHOUT_ACCOUNT_BUTTON: Final[str] = "#start-without-account"
-_FIRST_RUN_CREATE_FORM: Final[str] = "#start-create-form"
+_SIGN_IN_BUTTON: Final[str] = "#start-sign-in"
+_CREATE_REFUSED: Final[str] = "#start-refused"
+_SIGN_IN_STAGE_JS: Final[str] = "() => document.querySelector('#start-flow')?.getAttribute('data-stage') ?? null"
 _CONSENT_API_PATH: Final[str] = "/ui/api/onboarding/consent"
-# The first-run page with the param the app's shell hands a window to make it start the browser sign-in.
-_FIRST_RUN_WEB_LOGIN_PATH: Final[str] = "/start?web-login=1"
-# Settings' Accounts tab and its rail's Add account, and the web-login modal's copy of the sign-in URL.
-_ACCOUNTS_PATH: Final[str] = "/settings?tab=accounts"
-_ADD_ACCOUNT_BUTTON: Final[str] = 'button:has-text("Add account")'
+# The web-login modal's copy of the sign-in URL.
 _WEB_LOGIN_URL: Final[str] = "#web-login-url"
 # The modal's Try again, shown when the app could not start its sign-in flow.
 _WEB_LOGIN_RETRY: Final[str] = "#web-login-retry-btn"
 # A user presses Try again when the flow fails to start; the smoke run does too.
 _WEB_LOGIN_START_ATTEMPTS: Final[int] = 3
-# The create form, plus the compute preset cards. The form creates under the
-# window's account, which is the hub route's segment.
 _ACCOUNTS_API_PATH: Final[str] = "/api/v1/accounts"
-_CREATE_FORM: Final[str] = "#create-form"
-_REMOTE_PRESET: Final[str] = '[data-preset="remote"]'
-_ADVANCED_TOGGLE: Final[str] = "#toggle-advanced"
-_HOST_NAME_FIELD: Final[str] = "#host_name"
-_CREATE_ACCOUNT_LABEL: Final[str] = "#create-account"
-_LAUNCH_MODE_SELECT: Final[str] = "#launch_mode"
-_REGION_SELECT: Final[str] = "#region"
-# The form's "Enable sharing and web access" switch.
-_CREATE_SHARING_SWITCH: Final[str] = "#enable_web_access"
-_CREATE_SUBMIT: Final[str] = "#create-submit"
-_CREATING_PAGE: Final[str] = "#creating"
-IMBUE_CLOUD_LAUNCH_MODE: Final[str] = "IMBUE_CLOUD"
+# The creation page's heading (``FirstRunWelcome.ts``), which welcomes the owner of a first workspace.
+_CREATING_HEADING: Final[str] = "#creating-welcome"
 # Settings' Sharing page for the whole workspace (``ShareTab.ts``) and its General page's destroy
 # (``SettingsGroups.ts``).
 _SHARE_TAB_PATH: Final[str] = "/settings?workspace={agent_id}&tab=workspace&group=sharing"
@@ -101,10 +89,7 @@ _PUBLISH_SWITCH: Final[str] = "#ws-share-publish-switch"
 # it is busy while the publish or unpublish it started is still settling.
 _PUBLISH_SWITCH_ON: Final[str] = f'{_PUBLISH_SWITCH}[aria-checked="true"]'
 _PUBLISH_SWITCH_SETTLED_OFF: Final[str] = f'{_PUBLISH_SWITCH}[aria-checked="false"]:not([aria-busy])'
-_PUBLISH_CONFIRM: Final[str] = "#ws-share-publish-confirm"
-_PUBLISH_ERROR: Final[str] = "#ws-share-publish-error"
 _SHARE_LINK: Final[str] = "#ws-share-link"
-_SHARE_COPY: Final[str] = "#ws-share-copy"
 _DESTROY_BUTTON: Final[str] = "#destroy-btn"
 _DESTROY_CONFIRM: Final[str] = "#destroy-confirm-btn"
 # The app's own routes the journey reads to confirm what the UI did.
@@ -124,20 +109,21 @@ _DESTROY_OPERATION_PATH: Final[str] = "/api/v1/workspaces/operations/destroy/{ag
 _LANDING_TIMEOUT_MS: Final[float] = 180_000.0
 _PAGE_TIMEOUT_MS: Final[float] = 30_000.0
 _WEB_LOGIN_URL_TIMEOUT_MS: Final[float] = 60_000.0
+# The sign-in page reads the create form's defaults under the account that landed before it submits.
+_FIRST_CREATE_SUBMIT_TIMEOUT_MS: Final[float] = 180_000.0
 # A pre-baked pool host is adopted in a couple of minutes; when none matches
 # the app leases any host and rebuilds the workspace on it, which takes ten
 # minutes and more.
 _CREATE_TIMEOUT_SECONDS: Final[int] = 1200
-_DESKTOP_TIMEOUT_MS: Final[float] = 180_000.0
-# The welcome chat is framed once it is seeded, which the workspace is entered without waiting
-# for (as late as the seed's own timeout), and by the desktop's app list, which arrives after the backdrop.
+# The provider page hears of an account adopted behind it from the chat app's own push.
+_ACCOUNT_LISTED_TIMEOUT_MS: Final[float] = 60_000.0
+# The chat's page is framed by the desktop's app list, which arrives after the backdrop.
 _CHAT_FRAME_TIMEOUT_SECONDS: Final[float] = 240.0
 # The chat app answers its listing only once it has read the agent list from mngr.
 _MAIN_CHAT_TIMEOUT_SECONDS: Final[float] = 120.0
 # The launcher's text reaches the main chat through the chat app's intake, which the chat's page then sends.
 _PROMPT_SHOWN_TIMEOUT_SECONDS: Final[float] = 120.0
-# Publishing dials the relay and waits on a certificate before the link shows.
-_PUBLISH_TIMEOUT_MS: Final[float] = 300_000.0
+_UNPUBLISH_TIMEOUT_MS: Final[float] = 300_000.0
 _POLL_SECONDS: Final[float] = 2.0
 
 # The transcript only auto-scrolls when it was already at its tail and virtualizes
@@ -157,11 +143,6 @@ _REPLY_TEXT_PRESENT_JS: Final[str] = f"""(text) => {{
 _PROMPT_SHOWN_JS: Final[str] = f"""(marker) => {{
     {_SCROLL_CHAT_TO_TAIL_JS}
     return [...document.querySelectorAll('{USER_TURN_SELECTOR}')].some((el) => (el.textContent ?? '').includes(marker));
-}}"""
-_SELECT_VALUE_JS: Final[str] = "(select) => select.value"
-_ACCOUNT_LABEL_SHOWN_JS: Final[str] = f"""(email) => {{
-    const label = document.querySelector('{_CREATE_ACCOUNT_LABEL}');
-    return label !== null && label.textContent.trim() === email;
 }}"""
 _SCREENSHOT_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -192,68 +173,47 @@ def fetch_json_from_app(session: StudioAppSession, path: str) -> Any:
     return answer.json_body()
 
 
-def wait_for_landing_page(session: StudioAppSession) -> str:
+def _wait_for_landing_page(session: StudioAppSession) -> str:
     """Wait for the app to show one of its first pages; clear the consent screen if that is the one. Returns the page's selector."""
     page = session.page
-    page.wait_for_selector(", ".join(LANDING_SELECTORS), state="attached", timeout=_LANDING_TIMEOUT_MS)
-    landed_on = next(selector for selector in LANDING_SELECTORS if page.locator(selector).count() > 0)
+    page.wait_for_selector(", ".join(_LANDING_SELECTORS), state="attached", timeout=_LANDING_TIMEOUT_MS)
+    landed_on = next(selector for selector in _LANDING_SELECTORS if page.locator(selector).count() > 0)
     logger.info("The app landed on {}", landed_on)
     if landed_on == _CONSENT_CONTINUE:
         page.click(_CONSENT_CONTINUE)
         page.wait_for_selector(_CONSENT_CONTINUE, state="detached", timeout=_PAGE_TIMEOUT_MS)
-        remaining = [selector for selector in LANDING_SELECTORS if selector != _CONSENT_CONTINUE]
+        remaining = [selector for selector in _LANDING_SELECTORS if selector != _CONSENT_CONTINUE]
         page.wait_for_selector(", ".join(remaining), state="attached", timeout=_LANDING_TIMEOUT_MS)
         landed_on = next(selector for selector in remaining if page.locator(selector).count() > 0)
         logger.info("The consent screen is answered; the app shows {}", landed_on)
     return landed_on
 
 
-def start_web_login(session: StudioAppSession, landed_on: str) -> str:
-    """Open the app's web-login flow the way the page it landed on allows; return the hosted sign-in URL.
-
-    An install past onboarding signs in from Settings' Accounts tab. A fresh install is on its first-run
-    sign-in page, whose own Sign in starts the account's first workspace by itself once the sign-in lands,
-    while the run creates one it names and configures. Settings is out of reach there (the home page behind
-    it sends such an install back to the first-run page), so the run asks for the sign-in the way the app's
-    shell asks a window for one.
-    """
-    if landed_on == _START_FLOW:
-        _decline_reporting_on_first_run_page(session)
-        return _start_web_login_from_first_run_page(session)
-    return _start_web_login_from_accounts_page(session)
+def wait_for_sign_in_page(session: StudioAppSession) -> None:
+    """Wait for the app to open on its first-run sign-in page, which only a fresh install does."""
+    landed_on = _wait_for_landing_page(session)
+    if landed_on != _SIGN_IN_PAGE:
+        raise SmokeAppError(
+            f"The journey needs a fresh install: the app opened on {landed_on}, not on its first-run "
+            f"sign-in page ({_SIGN_IN_PAGE}), so its data home already holds an install past the first run."
+        )
 
 
-def _decline_reporting_on_first_run_page(session: StudioAppSession) -> None:
-    """Untick error reporting (a test run is not a user's install) and take "Use without an account", which records it."""
+def start_web_login_from_sign_in_page(session: StudioAppSession) -> str:
+    """Untick error reporting (a test run is not a user's install) and press Sign in; return the hosted sign-in URL."""
     page = session.page
     page.wait_for_selector(_REPORTING_CHECKBOX, state="visible", timeout=_PAGE_TIMEOUT_MS)
     page.uncheck(_REPORTING_CHECKBOX)
-    # The page posts the answer without waiting for it, and the sign-in loads the page afresh next.
+    # The page posts the checkbox's answer as Sign in is pressed, without waiting on it.
     with page.expect_response(
         lambda response: urlsplit(response.url).path == _CONSENT_API_PATH, timeout=_PAGE_TIMEOUT_MS
     ) as consent_response:
-        page.click(_WITHOUT_ACCOUNT_BUTTON)
+        page.click(_SIGN_IN_BUTTON)
     if not consent_response.value.ok:
         raise SmokeAppError(
-            f"The app answered {consent_response.value.status} to the first-run page's error-reporting answer."
+            f"The app answered {consent_response.value.status} to the sign-in page's error-reporting answer."
         )
-    page.wait_for_selector(_FIRST_RUN_CREATE_FORM, state="attached", timeout=_PAGE_TIMEOUT_MS)
-    logger.info("Error reporting is declined on the first-run page")
-
-
-def _start_web_login_from_first_run_page(session: StudioAppSession) -> str:
-    """Load the first-run page with the shell's sign-in param, which opens the web-login modal over it."""
-    page = session.page
-    page.goto(f"{session.backend_origin}{_FIRST_RUN_WEB_LOGIN_PATH}", wait_until="domcontentloaded")
-    return _wait_for_web_login_url(page)
-
-
-def _start_web_login_from_accounts_page(session: StudioAppSession) -> str:
-    """Press Add account on Settings' Accounts tab."""
-    page = session.page
-    page.goto(f"{session.backend_origin}{_ACCOUNTS_PATH}", wait_until="domcontentloaded")
-    page.wait_for_selector(_ADD_ACCOUNT_BUTTON, state="visible", timeout=_PAGE_TIMEOUT_MS)
-    page.click(_ADD_ACCOUNT_BUTTON)
+    logger.info("Error reporting is declined on the sign-in page; Sign in is pressed")
     return _wait_for_web_login_url(page)
 
 
@@ -296,17 +256,8 @@ def _require_signed_in_account_id(session: StudioAppSession, email: str) -> str:
     return account_id
 
 
-def _account_create_path(account_id: str) -> str:
-    return f"/account/{account_id}/create"
-
-
-def wait_for_account_in_create_form(session: StudioAppSession, email: str, timeout_seconds: float) -> str:
-    """Wait for ``email`` to be signed in and for its hub's create form to create under it; return its user id.
-
-    A window creates under the account its hub route names, so the sign-in that
-    just landed is checked on that account's create page.
-    """
-    page = session.page
+def wait_for_signed_in_account(session: StudioAppSession, email: str, timeout_seconds: float) -> str:
+    """Wait for the app to list ``email`` as a signed-in account; return its user id."""
     deadline = time.monotonic() + timeout_seconds
     account_id = _signed_in_account_id(session, email)
     while account_id is None:
@@ -314,49 +265,56 @@ def wait_for_account_in_create_form(session: StudioAppSession, email: str, timeo
             raise SmokeAppError(f"The app does not list {email} as a signed-in account after {timeout_seconds}s.")
         threading.Event().wait(timeout=_POLL_SECONDS)
         account_id = _signed_in_account_id(session, email)
-    page.goto(f"{session.backend_origin}{_account_create_path(account_id)}", wait_until="domcontentloaded")
-    page.wait_for_selector(_CREATE_FORM, state="attached", timeout=_PAGE_TIMEOUT_MS)
-    page.wait_for_function(_ACCOUNT_LABEL_SHOWN_JS, arg=email, timeout=max(deadline - time.monotonic(), 1.0) * 1000)
-    logger.info("The create form on {}'s hub creates under that account", email)
+    logger.info("The app lists {} as a signed-in account", email)
     return account_id
 
 
-def create_imbue_cloud_workspace(session: StudioAppSession, workspace_name: str, account_email: str) -> Frame:
-    """Drive the account's create form to an Imbue Cloud workspace; return its rendered desktop's frame."""
+def wait_for_first_workspace_creation_page(session: StudioAppSession) -> str:
+    """Wait for the sign-in page to hand over to the creation page of the account's first workspace; return
+    that page's heading.
+
+    The sign-in page submits the create by itself for an account the connector says has no workspace. It
+    sends an account the connector says has some to its home page, and stays up with the reason when the
+    create is refused; either fails here, saying which.
+    """
     page = session.page
-    account_id = _require_signed_in_account_id(session, account_email)
-    page.goto(f"{session.backend_origin}{_account_create_path(account_id)}", wait_until="domcontentloaded")
-    page.wait_for_selector(_CREATE_FORM, state="attached", timeout=_PAGE_TIMEOUT_MS)
-    page.wait_for_function(_ACCOUNT_LABEL_SHOWN_JS, arg=account_email, timeout=_PAGE_TIMEOUT_MS)
-    page.click(_REMOTE_PRESET)
-    page.wait_for_selector(f"{_ADVANCED_TOGGLE}:visible", timeout=_PAGE_TIMEOUT_MS)
-    page.click(_ADVANCED_TOGGLE)
-    page.wait_for_selector(f"{_HOST_NAME_FIELD}:visible", timeout=_PAGE_TIMEOUT_MS)
-    page.fill(_HOST_NAME_FIELD, workspace_name)
-    page.select_option(_LAUNCH_MODE_SELECT, IMBUE_CLOUD_LAUNCH_MODE)
-    page.wait_for_selector(f"{_REGION_SELECT}:visible", timeout=_PAGE_TIMEOUT_MS)
-    # The region the form already points at, which is the one the app picks for
-    # where this machine is.
-    region = str(page.eval_on_selector(_REGION_SELECT, _SELECT_VALUE_JS))
-    if not region:
-        raise SmokeAppError("The create form offers no Imbue Cloud region to create the workspace in.")
-    # The form shares a workspace on an account as it is created; the journey
-    # shares it from Settings' Sharing page instead, which only publishes an unshared one.
-    _turn_switch_off(page, _CREATE_SHARING_SWITCH)
-    logger.info("Creating Imbue Cloud workspace {!r} as {} in region {}", workspace_name, account_email, region)
-    page.click(_CREATE_SUBMIT)
-    page.wait_for_selector(_CREATING_PAGE, state="attached", timeout=_PAGE_TIMEOUT_MS)
-    workspace_frame = wait_for_workspace_ready_or_failure(session.browser, page, _CREATE_TIMEOUT_SECONDS)
-    workspace_frame.wait_for_selector(DESKTOP_BACKDROP_SELECTOR, state="visible", timeout=_DESKTOP_TIMEOUT_MS)
-    logger.info("The workspace's desktop rendered at {}", workspace_frame.url)
+    outcomes = (_CREATING_HEADING, _CREATE_REFUSED, _HOME_PAGE)
+    try:
+        page.wait_for_selector(", ".join(outcomes), state="visible", timeout=_FIRST_CREATE_SUBMIT_TIMEOUT_MS)
+    except PlaywrightTimeoutError as exc:
+        raise SmokeAppError(
+            f"The app neither started the account's first workspace nor said why within "
+            f"{_FIRST_CREATE_SUBMIT_TIMEOUT_MS / 1000:.0f}s of the sign-in; its sign-in page stood at stage "
+            f"{page.evaluate(_SIGN_IN_STAGE_JS)!r} and the page at {page.url}"
+        ) from exc
+    if page.locator(_CREATING_HEADING).count() > 0:
+        heading = page.locator(_CREATING_HEADING).inner_text().strip()
+        logger.info("The app started the account's first workspace; its creation page reads {!r}", heading)
+        return heading
+    if page.locator(_CREATE_REFUSED).count() > 0:
+        raise SmokeAppError(
+            f"The app could not start the account's first workspace: {page.locator(_CREATE_REFUSED).inner_text()}"
+        )
+    raise SmokeAppError(
+        "The app took the account to its home page instead of creating its first workspace: the connector "
+        "counts a workspace for the account, one the check made before the launch did not find it holding."
+    )
+
+
+def wait_for_first_workspace(session: StudioAppSession) -> Frame:
+    """Wait for the workspace the creation page is building, or for its failure; return the workspace's frame.
+
+    The workspace loads under the app's cover, so its frame is there before anything of it can be seen.
+    """
+    workspace_frame = wait_for_workspace_ready_or_failure(session.browser, session.page, _CREATE_TIMEOUT_SECONDS)
+    logger.info("The workspace is created and loads at {}", workspace_frame.url)
     return workspace_frame
 
 
-def _turn_switch_off(page: Page, switch: str) -> None:
-    """Flip a ``role="switch"`` control off unless it already is, and wait until it says it is off."""
-    if page.get_attribute(switch, "aria-checked") == "true":
-        page.click(switch)
-    page.wait_for_selector(f'{switch}[aria-checked="false"]', state="visible", timeout=_PAGE_TIMEOUT_MS)
+def continue_to_provider_page(session: StudioAppSession, workspace_frame: Frame) -> Frame:
+    """Press Continue on the cover over the new workspace; return the frame of the provider page it reveals."""
+    continue_from_first_run_cover(session.page)
+    return first_run_providers_frame(workspace_frame, FIRST_RUN_PROVIDERS_TIMEOUT_SECONDS)
 
 
 def agent_id_of_workspace_frame(session: StudioAppSession, workspace_frame: Frame) -> str:
@@ -376,13 +334,8 @@ def list_workspaces(session: StudioAppSession) -> list[dict[str, Any]]:
 
 
 def open_welcome_chat(workspace_frame: Frame) -> Frame:
-    """The chat a fresh workspace shows once it is seeded: the conversation its creation page handed over.
-
-    Returned before any composer renders, which is what it is for here: on a
-    workspace with no AI provider yet, the composer is replaced by the
-    "Connect an AI provider" notice, and this page is the journey's way onto
-    the chat app's origin while that is so.
-    """
+    """The chat a workspace's desktop shows once its first run is behind it: the conversation the creation
+    page's seed opened. A page of the chat app's own, which is the journey's way onto that app's origin."""
     chat = chat_frame(workspace_frame, _CHAT_FRAME_TIMEOUT_SECONDS)
     logger.info("The workspace's welcome chat is framed at {}", chat.url)
     return chat
@@ -404,6 +357,7 @@ def mint_workspace_llm_credentials(session: StudioAppSession, agent_id: str) -> 
 def adopt_imbue_credentials(chat: Frame, credential_blob: str) -> str:
     """Give the workspace the minted credentials as a provider account; return the account it made.
 
+    ``chat`` is any page of the chat app's, the provider page among them.
     ``/api/claude-auth/submit-credentials`` is the chat app's endpoint for
     exactly this blob -- the cross-repo contract the desktop's AI-keys page
     mints for -- and it answers with the auth mode it understood, so a key
@@ -426,12 +380,25 @@ def adopt_imbue_credentials(chat: Frame, credential_blob: str) -> str:
     return account_id
 
 
+def wait_for_account_on_provider_page(providers: Frame, account_id: str) -> None:
+    """Wait for the provider page to list the account under its "Connected" heading."""
+    row = FIRST_RUN_ACCOUNT_SELECTOR_TEMPLATE.format(account_id=account_id)
+    try:
+        providers.wait_for_selector(row, state="visible", timeout=_ACCOUNT_LISTED_TIMEOUT_MS)
+    except PlaywrightTimeoutError as exc:
+        raise SmokeAppError(
+            f"The provider page did not list account {account_id} as connected within "
+            f"{_ACCOUNT_LISTED_TIMEOUT_MS / 1000:.0f}s of the workspace adopting it."
+        ) from exc
+    logger.info("The provider page lists account {} as connected", account_id)
+
+
 def send_prompt_to_main_chat(workspace_frame: Frame, welcome_chat: Frame, prompt: str, marker: str) -> str:
     """Send ``prompt`` with the desktop launcher's Enter, which sends a text to the workspace's main chat; return that
     chat's id once its page shows the prompt (``marker`` is a string only the prompt carries).
 
-    A fresh workspace's main chat is its welcome chat, still awaiting its first send: the prompt is that send, and it
-    launches the chat's agent on the account signed in by then, so the credentials are adopted before this runs.
+    A fresh workspace's main chat is its welcome chat, open on the first conversation's ways to start: the prompt is
+    none of them, so its agent takes it as an ordinary request, on the account connected on the provider page.
     """
     main_chat_id = _main_chat_id(welcome_chat, _MAIN_CHAT_TIMEOUT_SECONDS)
     send_prompt_to_known_main_chat(workspace_frame, main_chat_id, prompt, marker)
@@ -508,22 +475,6 @@ def stop_workspace_from_account_home(
     stop_workspace_from_home_page(session.page, agent_id, timeout_seconds)
 
 
-def publish_share_from_panel(session: StudioAppSession, agent_id: str) -> None:
-    """Turn sharing on from Settings' Sharing page and wait until the link is live (or publishing is refused)."""
-    page = session.page
-    page.goto(f"{session.backend_origin}{_SHARE_TAB_PATH.format(agent_id=agent_id)}", wait_until="domcontentloaded")
-    page.wait_for_selector(_PUBLISH_SWITCH, state="visible", timeout=_PAGE_TIMEOUT_MS)
-    page.click(_PUBLISH_SWITCH)
-    page.wait_for_selector(_PUBLISH_CONFIRM, state="visible", timeout=_PAGE_TIMEOUT_MS)
-    page.click(_PUBLISH_CONFIRM)
-    page.wait_for_selector(_SHARE_LINK, state="attached", timeout=_PAGE_TIMEOUT_MS)
-    page.wait_for_selector(f"{_SHARE_COPY}, {_PUBLISH_ERROR}", state="visible", timeout=_PUBLISH_TIMEOUT_MS)
-    refusal = page.locator(_PUBLISH_ERROR)
-    if refusal.count() > 0:
-        raise SmokeAppError(f"The workspace could not be published: {refusal.first.inner_text()}")
-    logger.info("Workspace {} is published; its Sharing page shows its link", agent_id)
-
-
 def unpublish_share_from_panel(session: StudioAppSession, agent_id: str) -> None:
     """Turn sharing off from Settings' Sharing page and wait for the page to show it off.
 
@@ -535,7 +486,7 @@ def unpublish_share_from_panel(session: StudioAppSession, agent_id: str) -> None
     page.goto(f"{session.backend_origin}{_SHARE_TAB_PATH.format(agent_id=agent_id)}", wait_until="domcontentloaded")
     page.wait_for_selector(_PUBLISH_SWITCH_ON, state="visible", timeout=_PAGE_TIMEOUT_MS)
     page.click(_PUBLISH_SWITCH)
-    page.wait_for_selector(_PUBLISH_SWITCH_SETTLED_OFF, state="visible", timeout=_PUBLISH_TIMEOUT_MS)
+    page.wait_for_selector(_PUBLISH_SWITCH_SETTLED_OFF, state="visible", timeout=_UNPUBLISH_TIMEOUT_MS)
     page.wait_for_selector(_SHARE_LINK, state="detached", timeout=_PAGE_TIMEOUT_MS)
     logger.info("Workspace {} is no longer published", agent_id)
 
@@ -544,6 +495,32 @@ def read_sharing_status(session: StudioAppSession, agent_id: str) -> dict[str, A
     status = fetch_json_from_app(session, _SHARING_PATH.format(agent_id=agent_id))
     if not isinstance(status, dict):
         raise SmokeAppError(f"The sharing status of {agent_id} is not an object: {str(status)[:200]}")
+    return status
+
+
+@pure
+def is_sharing_enabled(status: Mapping[str, Any]) -> bool:
+    """Whether the status says the workspace is shared, and names the host the share is on."""
+    return status.get("enabled") is True and bool(status.get("host_id"))
+
+
+def wait_for_sharing_enabled(session: StudioAppSession, agent_id: str, timeout_seconds: float) -> dict[str, Any]:
+    """Wait for the workspace's share to report enabled; return that status.
+
+    The first run's create shares the workspace it makes, in a step of its own after the workspace is up.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    status = read_sharing_status(session, agent_id)
+    while not is_sharing_enabled(status):
+        if time.monotonic() >= deadline:
+            raise SmokeAppError(
+                f"The create did not turn sharing on for {agent_id} within {timeout_seconds:.0f}s; "
+                f"last status: enabled={status.get('enabled')}, host_id={status.get('host_id')}, "
+                f"url={status.get('url')}"
+            )
+        threading.Event().wait(timeout=_POLL_SECONDS)
+        status = read_sharing_status(session, agent_id)
+    logger.info("Workspace {} is shared from its create, on host {}", agent_id, status.get("host_id"))
     return status
 
 

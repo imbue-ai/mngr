@@ -412,9 +412,9 @@ class AuthSession(FrozenModel):
     is_pending_verification: bool = Field(
         default=False,
         description=(
-            "Legacy field, no longer consumed: email verification is non-blocking, so every "
-            "session counts as signed in. Kept so session files written by older plugin "
-            "versions still parse; new writes omit it."
+            "Legacy field, no longer consumed: a session is only saved once the account's "
+            "email is verified, so every saved session counts as signed in. Kept so session "
+            "files written by older plugin versions still parse; new writes omit it."
         ),
     )
 

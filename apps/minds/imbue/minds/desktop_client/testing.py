@@ -2237,3 +2237,12 @@ def make_fake_chat_app_forward_route(handler: ForwardHandler, window_seconds: fl
         window_seconds=window_seconds,
         retry_interval_seconds=0.0,
     )
+
+
+# The one seed every workspace is sent, as it reads once it has crossed either delivery route.
+FIXED_WELCOME_CHAT_SEED_BODY: Final[Mapping[str, object]] = {"title": "Welcome", "turns": [], "is_first_run": True}
+
+
+def welcome_chat_seed_body_sent_through_mngr_exec(argv: Sequence[str]) -> dict[str, object]:
+    """The seed body the template's script was handed, decoded from its ``mngr exec`` command line."""
+    return json.loads(base64.b64decode(shlex.split(argv[3])[3]).decode("utf-8"))

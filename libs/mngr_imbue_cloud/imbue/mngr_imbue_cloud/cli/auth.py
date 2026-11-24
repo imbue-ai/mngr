@@ -42,6 +42,8 @@ from imbue.mngr_imbue_cloud.connector.session_store import make_session_from_tok
 from imbue.mngr_imbue_cloud.data_types import AuthSession
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudEmailNotVerifiedError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudError
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
 from imbue.mngr_imbue_cloud.wire_types import AuthRawResponse
@@ -67,21 +69,61 @@ def auth() -> None:
     """Sign in/out of Imbue Cloud and manage SuperTokens sessions."""
 
 
-def _persist_auth_response(
+def _make_email_not_verified_error(email: str | None) -> ImbueCloudEmailNotVerifiedError:
+    link_clause = f"the link we sent to {email}" if email else "the link in the verification email"
+    return ImbueCloudEmailNotVerifiedError(
+        f"This account's email is not verified yet. Click {link_clause}, then sign in again.",
+        email=email,
+    )
+
+
+def _revoke_minted_session_best_effort(client: ImbueCloudConnectorClient, session: AuthSession) -> None:
+    """Revoke a session the connector just minted and this machine is not keeping.
+
+    The session's own token is presented, never one resolved from the store:
+    the store holds either nothing for this account or an older session that
+    must stay signed in.
+    """
+    try:
+        client.auth_revoke_current_session(session.access_token)
+    except ImbueCloudAuthError as exc:
+        logger.debug("Could not revoke the unsaved session for {}: {}", session.email, exc)
+
+
+def _is_minted_session_email_verified(
+    client: ImbueCloudConnectorClient,
+    response: AuthRawResponse,
+    session: AuthSession,
+    *,
+    is_verified_by_handoff: bool,
+) -> bool:
+    """Whether the account a freshly minted session belongs to has a verified email.
+
+    A check that cannot be made leaves the answer unknown, so the session is
+    revoked and the check's own error propagates.
+    """
+    if response.needs_email_verification:
+        # Only an old connector still reports this (new ones pin it False).
+        return False
+    if is_verified_by_handoff:
+        return True
+    try:
+        return client.auth_is_email_verified(session.access_token, str(session.email))
+    except ImbueCloudError:
+        _revoke_minted_session_best_effort(client, session)
+        raise
+
+
+def _session_from_auth_response(
     response: AuthRawResponse,
     expected_account: ImbueCloudAccount | None,
-    store: ImbueCloudSessionStore,
-) -> dict[str, Any]:
-    """Convert a successful AuthRawResponse into a saved session and emit-json payload.
+) -> AuthSession:
+    """Build the session a successful AuthRawResponse minted, failing the command on any other response.
 
     When ``expected_account`` is None (the first-time browser-login case), the
     email returned by the auth backend is accepted as-is. When it is set
     (signin / signup with explicit ``--account``), we validate that the
     backend returned the same account and fail otherwise.
-
-    Every OK response counts as signed in immediately -- email verification is
-    non-blocking (it is required only for specific actions, enforced
-    server-side), so there is no "pending session" state anymore.
     """
     if response.status != "OK":
         fail_with_json(
@@ -106,16 +148,11 @@ def _persist_auth_response(
             error_class="AuthMismatch",
         )
 
-    if response.needs_email_verification:
-        # Only an old connector still reports this (new ones pin it False);
-        # under the non-blocking model the account is signed in regardless.
-        logger.warning("Connector reported needs_email_verification; treating the account as signed in anyway")
-
     display_name_raw = user.get("display_name")
     display_name = display_name_raw if isinstance(display_name_raw, str) else None
     profile_picture_url_raw = user.get("profile_picture_url")
     profile_picture_url = profile_picture_url_raw if isinstance(profile_picture_url_raw, str) else None
-    session = make_session_from_tokens(
+    return make_session_from_tokens(
         user_id=SuperTokensUserId(user_id_raw),
         email=account_from_response,
         display_name=display_name,
@@ -123,13 +160,36 @@ def _persist_auth_response(
         refresh_token=refresh_token if isinstance(refresh_token, str) else None,
         profile_picture_url=profile_picture_url,
     )
+
+
+def _persist_auth_response(
+    response: AuthRawResponse,
+    expected_account: ImbueCloudAccount | None,
+    store: ImbueCloudSessionStore,
+    client: ImbueCloudConnectorClient,
+    *,
+    # True only for the browser hand-off, where the hosted page and the code
+    # exchange already refuse an unverified account; otherwise the connector's
+    # is-verified route is asked with the fresh access token.
+    is_verified_by_handoff: bool,
+) -> dict[str, Any]:
+    """Convert a successful AuthRawResponse into a saved session and emit-json payload.
+
+    This is the one place a session is saved, and it saves none for an account
+    whose email is unverified: the minted session is revoked best-effort and
+    ``ImbueCloudEmailNotVerifiedError`` is raised.
+    """
+    session = _session_from_auth_response(response, expected_account)
+    if not _is_minted_session_email_verified(client, response, session, is_verified_by_handoff=is_verified_by_handoff):
+        _revoke_minted_session_best_effort(client, session)
+        raise _make_email_not_verified_error(str(session.email))
     store.save(session)
     # Make the most-recently-touched account the active one. This is what
     # users expect when they swap between accounts: ``auth signin --account
     # bob`` then ``mngr create`` should default to bob without an extra
     # ``auth use`` step. Power users who prefer pinning still have
     # ``auth use --account <other>`` to override.
-    store.set_active_account(account_from_response)
+    store.set_active_account(session.email)
     return {
         "user_id": str(session.user_id),
         "email": str(session.email),
@@ -148,6 +208,9 @@ def signin(account: str, password: str | None, connector_url: str | None) -> Non
 
     The headless path (tests, SSH sessions, scripts). Interactive users
     normally use ``auth login``, which drives the hosted browser page.
+
+    An account whose email is not verified is not signed in: the command
+    saves nothing and fails with ``ImbueCloudEmailNotVerifiedError``.
     """
     parsed_account = parse_account(account)
     if password is None:
@@ -157,7 +220,7 @@ def signin(account: str, password: str | None, connector_url: str | None) -> Non
     client = make_connector_client(connector_url)
     store = make_session_store()
     response = client.auth_signin(str(parsed_account), password)
-    payload = _persist_auth_response(response, parsed_account, store)
+    payload = _persist_auth_response(response, parsed_account, store, client, is_verified_by_handoff=False)
     emit_json(payload)
 
 
@@ -203,12 +266,17 @@ def _prompt_password_with_confirmation(parsed_account: ImbueCloudAccount) -> str
 @click.option("--connector-url", default=None, help="Override connector URL")
 @handle_imbue_cloud_errors
 def signup(account: str, password: str | None, connector_url: str | None) -> None:
-    """Sign up with email + password (returns the new session).
+    """Create an account with email + password.
 
     The headless path for tests on dev/CI tiers only: production and staging
     refuse account creation through this API (status ``SIGNUP_DISABLED``) --
     create the account with ``auth login`` instead, which drives the hosted
     browser page.
+
+    The emitted ``is_signed_in`` says whether a session was saved. It is false
+    for the usual new account, whose email is not verified yet: the account
+    exists and the verification email is on its way, but signing in waits for
+    the emailed link.
     """
     parsed_account = parse_account(account)
     if password is None:
@@ -218,8 +286,23 @@ def signup(account: str, password: str | None, connector_url: str | None) -> Non
     client = make_connector_client(connector_url)
     store = make_session_store()
     response = client.auth_signup(str(parsed_account), password)
-    payload = _persist_auth_response(response, parsed_account, store)
-    emit_json(payload)
+    try:
+        payload = _persist_auth_response(response, parsed_account, store, client, is_verified_by_handoff=False)
+    except ImbueCloudEmailNotVerifiedError:
+        unsaved_session = _session_from_auth_response(response, parsed_account)
+        emit_json(
+            {
+                "user_id": str(unsaved_session.user_id),
+                "email": str(unsaved_session.email),
+                "is_signed_in": False,
+                "message": (
+                    f"Account created. Click the link in the verification email sent to {parsed_account}, "
+                    f"then run `mngr imbue_cloud auth signin --account {parsed_account}`."
+                ),
+            }
+        )
+        return
+    emit_json({**payload, "is_signed_in": True})
 
 
 @auth.command(name="signout")
@@ -447,6 +530,7 @@ class _LoginPageOutcome(UpperCaseStrEnum):
     """What the loopback callback page tells the browser about the sign-in."""
 
     SIGNED_IN = auto()
+    EMAIL_NOT_VERIFIED = auto()
     FAILED = auto()
     PENDING = auto()
 
@@ -538,21 +622,24 @@ _APP_PAGE_MESSAGE_BY_OUTCOME: Final[dict[_LoginPageOutcome, str]] = {
 }
 
 
-def _verification_reminder_html(unverified_email: str, manage_url: str) -> str:
-    """The page body for an account whose email is still unverified.
+def _verification_reminder_html(unverified_email: str | None, manage_url: str) -> str:
+    """The page body for a sign-in refused because the account's email is unverified.
 
-    A password sign-up counts as signed in right away, but most of what
-    Imbue Cloud is for requires the link in the verification email, so this
-    is the one moment to say so loudly. The heading is deliberately oversized.
+    Clicking the emailed link is the only way to sign in, so the heading is
+    deliberately oversized.
 
     The resend link goes to the hosted account page because this page's
     listener closes once the sign-in settles, so it cannot serve a send itself.
     """
-    email_html = html.escape(unverified_email)
+    address_html = (
+        f"You must verify your address: {html.escape(unverified_email)}"
+        if unverified_email
+        else "You must verify your email address"
+    )
     manage_href = html.escape(manage_url, quote=True)
     return (
         '<h1 class="verify">Click the email verification link</h1>'
-        f'<p class="verify-detail">You must verify your address: {email_html}</p>'
+        f'<p class="verify-detail">{address_html}</p>'
         '<p class="verify-detail">Check your spam folder</p>'
         f'<p class="verify-detail"><a href="{manage_href}" target="_blank" rel="noopener">Send the email again</a></p>'
     )
@@ -561,7 +648,7 @@ def _verification_reminder_html(unverified_email: str, manage_url: str) -> str:
 def _login_result_page(
     success_redirect_url: str | None,
     outcome: _LoginPageOutcome,
-    unverified_email: str | None,
+    callback_email: str | None,
     manage_url: str,
 ) -> bytes:
     """Build the HTML the callback listener serves to the browser for a sign-in outcome.
@@ -574,25 +661,25 @@ def _login_result_page(
     their open-external-app prompt at a moment the user chose instead of
     unprompted on page load.
 
-    ``unverified_email`` is the signed-in address when the connector reported
-    it as not yet verified; a completed sign-in then leads with the
-    verification reminder instead of the plain welcome. A failed or pending
-    sign-in shows only its own message.
+    A sign-in refused for an unverified email shows the verification reminder
+    in place of its outcome's message. ``callback_email`` is the address the
+    callback named, if any; only the reminder shows it.
     """
+    is_reminder = outcome == _LoginPageOutcome.EMAIL_NOT_VERIFIED
     if success_redirect_url is None:
-        if outcome != _LoginPageOutcome.SIGNED_IN or unverified_email is None:
-            body_html = _TERMINAL_PAGE_BODY_BY_OUTCOME[outcome]
-        else:
-            body_html = _verification_reminder_html(unverified_email, manage_url) + (
-                "<p>Then return to your terminal.</p>"
+        if is_reminder:
+            body_html = _verification_reminder_html(callback_email, manage_url) + (
+                "<p>Then sign in again from your terminal.</p>"
             )
+        else:
+            body_html = _TERMINAL_PAGE_BODY_BY_OUTCOME[outcome]
     else:
         href = html.escape(success_redirect_url, quote=True)
-        if outcome != _LoginPageOutcome.SIGNED_IN or unverified_email is None:
-            welcome_html = f'<p class="message">{html.escape(_APP_PAGE_MESSAGE_BY_OUTCOME[outcome])}</p>'
+        if is_reminder:
+            outcome_html = _verification_reminder_html(callback_email, manage_url)
         else:
-            welcome_html = _verification_reminder_html(unverified_email, manage_url)
-        body_html = _STUDIO_WORDMARK_SVG + welcome_html + f'<p><a href="{href}">Open app</a></p>'
+            outcome_html = f'<p class="message">{html.escape(_APP_PAGE_MESSAGE_BY_OUTCOME[outcome])}</p>'
+        body_html = _STUDIO_WORDMARK_SVG + outcome_html + f'<p><a href="{href}">Open app</a></p>'
     page = (
         "<!DOCTYPE html><html><head><title>Imbue Cloud sign-in</title>"
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -602,35 +689,18 @@ def _login_result_page(
     return page.encode("utf-8")
 
 
-def _unverified_email_from_callback(params: dict[str, str]) -> str | None:
-    """The signed-in address the connector flagged as unverified, or None.
-
-    The connector appends ``email`` and ``verified`` to the loopback redirect
-    beside ``code`` and ``state``; a connector that predates them sends
-    neither, which reads as nothing to remind about.
-    """
-    email = params.get("email", "")
-    if params.get("verified") == "0" and email:
-        return email
-    return None
-
-
 @pure
-def _email_verification_from_callback(params: Mapping[str, str], signed_in_email: str) -> bool | None:
-    """Whether the callback reported the signed-in address as verified, or None when it said nothing about it.
+def _active_workspace_count_from_callback(params: Mapping[str, str]) -> int | None:
+    """How many active workspaces the callback said the account has, or None when it did not say.
 
-    A connector that predates the ``verified`` parameter sends none, and a
-    callback naming a different address says nothing about this account.
+    The connector appends ``workspaces`` to the loopback redirect; one that
+    predates the parameter, or could not read the count, sends none. A value
+    that is not a non-negative integer also reads as not said.
     """
-    if params.get("email", "").casefold() != signed_in_email.casefold():
+    raw_count = params.get("workspaces")
+    if raw_count is None or not (raw_count.isascii() and raw_count.isdigit()):
         return None
-    match params.get("verified"):
-        case "1":
-            return True
-        case "0":
-            return False
-        case _:
-            return None
+    return int(raw_count)
 
 
 def _make_callback_handler_class(
@@ -661,9 +731,7 @@ def _make_callback_handler_class(
                 outcome = box.wait_for_outcome(outcome_wait_seconds)
             else:
                 outcome = box.wait_for_outcome(0.0)
-            body = _login_result_page(
-                success_redirect_url, outcome, _unverified_email_from_callback(params), manage_url
-            )
+            body = _login_result_page(success_redirect_url, outcome, params.get("email") or None, manage_url)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -744,13 +812,17 @@ def _serve_login_callback(
     """Serve the loopback callback listener for the duration of the block.
 
     However the block ends, a callback page still waiting for the outcome is
-    released with a failure (a success is published inside the block) before
-    the listener shuts down.
+    released before the listener shuts down: with the verification reminder
+    when the block refused an unverified email, otherwise with a failure (a
+    success is published inside the block).
     """
     server_thread = threading.Thread(target=server.serve_forever, daemon=True, name="imbue-cloud-login-cb")
     server_thread.start()
     try:
         yield
+    except ImbueCloudEmailNotVerifiedError:
+        capture_box.publish_outcome(_LoginPageOutcome.EMAIL_NOT_VERIFIED)
+        raise
     finally:
         capture_box.publish_outcome(_LoginPageOutcome.FAILED)
         server.shutdown()
@@ -930,10 +1002,14 @@ def login(
     session established along the way stays in the browser; this device gets
     independent tokens.
 
-    The emitted JSON's ``is_email_verified`` says whether the hosted page saw
-    the address as verified when the sign-in finished (null when the
-    connector does not say), so an embedder need not ask ``is-verified``
-    straight after.
+    An account whose email is not verified is not signed in: the callback
+    page shows the verification reminder, nothing is saved, and the command
+    fails with ``ImbueCloudEmailNotVerifiedError``.
+
+    The emitted JSON's ``active_workspace_count`` is how many active
+    workspaces the hosted page said the account has (null when it did not
+    say), so an embedder can tell at once whether this is the account's
+    first workspace.
     """
     parsed_account = parse_account(account) if account else None
 
@@ -982,14 +1058,18 @@ def login(
             fail_with_json("Timed out waiting for the browser sign-in", error_class="LoginTimeout")
         if captured.get("state") != state:
             fail_with_json("Login callback state mismatch; refusing the response", error_class="LoginStateMismatch")
+        if captured.get("verified") == "0":
+            # CLEANUP: drop once every tier's connector refuses an unverified
+            # account before the hand-off (its redirect then always says 1).
+            raise _make_email_not_verified_error(captured.get("email") or None)
         code = captured.get("code", "")
         if not code:
             fail_with_json("Login callback carried no code", error_class="LoginCallbackMissingCode")
 
         token_response = client.auth_device_token(code=code, code_verifier=code_verifier, redirect_uri=callback_url)
-        payload = _persist_auth_response(token_response, parsed_account, store)
+        payload = _persist_auth_response(token_response, parsed_account, store, client, is_verified_by_handoff=True)
         capture_box.publish_outcome(_LoginPageOutcome.SIGNED_IN)
-    emit_json({**payload, "is_email_verified": _email_verification_from_callback(captured, payload["email"])})
+    emit_json({**payload, "active_workspace_count": _active_workspace_count_from_callback(captured)})
 
 
 @auth.command(name="forgot-password")
@@ -1012,8 +1092,8 @@ def forgot_password(account: str | None, connector_url: str | None) -> None:
 def resend_verification(account: str | None, connector_url: str | None) -> None:
     """(Re-)send the email verification message for the given account.
 
-    Verification is non-blocking, but a few actions require a verified
-    email; this sends the link on demand.
+    Needs a saved session, and a session is only saved for an account with a
+    verified email, so there is normally nothing left to send.
     ``already_verified`` is True when nothing was sent because the address
     needs no link. Otherwise ``sent`` is False when the connector suppressed
     the send because one went out moments ago (its per-user cooldown).
@@ -1046,9 +1126,8 @@ def resend_verification(account: str | None, connector_url: str | None) -> None:
 def is_verified(account: str | None, connector_url: str | None) -> None:
     """Check whether the account's email is verified (a plain status query).
 
-    Verification is non-blocking: an unverified account is fully signed in,
-    and only specific actions require the email to be verified. Safe to poll
-    repeatedly.
+    A session is only saved for an account with a verified email, so this
+    normally answers true. Safe to poll repeatedly.
     """
     store = make_session_store()
     parsed_account = resolve_account_or_active(store, account)

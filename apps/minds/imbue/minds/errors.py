@@ -163,10 +163,6 @@ class InvalidJsonBodyError(MindError, ValueError):
     ...
 
 
-class EmptyWelcomeChatError(MindError, ValueError):
-    """A welcome chat that is not a first-run arrival was handed over with no turns."""
-
-
 class EmptySuggestionSettingsChangeError(MindError, ValueError):
     """A change to a workspace's suggestion switches named none of them."""
 
@@ -208,6 +204,12 @@ class WorkspaceAutoUpdateSettingError(MindsConfigError, ValueError):
 
 class NaiveTimestampError(MindError, ValueError):
     """Raised when a timezone-aware datetime is required but a naive one was passed."""
+
+    ...
+
+
+class DefaultWorkspaceNameBaseError(MindError, ValueError):
+    """Raised when the configured base for automatic workspace names cannot be used as a host name."""
 
     ...
 

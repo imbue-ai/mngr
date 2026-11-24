@@ -15,6 +15,7 @@ poll, the sign-in modal) are gone with the rest of the JinjaX surface.
 """
 
 import json
+import os
 import secrets
 import tempfile
 import threading
@@ -39,6 +40,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthFailedCliEr
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthSession
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudWebLoginIncompleteCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import WEB_LOGIN_SUBPROCESS_TIMEOUT_SECONDS
 from imbue.minds.desktop_client.imbue_cloud_cli import WebLoginIncompleteReason
@@ -47,6 +49,7 @@ from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
+from imbue.minds.desktop_client.ui_api_onboarding import FORCE_FIRST_RUN_ENV_VAR
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.output import emit_event
@@ -71,6 +74,13 @@ _SIGNIN_NOT_RECORDED_MESSAGE: Final[str] = (
     "Imbue signed you in, but Imbue Studio couldn't save the sign-in on this computer. "
     "Report a bug so we can look into it."
 )
+
+
+@pure
+def _email_not_verified_message(email: str | None) -> str:
+    """What a sign-in that ended on an unverified email says; Try again lands on the hosted check-inbox page."""
+    sent_to = f" to {email}" if email else ""
+    return f"Your email isn't verified yet. Click the link we sent{sent_to}, then sign in again."
 
 
 @pure
@@ -99,6 +109,8 @@ def _user_facing_auth_message(exc: ImbueCloudCliError) -> str:
         return _AUTH_REJECTED_MESSAGE
     if isinstance(exc, ImbueCloudWebLoginIncompleteCliError):
         return _web_login_incomplete_message(exc.reason)
+    if isinstance(exc, ImbueCloudEmailNotVerifiedCliError):
+        return _email_not_verified_message(exc.email)
     logger.warning("Auth call failed without a structured connector verdict: {}", exc)
     return _UNAVAILABLE_AUTH_SERVICE_MESSAGE
 
@@ -114,6 +126,8 @@ def _log_web_login_failure(exc: ImbueCloudCliError) -> None:
     if isinstance(exc, ImbueCloudWebLoginIncompleteCliError) and exc.reason != WebLoginIncompleteReason.TIMED_OUT:
         # The user finished in the browser and the handoff back still failed: a bug, not user behavior.
         logger.error("Browser sign-in finished but the app could not complete it ({}): {}", exc.reason, exc)
+    elif isinstance(exc, ImbueCloudEmailNotVerifiedCliError):
+        logger.info("Refused a browser sign-in whose email is not verified yet: {}", exc)
     else:
         logger.warning("Plugin web-login subprocess failed: {}", exc)
 
@@ -239,8 +253,9 @@ class _WebLoginFlowStatus(FrozenModel):
     copy-the-link fallback while the flow is running. Once the subprocess
     exits the temp file is deleted and the URL (dead, but still rendered by
     the modal) is carried in ``login_url`` instead.
-    ``is_email_verified`` is the hosted page's verdict on the signed-in
-    address (None when it did not give one).
+    ``active_workspace_count`` is how many active workspaces the hand-off said
+    the account has (None when it did not say), which is what the sign-in
+    page decides on between the account's home page and a first workspace.
     """
 
     state: str
@@ -249,7 +264,7 @@ class _WebLoginFlowStatus(FrozenModel):
     user_id: str | None = None
     email: str | None = None
     display_name: str | None = None
-    is_email_verified: bool | None = None
+    active_workspace_count: int | None = None
     error: str | None = None
     error_details: str | None = None
     is_retry_offered: bool = True
@@ -297,25 +312,6 @@ def _prune_expired_web_login_flows_locked() -> None:
 
 def _flow_deadline() -> float:
     return time.monotonic() + _WEB_LOGIN_FLOW_TTL_SECONDS
-
-
-def is_email_verified_by_web_login(email: str) -> bool:
-    """Whether the latest browser sign-in this app still tracks for ``email`` reported it verified as it finished.
-
-    A verified address stays verified, so such a verdict answers a
-    verification check without asking the connector again. Only the latest
-    sign-in counts (flows finish in the order they start, since only one runs
-    at a time), so a later one that saw the address unverified overrides it.
-    """
-    wanted = email.casefold()
-    with _web_login_flows_lock:
-        _prune_expired_web_login_flows_locked()
-        finished_verdicts = [
-            status.is_email_verified
-            for status in _web_login_flows.values()
-            if status.state in ("finishing", "done") and status.email is not None and status.email.casefold() == wanted
-        ]
-    return len(finished_verdicts) > 0 and finished_verdicts[-1] is True
 
 
 def _fail_web_login_flow_if_still_running(flow_id: str, login_url: str | None) -> None:
@@ -375,7 +371,7 @@ def _run_web_login_subprocess(
                 user_id=str(result.user_id),
                 email=str(result.email),
                 display_name=result.display_name,
-                is_email_verified=result.is_email_verified,
+                active_workspace_count=result.active_workspace_count,
                 deadline=_flow_deadline(),
             ),
         )
@@ -438,7 +434,7 @@ def _run_web_login_subprocess(
                 user_id=str(result.user_id),
                 email=str(result.email),
                 display_name=result.display_name,
-                is_email_verified=result.is_email_verified,
+                active_workspace_count=result.active_workspace_count,
                 deadline=_flow_deadline(),
             ),
         )
@@ -576,11 +572,14 @@ def _handle_web_login_status(flow_id: str) -> Response:
     """Poll-friendly status for an in-flight web login (GET).
 
     The frontend polls this until ``state`` is ``"done"`` or ``"error"``;
-    ``login_url`` appears as soon as the plugin's loopback listener is live.
+    ``login_url`` appears as soon as the plugin's loopback listener is live,
+    and ``active_workspace_count`` once the sign-in has landed.
     """
     status = _read_web_login_status(flow_id)
     if status is None:
         return _json_response({"status": "ERROR", "error": "Unknown flow id"}, 404)
+    is_signed_in = status.state in ("finishing", "done")
+    is_first_run_forced = os.environ.get(FORCE_FIRST_RUN_ENV_VAR) == "1"
     return _json_response(
         {
             "status": "OK",
@@ -589,6 +588,7 @@ def _handle_web_login_status(flow_id: str) -> Response:
             "user_id": status.user_id,
             "email": status.email,
             "display_name": status.display_name,
+            "active_workspace_count": 0 if is_signed_in and is_first_run_forced else status.active_workspace_count,
             "error": status.error,
             "error_details": status.error_details,
             "is_retry_offered": status.is_retry_offered,

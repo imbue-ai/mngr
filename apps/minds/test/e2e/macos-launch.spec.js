@@ -58,7 +58,7 @@ test('main window launches to a usable state (home, start flow, consent, or a re
     // titlebar #minds-titlebar deliberately does NOT count: it also renders
     // on the RouteError page, so it can't prove a good landing):
     //   #landing-minds-settings  the home page's fixed settings launcher
-    //   #start-flow              the first-run start flow (the chat that creates the first workspace)
+    //   #start-flow              the first-run sign-in page
     //   #consent-continue        the error-reporting consent screen
     //   #content-frame           the workspace surface (restored session)
     const landingMarker = content.locator(

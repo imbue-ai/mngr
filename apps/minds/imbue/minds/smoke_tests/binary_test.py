@@ -13,6 +13,7 @@ from imbue.minds.smoke_tests.binary import app_mngr_host_dir
 from imbue.minds.smoke_tests.binary import app_state_dir
 from imbue.minds.smoke_tests.binary import bundled_root_name_or_none
 from imbue.minds.smoke_tests.binary import cached_build_dir
+from imbue.minds.smoke_tests.binary import default_workspace_name_base_for_run
 from imbue.minds.smoke_tests.binary import is_studio_binary_selected
 from imbue.minds.smoke_tests.binary import launch_target_for
 from imbue.minds.smoke_tests.binary import packaged_studio_binary
@@ -30,6 +31,7 @@ from imbue.minds.smoke_tests.primitives import SMOKE_BINARY_PATH_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_CHANNEL_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_DEV_CHECKOUT_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SmokeConfigError
+from imbue.minds.smoke_tests.primitives import SmokeRunId
 
 _BUNDLED_ROOT_NAME_RELATIVE_PATH = Path("pyproject/imbue/minds/config/envs/_bundled/root_name")
 
@@ -275,3 +277,22 @@ def test_profile_file_launch_env_hands_the_app_the_requested_trace_path() -> Non
 def test_profile_file_launch_env_refuses_a_relative_path() -> None:
     with pytest.raises(SmokeConfigError):
         profile_file_launch_env({"MINDS_SMOKE_PROFILE_FILE": "trace.json"})
+
+
+@pytest.mark.parametrize(
+    ("run_id", "expected_name"),
+    [
+        ("20261014t101500z", "studio-smoke-20261014t101500z-ab12cd34"),
+        ("gh-18273645001-2", "studio-smoke-gh-18273645001-2-ab12cd34"),
+        # The app collapses a run of dashes, so the name a workspace gets is the collapsed one.
+        ("nightly--7", "studio-smoke-nightly-7-ab12cd34"),
+    ],
+)
+def test_a_run_s_workspace_name_base_is_the_smoke_name_as_the_app_reads_it(run_id: str, expected_name: str) -> None:
+    assert default_workspace_name_base_for_run(SmokeRunId(run_id), "ab12cd34") == expected_name
+
+
+def test_a_run_id_too_long_to_name_a_workspace_is_refused_naming_the_run_id() -> None:
+    run_id = SmokeRunId("r" * 40)
+    with pytest.raises(SmokeConfigError, match=f"The run id '{run_id}' leaves no usable workspace name"):
+        default_workspace_name_base_for_run(run_id, "ab12cd34")

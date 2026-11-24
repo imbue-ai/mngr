@@ -29,7 +29,6 @@ from imbue.minds.desktop_client.supertokens_routes import _WEB_LOGIN_FLOW_TTL_SE
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.minds.utils.testing import ScriptedMngrCaller
-from imbue.mngr_imbue_cloud.data_types import VerificationEmailSendResult
 
 
 def test_expect_success_keeps_traceback_out_of_message_but_on_stderr() -> None:
@@ -107,7 +106,6 @@ def test_expect_success_raises_typed_auth_error_carrying_the_connector_status() 
             "error": "Incorrect email or password",
             "error_class": "AuthFailed",
             "status": "WRONG_CREDENTIALS",
-            "needs_email_verification": False,
         },
         indent=2,
     )
@@ -170,17 +168,22 @@ def test_auth_login_asks_the_plugin_to_listen_for_the_whole_window() -> None:
 
 
 @pytest.mark.parametrize(
-    ("plugin_output_extra", "expected_verdict"),
+    ("plugin_output_extra", "expected_count"),
     [
-        ({"is_email_verified": True}, True),
-        ({"is_email_verified": False}, False),
-        ({"is_email_verified": None}, None),
+        ({"active_workspace_count": 0}, 0),
+        ({"active_workspace_count": 3}, 3),
+        ({"active_workspace_count": None}, None),
         # A plugin older than the field says nothing.
         ({}, None),
+        # The count only routes the sign-in, so a value that is not one reads as not given.
+        ({"active_workspace_count": -1}, None),
+        ({"active_workspace_count": "3"}, None),
+        ({"active_workspace_count": 2.0}, None),
+        ({"active_workspace_count": True}, None),
     ],
 )
-def test_auth_login_carries_the_sign_ins_verification_verdict(
-    plugin_output_extra: dict[str, object], expected_verdict: bool | None
+def test_auth_login_carries_the_accounts_active_workspace_count(
+    plugin_output_extra: dict[str, object], expected_count: int | None
 ) -> None:
     body = json.dumps({"user_id": "u-1", "email": "a@b.com", **plugin_output_extra})
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=body))
@@ -188,7 +191,32 @@ def test_auth_login_carries_the_sign_ins_verification_verdict(
 
     session = cli.auth_login()
 
-    assert session.is_email_verified is expected_verdict
+    assert session.active_workspace_count == expected_count
+    assert (session.user_id, session.email) == ("u-1", "a@b.com")
+
+
+@pytest.mark.parametrize("email", ["a@b.com", None], ids=["address-known", "address-unknown"])
+def test_auth_login_that_ends_on_an_unverified_email_raises_the_typed_error_with_the_address(
+    email: str | None,
+) -> None:
+    """The plugin saves no session for an unverified account and fails with the refusal the connector's own has."""
+    body = json.dumps(
+        {
+            "error": "Verify your email to finish signing in",
+            "error_class": "ImbueCloudEmailNotVerifiedError",
+            "code": "email_not_verified",
+            "email": email,
+        },
+        indent=2,
+    )
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="a log line first\n" + body + "\n"))
+    cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
+
+    with pytest.raises(ImbueCloudEmailNotVerifiedCliError) as exc_info:
+        cli.auth_login()
+
+    assert exc_info.value.email == email
+    assert str(exc_info.value) == "auth login: Verify your email to finish signing in"
 
 
 def test_parse_stderr_error_message_survives_surrounding_log_lines() -> None:
@@ -405,54 +433,6 @@ def test_list_share_relays_raises_on_malformed_output(malformed_body: dict[str, 
 
     with pytest.raises(ImbueCloudCliError, match="Malformed shares relays output"):
         cli.list_share_relays(account="owner@example.com")
-
-
-@pytest.mark.parametrize("is_already_verified", [False, True], ids=["cooldown", "already_verified"])
-def test_auth_resend_verification_reports_why_nothing_was_sent(is_already_verified: bool) -> None:
-    caller = RecordingMngrCaller(
-        result=MngrCallResult(
-            returncode=0,
-            stdout=json.dumps({"sent": False, "already_verified": is_already_verified, "email": "a@b.com"}),
-        )
-    )
-    cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
-
-    assert cli.auth_resend_verification("a@b.com") == VerificationEmailSendResult(
-        is_sent=False, is_already_verified=is_already_verified
-    )
-    assert caller.recorded_calls[0].argv == ("imbue_cloud", "auth", "resend-verification", "--account", "a@b.com")
-
-
-@pytest.mark.parametrize(
-    "malformed_body",
-    [{"already_verified": False, "email": "a@b.com"}, {"sent": False, "email": "a@b.com"}],
-    ids=["missing_sent", "missing_already_verified"],
-)
-def test_auth_resend_verification_raises_on_malformed_output(malformed_body: dict[str, object]) -> None:
-    """A body without either bool is a broken plugin contract, not a cooldown suppression."""
-    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps(malformed_body)))
-    cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
-
-    with pytest.raises(ImbueCloudCliError, match="Malformed auth resend-verification output"):
-        cli.auth_resend_verification("a@b.com")
-
-
-def test_auth_is_email_verified_reads_the_verdict() -> None:
-    caller = RecordingMngrCaller(
-        result=MngrCallResult(returncode=0, stdout=json.dumps({"verified": True, "email": "a@b.com"}))
-    )
-    cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
-
-    assert cli.auth_is_email_verified("a@b.com") is True
-    assert caller.recorded_calls[0].argv == ("imbue_cloud", "auth", "is-verified", "--account", "a@b.com")
-
-
-def test_auth_is_email_verified_raises_on_malformed_output() -> None:
-    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps({"email": "a@b.com"})))
-    cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
-
-    with pytest.raises(ImbueCloudCliError, match="Malformed auth is-verified output"):
-        cli.auth_is_email_verified("a@b.com")
 
 
 def test_expect_success_raises_typed_email_not_verified_error_with_the_email() -> None:

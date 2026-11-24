@@ -102,6 +102,7 @@ class _DeviceLoginConnectorStubHandler(_JsonConnectorStubHandler):
     """
 
     device_token_status_code: int = 200
+    device_token_refusal_detail: object = "Invalid, expired, or already-used code"
     device_attempts_status_code: int = 200
     recorded_requests: list[str] = []
 
@@ -130,7 +131,40 @@ class _DeviceLoginConnectorStubHandler(_JsonConnectorStubHandler):
                 },
             )
         else:
-            self._send_json(self.device_token_status_code, {"detail": "Invalid, expired, or already-used code"})
+            self._send_json(self.device_token_status_code, {"detail": self.device_token_refusal_detail})
+
+
+class _PasswordAuthConnectorStubHandler(_JsonConnectorStubHandler):
+    """Answers the connector routes ``auth signin`` and ``auth signup`` call, recording each request as ``"METHOD /path"``.
+
+    Those are the sign-in or sign-up itself, the is-verified check, and the
+    revocation of a session the command does not keep.
+    """
+
+    is_verified_status_code: int = 200
+    is_email_verified: bool = True
+    is_verification_reported_as_needed: bool = False
+    recorded_requests: list[str] = []
+
+    def do_POST(self) -> None:
+        self.recorded_requests.append(f"POST {self.path}")
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        if self.path in ("/auth/signin", "/auth/signup"):
+            self._send_json(
+                200,
+                {
+                    "status": "OK",
+                    "user": {"user_id": "user-password-auth-7306", "email": "password-auth-7306@example.com"},
+                    "tokens": {"access_token": "at-password-auth-7306", "refresh_token": "rt-password-auth-7306"},
+                    "needs_email_verification": self.is_verification_reported_as_needed,
+                },
+            )
+        elif self.path == "/auth/email/is-verified":
+            self._send_json(self.is_verified_status_code, {"status": "OK", "verified": self.is_email_verified})
+        elif self.path == "/auth/session/revoke-current":
+            self._send_json(200, {"status": "OK"})
+        else:
+            raise AssertionError(f"unexpected path {self.path}")
 
 
 class _SendVerificationConnectorStubHandler(_JsonConnectorStubHandler):
@@ -189,20 +223,57 @@ def device_login_connector_stub(
 ) -> Callable[..., tuple[str, list[str]]]:
     """Start a loopback connector stub for ``auth login`` with the given status codes for the exchange and the lease.
 
+    A refused exchange answers ``device_token_refusal_detail`` as its ``detail``.
     Returns ``(base_url, recorded_requests)``; the list fills with ``"METHOD /path"`` as requests arrive.
     """
 
-    def start(device_token_status_code: int, device_attempts_status_code: int = 200) -> tuple[str, list[str]]:
+    def start(
+        device_token_status_code: int,
+        device_attempts_status_code: int = 200,
+        device_token_refusal_detail: object = _DeviceLoginConnectorStubHandler.device_token_refusal_detail,
+    ) -> tuple[str, list[str]]:
         recorded_requests: list[str] = []
         handler_class = type(
             "_ScopedDeviceLoginConnectorStubHandler",
             (_DeviceLoginConnectorStubHandler,),
             {
                 "device_token_status_code": device_token_status_code,
+                "device_token_refusal_detail": device_token_refusal_detail,
                 "device_attempts_status_code": device_attempts_status_code,
                 "recorded_requests": recorded_requests,
             },
         )
         return start_loopback_stub(handler_class, "device-login-stub-test"), recorded_requests
+
+    return start
+
+
+@pytest.fixture
+def password_auth_connector_stub(
+    start_loopback_stub: Callable[[type[http.server.BaseHTTPRequestHandler], str], str],
+) -> Callable[..., tuple[str, list[str]]]:
+    """Start a loopback connector stub for ``auth signin`` / ``auth signup`` with the given is-verified answer.
+
+    ``is_verification_reported_as_needed`` makes the sign-in itself say ``needs_email_verification``, as an old connector does.
+    Returns ``(base_url, recorded_requests)``; the list fills with ``"METHOD /path"`` as requests arrive.
+    """
+
+    def start(
+        is_email_verified: bool,
+        is_verified_status_code: int = 200,
+        is_verification_reported_as_needed: bool = False,
+    ) -> tuple[str, list[str]]:
+        recorded_requests: list[str] = []
+        handler_class = type(
+            "_ScopedPasswordAuthConnectorStubHandler",
+            (_PasswordAuthConnectorStubHandler,),
+            {
+                "is_email_verified": is_email_verified,
+                "is_verified_status_code": is_verified_status_code,
+                "is_verification_reported_as_needed": is_verification_reported_as_needed,
+                "recorded_requests": recorded_requests,
+            },
+        )
+        return start_loopback_stub(handler_class, "password-auth-stub-test"), recorded_requests
 
     return start

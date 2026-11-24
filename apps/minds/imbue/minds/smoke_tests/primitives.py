@@ -141,6 +141,16 @@ class SmokeSignInRefusedError(SmokeAccountError):
     ...
 
 
+class SmokeAccountHoldsWorkspacesError(SmokeAccountError):
+    """Raised when the account a journey through the first run signs in as still holds workspaces.
+
+    The app's first run creates a workspace only for an account that has none,
+    so the journey cannot start until the leftovers are released.
+    """
+
+    ...
+
+
 class SmokeTeardownError(MindError):
     """Raised when a teardown step cannot complete (the step is still recorded in the report)."""
 

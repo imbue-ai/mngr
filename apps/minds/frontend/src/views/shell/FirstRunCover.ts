@@ -1,4 +1,4 @@
-// The cover over a first-run workspace while it loads: the creation page's welcome, carried on over the
+// The cover over a new workspace while it loads: the creation page's welcome, carried on over the
 // workspace's frame under the title bar. The workspace loads beneath it, and Continue appears once the workspace
 // reports its provider ask on screen, so the press lands on that ask with nothing to wait for
 // (models/firstRunCover.ts).
@@ -34,6 +34,7 @@ export function FirstRunCover(): m.Component<FirstRunCoverAttrs> {
         firstRunWelcome({
           id: "first-run-cover-welcome",
           attemptId: state.createAttemptId,
+          heading: state.heading,
           status: state.isReady
             ? readyStatus(() => firstRunCover.lower())
             : settingUpStatus(OPENING_WORKSPACE_LINE, 100),

@@ -1,4 +1,3 @@
-import base64
 import io
 import json
 import re
@@ -8,24 +7,21 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import httpx2
-import pytest
-from pydantic import ValidationError
 from starlette.testclient import TestClient
 
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.testing import FAKE_FORWARD_PORT
+from imbue.minds.desktop_client.testing import FIXED_WELCOME_CHAT_SEED_BODY
 from imbue.minds.desktop_client.testing import ForwardHandler
 from imbue.minds.desktop_client.testing import answering_forward
 from imbue.minds.desktop_client.testing import make_fake_chat_app_forward_route
+from imbue.minds.desktop_client.testing import welcome_chat_seed_body_sent_through_mngr_exec
 from imbue.minds.desktop_client.welcome_chat import ChatAppForwardRoute
 from imbue.minds.desktop_client.welcome_chat import ForwardSeedAttempt
 from imbue.minds.desktop_client.welcome_chat import SEED_SCRIPT_PATH
 from imbue.minds.desktop_client.welcome_chat import SEED_TIMEOUT_SECONDS
 from imbue.minds.desktop_client.welcome_chat import WelcomeChatOutcome
-from imbue.minds.desktop_client.welcome_chat import WelcomeChatRequest
-from imbue.minds.desktop_client.welcome_chat import WelcomeChatRole
 from imbue.minds.desktop_client.welcome_chat import WelcomeChatSeeder
-from imbue.minds.desktop_client.welcome_chat import WelcomeChatTurn
 from imbue.minds.desktop_client.welcome_chat import build_seed_welcome_chat_args
 from imbue.minds.desktop_client.welcome_chat import seed_welcome_chat
 from imbue.minds.desktop_client.welcome_chat import seed_welcome_chat_through_forward
@@ -50,48 +46,15 @@ from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 _AGENT_ID = AgentId("agent-0123456789abcdef0123456789abcdef")
 
 
-def _request() -> WelcomeChatRequest:
-    return WelcomeChatRequest(
-        title="Welcome",
-        turns=(
-            WelcomeChatTurn(role=WelcomeChatRole.USER, text="Wait.. what is honest software?"),
-            WelcomeChatTurn(role=WelcomeChatRole.ASSISTANT, text='It works "for you".\nNo lock-in.'),
-        ),
-    )
-
-
-def test_the_seed_runs_the_templates_script_in_the_workspace_with_the_transcript_as_base64() -> None:
-    """The transcript holds quotes and newlines, so it rides argv encoded; the command must not start a workspace."""
-    argv = build_seed_welcome_chat_args(_AGENT_ID, _request())
+def test_the_seed_runs_the_templates_script_in_the_workspace_with_the_fixed_body_as_base64() -> None:
+    """``mngr exec`` carries no stdin, so the body rides argv encoded; the command must not start a workspace."""
+    argv = build_seed_welcome_chat_args(_AGENT_ID)
 
     assert argv[:3] == ["exec", "--agent", str(_AGENT_ID)]
     assert argv[-1] == "--no-start"
     inner = shlex.split(argv[3])
     assert inner[:3] == ["python3", SEED_SCRIPT_PATH, "--transcript-base64"]
-    decoded = json.loads(base64.b64decode(inner[3]).decode("utf-8"))
-    assert decoded == {
-        "title": "Welcome",
-        "turns": [
-            {"role": "user", "text": "Wait.. what is honest software?"},
-            {"role": "assistant", "text": 'It works "for you".\nNo lock-in.'},
-        ],
-    }
-
-
-def _decoded_seed_body(welcome_chat: WelcomeChatRequest) -> dict[str, object]:
-    inner = shlex.split(build_seed_welcome_chat_args(_AGENT_ID, welcome_chat)[3])
-    return json.loads(base64.b64decode(inner[3]).decode("utf-8"))
-
-
-def test_a_first_run_seed_carries_no_turns_and_the_arrival_flag() -> None:
-    welcome_chat = WelcomeChatRequest(title="Welcome", is_first_run=True)
-
-    assert _decoded_seed_body(welcome_chat) == {"title": "Welcome", "turns": [], "is_first_run": True}
-
-
-def test_a_seed_that_is_not_a_first_run_needs_a_turn() -> None:
-    with pytest.raises(ValidationError):
-        WelcomeChatRequest(title="Welcome")
+    assert welcome_chat_seed_body_sent_through_mngr_exec(argv) == FIXED_WELCOME_CHAT_SEED_BODY
 
 
 def test_a_seeded_chat_reads_its_id_off_the_scripts_json_line() -> None:
@@ -99,7 +62,7 @@ def test_a_seeded_chat_reads_its_id_off_the_scripts_json_line() -> None:
         result=MngrCallResult(returncode=0, stdout='some chatter\n{"chat_id": "agent-seeded"}\n', is_mngr_output=True)
     )
 
-    outcome = seed_welcome_chat(caller, _AGENT_ID, _request())
+    outcome = seed_welcome_chat(caller, _AGENT_ID)
 
     assert outcome.is_seeded and outcome.chat_id == "agent-seeded"
     (recorded,) = caller.recorded_calls
@@ -120,7 +83,7 @@ def test_a_failed_seed_carries_the_scripts_verdict_rather_than_the_outer_execs()
         )
     )
 
-    outcome = seed_welcome_chat(caller, _AGENT_ID, _request())
+    outcome = seed_welcome_chat(caller, _AGENT_ID)
 
     assert not outcome.is_seeded
     assert outcome.failure_detail == "Could not seed the welcome chat: the chat app answered HTTP 400"
@@ -128,19 +91,19 @@ def test_a_failed_seed_carries_the_scripts_verdict_rather_than_the_outer_execs()
 
 def test_a_timed_out_or_silent_seed_is_a_failure_in_plain_words() -> None:
     timed_out = RecordingMngrCaller(result=MngrCallResult(returncode=1, is_timed_out=True))
-    assert seed_welcome_chat(timed_out, _AGENT_ID, _request()).failure_detail == "the workspace did not answer in time"
+    assert seed_welcome_chat(timed_out, _AGENT_ID).failure_detail == "the workspace did not answer in time"
 
     silent = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout="nothing useful\n", is_mngr_output=True))
-    assert seed_welcome_chat(silent, _AGENT_ID, _request()).failure_detail == "the seeding script printed no chat id"
+    assert seed_welcome_chat(silent, _AGENT_ID).failure_detail == "the seeding script printed no chat id"
 
     no_words = RecordingMngrCaller(result=MngrCallResult(returncode=3, is_mngr_output=True))
-    assert seed_welcome_chat(no_words, _AGENT_ID, _request()).failure_detail == "the seeding script exited with code 3"
+    assert seed_welcome_chat(no_words, _AGENT_ID).failure_detail == "the seeding script exited with code 3"
 
     # The caller's own account of a call that returned nothing is not a verdict of the workspace's.
     no_result = RecordingMngrCaller(
         result=MngrCallResult(returncode=1, stderr="mngr warm process exited without returning a result")
     )
-    assert seed_welcome_chat(no_result, _AGENT_ID, _request()).failure_detail == "mngr returned no result"
+    assert seed_welcome_chat(no_result, _AGENT_ID).failure_detail == "mngr returned no result"
 
 
 _ATTEMPT_ID = CreateAttemptId("create-attempt-0123456789abcdef0123456789abcdef")
@@ -152,10 +115,6 @@ _REFUSED = MngrCallResult(
 
 def _seeder(caller: MngrCaller) -> WelcomeChatSeeder:
     return WelcomeChatSeeder(mngr_caller=caller, backend_resolver=MngrCliBackendResolver())
-
-
-def _seeded_transcript(argv: Sequence[str]) -> dict[str, object]:
-    return json.loads(base64.b64decode(shlex.split(argv[3])[3]).decode("utf-8"))
 
 
 _SEED_STARTED_LINE = f"Seeding the welcome chat for create attempt {_ATTEMPT_ID} in workspace {_AGENT_ID}"
@@ -174,68 +133,40 @@ def _seed_warning_line(failure_detail: str) -> str:
     )
 
 
-def test_a_conversation_handed_over_while_the_workspace_was_built_is_seeded_when_the_attempt_finishes() -> None:
+def test_a_seed_asked_for_while_the_workspace_was_built_runs_when_the_attempt_finishes() -> None:
     """The creation page may be gone by then: the user left it and entered the workspace from the list."""
     caller = RecordingMngrCaller(result=_SEEDED)
     seeder = _seeder(caller)
 
-    seeder.hold(_ATTEMPT_ID, _request())
-    seeder.seed_held(_ATTEMPT_ID, _AGENT_ID)
+    seeder.owe(_ATTEMPT_ID)
+    seeder.seed_if_owed(_ATTEMPT_ID, _AGENT_ID)
 
     (argv,) = caller.calls
     assert argv[:3] == ["exec", "--agent", str(_AGENT_ID)]
-    assert _seeded_transcript(argv) == _request().seed_body()
+    assert welcome_chat_seed_body_sent_through_mngr_exec(argv) == FIXED_WELCOME_CHAT_SEED_BODY
 
 
-def test_a_conversation_handed_over_again_before_the_attempt_finishes_replaces_the_one_held() -> None:
-    """A page revisited before the attempt finishes hands the conversation over again; the latest one is seeded."""
+def test_a_workspace_is_seeded_once_however_often_its_page_asks() -> None:
+    """The page asks as it loads, again at done, and a revisited page asks again; the workspace is seeded once."""
     caller = RecordingMngrCaller(result=_SEEDED)
     seeder = _seeder(caller)
-    revisited = WelcomeChatRequest(
-        title="Welcome", turns=(*_request().turns, WelcomeChatTurn(role=WelcomeChatRole.ASSISTANT, text="Later"))
-    )
 
-    seeder.hold(_ATTEMPT_ID, _request())
-    seeder.hold(_ATTEMPT_ID, revisited)
-    seeder.seed_held(_ATTEMPT_ID, _AGENT_ID)
-
-    (argv,) = caller.calls
-    assert _seeded_transcript(argv) == revisited.seed_body()
-
-
-def test_a_first_run_conversation_is_handed_over_once_however_often_the_page_asks() -> None:
-    """The page asks for the seed at done and again as the user enters; the workspace hears of the first run once."""
-    caller = RecordingMngrCaller(result=_SEEDED)
-    seeder = _seeder(caller)
-    first_run = WelcomeChatRequest(title="Welcome", is_first_run=True)
-
-    seeder.hold(_ATTEMPT_ID, first_run)
-    seeder.seed_held(_ATTEMPT_ID, _AGENT_ID)
-    outcome = seeder.seed(_ATTEMPT_ID, _AGENT_ID, first_run)
+    seeder.owe(_ATTEMPT_ID)
+    seeder.owe(_ATTEMPT_ID)
+    seeder.seed_if_owed(_ATTEMPT_ID, _AGENT_ID)
+    outcome = seeder.seed(_ATTEMPT_ID, _AGENT_ID)
 
     assert outcome == WelcomeChatOutcome(chat_id="agent-seeded")
-    (argv,) = caller.calls
-    assert _seeded_transcript(argv) == {"title": "Welcome", "turns": [], "is_first_run": True}
-
-
-def test_a_conversation_that_is_not_a_first_run_is_never_handed_over_twice() -> None:
-    caller = RecordingMngrCaller(result=_SEEDED)
-    seeder = _seeder(caller)
-    later = WelcomeChatRequest(
-        title="Welcome", turns=(*_request().turns, WelcomeChatTurn(role=WelcomeChatRole.ASSISTANT, text="Later"))
-    )
-
-    seeder.hold(_ATTEMPT_ID, _request())
-    seeder.seed_held(_ATTEMPT_ID, _AGENT_ID)
-    seeder.seed(_ATTEMPT_ID, _AGENT_ID, later)
-
     assert len(caller.calls) == 1
 
 
-def test_an_attempt_whose_page_handed_nothing_over_is_not_seeded() -> None:
+def test_an_attempt_whose_page_never_asked_is_not_seeded() -> None:
+    """A create made through the API alone opens no creation page, and its workspace gets no welcome chat."""
     caller = RecordingMngrCaller(result=_SEEDED)
+    seeder = _seeder(caller)
+    seeder.owe(CreateAttemptId.generate())
 
-    _seeder(caller).seed_held(_ATTEMPT_ID, _AGENT_ID)
+    seeder.seed_if_owed(_ATTEMPT_ID, _AGENT_ID)
 
     assert caller.calls == []
 
@@ -249,14 +180,13 @@ def test_a_page_asking_while_the_finished_attempts_seed_runs_waits_for_it_instea
 
     caller.set_on_call(hold_the_seed_until_released)
     seeder = _seeder(caller)
-    seeder.hold(_ATTEMPT_ID, _request())
-    background = threading.Thread(target=seeder.seed_held, args=(_ATTEMPT_ID, _AGENT_ID))
+    seeder.owe(_ATTEMPT_ID)
+    background = threading.Thread(target=seeder.seed_if_owed, args=(_ATTEMPT_ID, _AGENT_ID))
     background.start()
     assert caller.called_event.wait(timeout=30.0)
 
     outcomes: list[WelcomeChatOutcome] = []
-    later_body = WelcomeChatRequest(title="Later", turns=(WelcomeChatTurn(role=WelcomeChatRole.USER, text="hi"),))
-    page = threading.Thread(target=lambda: outcomes.append(seeder.seed(_ATTEMPT_ID, _AGENT_ID, later_body)))
+    page = threading.Thread(target=lambda: outcomes.append(seeder.seed(_ATTEMPT_ID, _AGENT_ID)))
     page.start()
     page.join(timeout=0.2)
     assert page.is_alive()
@@ -266,18 +196,17 @@ def test_a_page_asking_while_the_finished_attempts_seed_runs_waits_for_it_instea
     background.join(timeout=30.0)
 
     assert outcomes == [WelcomeChatOutcome(chat_id="agent-seeded")]
-    (argv,) = caller.calls
-    assert _seeded_transcript(argv)["title"] == "Welcome"
+    assert len(caller.calls) == 1
 
 
 def test_a_failed_seed_is_run_again_on_the_next_ask_and_a_seeded_one_is_never_repeated() -> None:
     caller = ScriptedMngrCaller(results=(_REFUSED, _SEEDED))
     seeder = _seeder(caller)
-    seeder.hold(_ATTEMPT_ID, _request())
+    seeder.owe(_ATTEMPT_ID)
 
-    seeder.seed_held(_ATTEMPT_ID, _AGENT_ID)
-    retried = seeder.seed(_ATTEMPT_ID, _AGENT_ID, _request())
-    again = seeder.seed(_ATTEMPT_ID, _AGENT_ID, _request())
+    seeder.seed_if_owed(_ATTEMPT_ID, _AGENT_ID)
+    retried = seeder.seed(_ATTEMPT_ID, _AGENT_ID)
+    again = seeder.seed(_ATTEMPT_ID, _AGENT_ID)
 
     assert retried == WelcomeChatOutcome(chat_id="agent-seeded")
     assert again == retried
@@ -293,7 +222,7 @@ def test_a_seed_that_could_not_run_mngr_answers_a_failure_rather_than_leaving_it
     caller.set_on_call(refuse_to_run)
 
     with capture_loguru(level="WARNING") as log_output:
-        outcome = _seeder(caller).seed(_ATTEMPT_ID, _AGENT_ID, _request())
+        outcome = _seeder(caller).seed(_ATTEMPT_ID, _AGENT_ID)
 
     assert not outcome.is_seeded
     assert outcome.failure_detail == "mngr could not be run: the warm process is gone"
@@ -305,7 +234,7 @@ def test_a_seed_that_could_not_run_mngr_answers_a_failure_rather_than_leaving_it
 def test_a_seed_logs_its_start_its_duration_and_the_chat_it_opened() -> None:
     """The hand-off into a new workspace is measured from these lines in minds.log."""
     with capture_loguru(level="DEBUG") as log_output:
-        _seeder(RecordingMngrCaller(result=_SEEDED)).seed(_ATTEMPT_ID, _AGENT_ID, _request())
+        _seeder(RecordingMngrCaller(result=_SEEDED)).seed(_ATTEMPT_ID, _AGENT_ID)
 
     lines = log_output.getvalue().splitlines()
     closed = _assert_seed_span_timed(lines)
@@ -315,7 +244,7 @@ def test_a_seed_logs_its_start_its_duration_and_the_chat_it_opened() -> None:
 
 def test_a_failed_seed_logs_its_duration_and_one_warning_with_the_reason() -> None:
     with capture_loguru(level="DEBUG") as log_output:
-        _seeder(RecordingMngrCaller(result=_REFUSED)).seed(_ATTEMPT_ID, _AGENT_ID, _request())
+        _seeder(RecordingMngrCaller(result=_REFUSED)).seed(_ATTEMPT_ID, _AGENT_ID)
 
     lines = log_output.getvalue().splitlines()
     _assert_seed_span_timed(lines)
@@ -342,23 +271,21 @@ def _forward_seeder(caller: MngrCaller, route: ChatAppForwardRoute) -> WelcomeCh
 
 def _seed_over(route: ChatAppForwardRoute) -> ForwardSeedAttempt:
     with route.make_client() as client:
-        return seed_welcome_chat_through_forward(route, client, _AGENT_ID, _request())
+        return seed_welcome_chat_through_forward(route, client, _AGENT_ID)
 
 
 def test_the_seed_is_posted_to_the_chat_apps_origin_through_the_forward_without_running_mngr() -> None:
     requests, handler = answering_forward(_CREATED)
     caller = RecordingMngrCaller(result=_SEEDED)
 
-    outcome = _forward_seeder(caller, make_fake_chat_app_forward_route(handler)).seed(
-        _ATTEMPT_ID, _AGENT_ID, _request()
-    )
+    outcome = _forward_seeder(caller, make_fake_chat_app_forward_route(handler)).seed(_ATTEMPT_ID, _AGENT_ID)
 
     assert outcome == WelcomeChatOutcome(chat_id="agent-over-forward")
     (request,) = requests
     assert request.method == "POST"
     assert str(request.url) == _SEED_URL
     assert request.headers["host"] == _CHAT_ORIGIN_HOST
-    assert json.loads(request.content) == _request().seed_body()
+    assert json.loads(request.content) == FIXED_WELCOME_CHAT_SEED_BODY
     assert caller.calls == []
 
 
@@ -379,7 +306,7 @@ def test_a_seed_the_forward_cannot_deliver_within_its_window_goes_through_mngr_e
 
     with capture_loguru(level="INFO") as log_output:
         outcome = _forward_seeder(caller, make_fake_chat_app_forward_route(handler, window_seconds=0.0)).seed(
-            _ATTEMPT_ID, _AGENT_ID, _request()
+            _ATTEMPT_ID, _AGENT_ID
         )
 
     assert outcome == WelcomeChatOutcome(chat_id="agent-seeded")
@@ -401,9 +328,7 @@ def test_an_answer_only_an_unreachable_route_gives_sends_the_seed_through_mngr_e
         requests, handler = answering_forward(answer)
         caller = RecordingMngrCaller(result=_SEEDED)
 
-        outcome = _forward_seeder(caller, make_fake_chat_app_forward_route(handler)).seed(
-            _ATTEMPT_ID, _AGENT_ID, _request()
-        )
+        outcome = _forward_seeder(caller, make_fake_chat_app_forward_route(handler)).seed(_ATTEMPT_ID, _AGENT_ID)
 
         assert outcome == WelcomeChatOutcome(chat_id="agent-seeded")
         assert len(requests) == 1
@@ -417,7 +342,7 @@ def test_a_route_whose_client_cannot_be_built_sends_the_seed_through_mngr_exec()
     caller = RecordingMngrCaller(result=_SEEDED)
     route = ChatAppForwardRoute(forward_port=FAKE_FORWARD_PORT, make_client=no_ca_certificate)
 
-    outcome = _forward_seeder(caller, route).seed(_ATTEMPT_ID, _AGENT_ID, _request())
+    outcome = _forward_seeder(caller, route).seed(_ATTEMPT_ID, _AGENT_ID)
 
     assert outcome == WelcomeChatOutcome(chat_id="agent-seeded")
     assert len(caller.calls) == 1
@@ -436,9 +361,7 @@ def test_the_chat_apps_refusal_is_the_seeds_outcome_rather_than_a_reason_to_run_
     _requests, handler = answering_forward(httpx2.Response(409, json={"detail": "A chat named Main already exists"}))
     caller = RecordingMngrCaller(result=_SEEDED)
 
-    outcome = _forward_seeder(caller, make_fake_chat_app_forward_route(handler)).seed(
-        _ATTEMPT_ID, _AGENT_ID, _request()
-    )
+    outcome = _forward_seeder(caller, make_fake_chat_app_forward_route(handler)).seed(_ATTEMPT_ID, _AGENT_ID)
 
     assert outcome == WelcomeChatOutcome(
         failure_detail="the chat app refused the seed: A chat named Main already exists"
@@ -461,7 +384,7 @@ def test_a_seed_through_the_forward_logs_its_start_its_duration_and_the_chat_it_
 
     with capture_loguru(level="DEBUG") as log_output:
         _forward_seeder(RecordingMngrCaller(result=_SEEDED), make_fake_chat_app_forward_route(handler)).seed(
-            _ATTEMPT_ID, _AGENT_ID, _request()
+            _ATTEMPT_ID, _AGENT_ID
         )
 
     lines = log_output.getvalue().splitlines()
@@ -510,7 +433,7 @@ def _seed_through_a_real_forward(
         route = ChatAppForwardRoute(
             forward_port=FAKE_FORWARD_PORT, make_client=lambda: client, window_seconds=5.0, retry_interval_seconds=0.01
         )
-        attempt = seed_welcome_chat_through_forward(route, client, _AGENT_ID, _request())
+        attempt = seed_welcome_chat_through_forward(route, client, _AGENT_ID)
     return attempt, backend_requests
 
 
@@ -522,7 +445,7 @@ def test_the_forward_routes_the_chat_apps_name_to_its_service_and_retries_until_
 
     assert attempt == ForwardSeedAttempt(outcome=WelcomeChatOutcome(chat_id="agent-over-forward"))
     assert [str(request.url) for request in backend_requests] == ["http://chat.invalid/api/chats/seed"] * 2
-    assert json.loads(backend_requests[-1].content) == _request().seed_body()
+    assert json.loads(backend_requests[-1].content) == FIXED_WELCOME_CHAT_SEED_BODY
     # The forward keeps its own session cookie from the workspace's services.
     assert MNGR_FORWARD_SESSION_COOKIE_NAME not in backend_requests[-1].headers.get("cookie", "")
 

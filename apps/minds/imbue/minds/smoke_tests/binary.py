@@ -50,6 +50,9 @@ from imbue.minds.desktop_client.e2e_workspace_runner import DEV_CHECKOUT_LAUNCH_
 from imbue.minds.desktop_client.e2e_workspace_runner import ElectronLaunchTarget
 from imbue.minds.desktop_client.e2e_workspace_runner import backend_origin_from_page
 from imbue.minds.desktop_client.e2e_workspace_runner import electron_app_session
+from imbue.minds.desktop_client.host_names import DEFAULT_WORKSPACE_NAME_BASE_ENV_VAR
+from imbue.minds.desktop_client.host_names import read_configured_host_name_base
+from imbue.minds.errors import DefaultWorkspaceNameBaseError
 from imbue.minds.smoke_tests.accounts import smoke_headers
 from imbue.minds.smoke_tests.backend import resolve_smoke_client_config_path
 from imbue.minds.smoke_tests.data_types import ManifestArtifact
@@ -70,9 +73,11 @@ from imbue.minds.smoke_tests.primitives import SMOKE_BINARY_PATH_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_CHANNEL_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_DEV_CHECKOUT_ENABLED_VALUE
 from imbue.minds.smoke_tests.primitives import SMOKE_DEV_CHECKOUT_ENV_VAR
+from imbue.minds.smoke_tests.primitives import SMOKE_EMAIL_PREFIX
 from imbue.minds.smoke_tests.primitives import SMOKE_PROFILE_FILE_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_TIER_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SmokeConfigError
+from imbue.minds.smoke_tests.primitives import SmokeRunId
 
 # The env vars that name a build; one of them has to be set for a run to launch anything.
 BINARY_SELECTION_ENV_VARS: Final[tuple[str, ...]] = (
@@ -504,6 +509,25 @@ def app_environment(environ: Mapping[str, str], launch_env: Mapping[str, str]) -
     return {**inherited, **launch_env}
 
 
+def default_workspace_name_base_for_run(run_id: SmokeRunId, suffix: str) -> str:
+    """What a run has the app name a workspace whose create names none: ``studio-smoke-<run id>-<suffix>``.
+
+    The prefix every smoke resource carries, the id the run is known as, and a
+    suffix so a rerun of the same run id never collides with a leftover. The
+    app normalizes the base it is handed and refuses one too long to be a name,
+    so this is the base as the app reads it, which is the name the workspace
+    gets; a run id too long for that is refused here.
+    """
+    requested = f"{SMOKE_EMAIL_PREFIX}{run_id}-{suffix}"
+    try:
+        name_base = read_configured_host_name_base({DEFAULT_WORKSPACE_NAME_BASE_ENV_VAR: requested})
+    except DefaultWorkspaceNameBaseError as exc:
+        raise SmokeConfigError(f"The run id {str(run_id)!r} leaves no usable workspace name: {exc}") from exc
+    if name_base is None:
+        raise SmokeConfigError(f"The app reads no workspace name base from {requested!r}.")
+    return str(name_base)
+
+
 def profile_file_launch_env(environ: Mapping[str, str]) -> dict[str, str]:
     """The app's profiling switch: ``MINDS_PROFILE_FILE`` at the path ``MINDS_SMOKE_PROFILE_FILE`` names, or nothing.
 
@@ -522,7 +546,14 @@ def profile_file_launch_env(environ: Mapping[str, str]) -> dict[str, str]:
 
 @contextmanager
 def launched_studio_app(
-    binary: StudioBinary, backend: SmokeBackend, data_home: Path, debug_port: int, display: str | None
+    binary: StudioBinary,
+    backend: SmokeBackend,
+    data_home: Path,
+    debug_port: int,
+    display: str | None,
+    # What the app names a workspace whose create names none, as the first run's does
+    # (see ``default_workspace_name_base_for_run``).
+    default_workspace_name_base: str,
 ) -> Generator[StudioAppSession, None, None]:
     """Launch ``binary`` against ``backend`` on a throwaway data home, with Playwright attached over CDP.
 
@@ -550,6 +581,7 @@ def launched_studio_app(
         MINDS_ROOT_NAME_ENV_VAR: str(binary.root_name),
         ACTIVATED_CLIENT_CONFIG_PATH_ENV_VAR: str(resolve_smoke_client_config_path(backend.env_name)),
         _BROWSER_ENV_VAR: no_op_command,
+        DEFAULT_WORKSPACE_NAME_BASE_ENV_VAR: default_workspace_name_base,
         **({_DISPLAY_ENV_VAR: display} if display is not None else {}),
         **profile_file_launch_env(os.environ),
     }

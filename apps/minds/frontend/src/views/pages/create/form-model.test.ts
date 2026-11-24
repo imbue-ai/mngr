@@ -535,7 +535,6 @@ describe("CreateFormModel", () => {
     expect(labelOf(`${CONNECTION_LAUNCH_PREFIX}aws_acct`)).toBe("team aws (AWS)");
     // A this-device-only connection under an account reads apart from the account's own.
     expect(labelOf(`${CONNECTION_LAUNCH_PREFIX}modal_acct`)).toBe(`my modal (Modal)${LOCAL_CONNECTION_SUFFIX}`);
-    // The modes say themselves the way the creation transcript does.
     expect(labelOf("IMBUE_CLOUD")).toBe(launchModeLabel("IMBUE_CLOUD"));
     // No account: only this device's connections, unsuffixed, and Imbue Cloud unusable.
     model.accountId = "";
@@ -755,7 +754,6 @@ describe("CreateFormModel", () => {
           memory_gb: null,
           disk_gb: null,
           color: "#123456",
-          is_onboarding_driven_by_agent: false,
           unavailable_reason: "",
         },
       }),
@@ -792,7 +790,6 @@ describe("CreateFormModel", () => {
           memory_gb: null,
           disk_gb: null,
           color: "#123456",
-          is_onboarding_driven_by_agent: false,
           unavailable_reason: "",
         },
       }),
@@ -822,7 +819,6 @@ describe("CreateFormModel", () => {
           memory_gb: null,
           disk_gb: null,
           color: "#123456",
-          is_onboarding_driven_by_agent: false,
           unavailable_reason: reason,
         },
       }),
@@ -871,7 +867,6 @@ describe("CreateFormModel", () => {
           memory_gb: null,
           disk_gb: null,
           color: "#123456",
-          is_onboarding_driven_by_agent: false,
           unavailable_reason: "",
         },
       }),
@@ -901,7 +896,6 @@ describe("CreateFormModel", () => {
           memory_gb: null,
           disk_gb: null,
           color: "#123456",
-          is_onboarding_driven_by_agent: false,
           unavailable_reason: "",
         },
       }),
@@ -1005,7 +999,6 @@ describe("CreateFormModel machine size", () => {
           memory_gb: 32,
           disk_gb: null,
           color: "#123456",
-          is_onboarding_driven_by_agent: false,
           unavailable_reason: "",
         },
       }),

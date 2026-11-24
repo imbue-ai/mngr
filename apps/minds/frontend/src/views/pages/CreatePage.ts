@@ -4,14 +4,13 @@
 // /api/v1/workspaces front door and routes to /creating/<operation_id>. DOM
 // ids match the legacy form (the e2e workspace runner drives them).
 //
-// The same component also runs embedded in a modal (the start flow's local and
-// own-cloud answers, the creation page's Retry): there the masthead is the
+// The same component also runs embedded in a modal (the sign-in page's "Use
+// without an account", the creation page's Retry): there the masthead is the
 // modal's, the caller picks the opening preset, and a successful submit
 // reports the operation id instead of routing.
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
-import { electronBridge } from "../../electron-bridge";
 import type { CreateFormDefaults, LocalBackendPrerequisite } from "../../models/create";
 import type { MachineSizeDimension } from "../../models/machineSize";
 import {
@@ -36,7 +35,7 @@ import { CloudAccountsModal, CloudAccountsModalState } from "./create/CloudAccou
 import { slowStartNotice } from "./create/ComputeNotices";
 import { PresetCards } from "./create/PresetCards";
 import { PrerequisiteNotice } from "./create/PrerequisiteNotice";
-import type { CreateSubmitBody, PresetName } from "./create/form-model";
+import type { PresetName } from "./create/form-model";
 import {
   CREATE_NO_RESPONSE,
   isSubmitErrorClearedByRestart,
@@ -48,20 +47,8 @@ import {
   regionChoiceLabel,
 } from "./create/form-model";
 import { ImbueCloudSignInGate } from "./create/sign-in-gate";
-import { VerificationWaitNotice } from "./create/VerificationWaitNotice";
-import {
-  VERIFICATION_CHECK_FAILED_MESSAGE,
-  VERIFICATION_WAITING_LABEL,
-  VerificationWait,
-  createOnceVerified,
-} from "./create/verification-wait";
 import { renderSwitch, renderSwitchWord } from "../components/Switch";
 import { ENABLE_SHARING_LABEL, SHARING_SENTENCE } from "./workspace/ShareTab";
-
-/** The advanced view's switch for the creation page's onboarding examples, and the line under it. */
-export const ONBOARDING_EXAMPLES_LABEL = "Show onboarding examples?";
-export const ONBOARDING_EXAMPLES_SENTENCE =
-  "While the workspace is built, the creation page shows a short recording of what people build with Studio.";
 
 export interface CreatePageAttrs {
   /** `page` (the default) is the routed /create page; `embedded` is the form inside a modal. */
@@ -72,15 +59,13 @@ export interface CreatePageAttrs {
   retryId?: string;
   /** The window's account can't use Imbue Cloud (e.g. the waitlist, a suspended account): Imbue backups and sharing open off. */
   isImbueCloudRefused?: boolean;
-  /** Open with "Show onboarding examples?" on: the start flow's form answers, whose create is the first. */
-  isOnboardingDrivenByAgent?: boolean;
   /** Embedded mode's outcome: called with the new attempt's operation id instead of routing. */
   onSubmitted?: (operationId: string) => void;
 }
 
 /**
- * The create form in a modal, as the start flow's form answers and the
- * creation page's Retry host it: one shell (size, title) around the embedded
+ * The create form in a modal, as the sign-in page's "Use without an account"
+ * and the creation page's Retry host it: one shell (size, title) around the embedded
  * form, so the two hosts cannot drift. `key` and `id` are the caller's, since
  * both render it inside a keyed fragment and name it for tests.
  */
@@ -121,10 +106,6 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
   const isEmbedded = attrs.mode === "embedded";
   const model = new CreateFormModel();
   const connectionModal = new CloudAccountsModalState();
-  const verificationWait = new VerificationWait({
-    redraw: () => m.redraw(),
-    bringAppToFront: () => electronBridge.bringAppToFront(),
-  });
   // Set once the form is gone, so a create a sign-in enabled does not go out from it.
   let isRemoved = false;
   // Imbue Cloud asked for in a window with no signed-in account: the gate
@@ -206,14 +187,9 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
 
   function submit(event: SubmitEvent): void {
     event.preventDefault();
-    // A create is already on its way (or waiting on the emailed link).
+    // A create is already on its way.
     if (model.isSubmitting) return;
     createNow(false);
-  }
-
-  function cancelVerificationWait(): void {
-    verificationWait.cancel();
-    model.isSubmitting = false;
   }
 
   /** `isAfterSignIn`: a create a sign-in just enabled, which must not ask for another. */
@@ -243,20 +219,11 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
     model.isSubmitting = true;
     model.submitError = "";
     model.submitErrorField = "";
-    // Taken now: the form stays editable while the emailed link is awaited,
-    // and the create that goes out must be the one whose account was checked.
-    const body = model.submitBody();
-    createOnceVerified(verificationWait, model, () => postCreate(body, isAfterSignIn), refuseUncheckedVerification);
+    postCreate(isAfterSignIn);
   }
 
-  function refuseUncheckedVerification(): void {
-    model.isSubmitting = false;
-    model.submitError = VERIFICATION_CHECK_FAILED_MESSAGE;
-    m.redraw();
-  }
-
-  function postCreate(body: CreateSubmitBody, isAfterSignIn: boolean): void {
-    void submitCreateRequest({ ...body }).then((result) => {
+  function postCreate(isAfterSignIn: boolean): void {
+    void submitCreateRequest({ ...model.submitBody() }).then((result) => {
       if (result.status === 0) {
         model.isSubmitting = false;
         model.submitError = CREATE_NO_RESPONSE;
@@ -655,34 +622,6 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                 )
               : null,
           ]),
-          m("div", { id: "onboarding-examples-row" }, [
-            m("div", { class: "flex items-center justify-between gap-3" }, [
-              m(
-                FormLabel,
-                { target: "is_onboarding_driven_by_agent", inline: true },
-                ONBOARDING_EXAMPLES_LABEL,
-              ),
-              m("span", { class: "flex shrink-0 items-center gap-2" }, [
-                renderSwitch({
-                  id: "is_onboarding_driven_by_agent",
-                  isOn: model.isOnboardingDrivenByAgent,
-                  label: ONBOARDING_EXAMPLES_LABEL,
-                  onFlip: (isOn) => {
-                    model.isOnboardingDrivenByAgent = isOn;
-                  },
-                }),
-                renderSwitchWord({
-                  id: "onboarding-examples-word",
-                  isOn: model.isOnboardingDrivenByAgent,
-                }),
-              ]),
-            ]),
-            m(
-              "p",
-              { class: "mt-1 type-helper text-tertiary" },
-              ONBOARDING_EXAMPLES_SENTENCE,
-            ),
-          ]),
           regionOptions.length > 0
             ? m("div", { id: "region-row" }, [
                 m("div", { class: "flex items-start justify-between gap-3" }, [
@@ -853,7 +792,6 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
       fetchCreateFormDefaults(retryId, getAppContext().shell.accountId)
         .then((defaults) => {
           model.applyDefaults(defaults);
-          if (attrs.isOnboardingDrivenByAgent === true) model.isOnboardingDrivenByAgent = true;
           // An embedded caller's opening preset; over a retry's prefill it
           // sets only where the workspace runs.
           if (attrs.initialPreset !== undefined) selectPreset(attrs.initialPreset);
@@ -885,7 +823,6 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
     onremove() {
       isRemoved = true;
       if (hostNameDebounce !== null) clearTimeout(hostNameDebounce);
-      verificationWait.cancel();
     },
     view() {
       const defaults = model.defaults;
@@ -966,7 +903,6 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                   // hidden with the panel.
                   prerequisiteNotice(model.unmetPrerequisiteForSubmit(), "submit-prerequisite"),
                 ]),
-                m(VerificationWaitNotice, { wait: verificationWait, onCancel: cancelVerificationWait }),
                 m(
                   "div",
                   {
@@ -1037,11 +973,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                       extra: "w-80",
                       disabled: model.isSubmitting || model.unmetPrerequisiteForSubmit() !== null,
                     },
-                    verificationWait.email !== null
-                      ? VERIFICATION_WAITING_LABEL
-                      : model.isSubmitting
-                        ? "Creating..."
-                        : "Create",
+                    model.isSubmitting ? "Creating..." : "Create",
                   ),
                 ),
                 m(CloudAccountsModal, {

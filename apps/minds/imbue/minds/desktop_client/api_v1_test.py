@@ -173,6 +173,7 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHostSize
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.polling import poll_for_value
@@ -239,7 +240,6 @@ class _RecordingAgentCreator(AgentCreator):
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
         account_id: str = "",
-        is_onboarding_driven_by_agent: bool = False,
     ) -> CreateAttemptId:
         self._last_call = {
             "repo_source": repo_source,
@@ -258,7 +258,6 @@ class _RecordingAgentCreator(AgentCreator):
             "docker_runtime": docker_runtime,
             "original_minds_version": original_minds_version,
             "account_id": account_id,
-            "is_onboarding_driven_by_agent": is_onboarding_driven_by_agent,
             "on_created": on_created,
             "backup_request": backup_request,
         }
@@ -288,6 +287,7 @@ def _client_with_agent_creator(
     session_store: MultiAccountSessionStore | None = None,
     minds_config: MindsConfig | None = None,
     connection_store: ConnectionStore | None = None,
+    configured_host_name_base: HostName | None = None,
 ) -> FlaskClient:
     """Build a test client whose ``/api/v1`` create route has an ``AgentCreator`` wired.
 
@@ -316,6 +316,7 @@ def _client_with_agent_creator(
         paths=InstallationPaths(data_dir=tmp_path / "minds"),
         minds_api_key=_TEST_KEY,
         minds_config=minds_config,
+        configured_host_name_base=configured_host_name_base,
     )
     return app.test_client()
 
@@ -1469,6 +1470,39 @@ def test_create_workspace_auto_names_next_workspace_when_host_name_omitted(
 
     assert response.status_code == 202
     assert str(creator.last_call["host_name"]) == "workspace-2"
+
+
+def test_create_workspace_names_an_unnamed_create_after_the_configured_base(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """The base itself while it is free, numbered once a workspace holds it; a submitted name still wins."""
+    existing_id = AgentId()
+    crowded_resolver = make_resolver_with_data(
+        make_agents_json(existing_id, labels={"is_primary": "true"}, host_name="studio-smoke-run-7"),
+    )
+    base = HostName("studio-smoke-run-7")
+    free_creator = _make_recording_creator(tmp_path / "free", root_concurrency_group)
+    free_client = _client_with_agent_creator(
+        tmp_path / "free", root_concurrency_group, agent_creator=free_creator, configured_host_name_base=base
+    )
+    taken_creator = _make_recording_creator(tmp_path / "taken", root_concurrency_group)
+    taken_client = _client_with_agent_creator(
+        tmp_path / "taken",
+        root_concurrency_group,
+        resolver=crowded_resolver,
+        agent_creator=taken_creator,
+        configured_host_name_base=base,
+    )
+    body = {"git_url": "https://example/repo"}
+
+    assert free_client.post("/api/v1/workspaces", headers=_auth_header(), json=body).status_code == 202
+    assert str(free_creator.last_call["host_name"]) == "studio-smoke-run-7"
+    assert taken_client.post("/api/v1/workspaces", headers=_auth_header(), json=body).status_code == 202
+    assert str(taken_creator.last_call["host_name"]) == "studio-smoke-run-7-2"
+    named = free_client.post("/api/v1/workspaces", headers=_auth_header(), json={**body, "host_name": "My Own"})
+    assert named.status_code == 202
+    assert str(free_creator.last_call["host_name"]) == "my-own"
 
 
 def test_create_operation_status_includes_status_text(
@@ -6842,7 +6876,6 @@ class _NameConflictAgentCreator(_RecordingAgentCreator):
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
         account_id: str = "",
-        is_onboarding_driven_by_agent: bool = False,
     ) -> CreateAttemptId:
         raise WorkspaceNameInUseError(
             "A machine named 'contended' is already being created. "
@@ -6998,30 +7031,22 @@ def test_create_workspace_honours_an_explicit_backup_provider_under_an_account(
     assert backup_request.backup_provider is BackupProvider.CONFIGURE_LATER
 
 
-def test_create_workspace_threads_the_onboarding_examples_flag_off_unless_the_body_turns_it_on(
+def test_create_workspace_accepts_and_ignores_the_retired_onboarding_examples_flag(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
 ) -> None:
-    # The creation page reads the flag back from the attempt's record, so it must reach the creator;
-    # the form leaves it off, and the start flow's creates (and the form's switch) turn it on.
+    """A client from before the creation page stopped showing examples still sends the flag with its create."""
     creator = _make_recording_creator(tmp_path, root_concurrency_group)
     client = _client_with_agent_creator(tmp_path, root_concurrency_group, agent_creator=creator)
 
-    quiet = client.post(
-        "/api/v1/workspaces",
-        headers=_auth_header(),
-        json={"git_url": "https://example/repo", "host_name": "quiet-create"},
-    )
-    assert quiet.status_code == 202
-    assert creator.last_call["is_onboarding_driven_by_agent"] is False
-
-    asked = client.post(
+    response = client.post(
         "/api/v1/workspaces",
         headers=_auth_header(),
         json={"git_url": "https://example/repo", "host_name": "asked-create", "is_onboarding_driven_by_agent": True},
     )
-    assert asked.status_code == 202
-    assert creator.last_call["is_onboarding_driven_by_agent"] is True
+
+    assert response.status_code == 202
+    assert creator.last_call["host_name"] == "asked-create"
 
 
 def test_create_workspace_marks_onboarding_complete(

@@ -22,12 +22,7 @@ import { webLogin } from "../../models/webLogin";
 import { ErrorNotice } from "../components/ErrorDisplay";
 import { DialogCloseButton } from "../components/Modal";
 import type { CreatePageAttrs } from "./CreatePage";
-import {
-  CreatePage,
-  ONBOARDING_EXAMPLES_LABEL,
-  ONBOARDING_EXAMPLES_SENTENCE,
-  createFormModal,
-} from "./CreatePage";
+import { CreatePage, createFormModal } from "./CreatePage";
 import { ENABLE_SHARING_LABEL, SHARING_SENTENCE } from "./workspace/ShareTab";
 import { SLOW_START_WARNING } from "./create/ComputeNotices";
 import { PresetCards } from "./create/PresetCards";
@@ -205,39 +200,6 @@ describe("CreatePage", () => {
     expect(attrsOf(byId(thrown, "enable_web_access") as AnyVnode)["aria-checked"]).toBe("false");
     expect(allText(byId(thrown, "web-access-word"))).toBe("No");
   });
-
-  it("offers the onboarding examples in the advanced view, off from the form and on for the start flow's form", async () => {
-    const { page, vnode } = await loadedPage();
-    (attrsOf(byId(page.view.call(page, vnode), "toggle-advanced") as AnyVnode).onclick as () => void)();
-    const row = byId(page.view.call(page, vnode), "onboarding-examples-row");
-
-    expect(allText(row)).toContain(ONBOARDING_EXAMPLES_LABEL);
-    expect(allText(row)).toContain(ONBOARDING_EXAMPLES_SENTENCE);
-    const control = byId(row, "is_onboarding_driven_by_agent") as AnyVnode;
-    expect(attrsOf(control).role).toBe("switch");
-    expect(attrsOf(control)["aria-checked"]).toBe("false");
-    expect(allText(byId(row, "onboarding-examples-word"))).toBe("No");
-
-    (attrsOf(control).onclick as () => void)();
-    const thrown = byId(page.view.call(page, vnode), "onboarding-examples-row");
-    expect(attrsOf(byId(thrown, "is_onboarding_driven_by_agent") as AnyVnode)["aria-checked"]).toBe("true");
-
-    // The start flow's form answers open with it on: theirs is the first workspace.
-    const { page: flowPage, vnode: flowVnode } = await loadedPage({
-      mode: "embedded",
-      initialPreset: "local",
-      isOnboardingDrivenByAgent: true,
-    });
-    const flowRow = byId(
-      flowPage.view.call(flowPage, flowVnode),
-      "onboarding-examples-row",
-    );
-    expect(
-      attrsOf(byId(flowRow, "is_onboarding_driven_by_agent") as AnyVnode)[
-        "aria-checked"
-      ],
-    ).toBe("true");
-  });
 });
 
 /** Press Create: the form's submit, as Enter or the button sends it. */
@@ -397,6 +359,22 @@ describe("CreatePage's sign-in for Imbue Cloud", () => {
       "/ui/api/create/form-defaults?account=local",
       `/ui/api/create/form-defaults?account=${BOB.user_id}`,
     ]);
+  });
+
+  it("posts an Imbue Cloud create at once, asking nothing about the account's email first", async () => {
+    const { page, vnode } = await loadedPage();
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    const requests: string[] = [];
+    vi.stubGlobal("fetch", (url: string) => {
+      requests.push(url);
+      return Promise.resolve(jsonResponse({ operation_id: "op-1" }, 202));
+    });
+
+    submit(page, vnode);
+    await settle();
+
+    expect(requests).toEqual(["/api/v1/workspaces"]);
+    expect(routeSet).toHaveBeenCalledWith("/creating/op-1");
   });
 
   it("moves a retried Imbue Cloud attempt to this computer for Run on this computer, keeping its repository and name", async () => {

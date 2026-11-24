@@ -1,27 +1,24 @@
-"""Continue the onboarding conversation inside a new workspace as its first chat.
+"""Seed a new workspace's welcome chat, the chat its first run plays in.
 
-The start flow and the creation page are a conversation: the "what is honest software"
-exchange, the questions about where to run the workspace, the settings the user chose, the
-setup and ready lines. Once the workspace is up that conversation carries on inside it: the
-creation page hands the turns to this module, which posts them to the chat app's seed route
-(``POST /api/chats/seed``) and gets the chat's id back; the chat app lists the chat with the
-transcript on its page, and the user's first message there launches the workspace's first real
-agent.
+Every creation page asks for the same seed (``WELCOME_CHAT_SEED_BODY``): a chat named "Welcome"
+with no turns, flagged as a first-run arrival. This module posts it to the chat app's seed
+route (``POST /api/chats/seed``) and gets the chat's id back; the workspace then owes its owner
+the provider page and opens that chat on its first conversation.
 
-The page hands the conversation over as soon as it has it, while the workspace is still being
-built, and the seed runs when the create attempt finishes (``WelcomeChatSeeder``), so a
-workspace the user enters some other way -- from the workspace list, after leaving the creation
-page -- still shows its welcome chat.
+The page asks as soon as it loads, while the workspace is still being built, and the seed runs
+when the create attempt finishes (``WelcomeChatSeeder``), so a workspace the user enters some
+other way -- from the workspace list, after leaving the creation page -- still plays its
+arrival. A create whose creation page never asked (one made through the API alone) is not
+seeded.
 
 The seed goes to the chat app's own origin through ``mngr forward`` (``ChatAppForwardRoute``),
 retried every quarter second while the forward cannot route it yet or the chat app is not ready
 to take it. When that route is not configured, or cannot deliver the seed (it keeps failing past
 its window, or answers the way only a route that cannot reach the chat app does), the seed falls
 back to running the template's ``system/scripts/seed_welcome_chat.py`` in the workspace through
-``mngr exec``, which posts the same body from inside. The transcript rides that command line as
-base64 (``mngr exec`` carries no stdin, and the turns hold newlines and quotes). The script
-retries the chat app for a bounded window of its own, so that call is given a little longer than
-the window.
+``mngr exec``, which posts the same body from inside. The body rides that command line as
+base64 (``mngr exec`` carries no stdin). The script retries the chat app for a bounded window of
+its own, so that call is given a little longer than the window.
 """
 
 import base64
@@ -29,8 +26,8 @@ import json
 import shlex
 import threading
 from collections.abc import Callable
+from collections.abc import Mapping
 from concurrent.futures import Future
-from enum import auto
 from pathlib import Path
 from typing import Final
 
@@ -38,13 +35,11 @@ import httpx2
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
-from pydantic import model_validator
 from tenacity import Retrying
 from tenacity import retry_if_exception_type
 from tenacity import stop_after_delay
 from tenacity import wait_fixed
 
-from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import info_span
 from imbue.imbue_common.mutable_model import MutableModel
@@ -54,7 +49,6 @@ from imbue.minds.desktop_client.agent_creator import MNGR_FORWARD_SCHEME
 from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.in_workspace_mngr import in_workspace_failure_detail
-from imbue.minds.errors import EmptyWelcomeChatError
 from imbue.minds.errors import MindError
 from imbue.minds.primitives import CreateAttemptId
 from imbue.minds.utils.mngr_caller import MngrCallResult
@@ -80,42 +74,9 @@ FORWARD_SEED_RETRY_INTERVAL_SECONDS: Final[float] = 0.25
 FORWARD_SEED_REQUEST_TIMEOUT_SECONDS: Final[float] = 10.0
 
 
-class WelcomeChatRole(LowerCaseStrEnum):
-    """Who said a turn of the onboarding conversation."""
-
-    USER = auto()
-    ASSISTANT = auto()
-
-
-class WelcomeChatTurn(FrozenModel):
-    """One turn, as the chat app's seed route takes it."""
-
-    role: WelcomeChatRole = Field(description="The side of the conversation the turn belongs to")
-    text: str = Field(description="The turn's text, as markdown")
-
-
-class WelcomeChatRequest(FrozenModel):
-    """The body the creation page posts once the workspace is ready: the chat's name and its turns.
-
-    A first-run create (``is_first_run``) sends no turns: the workspace plays its own arrival in
-    the chat.
-    """
-
-    title: str = Field(default="", description="The chat's display name; empty lets the chat app number it")
-    turns: tuple[WelcomeChatTurn, ...] = Field(default=(), description="The conversation so far, in order")
-    is_first_run: bool = Field(default=False, description="Whether the workspace plays its first-run arrival here")
-
-    @model_validator(mode="after")
-    def _require_turns_unless_first_run(self) -> "WelcomeChatRequest":
-        if not self.is_first_run and len(self.turns) == 0:
-            raise EmptyWelcomeChatError("A welcome chat needs at least one turn unless it is a first-run arrival")
-        return self
-
-    def seed_body(self) -> dict[str, object]:
-        """The body the chat app's seed route takes. The first-run flag goes only to a template that plays the
-        arrival, so any other seed keeps the body every template's seed route accepts."""
-        exclude = None if self.is_first_run else {"is_first_run"}
-        return self.model_dump(mode="json", exclude=exclude)
+# What the chat app's seed route is sent for every workspace: an empty chat that the workspace
+# plays its first-run arrival in.
+WELCOME_CHAT_SEED_BODY: Final[Mapping[str, object]] = {"title": "Welcome", "turns": (), "is_first_run": True}
 
 
 class WelcomeChatOutcome(FrozenModel):
@@ -129,9 +90,9 @@ class WelcomeChatOutcome(FrozenModel):
         return self.chat_id != ""
 
 
-def build_seed_welcome_chat_args(workspace_address: str, welcome_chat: WelcomeChatRequest) -> list[str]:
-    """The ``mngr`` args that run the template's seeding script in the workspace with the transcript."""
-    body = json.dumps(welcome_chat.seed_body())
+def build_seed_welcome_chat_args(workspace_address: str) -> list[str]:
+    """The ``mngr`` args that run the template's seeding script in the workspace with the seed body."""
+    body = json.dumps(WELCOME_CHAT_SEED_BODY)
     encoded = base64.b64encode(body.encode("utf-8")).decode("ascii")
     command = shlex.join(["python3", SEED_SCRIPT_PATH, "--transcript-base64", encoded])
     # --no-start: the workspace was just created and is running; seeding must never boot one.
@@ -164,13 +125,9 @@ def _failure_detail(result: MngrCallResult) -> str:
     return detail if detail else f"the seeding script exited with code {result.returncode}"
 
 
-def seed_welcome_chat(
-    mngr_caller: MngrCaller, workspace_address: str, welcome_chat: WelcomeChatRequest
-) -> WelcomeChatOutcome:
-    """Seed the workspace's first chat with the conversation; the chat's id, or why there is none."""
-    result = mngr_caller.call(
-        build_seed_welcome_chat_args(workspace_address, welcome_chat), timeout=SEED_TIMEOUT_SECONDS
-    )
+def seed_welcome_chat(mngr_caller: MngrCaller, workspace_address: str) -> WelcomeChatOutcome:
+    """Seed the workspace's welcome chat through ``mngr exec``; the chat's id, or why there is none."""
+    result = mngr_caller.call(build_seed_welcome_chat_args(workspace_address), timeout=SEED_TIMEOUT_SECONDS)
     if result.returncode == 0 and not result.is_timed_out:
         chat_id = _chat_id_from_stdout(result.stdout)
         if chat_id:
@@ -247,10 +204,10 @@ def describe_forward_transport_failure(error: httpx2.TransportError) -> str:
     return f"{type(error).__name__}: {message}" if message else type(error).__name__
 
 
-def _post_seed(client: httpx2.Client, url: str, host: str, body: dict[str, object]) -> httpx2.Response:
+def _post_seed(client: httpx2.Client, url: str, host: str) -> httpx2.Response:
     """Post the seed once; raises ``_SeedNotDeliverableYetError`` for the failures that are safe to retry."""
     try:
-        response = client.post(url, headers={"Host": host}, json=body)
+        response = client.post(url, headers={"Host": host}, json=WELCOME_CHAT_SEED_BODY)
     except (httpx2.ConnectError, httpx2.ConnectTimeout) as e:
         raise _SeedNotDeliverableYetError(describe_forward_transport_failure(e)) from e
     # Both the forward (no route to the chat app yet, or the app not listening) and the chat app (its
@@ -261,7 +218,7 @@ def _post_seed(client: httpx2.Client, url: str, host: str, body: dict[str, objec
 
 
 def seed_welcome_chat_through_forward(
-    route: ChatAppForwardRoute, client: httpx2.Client, workspace_agent_id: AgentId, welcome_chat: WelcomeChatRequest
+    route: ChatAppForwardRoute, client: httpx2.Client, workspace_agent_id: AgentId
 ) -> ForwardSeedAttempt:
     """Post the seed to the workspace's chat app through the forward, retrying while it cannot be delivered yet.
 
@@ -274,7 +231,6 @@ def seed_welcome_chat_through_forward(
     """
     url = route.chat_app_url(CHAT_SEED_PATH)
     host = chat_app_forward_host(workspace_agent_id)
-    body = welcome_chat.seed_body()
     try:
         for attempt in Retrying(
             retry=retry_if_exception_type(_SeedNotDeliverableYetError),
@@ -283,7 +239,7 @@ def seed_welcome_chat_through_forward(
             reraise=True,
         ):
             with attempt:
-                response = _post_seed(client, url, host, body)
+                response = _post_seed(client, url, host)
     except _SeedNotDeliverableYetError as e:
         return ForwardSeedAttempt(unavailable_reason=f"not delivered within {route.window_seconds:g}s: {e}")
     except httpx2.TransportError as e:
@@ -307,27 +263,24 @@ def seed_welcome_chat_through_forward(
     return ForwardSeedAttempt(unavailable_reason=f"the forward answered {forward_answer_detail(response)}")
 
 
-def _seed_through_route(
-    route: ChatAppForwardRoute, workspace_agent_id: AgentId, welcome_chat: WelcomeChatRequest
-) -> ForwardSeedAttempt:
+def _seed_through_route(route: ChatAppForwardRoute, workspace_agent_id: AgentId) -> ForwardSeedAttempt:
     try:
         client = route.make_client()
     except OSError as e:
         # The proxy's CA certificate could not be read.
         return ForwardSeedAttempt(unavailable_reason=f"its client could not be built: {e}")
     with client:
-        return seed_welcome_chat_through_forward(route, client, workspace_agent_id, welcome_chat)
+        return seed_welcome_chat_through_forward(route, client, workspace_agent_id)
 
 
 class WelcomeChatSeeder(MutableModel):
     """Seeds each create attempt's welcome chat in its new workspace once, whether or not the creation page is there.
 
-    The page hands the conversation over while the workspace is still being built (``hold``),
-    and the agent creator's done hook seeds it the moment the attempt finishes (``seed_held``).
-    A page that hands it over again before then (one revisited before the attempt finished)
-    replaces what is held: the latest hand-over is the one seeded. A page still open at that
-    moment asks for the seed itself (``seed``) and waits on the one already running instead of
-    starting a second chat. A seed that failed is not kept, so the next ask runs it again.
+    The page asks while the workspace is still being built (``owe``), and the agent creator's
+    done hook seeds the workspace the moment the attempt finishes (``seed_if_owed``). A page
+    still open at that moment asks for the seed itself (``seed``) and waits on the one already
+    running instead of starting a second chat. A seed that failed is not kept, so the next ask
+    runs it again.
     """
 
     model_config = {"arbitrary_types_allowed": True}
@@ -341,43 +294,36 @@ class WelcomeChatSeeder(MutableModel):
     )
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    _held_by_attempt: dict[CreateAttemptId, WelcomeChatRequest] = PrivateAttr(default_factory=dict)
+    _owed_attempts: set[CreateAttemptId] = PrivateAttr(default_factory=set)
     _seed_by_attempt: dict[CreateAttemptId, Future[WelcomeChatOutcome]] = PrivateAttr(default_factory=dict)
 
-    def hold(self, create_attempt_id: CreateAttemptId, welcome_chat: WelcomeChatRequest) -> None:
-        """Keep the attempt's conversation for its seed; the latest one handed over is the one seeded."""
+    def owe(self, create_attempt_id: CreateAttemptId) -> None:
+        """Record that the attempt's creation page asked for the seed, to run when the attempt finishes."""
         with self._lock:
-            self._held_by_attempt[create_attempt_id] = welcome_chat
+            self._owed_attempts.add(create_attempt_id)
 
-    def is_held(self, create_attempt_id: CreateAttemptId) -> bool:
+    def is_owed(self, create_attempt_id: CreateAttemptId) -> bool:
         with self._lock:
-            return create_attempt_id in self._held_by_attempt
+            return create_attempt_id in self._owed_attempts
 
-    def seed(
-        self, create_attempt_id: CreateAttemptId, workspace_agent_id: AgentId, welcome_chat: WelcomeChatRequest
-    ) -> WelcomeChatOutcome:
+    def seed_if_owed(self, create_attempt_id: CreateAttemptId, workspace_agent_id: AgentId) -> None:
+        """The agent creator's done hook: seed the workspace when its creation page asked for it."""
+        if self.is_owed(create_attempt_id):
+            self.seed(create_attempt_id, workspace_agent_id)
+
+    def seed(self, create_attempt_id: CreateAttemptId, workspace_agent_id: AgentId) -> WelcomeChatOutcome:
         """Seed the finished attempt's workspace now, or wait for the seed already under way, and answer its outcome."""
-        self.hold(create_attempt_id, welcome_chat)
-        return self._seed_once(create_attempt_id, workspace_agent_id)
-
-    def seed_held(self, create_attempt_id: CreateAttemptId, workspace_agent_id: AgentId) -> None:
-        """The agent creator's done hook: seed the conversation the page handed over, if it handed one over."""
-        if self.is_held(create_attempt_id):
-            self._seed_once(create_attempt_id, workspace_agent_id)
-
-    def _seed_once(self, create_attempt_id: CreateAttemptId, workspace_agent_id: AgentId) -> WelcomeChatOutcome:
         own: Future[WelcomeChatOutcome] = Future()
         with self._lock:
             running = self._seed_by_attempt.get(create_attempt_id)
             if running is None:
                 self._seed_by_attempt[create_attempt_id] = own
-            welcome_chat = self._held_by_attempt[create_attempt_id]
         if running is not None:
             return running.result()
         address = build_agent_address(workspace_agent_id, self.backend_resolver)
         # info_span rather than log_span: its timed close is at DEBUG, so the seed's duration reaches minds.log.
         with info_span("Seeding the welcome chat for create attempt {} in workspace {}", create_attempt_id, address):
-            outcome = self._deliver(workspace_agent_id, address, welcome_chat)
+            outcome = self._deliver(workspace_agent_id, address)
         if outcome.is_seeded:
             logger.debug("Seeded welcome chat {} for create attempt {}", outcome.chat_id, create_attempt_id)
         else:
@@ -392,12 +338,10 @@ class WelcomeChatSeeder(MutableModel):
         own.set_result(outcome)
         return outcome
 
-    def _deliver(
-        self, workspace_agent_id: AgentId, address: str, welcome_chat: WelcomeChatRequest
-    ) -> WelcomeChatOutcome:
+    def _deliver(self, workspace_agent_id: AgentId, address: str) -> WelcomeChatOutcome:
         """Seed through the forward when it can deliver the seed, else through mngr exec."""
         if self.chat_app_route is not None:
-            attempt = _seed_through_route(self.chat_app_route, workspace_agent_id, welcome_chat)
+            attempt = _seed_through_route(self.chat_app_route, workspace_agent_id)
             if attempt.outcome is not None:
                 return attempt.outcome
             logger.info(
@@ -406,7 +350,7 @@ class WelcomeChatSeeder(MutableModel):
                 attempt.unavailable_reason,
             )
         try:
-            return seed_welcome_chat(self.mngr_caller, address, welcome_chat)
+            return seed_welcome_chat(self.mngr_caller, address)
         except OSError as e:
             # Whoever waits on this seed must get an answer, so a call that never ran is a failed seed.
             return WelcomeChatOutcome(failure_detail=f"mngr could not be run: {e}")

@@ -18,7 +18,6 @@
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
-import { electronBridge } from "../../electron-bridge";
 import {
   fetchCreateFormDefaults,
   recoveryRoute,
@@ -41,15 +40,8 @@ import { keyStateChipFor, livenessBadgeFor, rowClickActionFor } from "./landing-
 import { slowStartNotice } from "./create/ComputeNotices";
 import { PRESET_TITLES, PresetCards } from "./create/PresetCards";
 import { PrerequisiteNotice } from "./create/PrerequisiteNotice";
-import type { CreateSubmitBody, PresetName } from "./create/form-model";
+import type { PresetName } from "./create/form-model";
 import { ImbueCloudSignInGate } from "./create/sign-in-gate";
-import { VerificationWaitNotice } from "./create/VerificationWaitNotice";
-import {
-  VERIFICATION_CHECK_FAILED_MESSAGE,
-  VERIFICATION_WAITING_LABEL,
-  VerificationWait,
-  createOnceVerified,
-} from "./create/verification-wait";
 import {
   CREATE_NO_RESPONSE,
   isSubmitErrorClearedByRestart,
@@ -148,15 +140,11 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
   const signInGate = new ImbueCloudSignInGate({
     model,
     isRemoved: () => isRemoved,
-    create: createWhenVerified,
+    create: postCreate,
     setSubmitError: (message) => {
       submitError = message;
       model.submitErrorField = "";
     },
-  });
-  const verificationWait = new VerificationWait({
-    redraw: () => m.redraw(),
-    bringAppToFront: () => electronBridge.bringAppToFront(),
   });
   const copyTimers: ReturnType<typeof setTimeout>[] = [];
   // Which step circles have already played their completion pop, so a redraw
@@ -190,7 +178,6 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
     isMessageCopied = false;
     isTrusted = false;
     submitError = "";
-    cancelVerificationWait();
     model.selectedPreset = null;
   }
 
@@ -223,11 +210,7 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
   }
 
   function goBack(target: number): void {
-    if (activeStep <= target) return;
-    // The wait's notice lives on the last step, so a create left held here
-    // would go out unseen.
-    if (verificationWait.email !== null) cancelVerificationWait();
-    else if (model.isSubmitting) return;
+    if (activeStep <= target || model.isSubmitting) return;
     activeStep = target;
   }
 
@@ -318,31 +301,14 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
       signInGate.start();
       return;
     }
-    createWhenVerified();
+    postCreate();
   }
 
-  function createWhenVerified(): void {
+  function postCreate(): void {
     model.isSubmitting = true;
     submitError = "";
     model.submitErrorField = "";
-    // Taken now: the create that goes out must be the one whose account was checked.
-    const body = model.submitBody();
-    createOnceVerified(verificationWait, model, () => postCreate(body), refuseUncheckedVerification);
-  }
-
-  function refuseUncheckedVerification(): void {
-    model.isSubmitting = false;
-    submitError = VERIFICATION_CHECK_FAILED_MESSAGE;
-    m.redraw();
-  }
-
-  function cancelVerificationWait(): void {
-    verificationWait.cancel();
-    model.isSubmitting = false;
-  }
-
-  function postCreate(body: CreateSubmitBody): void {
-    void submitCreateRequest({ ...body }).then((result) => {
+    void submitCreateRequest({ ...model.submitBody() }).then((result) => {
       if (
         result.status === 202 &&
         typeof result.data.operation_id === "string"
@@ -541,11 +507,6 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
     ]);
   }
 
-  function createButtonLabel(): string {
-    if (verificationWait.email !== null) return VERIFICATION_WAITING_LABEL;
-    return model.isSubmitting ? "Creating..." : "Create from Template";
-  }
-
   function submitErrorActions(): ErrorAction[] {
     if (!submitError) return [];
     if (isSubmitErrorClearedBySignIn(model.submitErrorField)) {
@@ -676,7 +637,6 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
       // explained here.
       prerequisiteNotice(model.unmetPrerequisiteForSubmit(), "insp-submit-prerequisite"),
       slowStartNotice("insp-slow-start-notice", model.isSlowStartCompute()),
-      m(VerificationWaitNotice, { wait: verificationWait, onCancel: cancelVerificationWait }),
       m(
         "div",
         { class: "mt-6" },
@@ -690,7 +650,7 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
             block: true,
             disabled: !isTrusted || model.isSubmitting || model.unmetPrerequisiteForSubmit() !== null,
           },
-          createButtonLabel(),
+          model.isSubmitting ? "Creating..." : "Create from Template",
         ),
       ),
     ]);
@@ -941,7 +901,6 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
     onremove() {
       isRemoved = true;
       for (const timer of copyTimers) clearTimeout(timer);
-      verificationWait.cancel();
     },
     view() {
       if (!syncRoute()) {

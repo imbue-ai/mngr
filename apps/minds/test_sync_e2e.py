@@ -74,6 +74,7 @@ from imbue.minds.desktop_client.connections.primitives import ConnectionBackend
 from imbue.minds.desktop_client.connections.primitives import ConnectionId
 from imbue.minds.desktop_client.connections.primitives import provider_instance_name_for_connection
 from imbue.minds.desktop_client.dek_store import unwrap_bundle_json
+from imbue.minds.desktop_client.e2e_workspace_runner import LeaveFirstRunProviderPageSignedOut
 from imbue.minds.desktop_client.e2e_workspace_runner import _REPO_ROOT
 from imbue.minds.desktop_client.e2e_workspace_runner import backend_origin_from_page
 from imbue.minds.desktop_client.e2e_workspace_runner import configure_logging
@@ -362,6 +363,7 @@ def _create_unassociated_workspace(runtime: _SyncE2ERuntime) -> str:
         find_free_port(),
         host_config_dir=runtime.host_config_root,
         on_workspace_ready=lambda page: created_coordinates.append(workspace_coordinate_from_subdomain(page.url)),
+        first_run_provider_choice=LeaveFirstRunProviderPageSignedOut(),
     )
     assert created_coordinates, "The create flow finished without a workspace URL"
     agent_id = _agent_id_for_coordinate(runtime, created_coordinates[0])

@@ -3,6 +3,7 @@ from pathlib import Path
 
 import click
 import pytest
+from click.testing import CliRunner
 
 from imbue.imbue_common.profiling import disable
 from imbue.imbue_common.profiling import get_profiler
@@ -40,3 +41,10 @@ def test_enable_profile_writer_starts_the_trace_file_named_after_the_run(tmp_pat
     disable()
     events = json.loads(trace_path.read_text())
     assert [event["args"]["name"] for event in events if event["name"] == "process_name"] == ["minds run"]
+
+
+def test_run_stops_at_startup_on_a_workspace_name_base_that_cannot_be_a_host_name() -> None:
+    result = CliRunner().invoke(run, [], env={"MINDS_DEFAULT_WORKSPACE_NAME_BASE": "!!!"})
+
+    assert result.exit_code != 0
+    assert "MINDS_DEFAULT_WORKSPACE_NAME_BASE='!!!' is not a usable workspace name base" in result.output

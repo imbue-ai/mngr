@@ -33,6 +33,7 @@ from pydantic import PrivateAttr
 from pydantic import SecretStr
 from pydantic import TypeAdapter
 from pydantic import ValidationError
+from pydantic import field_validator
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -45,7 +46,6 @@ from imbue.minds.errors import MindError
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
-from imbue.mngr_imbue_cloud.data_types import VerificationEmailSendResult
 from imbue.mngr_imbue_cloud.errors import CLIENT_TOO_OLD_FALLBACK_MESSAGE
 from imbue.mngr_imbue_cloud.errors import GRANTS_REFUSED_CODE
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
@@ -118,7 +118,7 @@ _USER_NOT_FOUND_CODE_SIGNAL = "user_not_found"
 IMBUE_CLOUD_AUTH_ERROR_CLASS: Final[str] = ImbueCloudAuthError.__name__
 
 # The plugin's error_class marker for a structured auth rejection, written by
-# ``_persist_auth_response`` in the plugin's auth CLI whenever the connector
+# ``_session_from_auth_response`` in the plugin's auth CLI whenever the connector
 # answers an auth call with a non-OK status. Matched on the parsed body's
 # ``error_class`` field rather than as a substring, because the accompanying
 # ``status`` has to be read out of that body anyway.
@@ -161,14 +161,14 @@ class ImbueCloudQuotaExceededCliError(ImbueCloudCliError):
 
 
 class ImbueCloudEmailNotVerifiedCliError(ImbueCloudCliError):
-    """The connector refused the operation because the account's email is unverified.
+    """The operation was refused because the account's email is unverified.
 
-    Raised for the connector's structured ``email_not_verified`` 403 (relayed
-    through the plugin). Deterministic like a quota refusal -- retrying cannot
-    succeed until the user clicks the verification link -- so callers surface
-    a contextual "verify your email" prompt instead of a generic failure.
-    ``email`` is the address the verification link goes to (None when the
-    connector could not resolve one).
+    Raised for a sign-in the plugin would not save (``auth login`` ending on an
+    unverified address), and for the connector's structured
+    ``email_not_verified`` 403 on any other action (relayed through the
+    plugin). Deterministic like a quota refusal -- retrying cannot succeed
+    until the user clicks the verification link. ``email`` is the address the
+    verification link goes to (None when none could be resolved).
     """
 
     email: str | None = None
@@ -303,19 +303,26 @@ class AuthRefreshOutcome(UpperCaseStrEnum):
 
 
 class ImbueCloudAuthSession(WireModel):
-    """Result of a successful auth signin/signup/login invocation."""
+    """Result of a successful auth login invocation."""
 
     user_id: str
     email: str
     display_name: str | None = None
-    needs_email_verification: bool = False
-    is_email_verified: bool | None = Field(
+    active_workspace_count: int | None = Field(
         default=None,
         description=(
-            "Whether the hosted sign-in page reported the address verified as the sign-in finished; "
-            "None when it did not say (an older connector)"
+            "How many active workspaces the account had as the sign-in was handed off; "
+            "None when the hand-off did not say (an older connector)"
         ),
     )
+
+    @field_validator("active_workspace_count", mode="before")
+    @classmethod
+    def _read_only_a_non_negative_integer_count(cls, value: object) -> int | None:
+        """The count is routing information, so anything but a non-negative integer reads as not given."""
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        return value
 
 
 class ImbueCloudAuthAccount(WireModel):
@@ -897,7 +904,9 @@ class ImbueCloudCli(MutableModel):
         writes the sign-in URL once its listener is live -- the desktop
         client's copy-the-link fallback reads it. Blocks until the flow
         finishes or the listen window passes. A sign-in that ends without
-        signing in raises ``ImbueCloudWebLoginIncompleteCliError``.
+        signing in raises ``ImbueCloudWebLoginIncompleteCliError``, and one the
+        plugin would not save because the account's email is unverified raises
+        ``ImbueCloudEmailNotVerifiedCliError``.
         """
         args: list[str] = ["auth", "login", "--listen-timeout", str(WEB_LOGIN_LISTEN_SECONDS)]
         if success_redirect_url is not None:
@@ -977,30 +986,6 @@ class ImbueCloudCli(MutableModel):
             logger.warning("Could not refresh the session of {} (treating it as transient): {}", account, exc)
             return AuthRefreshOutcome.TRANSIENT_FAILURE
         return AuthRefreshOutcome.REFRESHED
-
-    def auth_resend_verification(self, account: str) -> VerificationEmailSendResult:
-        """Re-send ``account``'s verification email and report what became of it."""
-        result = self._run(
-            ["auth", "resend-verification", "--account", account],
-            cg_name="imbue-cloud-auth-resend-verification",
-        )
-        body = self._expect_success(result, "auth resend-verification")
-        # A missing/non-bool field is a broken plugin contract; raising
-        # (rather than defaulting to False) keeps the UI from claiming an
-        # email "was sent recently" when nothing of the sort is known.
-        return VerificationEmailSendResult(
-            is_sent=_expect_bool_field(body, "sent", "auth resend-verification"),
-            is_already_verified=_expect_bool_field(body, "already_verified", "auth resend-verification"),
-        )
-
-    def auth_is_email_verified(self, account: str) -> bool:
-        """Whether ``account``'s email is verified; a plain status query, safe to poll."""
-        result = self._run(
-            ["auth", "is-verified", "--account", account],
-            cg_name="imbue-cloud-auth-is-verified",
-        )
-        body = self._expect_success(result, "auth is-verified")
-        return _expect_bool_field(body, "verified", "auth is-verified")
 
     # Hosts (list / release)
 
@@ -1915,16 +1900,6 @@ def _parse_auth_failure_body(stderr: str) -> dict[str, Any] | None:
 def _describe_body_shape(body: Any) -> str:
     """Name only a body's shape, never its contents, which may carry a token."""
     return f"dict with keys {sorted(body)}" if isinstance(body, dict) else type(body).__name__
-
-
-def _expect_bool_field(body: Any, key: str, command_repr: str) -> bool:
-    """The bool at ``key`` of a dict body; anything else is a broken plugin contract."""
-    value = body.get(key) if isinstance(body, dict) else None
-    if not isinstance(value, bool):
-        raise ImbueCloudCliError(
-            f"Malformed {command_repr} output: expected a '{key}' bool, got {_describe_body_shape(body)}"
-        )
-    return value
 
 
 def _parse_stdout_json(stdout: str, command_repr: str) -> Any:

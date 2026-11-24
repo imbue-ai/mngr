@@ -2541,7 +2541,7 @@ class AgentCreator(MutableModel):
         frozen=True,
         description=(
             "Run on a thread of its own once a create attempt is DONE, with its workspace's agent id. Wired to "
-            "the welcome-chat seeder, which seeds the conversation the creation page handed over even when "
+            "the welcome-chat seeder, which seeds the workspace its creation page asked a seed for even when "
             "that page has since been left."
         ),
     )
@@ -2605,7 +2605,6 @@ class AgentCreator(MutableModel):
         docker_runtime: DockerRuntime = DockerRuntime.RUNC,
         original_minds_version: str = "",
         account_id: str = "",
-        is_onboarding_driven_by_agent: bool = False,
     ) -> CreateAttemptId:
         """Start creating an agent from a git URL or local path in a background thread.
 
@@ -2731,7 +2730,6 @@ class AgentCreator(MutableModel):
             docker_runtime=docker_runtime,
             original_minds_version=original_minds_version,
             backup_request=backup_request,
-            is_onboarding_driven_by_agent=is_onboarding_driven_by_agent,
         )
 
         thread = threading.Thread(
@@ -2868,7 +2866,6 @@ class AgentCreator(MutableModel):
         docker_runtime: DockerRuntime,
         original_minds_version: str,
         backup_request: BackupSetupRequest | None,
-        is_onboarding_driven_by_agent: bool,
     ) -> None:
         """Write the IN_FLIGHT pending-create-attempt record, downgrading store errors to warnings.
 
@@ -2907,7 +2904,6 @@ class AgentCreator(MutableModel):
                     backup_request.backup_provider if backup_request is not None else BackupProvider.CONFIGURE_LATER
                 ),
                 backup_api_key_env=(backup_request.api_key_env_text if backup_request is not None else ""),
-                is_onboarding_driven_by_agent=is_onboarding_driven_by_agent,
             ),
         )
         try:

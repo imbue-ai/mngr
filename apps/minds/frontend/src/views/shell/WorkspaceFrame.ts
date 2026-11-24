@@ -165,9 +165,8 @@ export interface EmbedHandlerDeps {
    * it opens the links main hands back (minds:open-link), custom-scheme ones
    * included. */
   onWorkspaceReady: (promises: WorkspaceLinkPromises) => void;
-  /** The mounted page said what it reports on screen (minds:chat-on-screen, minds:provider-chooser-on-screen);
-   * answers whether to ask it to show its chat root window now (minds:focus-chat without a chat id). */
-  onReportingKnown: (reporting: WorkspaceReporting) => boolean;
+  /** The mounted page said what it reports on screen (minds:chat-on-screen, minds:provider-chooser-on-screen). */
+  onReportingKnown: (reporting: WorkspaceReporting) => void;
   /** A chat's transcript is drawn in a window the user can see. */
   onChatOnScreen: (chatId: string) => void;
   /** The AI-provider chooser is drawn in a window the user can see. */
@@ -305,14 +304,11 @@ export function buildEmbedHandlers(
   };
   handlers[contract.BRING_APP_TO_FRONT] = () => bringAppToFront();
   handlers[contract.WORKSPACE_READY] = (message) => {
-    // Before the held message goes (onWorkspaceReady flushes it): a held ask for one chat must land after
-    // the ask for the chat root, not be undone by it.
-    const isChatRootWanted = onReportingKnown({
+    onReportingKnown({
       reportsChatOnScreen: message.reportsChatOnScreen === true,
       reportsProviderChooserOnScreen:
         message.reportsProviderChooserOnScreen === true,
     });
-    if (isChatRootWanted) sendAck(contract.FOCUS_CHAT, {});
     onWorkspaceReady({
       opensLinks: message.opensLinks === true,
       opensCustomSchemeLinks: message.opensCustomSchemeLinks === true,

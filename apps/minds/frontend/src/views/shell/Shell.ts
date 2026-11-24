@@ -454,10 +454,10 @@ export function Shell(): m.Component<ShellAttrs> {
         autoUpdatePromptTrigger !== null
           ? m(AutoUpdatePromptModal, { model: shell.autoUpdatePrompt })
           : null,
-        // The creation page's crossing into the workspace; it outlives that
-        // page's route, so the shell owns it.
+        // The color that covers the window as a first run's provider page is
+        // left; it covers the title bar too, so the shell owns it.
         m(Wash),
-        // A first-run workspace loads under the welcome it was created from.
+        // A new workspace loads under the heading of the page it was created from.
         m(FirstRunCover, { routePath }),
         isReconnecting
           ? m(
