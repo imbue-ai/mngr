@@ -25,11 +25,21 @@ from imbue.minds.desktop_client.e2e_workspace_runner import SignInOnFirstRunProv
 from imbue.minds.desktop_client.e2e_workspace_runner import TERMINAL_IFRAME_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import WorkspaceCreateAttemptFailedError
 from imbue.minds.desktop_client.e2e_workspace_runner import WorkspaceFlowError
+from imbue.minds.desktop_client.e2e_workspace_runner import _BACKEND_READY_OUTPUT_MARKER
+from imbue.minds.desktop_client.e2e_workspace_runner import _ELECTRON_MAIN_JS
+from imbue.minds.desktop_client.e2e_workspace_runner import _ELECTRON_OUTPUT_MAX_LINE_LENGTH
+from imbue.minds.desktop_client.e2e_workspace_runner import _ELECTRON_RECENT_OUTPUT_MAX_CHARACTER_COUNT
+from imbue.minds.desktop_client.e2e_workspace_runner import _ELECTRON_RECENT_OUTPUT_MAX_LINE_COUNT
+from imbue.minds.desktop_client.e2e_workspace_runner import _ELECTRON_STARTUP_OUTPUT_MAX_LINE_COUNT
+from imbue.minds.desktop_client.e2e_workspace_runner import _ElectronConnectError
+from imbue.minds.desktop_client.e2e_workspace_runner import _ElectronOutputTail
 from imbue.minds.desktop_client.e2e_workspace_runner import _LAUNCHER_INPUT_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _LAUNCHER_OVERLAY_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _START_WORKSPACE_CONTROL_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _STOP_WORKSPACE_CONTROL_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _build_electron_env
+from imbue.minds.desktop_client.e2e_workspace_runner import _clean_electron_output_line
+from imbue.minds.desktop_client.e2e_workspace_runner import _describe_spent_launch_attempts
 from imbue.minds.desktop_client.e2e_workspace_runner import _drain_byte_stream_to_loguru
 from imbue.minds.desktop_client.e2e_workspace_runner import _read_failure_message
 from imbue.minds.desktop_client.e2e_workspace_runner import chat_frame
@@ -639,8 +649,9 @@ def test_drain_promotes_gpu_and_signal_lines_to_info() -> None:
     sink_id = loguru_logger.add(
         lambda msg: records.append((msg.record["level"].name, msg.record["message"])), level="DEBUG"
     )
+    output_tail = _ElectronOutputTail()
     try:
-        _drain_byte_stream_to_loguru(stream, "electron-err")
+        _drain_byte_stream_to_loguru(stream, "electron-err", output_tail)
     finally:
         loguru_logger.remove(sink_id)
     assert records == [
@@ -648,6 +659,203 @@ def test_drain_promotes_gpu_and_signal_lines_to_info() -> None:
         ("INFO", "[electron-err] [gpu] GPU process gone (reason=killed)"),
         ("INFO", "[electron-err] [lifecycle] SIGTERM received, requesting quit (uptime=1.0s)"),
         ("INFO", "[electron-err] /path/to/electron exited with signal SIGTRAP"),
+    ]
+    assert output_tail.read().recent_lines == tuple(message for _level, message in records)
+
+
+_ONE_TIME_CODE = "Zq3vK8-w_Yt51secret"
+_ATTACH_FAILURE_CAUSE = (
+    "Electron CDP attach failed on port 48653: No Electron content page settled on a backend URL within 19s; "
+    "observed pages: ['file:///code/mngr/apps/minds/electron/shell.html#intro']"
+)
+
+
+def test_the_backend_ready_marker_is_a_line_main_js_prints() -> None:
+    assert f"console.log('{_BACKEND_READY_OUTPUT_MARKER}'" in _ELECTRON_MAIN_JS.read_text()
+
+
+def test_the_output_tail_keeps_the_newest_lines_within_its_line_count() -> None:
+    output_tail = _ElectronOutputTail()
+    for idx in range(200):
+        output_tail.record("electron-err", f"line {idx}")
+
+    reading = output_tail.read()
+
+    newest_idxs = range(200 - _ELECTRON_RECENT_OUTPUT_MAX_LINE_COUNT, 200)
+    assert reading.recent_lines == tuple(f"[electron-err] line {idx}" for idx in newest_idxs)
+    assert reading.written_line_count == 200
+
+
+def test_the_output_tail_keeps_the_newest_lines_within_its_character_count_and_cuts_a_long_line() -> None:
+    output_tail = _ElectronOutputTail()
+    for idx in range(40):
+        output_tail.record("electron-err", f"{idx:03d} " + "x" * 500)
+
+    reading = output_tail.read()
+
+    # Fewer lines than the line count allows, so the character count is what bounds them.
+    kept_line_count = _ELECTRON_RECENT_OUTPUT_MAX_CHARACTER_COUNT // _ELECTRON_OUTPUT_MAX_LINE_LENGTH
+    assert kept_line_count < _ELECTRON_RECENT_OUTPUT_MAX_LINE_COUNT
+    assert [line[:19] for line in reading.recent_lines] == [
+        f"[electron-err] {idx:03d} " for idx in range(40 - kept_line_count, 40)
+    ]
+    assert {len(line) for line in reading.recent_lines} == {_ELECTRON_OUTPUT_MAX_LINE_LENGTH}
+
+
+def test_the_output_tail_keeps_main_js_s_startup_lines_once_later_output_has_pushed_them_out_of_the_recent_lines() -> (
+    None
+):
+    output_tail = _ElectronOutputTail()
+    output_tail.record("electron-out", "[startup] Loading shell.html...")
+    output_tail.record("electron-err", "[startup] shell.html load did not finish: ERR_ABORTED")
+    for idx in range(500):
+        output_tail.record("electron-err", f"backend chatter {idx}")
+
+    reading = output_tail.read()
+
+    assert reading.startup_lines == (
+        "[electron-out] [startup] Loading shell.html...",
+        "[electron-err] [startup] shell.html load did not finish: ERR_ABORTED",
+    )
+    assert not any("[startup]" in line for line in reading.recent_lines)
+    assert reading.is_backend_ready_seen is False
+
+
+def test_the_output_tail_remembers_the_backend_ready_line_after_it_has_left_every_kept_line() -> None:
+    output_tail = _ElectronOutputTail()
+    output_tail.record("electron-out", "[startup] Backend ready at http://localhost:41221")
+    for idx in range(100):
+        output_tail.record("electron-out", f"[startup] later step {idx}")
+
+    reading = output_tail.read()
+
+    newest_idxs = range(100 - _ELECTRON_STARTUP_OUTPUT_MAX_LINE_COUNT, 100)
+    assert reading.startup_lines == tuple(f"[electron-out] [startup] later step {idx}" for idx in newest_idxs)
+    assert not any("Backend ready" in line for line in reading.recent_lines)
+    assert reading.is_backend_ready_seen is True
+
+
+@pytest.mark.parametrize(
+    ("line", "expected_line"),
+    [
+        (
+            f"[startup] Consuming one-time code via http://localhost:41221/authenticate?one_time_code={_ONE_TIME_CODE}",
+            "[startup] Consuming one-time code via http://localhost:41221/authenticate?one_time_code=***",
+        ),
+        (
+            "Forward stream payload login_url: {'type': 'login_url', "
+            f"'url': 'https://localhost:8421/login?one_time_code={_ONE_TIME_CODE}'}}",
+            "Forward stream payload login_url: {'type': 'login_url', "
+            "'url': 'https://localhost:8421/login?one_time_code=***'}",
+        ),
+        (
+            f"GET /authenticate?one_time_code={_ONE_TIME_CODE}&next=%2F HTTP/1.1",
+            "GET /authenticate?one_time_code=***&next=%2F HTTP/1.1",
+        ),
+        (
+            f"\x1b[38;5;33mImbue Studio login URL (one-time use): http://localhost:41221/login?one_time_code={_ONE_TIME_CODE}\x1b[0m",
+            "Imbue Studio login URL (one-time use): http://localhost:41221/login?one_time_code=***",
+        ),
+        ("\x1b[1mordinary chatter\x1b[0m", "ordinary chatter"),
+    ],
+)
+def test_a_quoted_output_line_carries_no_one_time_login_code_and_no_terminal_styling(
+    line: str, expected_line: str
+) -> None:
+    assert _clean_electron_output_line(line) == expected_line
+
+
+def test_a_one_time_login_code_electron_writes_reaches_neither_kind_of_kept_line() -> None:
+    stream = io.BytesIO(
+        f"[startup] Consuming one-time code via http://localhost:41221/authenticate?one_time_code={_ONE_TIME_CODE}\n".encode()
+    )
+    output_tail = _ElectronOutputTail()
+
+    _drain_byte_stream_to_loguru(stream, "electron-out", output_tail)
+
+    reading = output_tail.read()
+    kept_line = (
+        "[electron-out] [startup] Consuming one-time code via http://localhost:41221/authenticate?one_time_code=***"
+    )
+    assert reading.startup_lines == (kept_line,)
+    assert reading.recent_lines == (kept_line,)
+
+
+def test_an_attach_failure_quotes_the_launch_s_output_and_says_the_backend_reported_ready() -> None:
+    output_tail = _ElectronOutputTail()
+    output_tail.record("electron-out", "[startup] Loading shell.html...")
+    output_tail.record("electron-err", "Starting the desktop client on port 41221")
+    output_tail.record("electron-out", "[startup] Backend ready at http://localhost:41221")
+
+    error = _ElectronConnectError(_ATTACH_FAILURE_CAUSE, output_tail.read())
+
+    assert str(error).splitlines() == [
+        _ATTACH_FAILURE_CAUSE,
+        "Backend-ready line '[startup] Backend ready at': seen (this launch wrote 3 lines)",
+        "----- main.js's [startup] lines (the newest 2) -----",
+        "[electron-out] [startup] Loading shell.html...",
+        "[electron-out] [startup] Backend ready at http://localhost:41221",
+        "----- the last 3 of the 3 lines Electron wrote to stdout and stderr -----",
+        "[electron-out] [startup] Loading shell.html...",
+        "[electron-err] Starting the desktop client on port 41221",
+        "[electron-out] [startup] Backend ready at http://localhost:41221",
+        "----- end of Electron output -----",
+    ]
+
+
+def test_an_attach_failure_says_so_when_the_backend_never_reported_ready() -> None:
+    output_tail = _ElectronOutputTail()
+    output_tail.record("electron-out", "[startup] Loading shell.html...")
+    output_tail.record("electron-err", "[startup] env-setup failed: uv sync exited with code 1")
+
+    error = _ElectronConnectError(_ATTACH_FAILURE_CAUSE, output_tail.read())
+
+    assert str(error).splitlines()[:2] == [
+        _ATTACH_FAILURE_CAUSE,
+        "Backend-ready line '[startup] Backend ready at': NOT seen (this launch wrote 2 lines)",
+    ]
+    assert "[electron-err] [startup] env-setup failed: uv sync exited with code 1" in str(error).splitlines()
+
+
+def test_an_attach_failure_on_a_launch_that_wrote_nothing_says_that() -> None:
+    error = _ElectronConnectError(_ATTACH_FAILURE_CAUSE, _ElectronOutputTail().read())
+
+    assert str(error).splitlines() == [
+        _ATTACH_FAILURE_CAUSE,
+        "Backend-ready line '[startup] Backend ready at': NOT seen (this launch wrote 0 lines)",
+        "----- main.js's [startup] lines (the newest 0) -----",
+        "----- the last 0 of the 0 lines Electron wrote to stdout and stderr -----",
+        "----- end of Electron output -----",
+    ]
+
+
+def test_spent_launch_attempts_give_every_attempt_s_startup_lines_and_the_last_attempt_s_recent_output() -> None:
+    never_ready_tail = _ElectronOutputTail()
+    never_ready_tail.record("electron-out", "[startup] Loading shell.html...")
+    never_ready_tail.record("electron-err", "chatter of the first attempt")
+    ready_tail = _ElectronOutputTail()
+    ready_tail.record("electron-out", "[startup] Backend ready at http://localhost:41221")
+    ready_tail.record("electron-err", "chatter of the last attempt")
+    errors = [
+        _ElectronConnectError("Electron CDP attach failed on port 48653: first", never_ready_tail.read()),
+        _ElectronConnectError("Electron CDP attach failed on port 50112: last", ready_tail.read()),
+    ]
+
+    assert _describe_spent_launch_attempts(errors).splitlines() == [
+        "Electron CDP attach failed after 2 relaunch attempts "
+        "(last error: Electron CDP attach failed on port 50112: last)",
+        "Attempt 1 of 2: Electron CDP attach failed on port 48653: first",
+        "Backend-ready line '[startup] Backend ready at': NOT seen (this launch wrote 2 lines)",
+        "----- main.js's [startup] lines (the newest 1) -----",
+        "[electron-out] [startup] Loading shell.html...",
+        "Attempt 2 of 2: Electron CDP attach failed on port 50112: last",
+        "Backend-ready line '[startup] Backend ready at': seen (this launch wrote 2 lines)",
+        "----- main.js's [startup] lines (the newest 1) -----",
+        "[electron-out] [startup] Backend ready at http://localhost:41221",
+        "----- the last 2 of the 2 lines Electron wrote to stdout and stderr -----",
+        "[electron-out] [startup] Backend ready at http://localhost:41221",
+        "[electron-err] chatter of the last attempt",
+        "----- end of Electron output -----",
     ]
 
 

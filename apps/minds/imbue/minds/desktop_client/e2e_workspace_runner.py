@@ -21,6 +21,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from collections.abc import Generator
 from collections.abc import Mapping
@@ -50,6 +51,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import PrivateAttr
 from pydantic import SecretStr
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -61,6 +63,7 @@ from imbue.minds.config.loader import repo_tier_client_config_path
 from imbue.minds.desktop_client.default_workspace_template_worktree import DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE
 from imbue.minds.desktop_client.default_workspace_template_worktree import current_worktree_branch
 from imbue.minds.desktop_client.welcome_chat import SEED_TIMEOUT_SECONDS
+from imbue.minds.utils.secret_redaction import REDACTED_PLACEHOLDER
 
 # This file lives at apps/minds/imbue/minds/desktop_client/e2e_workspace_runner.py,
 # so parents[5] hops up over desktop_client, minds, imbue, minds, apps to the repo
@@ -111,6 +114,22 @@ _ELECTRON_OUTPUT_INFO_MARKERS: Final[tuple[str, ...]] = (
     "[lifecycle] SIG",
     "exited with signal",
 )
+# The tag main.js's console lines about its own launch sequence start with.
+_STARTUP_OUTPUT_TAG: Final[str] = "[startup] "
+# What ``startBackendWithRetry`` in apps/minds/electron/main.js prints once the backend it spawned is serving.
+_BACKEND_READY_OUTPUT_MARKER: Final[str] = "[startup] Backend ready at"
+# How much of one launch's output an attach failure quotes. The failure's text lands in a junit ``<failure>``
+# and from there in CI check-run summaries, which is why each bound is small.
+_ELECTRON_OUTPUT_MAX_LINE_LENGTH: Final[int] = 300
+_ELECTRON_RECENT_OUTPUT_MAX_LINE_COUNT: Final[int] = 60
+_ELECTRON_RECENT_OUTPUT_MAX_CHARACTER_COUNT: Final[int] = 4000
+_ELECTRON_STARTUP_OUTPUT_MAX_LINE_COUNT: Final[int] = 30
+_ELECTRON_STARTUP_OUTPUT_MAX_CHARACTER_COUNT: Final[int] = 2500
+# The one-time login code in a URL the app logs: main.js's "[startup] Consuming one-time code via <url>", and the
+# login URLs the backend and ``mngr forward`` log, which a development build forwards to Electron's stderr.
+_ONE_TIME_CODE_PATTERN: Final[re.Pattern[str]] = re.compile(r"(one_time_code=)[^\s&'\"]+")
+# The colors the backend's log lines carry, which a junit file cannot hold and renders as noise.
+_TERMINAL_STYLING_PATTERN: Final[re.Pattern[str]] = re.compile(r"\x1b\[[0-9;]*m")
 
 
 class ElectronLaunchTarget(FrozenModel):
@@ -366,8 +385,99 @@ def _build_electron_env(
     return env
 
 
-def _drain_byte_stream_to_loguru(stream: IO[bytes], prefix: str) -> None:
-    """Read lines from ``stream`` and forward each non-empty one to loguru.
+@pure
+def _clean_electron_output_line(line: str) -> str:
+    """The line as a failure quotes it: without terminal styling, its one-time login codes masked, cut to length."""
+    unstyled_line = _TERMINAL_STYLING_PATTERN.sub("", line)
+    redacted_line = _ONE_TIME_CODE_PATTERN.sub(rf"\g<1>{REDACTED_PLACEHOLDER}", unstyled_line)
+    return redacted_line[:_ELECTRON_OUTPUT_MAX_LINE_LENGTH]
+
+
+class _ElectronOutputReading(FrozenModel):
+    """What one Electron launch had written to stdout and stderr by the time it was read."""
+
+    startup_lines: tuple[str, ...] = Field(description="The newest of main.js's own startup lines, oldest first.")
+    recent_lines: tuple[str, ...] = Field(description="The newest lines of both streams, oldest first.")
+    written_line_count: int = Field(description="How many lines the launch wrote, kept or not.")
+    is_backend_ready_seen: bool = Field(description="Whether any line it wrote was main.js's backend-ready line.")
+
+
+class _ElectronOutputTail(MutableModel):
+    """What one Electron launch writes to stdout and stderr, kept small enough to quote when an attach to it fails.
+
+    main.js's startup lines are kept apart from the tail of everything: a development build forwards the
+    backend's logging to stderr, which pushes them out of a short tail soon after the backend starts. The
+    threads draining the two streams record into it while the launching thread reads it.
+    """
+
+    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _startup_lines: deque[str] = PrivateAttr(default_factory=deque)
+    _recent_lines: deque[str] = PrivateAttr(default_factory=deque)
+    _written_line_count: int = PrivateAttr(default=0)
+    _is_backend_ready_seen: bool = PrivateAttr(default=False)
+
+    def record(self, stream_name: str, line: str) -> None:
+        kept_line = _clean_electron_output_line(f"[{stream_name}] {line}")
+        with self._lock:
+            self._written_line_count += 1
+            self._is_backend_ready_seen = self._is_backend_ready_seen or _BACKEND_READY_OUTPUT_MARKER in line
+            self._keep_newest(
+                self._recent_lines,
+                kept_line,
+                _ELECTRON_RECENT_OUTPUT_MAX_LINE_COUNT,
+                _ELECTRON_RECENT_OUTPUT_MAX_CHARACTER_COUNT,
+            )
+            if line.startswith(_STARTUP_OUTPUT_TAG):
+                self._keep_newest(
+                    self._startup_lines,
+                    kept_line,
+                    _ELECTRON_STARTUP_OUTPUT_MAX_LINE_COUNT,
+                    _ELECTRON_STARTUP_OUTPUT_MAX_CHARACTER_COUNT,
+                )
+
+    def _keep_newest(self, kept_lines: deque[str], line: str, max_line_count: int, max_character_count: int) -> None:
+        kept_lines.append(line)
+        while len(kept_lines) > max_line_count or sum(len(kept) for kept in kept_lines) > max_character_count:
+            kept_lines.popleft()
+
+    def read(self) -> _ElectronOutputReading:
+        with self._lock:
+            return _ElectronOutputReading(
+                startup_lines=tuple(self._startup_lines),
+                recent_lines=tuple(self._recent_lines),
+                written_line_count=self._written_line_count,
+                is_backend_ready_seen=self._is_backend_ready_seen,
+            )
+
+
+@pure
+def _describe_electron_startup_output(output: _ElectronOutputReading) -> str:
+    """Whether the launch's backend came up, and main.js's own account of the launch."""
+    verdict = "seen" if output.is_backend_ready_seen else "NOT seen"
+    return "\n".join(
+        [
+            f"Backend-ready line {_BACKEND_READY_OUTPUT_MARKER!r}: {verdict} "
+            f"(this launch wrote {output.written_line_count} lines)",
+            f"----- main.js's {_STARTUP_OUTPUT_TAG}lines (the newest {len(output.startup_lines)}) -----",
+            *output.startup_lines,
+        ]
+    )
+
+
+@pure
+def _describe_electron_recent_output(output: _ElectronOutputReading) -> str:
+    return "\n".join(
+        [
+            f"----- the last {len(output.recent_lines)} of the {output.written_line_count} lines "
+            "Electron wrote to stdout and stderr -----",
+            *output.recent_lines,
+            "----- end of Electron output -----",
+        ]
+    )
+
+
+def _drain_byte_stream_to_loguru(stream: IO[bytes], prefix: str, output_tail: _ElectronOutputTail) -> None:
+    """Read lines from ``stream``, forward each non-empty one to loguru and record it in ``output_tail``.
 
     Lines carrying one of ``_ELECTRON_OUTPUT_INFO_MARKERS`` go out at info
     rather than debug, so a run's GPU-process deaths, termination signals and
@@ -381,14 +491,15 @@ def _drain_byte_stream_to_loguru(stream: IO[bytes], prefix: str) -> None:
         line = raw_line.decode("utf-8", errors="replace").rstrip()
         if not line:
             continue
+        output_tail.record(prefix, line)
         if any(marker in line for marker in _ELECTRON_OUTPUT_INFO_MARKERS):
             logger.info("[{}] {}", prefix, line)
         else:
             logger.debug("[{}] {}", prefix, line)
 
 
-def _stream_electron_output(process: subprocess.Popen[bytes]) -> None:
-    """Drain Electron's stdout+stderr into the loguru sink in a background thread.
+def _stream_electron_output(process: subprocess.Popen[bytes], output_tail: _ElectronOutputTail) -> None:
+    """Drain Electron's stdout+stderr into the loguru sink and ``output_tail`` in background threads.
 
     Electron is verbose; without draining the pipes the OS buffer fills and
     Electron blocks. We don't parse anything; the caller reads state from CDP.
@@ -396,7 +507,7 @@ def _stream_electron_output(process: subprocess.Popen[bytes]) -> None:
     if process.stdout is None or process.stderr is None:
         raise AssertionError("Electron subprocess was launched without piped stdout/stderr")
     for stream, prefix in ((process.stdout, "electron-out"), (process.stderr, "electron-err")):
-        thread = threading.Thread(target=_drain_byte_stream_to_loguru, args=(stream, prefix), daemon=True)
+        thread = threading.Thread(target=_drain_byte_stream_to_loguru, args=(stream, prefix, output_tail), daemon=True)
         thread.start()
 
 
@@ -475,8 +586,8 @@ def _launched_electron(
     launch_target: ElectronLaunchTarget = DEV_CHECKOUT_LAUNCH_TARGET,
     # The environment to launch from, in place of this process's own (see ``_build_electron_env``).
     base_env: Mapping[str, str] | None = None,
-) -> Generator[subprocess.Popen[bytes], None, None]:
-    """Start the Electron app, yield the process, and always tear it down.
+) -> Generator[_ElectronOutputTail, None, None]:
+    """Start the Electron app, yield the tail of what it writes, and always tear it down.
 
     ``host_config_dir`` becomes the Electron process's cwd, so the
     host-side ``mngr`` invocations the app spawns (e.g. the ``mngr auth
@@ -554,9 +665,10 @@ def _launched_electron(
             # Own session/process group so teardown can signal the whole tree.
             start_new_session=True,
         )
-        _stream_electron_output(process)
+        output_tail = _ElectronOutputTail()
+        _stream_electron_output(process, output_tail)
         try:
-            yield process
+            yield output_tail
         finally:
             _terminate_electron_process_tree(process)
 
@@ -590,6 +702,29 @@ class _ElectronConnectError(RuntimeError):
     failure while driving the create flow, which is a real test failure and must
     propagate.
     """
+
+    def __init__(self, cause: str, output: _ElectronOutputReading) -> None:
+        self.cause = cause
+        self.output = output
+        super().__init__(
+            f"{cause}\n{_describe_electron_startup_output(output)}\n{_describe_electron_recent_output(output)}"
+        )
+
+
+@pure
+def _describe_spent_launch_attempts(errors: Sequence[_ElectronConnectError]) -> str:
+    """Why every launch attempt failed: each attempt's cause and startup lines, and the last one's output tail."""
+    attempt_descriptions = [
+        f"Attempt {attempt} of {len(errors)}: {error.cause}\n{_describe_electron_startup_output(error.output)}"
+        for attempt, error in enumerate(errors, start=1)
+    ]
+    return "\n".join(
+        [
+            f"Electron CDP attach failed after {len(errors)} relaunch attempts (last error: {errors[-1].cause})",
+            *attempt_descriptions,
+            _describe_electron_recent_output(errors[-1].output),
+        ]
+    )
 
 
 def _pick_content_page(browser: Browser, timeout_seconds: int) -> Page:
@@ -992,13 +1127,15 @@ def _attempt_create_workspace_via_electron(
     (e.g. to send a chat message). Its exceptions propagate unchanged -- they
     are real failures, not launch flakes, so they are not retried.
     """
-    with _launched_electron(default_workspace_template_path, debug_port, host_config_dir):
+    with _launched_electron(default_workspace_template_path, debug_port, host_config_dir) as electron_output:
         with sync_playwright() as playwright:
             try:
                 _wait_for_cdp(debug_port, _CDP_READY_TIMEOUT_SECONDS)
                 browser, page = _connect_and_pick_content_page(playwright, debug_port, _BACKEND_READY_TIMEOUT_SECONDS)
             except (PlaywrightError, TimeoutError) as exc:
-                raise _ElectronConnectError(f"Electron CDP attach failed on port {debug_port}: {exc}") from exc
+                raise _ElectronConnectError(
+                    f"Electron CDP attach failed on port {debug_port}: {exc}", electron_output.read()
+                ) from exc
             # Always disconnect the browser once it is open, regardless of which
             # phase fails: a create-flow failure is a real test failure that
             # must propagate (the attach phase above is the launch-flake part).
@@ -1047,7 +1184,7 @@ def electron_app_session(
     ``extra_env``, ``user_data_dir``, ``launch_target`` and ``base_env`` are
     handed to every launch (see :func:`_launched_electron`).
     """
-    last_error: _ElectronConnectError | None = None
+    errors: list[_ElectronConnectError] = []
     for attempt in range(1, _ELECTRON_LAUNCH_ATTEMPTS + 1):
         attempt_port = debug_port if attempt == 1 else find_free_port()
         with _launched_electron(
@@ -1058,7 +1195,7 @@ def electron_app_session(
             user_data_dir=user_data_dir,
             launch_target=launch_target,
             base_env=base_env,
-        ):
+        ) as electron_output:
             with sync_playwright() as playwright:
                 try:
                     _wait_for_cdp(attempt_port, _CDP_READY_TIMEOUT_SECONDS)
@@ -1066,12 +1203,15 @@ def electron_app_session(
                         playwright, attempt_port, _BACKEND_READY_TIMEOUT_SECONDS
                     )
                 except (PlaywrightError, TimeoutError) as exc:
-                    last_error = _ElectronConnectError(f"Electron CDP attach failed on port {attempt_port}: {exc}")
+                    error = _ElectronConnectError(
+                        f"Electron CDP attach failed on port {attempt_port}: {exc}", electron_output.read()
+                    )
+                    errors.append(error)
                     logger.warning(
                         "Electron launch/CDP attempt {}/{} failed; relaunching: {}",
                         attempt,
                         _ELECTRON_LAUNCH_ATTEMPTS,
-                        last_error,
+                        error,
                     )
                     continue
                 try:
@@ -1080,9 +1220,7 @@ def electron_app_session(
                     return
                 finally:
                     browser.close()
-    raise PlaywrightTimeoutError(
-        f"Electron CDP attach failed after {_ELECTRON_LAUNCH_ATTEMPTS} relaunch attempts (last error: {last_error})"
-    )
+    raise PlaywrightTimeoutError(_describe_spent_launch_attempts(errors))
 
 
 def create_workspace_via_electron(
@@ -1132,7 +1270,7 @@ def create_workspace_via_electron(
     - ``host_config_dir`` is the cwd for the Electron process (see
       :func:`_launched_electron`); leave unset outside pytest.
     """
-    last_error: _ElectronConnectError | None = None
+    errors: list[_ElectronConnectError] = []
     for attempt in range(1, _ELECTRON_LAUNCH_ATTEMPTS + 1):
         # Reuse the caller-provided port on the first try; allocate a fresh one
         # for each relaunch so a leftover socket from a wedged process can't clash.
@@ -1150,16 +1288,14 @@ def create_workspace_via_electron(
             )
             return
         except _ElectronConnectError as exc:
-            last_error = exc
+            errors.append(exc)
             logger.warning(
                 "Electron launch/CDP attempt {}/{} failed; relaunching: {}",
                 attempt,
                 _ELECTRON_LAUNCH_ATTEMPTS,
                 exc,
             )
-    raise PlaywrightTimeoutError(
-        f"Electron CDP attach failed after {_ELECTRON_LAUNCH_ATTEMPTS} relaunch attempts (last error: {last_error})"
-    )
+    raise PlaywrightTimeoutError(_describe_spent_launch_attempts(errors))
 
 
 # Helpers that drive a ready workspace's desktop, once the create primitives

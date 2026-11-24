@@ -3408,6 +3408,7 @@ async function startBackendWithRetry() {
         if (!target.window.isDestroyed()) {
           target.window.webContents.send('startup-ready', { park: routing.route === 'start' });
         }
+        console.log(`[startup] route=${routing.route} resolved; waiting for the loading document's intro to finish`);
         await target.introFinished;
         if (lastErrorTakeover) {
           // The backend died while the route waited. The takeover owns the
@@ -4326,6 +4327,7 @@ ipcMain.on('reload-chrome', (event) => {
 
 ipcMain.on('intro-finished', (event) => {
   const senderBundle = getBundleFromEvent(event);
+  console.log(`[startup] the loading document reported its intro finished${senderBundle ? '' : ' (from no known window)'}`);
   if (senderBundle) senderBundle.resolveIntroFinished();
 });
 

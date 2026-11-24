@@ -636,6 +636,7 @@ def _chat_on_cheapest_model(page: Page | Frame, token: str) -> None:
 
 
 @pytest.mark.minds_snapshot_resume
+@pytest.mark.flaky
 @pytest.mark.docker
 @pytest.mark.rsync
 @pytest.mark.timeout(900)
