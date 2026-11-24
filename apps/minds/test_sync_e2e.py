@@ -884,6 +884,7 @@ def _assert_zip_contains_sentinel(zip_path: Path, sentinel_content: str) -> None
 
 
 @pytest.mark.minds_snapshot_resume
+@pytest.mark.flaky
 @pytest.mark.docker
 @pytest.mark.rsync
 # ~3x the measured 5-minute runtime, and strictly below offload's
