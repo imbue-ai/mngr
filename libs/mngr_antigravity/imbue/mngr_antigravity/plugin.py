@@ -72,9 +72,11 @@ appears).
 Readiness is signalled by the ``InteractiveTuiAgent`` banner-poll: it gates
 "input row drawn and able to receive a paste", which the ``statusLine``
 ``agent_state`` does not (that is about the agent loop and can be ``idle`` before
-the input row renders). A permission dialog can't be detected via hooks either
--- none fires while the agent is blocked at it -- so the agent exposes no
-permission-specific WAITING reason.
+the input row renders). After an upgrade's restart, readiness is the
+``antigravity_ready`` marker ``statusline.sh`` touches once agy reports a state
+past startup; a later send still waits for the input row. A permission dialog
+can't be detected via hooks either -- none fires while the agent is blocked at
+it -- so the agent exposes no permission-specific WAITING reason.
 
 Transcript support: enabled by default. ``stream_transcript.sh`` tails agy's
 per-conversation JSONL files under ``$ANTIGRAVITY_APP_DATA_DIR`` (pointed at the
@@ -91,6 +93,7 @@ from __future__ import annotations
 import importlib.resources
 import re
 import shlex
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
@@ -105,9 +108,8 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.pure import pure
 from imbue.mngr import hookimpl
-from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
-from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.output_styles import read_output_style_files
@@ -121,6 +123,11 @@ from imbue.mngr.agents.tui_utils import build_file_mtime_token_command
 from imbue.mngr.agents.tui_utils import build_unsubmitted_message_retry_gate
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.agents.update_policy import is_self_update_disabled
+from imbue.mngr.agents.upgrade import AGENT_DATA_RELATIVE_PATH
+from imbue.mngr.agents.upgrade import build_command_script_files
+from imbue.mngr.agents.upgrade import build_shared_shell_lib_files
+from imbue.mngr.agents.upgrade import parse_json_object_input
+from imbue.mngr.agents.upgrade import read_stored_launch_command
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import build_transcript_preserved_items
@@ -134,6 +141,7 @@ from imbue.mngr.api.preservation import run_adopt_session_preflight
 from imbue.mngr.api.preservation import transfer_cloned_agent_session_store
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import copy_on_host
 from imbue.mngr.hosts.common import symlink_on_host
@@ -147,7 +155,9 @@ from imbue.mngr.interfaces.agent import HasPermissionPolicyMixin
 from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
+from imbue.mngr.interfaces.agent import UpgradableAgentMixin
 from imbue.mngr.interfaces.data_types import FileType
+from imbue.mngr.interfaces.data_types import HarnessFileSpec
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import HostLocation
@@ -159,17 +169,18 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import OutputStyleName
 from imbue.mngr.primitives import SystemPromptText
 from imbue.mngr.utils.git_utils import find_git_source_path
+from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_antigravity import resources as _antigravity_resources
 from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import CONVERSATIONS_DIR_RELATIVE_TO_HOME
 from imbue.mngr_antigravity.antigravity_config import CONVERSATION_IDS_FILENAME
+from imbue.mngr_antigravity.antigravity_config import READY_MARKER_FILENAME
 from imbue.mngr_antigravity.antigravity_config import ROOT_CONVERSATION_FILENAME
 from imbue.mngr_antigravity.antigravity_config import STATUSLINE_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import TRUSTED_WORKSPACES_KEY
 from imbue.mngr_antigravity.antigravity_config import TURN_END_HOOK_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import USER_STATUSLINE_COMMAND_FILENAME
 from imbue.mngr_antigravity.antigravity_config import build_antigravity_hooks_config
-from imbue.mngr_antigravity.antigravity_config import build_antigravity_statusline_settings
 from imbue.mngr_antigravity.antigravity_config import build_isolated_settings
 from imbue.mngr_antigravity.antigravity_config import build_onboarding_seed
 from imbue.mngr_antigravity.antigravity_config import extract_statusline_command
@@ -183,6 +194,8 @@ from imbue.mngr_antigravity.antigravity_config import get_antigravity_output_sty
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_settings_path
 from imbue.mngr_antigravity.antigravity_config import merge_trusted_workspace
 from imbue.mngr_antigravity.antigravity_config import read_antigravity_settings
+from imbue.mngr_antigravity.antigravity_config import rebuild_antigravity_hooks_config
+from imbue.mngr_antigravity.antigravity_config import rebuild_antigravity_settings
 from imbue.mngr_antigravity.antigravity_config import serialize_antigravity_hooks
 from imbue.mngr_antigravity.antigravity_config import serialize_antigravity_settings
 
@@ -219,6 +232,14 @@ _TRANSCRIPT_DECODER_SCRIPT_NAME: Final[str] = "decode_agy_transcript.py"
 # converter. Mirrors the mngr_claude background-tasks pattern.
 _BACKGROUND_TASKS_SCRIPT_NAME: Final[str] = "antigravity_background_tasks.sh"
 
+# How the launch command starts the supervisor, up to its session-name argument.
+_BACKGROUND_TASKS_INVOCATION: Final[str] = f"( bash $MNGR_AGENT_STATE_DIR/commands/{_BACKGROUND_TASKS_SCRIPT_NAME}"
+
+_COMMON_TRANSCRIPT_SCRIPT_RELATIVE_PATHS: Final[tuple[Path, ...]] = (
+    Path("commands") / _COMMON_TRANSCRIPT_SCRIPT_NAME,
+    Path("commands") / _COMMON_TRANSCRIPT_CONVERT_SCRIPT_NAME,
+)
+
 # Env var consumed by stream_transcript.sh to locate agy's per-conversation
 # ``brain/<conv_id>/.system_generated/logs/transcript.jsonl`` files. We point it
 # at the per-agent home's ``antigravity-cli`` dir so the streamer (which runs in
@@ -246,6 +267,10 @@ _AGY_LOG_FILE_RELATIVE_PATH: Final[str] = "logs/agy_cli.log"
 # path -- agy only rejects dot-prefixed *project folder*/``--add-dir`` paths, not its
 # own config dir). Mirrors mngr_claude's per-agent ``get_claude_config_dir``.
 _AGY_HOME_RELATIVE_PATH: Final[tuple[str, ...]] = ("plugin", "antigravity", "home")
+
+_SETTINGS_RELATIVE_PATH: Final[Path] = get_antigravity_settings_path(Path(*_AGY_HOME_RELATIVE_PATH))
+_HOOKS_CONFIG_RELATIVE_PATH: Final[Path] = get_antigravity_hooks_config_path(Path(*_AGY_HOME_RELATIVE_PATH))
+_CONFIG_FILE_MODE: Final[str] = "0644"
 
 # Parent directory for the per-agent symlinks that work around agy's
 # refusal to treat hidden paths (anything with a dot-prefixed segment, like
@@ -276,6 +301,10 @@ _PROCESS_STARTED_MARKER_FILENAME: Final[str] = "antigravity_process_started"
 # a process killed mid-turn cannot run the statusLine's idle branch, so it would otherwise
 # leave this behind forever.
 _ACTIVE_MARKER_FILENAME: Final[str] = "active"
+
+_LAUNCH_CLEARED_MARKER_FILENAMES: Final[tuple[str, ...]] = (_ACTIVE_MARKER_FILENAME, READY_MARKER_FILENAME)
+
+_READY_POLL_INTERVAL_SECONDS: Final[float] = 0.2
 
 # The model mirror statusline.sh rewrites on every run whose payload reports a model, idle or busy.
 _MODEL_STATE_FILENAME: Final[str] = "model_state.json"
@@ -321,6 +350,21 @@ def _load_antigravity_resource_script(filename: str) -> str:
     """Load a resource script from the mngr_antigravity resources package."""
     resource_files = importlib.resources.files(_antigravity_resources)
     return resource_files.joinpath(filename).read_text()
+
+
+@pure
+def _build_rebuilt_config_files(
+    relative_path: Path,
+    live_content: str | None,
+    rebuild: Callable[[Mapping[str, Any]], dict[str, Any]],
+    serialize: Callable[[Mapping[str, Any]], str],
+) -> dict[Path, HarnessFileSpec]:
+    """The agy config file at ``relative_path`` rebuilt from ``live_content``, or nothing when the rebuild parses equal to it."""
+    live_config = parse_json_object_input(relative_path, live_content)
+    rebuilt_config = rebuild(live_config)
+    if rebuilt_config == live_config:
+        return {}
+    return {relative_path: HarnessFileSpec(content=serialize(rebuilt_config), mode=_CONFIG_FILE_MODE)}
 
 
 def _state_file_changed_probe(name: str, env_command_prefix: str, file_name: str) -> SubmissionEvidenceProbe:
@@ -583,6 +627,7 @@ class AntigravityAgent(
     HasUnattendedModeMixin,
     HasPermissionPolicyMixin,
     HasAutoInstallMixin,
+    UpgradableAgentMixin,
 ):
     """Agent implementation for Google's Antigravity CLI (``agy``)."""
 
@@ -976,38 +1021,90 @@ class AntigravityAgent(
         self._ensure_source_repo_trusted(host, host_home, mngr_ctx)
         self._provision_agy_home(host, host_home, host_uname, mngr_ctx)
         with mngr_ctx.concurrency_group.make_concurrency_group("antigravity_provisioning") as concurrency_group:
-            provision_raw_transcript_scripts(
-                self,
-                host,
-                self._get_agent_dir(),
-                concurrency_group,
-            )
-            maybe_provision_common_transcript_scripts(
-                self,
-                host,
-                self._get_agent_dir(),
-                concurrency_group,
-            )
             provision_scripts_to_commands_dir(
                 host,
                 self._get_agent_dir(),
-                {
-                    _BACKGROUND_TASKS_SCRIPT_NAME: _load_antigravity_resource_script(_BACKGROUND_TASKS_SCRIPT_NAME),
-                    # Run by agy's statusLine command on every agent-state change:
-                    # maintains the active marker (RUNNING/WAITING), records the
-                    # root conversation, and fires the message-submission signal
-                    # (see build_antigravity_statusline_settings).
-                    STATUSLINE_SCRIPT_NAME: _load_antigravity_resource_script(STATUSLINE_SCRIPT_NAME),
-                    # Run by the PreInvocation capture hook to record every
-                    # conversation ID (incl. subagents') for transcript scoping
-                    # (see build_antigravity_hooks_config).
-                    CAPTURE_CONVERSATION_ID_SCRIPT_NAME: _load_antigravity_resource_script(
-                        CAPTURE_CONVERSATION_ID_SCRIPT_NAME
-                    ),
-                    TURN_END_HOOK_SCRIPT_NAME: _load_antigravity_resource_script(TURN_END_HOOK_SCRIPT_NAME),
-                },
+                self._build_command_scripts(is_common_transcript_written=self.is_common_transcript_enabled),
                 concurrency_group,
             )
+
+    def _build_command_scripts(self, *, is_common_transcript_written: bool) -> dict[str, str]:
+        """The scripts mngr writes to the agent's ``commands/`` dir, by name.
+
+        The supervisor runs the common-transcript converter only when it finds it there.
+        """
+        scripts = {
+            _BACKGROUND_TASKS_SCRIPT_NAME: _load_antigravity_resource_script(_BACKGROUND_TASKS_SCRIPT_NAME),
+            STATUSLINE_SCRIPT_NAME: _load_antigravity_resource_script(STATUSLINE_SCRIPT_NAME),
+            CAPTURE_CONVERSATION_ID_SCRIPT_NAME: _load_antigravity_resource_script(
+                CAPTURE_CONVERSATION_ID_SCRIPT_NAME
+            ),
+            TURN_END_HOOK_SCRIPT_NAME: _load_antigravity_resource_script(TURN_END_HOOK_SCRIPT_NAME),
+            **self.get_raw_transcript_scripts(),
+        }
+        if is_common_transcript_written:
+            scripts.update(self.get_common_transcript_scripts())
+        return scripts
+
+    def get_upgrade_input_paths(self) -> tuple[Path, ...]:
+        return (
+            AGENT_DATA_RELATIVE_PATH,
+            _SETTINGS_RELATIVE_PATH,
+            _HOOKS_CONFIG_RELATIVE_PATH,
+            *_COMMON_TRANSCRIPT_SCRIPT_RELATIVE_PATHS,
+        )
+
+    def get_upgrade_unsupported_detail(self, input_content_by_path: Mapping[Path, str | None]) -> str | None:
+        """None when the stored launch command starts mngr's supervisor and runs agy under the agent's own home."""
+        command = read_stored_launch_command(input_content_by_path[AGENT_DATA_RELATIVE_PATH])
+        if _BACKGROUND_TASKS_INVOCATION in command and f"{self._build_agy_home_assignment()} " in command:
+            return None
+        return "its launch command does not start mngr's background tasks and run agy under the agent's own home"
+
+    def build_upgraded_files(self, input_content_by_path: Mapping[Path, str | None]) -> dict[Path, HarnessFileSpec]:
+        """mngr's shared libs and scripts, the common-transcript scripts only where the agent has them, and settings.json and hooks.json when mngr's entries in them differ."""
+        command_scripts = self._build_command_scripts(
+            is_common_transcript_written=any(
+                input_content_by_path[path] is not None for path in _COMMON_TRANSCRIPT_SCRIPT_RELATIVE_PATHS
+            )
+        )
+        return {
+            **build_shared_shell_lib_files(),
+            **build_command_script_files(command_scripts),
+            **_build_rebuilt_config_files(
+                _SETTINGS_RELATIVE_PATH,
+                input_content_by_path[_SETTINGS_RELATIVE_PATH],
+                rebuild_antigravity_settings,
+                serialize_antigravity_settings,
+            ),
+            **_build_rebuilt_config_files(
+                _HOOKS_CONFIG_RELATIVE_PATH,
+                input_content_by_path[_HOOKS_CONFIG_RELATIVE_PATH],
+                rebuild_antigravity_hooks_config,
+                serialize_antigravity_hooks,
+            ),
+        }
+
+    def get_ready_signal_paths(self) -> tuple[Path, ...]:
+        return tuple(Path(name) for name in _LAUNCH_CLEARED_MARKER_FILENAMES)
+
+    def wait_for_ready_after_restart(self, timeout: float) -> None:
+        """Wait for agy to report a state past startup to mngr's statusLine; past the timeout, raise with the pane logged."""
+        ready_marker_path = self._get_agent_dir() / READY_MARKER_FILENAME
+        with log_span("Waiting for agy to report it is past startup after a restart (timeout={}s)", timeout):
+            is_ready = poll_until(
+                lambda: self._check_file_exists(ready_marker_path),
+                timeout=timeout,
+                poll_interval=_READY_POLL_INTERVAL_SECONDS,
+            )
+        if is_ready:
+            return
+        logger.error("antigravity agent {} is not ready; pane content:\n{}", self.name, self.capture_pane_content())
+        raise AgentStartError(
+            str(self.name),
+            f"agy reported no state past initializing and authenticating within {timeout}s "
+            "(the pane content is in the log)",
+        )
 
     def _provision_agy_home(
         self, host: OnlineHostInterface, host_home: Path, host_uname: str, mngr_ctx: MngrContext
@@ -1050,17 +1147,22 @@ class AntigravityAgent(
         # itself renders nothing). A statusLine we can't run as a command (an unknown
         # shape) is dropped with a warning. Then inject mngr's statusLine LAST so it wins.
         self._provision_user_statusline_command(host, per_agent_settings.get("statusLine"))
-        per_agent_settings.update(build_antigravity_statusline_settings())
         settings_path = get_antigravity_settings_path(agy_home)
         with log_span("Writing per-agent antigravity settings to {}", settings_path):
-            host.write_text_file(settings_path, serialize_antigravity_settings(per_agent_settings))
+            host.write_text_file(
+                settings_path,
+                serialize_antigravity_settings(rebuild_antigravity_settings(per_agent_settings)),
+                mode=_CONFIG_FILE_MODE,
+            )
 
         onboarding_path = get_antigravity_onboarding_cache_path(agy_home)
         host.write_text_file(onboarding_path, serialize_antigravity_settings(build_onboarding_seed()))
 
         hooks_path = get_antigravity_hooks_config_path(agy_home)
         with log_span("Installing antigravity hooks at {}", hooks_path):
-            host.write_text_file(hooks_path, serialize_antigravity_hooks(build_antigravity_hooks_config()))
+            host.write_text_file(
+                hooks_path, serialize_antigravity_hooks(build_antigravity_hooks_config()), mode=_CONFIG_FILE_MODE
+            )
 
         self._provision_agent_instructions(host, agy_home)
 
@@ -1421,15 +1523,14 @@ class AntigravityAgent(
         therefore safe because the supervisor's pidfile check causes a
         duplicate launch to exit immediately.
         """
-        script_path = f"$MNGR_AGENT_STATE_DIR/commands/{_BACKGROUND_TASKS_SCRIPT_NAME}"
-        return f"( bash {script_path} {PANE_SESSION_NAME_SHELL_EXPRESSION} ) &"
+        return f"{_BACKGROUND_TASKS_INVOCATION} {PANE_SESSION_NAME_SHELL_EXPRESSION} ) &"
 
     def upgrade_stored_command(self, command: CommandString) -> CommandString:
-        return CommandString(
-            upgrade_literal_session_name_argument(
-                command, f"( bash $MNGR_AGENT_STATE_DIR/commands/{_BACKGROUND_TASKS_SCRIPT_NAME}"
-            )
-        )
+        return CommandString(upgrade_literal_session_name_argument(command, _BACKGROUND_TASKS_INVOCATION))
+
+    def _build_agy_home_assignment(self) -> str:
+        """The part of the launch command that runs agy with the agent's own home, e.g. ``env HOME=<state>/plugin/antigravity/home``."""
+        return f"env HOME={shlex.quote(str(self._get_agy_home_dir()))}"
 
     def _get_agy_workspace_symlink_path(self) -> str:
         """Per-agent symlink target that agy will treat as its project folder.
@@ -1499,7 +1600,6 @@ class AntigravityAgent(
         not this log.)
         """
         log_file_path = self._get_agy_log_file_path()
-        agy_home = self._get_agy_home_dir()
         extra_args: list[str] = [f"--log-file {shlex.quote(str(log_file_path))}"]
         # Auto-approval goes through the flag, not a hook (the hook allow-decision
         # does not gate run_command confirmations; see the config field comment).
@@ -1523,10 +1623,10 @@ class AntigravityAgent(
         # idle sample. Clearing it here makes that whole class of edge disappear rather than be
         # defended against downstream.
         marker_path = self._get_agent_dir() / _PROCESS_STARTED_MARKER_FILENAME
-        active_marker_path = self._get_agent_dir() / _ACTIVE_MARKER_FILENAME
-        touch_cmd = (
-            f"rm -f {shlex.quote(str(active_marker_path))} 2>/dev/null || true; touch {shlex.quote(str(marker_path))}"
+        cleared_marker_paths = " ".join(
+            shlex.quote(str(self._get_agent_dir() / name)) for name in _LAUNCH_CLEARED_MARKER_FILENAMES
         )
+        touch_cmd = f"rm -f {cleared_marker_paths} 2>/dev/null || true; touch {shlex.quote(str(marker_path))}"
         ln_cmd = f"ln -sfn {shlex.quote(str(self.work_dir))} {shlex.quote(symlink_path)}"
         cd_cmd = f"cd {shlex.quote(symlink_path)}"
         # The policy-guard shim, ahead of the real bash on PATH. agy declares PreToolUse but
@@ -1542,7 +1642,7 @@ class AntigravityAgent(
         # shim would also be inherited by every terminal the USER opens in the agent's session.
         # ``$PATH`` stays unquoted deliberately -- quoting it would make it a literal.
         shim_dir = shlex.quote(f"{self.work_dir}/system/scripts/agy_shim")
-        home_prefix = f"env HOME={shlex.quote(str(agy_home))} PATH={shim_dir}:$PATH"
+        home_prefix = f"{self._build_agy_home_assignment()} PATH={shim_dir}:$PATH"
 
         # Resume the agent's main conversation via `agy --conversation`,
         # evaluated here in the shell because the stored command is replayed on

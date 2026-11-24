@@ -4,7 +4,8 @@ agy invokes this on every agent-state change, piping a JSON payload on stdin
 (`agent_state`, `conversation_id`, `model`, ...). The script maintains the
 `active` marker BaseAgent reads for RUNNING/WAITING (active iff `agent_state` is
 a busy state -- a denylist excluding idle/initializing/authenticating/empty),
-records the root `conversation_id` for resume, rewrites the background-task
+records the root `conversation_id` for resume, touches `antigravity_ready` once
+`agent_state` is past startup, rewrites the background-task
 records from `task_count` and `subagents`, and fires the tmux submission
 signal when busy. mngr's statusLine is lifecycle-only and prints nothing of its
 own (agy already shows working/idle), so stdout is empty unless a user statusLine
@@ -108,6 +109,17 @@ def test_empty_agent_state_clears_marker(tmp_path: Path) -> None:
     _marker(tmp_path).touch()
     _run(tmp_path, _payload(agent_state=None))
     assert not _marker(tmp_path).exists()
+
+
+@pytest.mark.parametrize(
+    ("agent_state", "is_ready_expected"),
+    [("initializing", False), ("authenticating", False), (None, False), ("idle", True), ("working", True)],
+)
+def test_ready_marker_is_touched_once_agy_reports_a_state_past_startup(
+    tmp_path: Path, agent_state: str | None, is_ready_expected: bool
+) -> None:
+    _run(tmp_path, _payload(agent_state=agent_state))
+    assert (tmp_path / "antigravity_ready").exists() == is_ready_expected
 
 
 def test_empty_payload_does_not_clobber_recorded_root(tmp_path: Path) -> None:

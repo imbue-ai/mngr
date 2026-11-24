@@ -69,6 +69,13 @@ mngr create my-agent readonly_agy
 
 `mngr stop` then `mngr start` resumes the agent's prior agy conversation, keeping its full context rather than starting fresh.
 
+## Upgrade
+
+`mngr upgrade <name>` gives an antigravity agent that an older mngr created this mngr's `commands/` scripts and shared shell libraries, and mngr's entries in its agy `settings.json` (the `statusLine`) and `hooks.json` (the `mngr` hook), restarting it if idle; it resumes its conversation. The common-transcript scripts are rewritten only where the agent has them. Every other key of `settings.json`, every other hook in `hooks.json`, `GEMINI.md` and every other file stay as they are; `mngr create <name> --reuse --update` re-applies the agent's configuration instead.
+
+- An agent whose launch command does not start mngr's background tasks and run agy under the agent's own home is skipped until `mngr create <name> --reuse --update` re-creates it.
+- The upgrade is `ready` once the restarted agy reports a state past initializing and authenticating to mngr's statusLine; otherwise it fails at `ready`, with agy's screen in the log.
+
 ## Background tasks
 
 When a turn ends while agy still holds a background task (a command it left running, a timer, a workflow) or a running subagent, the agent reads `RUNNING_BACKGROUND`, and `mngr list` shows one `agy-task-<n>` (kind `SHELL`) per task and one `agy-subagent-<n>` (kind `SUBAGENT`) per running subagent. agy reports how many tasks it holds, not which, so the names are numbers.

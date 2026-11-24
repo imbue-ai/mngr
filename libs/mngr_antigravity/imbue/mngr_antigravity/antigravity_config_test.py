@@ -26,6 +26,8 @@ from imbue.mngr_antigravity.antigravity_config import get_antigravity_onboarding
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_settings_path
 from imbue.mngr_antigravity.antigravity_config import merge_trusted_workspace
 from imbue.mngr_antigravity.antigravity_config import read_antigravity_settings
+from imbue.mngr_antigravity.antigravity_config import rebuild_antigravity_hooks_config
+from imbue.mngr_antigravity.antigravity_config import rebuild_antigravity_settings
 from imbue.mngr_antigravity.antigravity_config import serialize_antigravity_hooks
 from imbue.mngr_antigravity.antigravity_config import serialize_antigravity_settings
 
@@ -333,3 +335,64 @@ def test_serialize_antigravity_hooks_round_trips() -> None:
     # which a bare ``"  " in serialized`` check could not distinguish from four.
     mngr_key_line = next(line for line in serialized.splitlines() if '"mngr"' in line)
     assert mngr_key_line.startswith("  ") and not mngr_key_line.startswith("   ")
+
+
+_USER_HOOK_GROUP: dict[str, Any] = {"Stop": [{"type": "command", "command": "echo user-stop-hook-58302"}]}
+_STALE_MNGR_HOOK_GROUP: dict[str, Any] = {
+    "PreInvocation": [
+        {"type": "command", "command": 'bash "$MNGR_AGENT_STATE_DIR/commands/capture_conversation_id.sh"'}
+    ]
+}
+
+
+@pytest.mark.parametrize(
+    ("live_hooks_config", "expected_hooks_config"),
+    [
+        pytest.param({}, build_antigravity_hooks_config(), id="empty"),
+        pytest.param(build_antigravity_hooks_config(), build_antigravity_hooks_config(), id="current"),
+        pytest.param({"mngr": _STALE_MNGR_HOOK_GROUP}, build_antigravity_hooks_config(), id="stale_mngr_group"),
+        pytest.param(
+            {"user-audit": _USER_HOOK_GROUP},
+            {"user-audit": _USER_HOOK_GROUP, **build_antigravity_hooks_config()},
+            id="user_group_only",
+        ),
+        pytest.param(
+            {"mngr": _STALE_MNGR_HOOK_GROUP, "user-audit": _USER_HOOK_GROUP},
+            {**build_antigravity_hooks_config(), "user-audit": _USER_HOOK_GROUP},
+            id="stale_mngr_group_beside_a_user_group",
+        ),
+    ],
+)
+def test_rebuild_antigravity_hooks_config_replaces_only_mngrs_hook_group(
+    live_hooks_config: dict[str, Any], expected_hooks_config: dict[str, Any]
+) -> None:
+    rebuilt = rebuild_antigravity_hooks_config(live_hooks_config)
+
+    assert rebuilt == expected_hooks_config
+    assert list(rebuilt) == list(expected_hooks_config)
+
+
+@pytest.mark.parametrize(
+    ("settings", "expected_settings"),
+    [
+        pytest.param({}, build_antigravity_statusline_settings(), id="empty"),
+        pytest.param(build_antigravity_statusline_settings(), build_antigravity_statusline_settings(), id="current"),
+        pytest.param(
+            {"statusLine": {"type": "command", "command": "echo user-status-58302"}, "model": "x"},
+            {**build_antigravity_statusline_settings(), "model": "x"},
+            id="another_statusline_beside_other_keys",
+        ),
+        pytest.param(
+            {"model": "x", "trustedWorkspaces": ["/tmp/w-58302"]},
+            {"model": "x", "trustedWorkspaces": ["/tmp/w-58302"], **build_antigravity_statusline_settings()},
+            id="no_statusline",
+        ),
+    ],
+)
+def test_rebuild_antigravity_settings_replaces_only_the_statusline(
+    settings: dict[str, Any], expected_settings: dict[str, Any]
+) -> None:
+    rebuilt = rebuild_antigravity_settings(settings)
+
+    assert rebuilt == expected_settings
+    assert list(rebuilt) == list(expected_settings)

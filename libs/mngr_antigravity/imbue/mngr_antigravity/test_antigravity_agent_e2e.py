@@ -40,10 +40,16 @@ import pytest
 
 from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
 from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
+from imbue.mngr.agents.agent_release_testing import agent_state_dir
+from imbue.mngr.agents.agent_release_testing import is_step_from
+from imbue.mngr.agents.agent_release_testing import marker_path
+from imbue.mngr.agents.agent_release_testing import read_common_records
 from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
 from imbue.mngr.agents.agent_release_testing import run_message_delivery_journey
 from imbue.mngr.agents.agent_release_testing import run_question_mark_message_delivery
 from imbue.mngr.agents.agent_release_testing import send_expecting_success
+from imbue.mngr.agents.agent_release_testing import step_message
+from imbue.mngr.agents.agent_release_testing import wait_for_records
 from imbue.mngr.hosts.common import is_macos
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import BackgroundTaskKind
@@ -53,6 +59,7 @@ from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import mngr_agent_cleanup
 from imbue.mngr.utils.testing import run_mngr_subprocess
+from imbue.mngr_antigravity.antigravity_config import get_antigravity_hooks_config_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_oauth_token_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_settings_path
 from imbue.mngr_antigravity.resources.testing import read_installed_agy_version
@@ -97,6 +104,7 @@ _BACKGROUND_SLEEP_PROMPT: Final[str] = (
 _CREATE_TIMEOUT_SECONDS: Final[float] = 600.0
 _TURN_TIMEOUT_SECONDS: Final[float] = 300.0
 _LIST_TIMEOUT_SECONDS: Final[float] = 120.0
+_UPGRADE_TIMEOUT_SECONDS: Final[float] = 300.0
 
 
 class _AntigravityReleaseProfile(AgentReleaseProfile):
@@ -327,3 +335,116 @@ def test_antigravity_agent_reads_running_background_while_a_backgrounded_command
             "the agent never read WAITING with no background task after its backgrounded command ended; mngr list "
             f"reports {_read_state_and_background_tasks(profile, ctx, agent_name)} {drift}"
         )
+
+
+def _list_pids_running(script_path: Path) -> list[str]:
+    """The pids of the processes whose command line names ``script_path``."""
+    result = subprocess.run(["pgrep", "-f", str(script_path)], capture_output=True, text=True, check=False)
+    return result.stdout.split()
+
+
+def _send_and_wait_for_reply_with(
+    profile: AgentReleaseProfile, ctx: AgentReleaseContext, agent_name: str, prompt: str, reply_text: str
+) -> None:
+    """Send ``prompt``, then wait until a later agent step carrying ``reply_text`` reaches the transcript and the turn ends."""
+    prior_record_count = len(read_common_records(ctx.host_dir, profile.common_transcript_subdir))
+    send_expecting_success(profile, ctx, agent_name, prompt)
+    wait_for_records(
+        ctx.host_dir,
+        profile.common_transcript_subdir,
+        lambda records: any(
+            is_step_from(record, "agent") and reply_text in step_message(record)
+            for record in records[prior_record_count:]
+        ),
+        timeout=_TURN_TIMEOUT_SECONDS,
+        description=f"no reply carrying {reply_text!r} to {prompt!r}",
+    )
+    assert poll_until(
+        lambda: not marker_path(ctx.host_dir).exists(), timeout=_TURN_TIMEOUT_SECONDS, poll_interval=1.0
+    ), f"the turn {prompt!r} did not end within {_TURN_TIMEOUT_SECONDS:.0f}s: the `active` marker is still set"
+
+
+@pytest.mark.release
+@pytest.mark.harness_internals(harness="antigravity")
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(900)
+def test_antigravity_upgrade_moves_an_agent_onto_new_files_and_keeps_its_conversation(tmp_path: Path) -> None:
+    """An agent with stale mngr files and config entries restarts on this mngr's, resumes its conversation, and runs the turn-end hook."""
+    profile = _AntigravityReleaseProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    ctx = profile.setup(tmp_path)
+    agent_name = f"antigravity-upgrade-{get_short_random_string()}"
+    secret = f"SECRET-{get_short_random_string()}"
+    with mngr_agent_cleanup(agent_name, env=dict(ctx.env)):
+        create = profile.run_mngr(
+            ctx,
+            "create",
+            agent_name,
+            profile.agent_type,
+            "--no-connect",
+            "--yes",
+            *profile.create_extra_args(ctx),
+            timeout=_CREATE_TIMEOUT_SECONDS,
+        )
+        assert create.returncode == 0, f"create failed:\n{create.stdout}\n{create.stderr}"
+        state_dir = agent_state_dir(ctx.host_dir)
+        _send_and_wait_for_reply_with(profile, ctx, agent_name, profile.seed_prompt(secret), "OK")
+
+        # Make it look like an older mngr created it: mngr's entries in agy's config files and its scripts are stale.
+        agy_home = state_dir / "plugin" / "antigravity" / "home"
+        hooks_path = get_antigravity_hooks_config_path(agy_home)
+        settings_path = get_antigravity_settings_path(agy_home)
+        created_hooks = json.loads(hooks_path.read_text())
+        created_settings = json.loads(settings_path.read_text())
+        hooks_path.write_text(json.dumps({"mngr": {"PreInvocation": created_hooks["mngr"]["PreInvocation"][:1]}}))
+        settings_path.write_text(
+            json.dumps({key: value for key, value in created_settings.items() if key != "statusLine"})
+        )
+        (state_dir / "commands" / "turn_end_hook.sh").unlink()
+        (state_dir / "commands" / "mngr_background_task_lib.sh").unlink()
+        (state_dir / "turn_end").unlink(missing_ok=True)
+        data_before = (state_dir / "data.json").read_bytes()
+        supervisor_path = state_dir / "commands" / "antigravity_background_tasks.sh"
+        supervisor_pids_before = _list_pids_running(supervisor_path)
+
+        upgrade = profile.run_mngr(ctx, "upgrade", agent_name, timeout=_UPGRADE_TIMEOUT_SECONDS)
+
+        hooks_after_upgrade = json.loads(hooks_path.read_text())
+        settings_after_upgrade = json.loads(settings_path.read_text())
+        restored_paths = [
+            path.name
+            for path in (
+                state_dir / "commands" / "turn_end_hook.sh",
+                state_dir / "commands" / "mngr_background_task_lib.sh",
+            )
+            if path.is_file()
+        ]
+        data_after_upgrade = (state_dir / "data.json").read_bytes()
+        supervisor_pids_after = _list_pids_running(supervisor_path)
+        _send_and_wait_for_reply_with(profile, ctx, agent_name, profile.recall_prompt(), secret)
+        turn_end_path = state_dir / "turn_end"
+        is_turn_end_recorded = poll_until(
+            lambda: turn_end_path.exists() and "kind:COMPLETED" in turn_end_path.read_text(),
+            timeout=_TURN_TIMEOUT_SECONDS,
+            poll_interval=1.0,
+        )
+        second_upgrade = profile.run_mngr(ctx, "upgrade", agent_name, timeout=_UPGRADE_TIMEOUT_SECONDS)
+
+    assert upgrade.returncode == 0, f"upgrade failed:\n{upgrade.stdout}\n{upgrade.stderr}"
+    assert f"upgraded {agent_name} (restarted)" in upgrade.stdout, upgrade.stdout
+    assert hooks_after_upgrade == created_hooks
+    assert settings_after_upgrade == created_settings
+    assert restored_paths == ["turn_end_hook.sh", "mngr_background_task_lib.sh"]
+    assert data_after_upgrade == data_before
+    assert len(supervisor_pids_before) == 1, supervisor_pids_before
+    assert len(supervisor_pids_after) == 1 and supervisor_pids_after != supervisor_pids_before, (
+        f"expected one supervisor started by the upgrade, found {supervisor_pids_after} "
+        f"(before the upgrade: {supervisor_pids_before})"
+    )
+    assert is_turn_end_recorded, "the turn-end hook recorded no completed turn after the upgrade"
+    assert second_upgrade.returncode == 0, f"upgrade failed:\n{second_upgrade.stdout}\n{second_upgrade.stderr}"
+    assert f"current {agent_name}" in second_upgrade.stdout, second_upgrade.stdout

@@ -13,7 +13,8 @@
 # On each invocation this script:
 #   1. Parses `agent_state` and `conversation_id` (POSIX grep/sed only -- no jq;
 #      jq may be absent on remote hosts).
-#   2. Records the (root) `conversation_id` in `root_conversation` when present.
+#   2. Records the (root) `conversation_id` in `root_conversation` when present,
+#      and touches `antigravity_ready` once `agent_state` is past startup.
 #   3. Maintains the `active` marker BaseAgent reads for RUNNING/WAITING: active
 #      iff `agent_state` is NOT in {idle, initializing, authenticating, ""}
 #      (a denylist, so any present/future busy state counts as RUNNING; `idle`
@@ -44,6 +45,7 @@ if [ -z "${MNGR_AGENT_STATE_DIR:-}" ]; then
 fi
 
 marker_file="$MNGR_AGENT_STATE_DIR/active"
+ready_file="$MNGR_AGENT_STATE_DIR/antigravity_ready"
 root_file="$MNGR_AGENT_STATE_DIR/root_conversation"
 model_state_file="$MNGR_AGENT_STATE_DIR/model_state.json"
 
@@ -188,6 +190,12 @@ _record_background_tasks() {
     _rewrite_background_tasks agy-task- "$((10#${task_count:-0}))" SHELL task_count
     _rewrite_background_tasks agy-subagent- "$((running_subagent_count))" SUBAGENT subagents
 }
+
+# Marks agy past startup, which `mngr upgrade` waits for after a restart.
+case "$agent_state" in
+    initializing | authenticating | "") ;;
+    *) touch "$ready_file" ;;
+esac
 
 # Busy = any state that is not a known not-working state. Denylist so any
 # current/future busy state (working, ...) keeps the agent RUNNING.

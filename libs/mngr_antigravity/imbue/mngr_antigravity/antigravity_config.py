@@ -61,6 +61,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from typing import Final
 
 from imbue.imbue_common.pure import pure
 from imbue.mngr.config.external_settings import apply_settings_patch
@@ -322,6 +323,9 @@ _MNGR_HOOK_NAME: str = "mngr"
 # ``"active"`` that ``BaseAgent`` and the provider listing scripts check.
 ACTIVE_MARKER_FILENAME: str = "active"
 
+# Touched by statusline.sh once agy reports a state past initializing and authenticating.
+READY_MARKER_FILENAME: Final[str] = "antigravity_ready"
+
 # Per-agent file (in ``$MNGR_AGENT_STATE_DIR``) recording every agy conversation
 # ID this agent has touched -- the root agent's and its subagents' -- one per
 # line, appended the first time each is seen (see ``capture_conversation_id.sh``).
@@ -426,6 +430,12 @@ def extract_statusline_command(statusline: Any) -> str | None:
 
 
 @pure
+def rebuild_antigravity_settings(settings: Mapping[str, Any]) -> dict[str, Any]:
+    """``settings`` with mngr's statusLine in place of any other and every other key kept."""
+    return {**settings, **build_antigravity_statusline_settings()}
+
+
+@pure
 def build_antigravity_hooks_config() -> dict[str, Any]:
     """Build the per-agent ``hooks.json`` body for the antigravity agent.
 
@@ -455,8 +465,7 @@ def build_antigravity_hooks_config() -> dict[str, Any]:
     ``--dangerously-skip-permissions`` CLI flag instead.
 
     ``PreInvocation`` and ``Stop`` take a flat list of handlers (their matcher is ignored). The
-    file is mngr-owned and rewritten from scratch each provision, so no
-    merge-with-existing-content logic is needed.
+    file is rewritten from scratch each provision.
     """
     mngr_hook: dict[str, Any] = {
         "PreInvocation": [
@@ -471,10 +480,12 @@ def build_antigravity_hooks_config() -> dict[str, Any]:
 
 
 @pure
-def serialize_antigravity_hooks(hooks_config: Mapping[str, Any]) -> str:
-    """Serialize a ``hooks.json`` body as two-space-indented JSON.
+def rebuild_antigravity_hooks_config(hooks_config: Mapping[str, Any]) -> dict[str, Any]:
+    """``hooks_config`` with this mngr's hook group in place of mngr's and every other hook name kept."""
+    return {**hooks_config, **build_antigravity_hooks_config()}
 
-    Matches the indentation agy itself uses for its config files; the file is
-    mngr-owned so the exact formatting only matters for readable diffs.
-    """
+
+@pure
+def serialize_antigravity_hooks(hooks_config: Mapping[str, Any]) -> str:
+    """Serialize a ``hooks.json`` body as two-space-indented JSON, the indentation agy uses for its config files."""
     return json.dumps(dict(hooks_config), indent=2)

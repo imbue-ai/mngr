@@ -5,6 +5,7 @@ import os
 import re
 import shlex
 import subprocess
+from collections.abc import Callable
 from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
@@ -22,9 +23,12 @@ from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.overlay_merge import merge_models_via_overlay
+from imbue.mngr.errors import AgentStartError
+from imbue.mngr.errors import InvalidUpgradeInputError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.common import is_macos
+from imbue.mngr.hosts.host import SHARED_SHELL_LIB_NAMES
 from imbue.mngr.hosts.tmux import PANE_SESSION_NAME_SHELL_EXPRESSION
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -44,6 +48,8 @@ from imbue.mngr_antigravity.antigravity_config import CONVERSATION_IDS_FILENAME
 from imbue.mngr_antigravity.antigravity_config import ROOT_CONVERSATION_FILENAME
 from imbue.mngr_antigravity.antigravity_config import STATUSLINE_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import TURN_END_HOOK_SCRIPT_NAME
+from imbue.mngr_antigravity.antigravity_config import build_antigravity_hooks_config
+from imbue.mngr_antigravity.antigravity_config import build_antigravity_statusline_settings
 from imbue.mngr_antigravity.antigravity_config import build_onboarding_seed
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_conversations_dir
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_global_rules_path
@@ -51,6 +57,8 @@ from imbue.mngr_antigravity.antigravity_config import get_antigravity_hooks_conf
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_oauth_token_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_onboarding_cache_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_settings_path
+from imbue.mngr_antigravity.antigravity_config import serialize_antigravity_hooks
+from imbue.mngr_antigravity.antigravity_config import serialize_antigravity_settings
 from imbue.mngr_antigravity.plugin import AntigravityAgent
 from imbue.mngr_antigravity.plugin import AntigravityAgentConfig
 from imbue.mngr_antigravity.plugin import _AGENT_CONVERSATIONS_RELPATH
@@ -281,7 +289,7 @@ def test_provision_runs_install_check_when_enabled(
     The binary is reported present so no install command runs; reaching the
     ``command -v`` probe proves the install-check line executed.
     """
-    agent = _make_antigravity_agent(
+    agent = make_antigravity_agent(
         local_provider, tmp_path, AntigravityAgentConfig(check_installation=True, auto_dismiss_dialogs_at_startup=True)
     )
     stub_host: Any = _BinaryPresentStubHost(host_dir=tmp_path, is_local=True)
@@ -293,7 +301,7 @@ def test_provision_runs_install_check_when_enabled(
     assert any(command.startswith("command -v agy") for command in stub_host.executed_commands)
 
 
-def _make_antigravity_agent(
+def make_antigravity_agent(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     agent_config: AntigravityAgentConfig,
@@ -327,7 +335,7 @@ def antigravity_agent(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
 ) -> AntigravityAgent:
-    return _make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig())
+    return make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig())
 
 
 @pytest.fixture
@@ -335,7 +343,7 @@ def antigravity_agent_auto_allow(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
 ) -> AntigravityAgent:
-    return _make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig(auto_allow_permissions=True))
+    return make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig(auto_allow_permissions=True))
 
 
 @pytest.fixture
@@ -344,7 +352,7 @@ def antigravity_agent_auto_dismiss(
     tmp_path: Path,
 ) -> AntigravityAgent:
     """Agent with `auto_dismiss_dialogs_at_startup=True` so provision() trusts silently."""
-    return _make_antigravity_agent(
+    return make_antigravity_agent(
         local_provider, tmp_path, AntigravityAgentConfig(auto_dismiss_dialogs_at_startup=True)
     )
 
@@ -645,7 +653,7 @@ def test_modify_env_vars_disables_auto_update_when_policy_never(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
     """update_policy=NEVER sets AGY_CLI_DISABLE_AUTO_UPDATE=true even on an attended local host."""
-    agent = _make_antigravity_agent(
+    agent = make_antigravity_agent(
         local_provider, tmp_path, AntigravityAgentConfig(update_policy=AgentUpdatePolicy.NEVER)
     )
     env_vars: dict[str, str] = {}
@@ -657,7 +665,7 @@ def test_modify_env_vars_respects_explicit_disable_auto_update(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
     """An explicit user-provided AGY_CLI_DISABLE_AUTO_UPDATE value is not overwritten."""
-    agent = _make_antigravity_agent(
+    agent = make_antigravity_agent(
         local_provider, tmp_path, AntigravityAgentConfig(update_policy=AgentUpdatePolicy.NEVER)
     )
     env_vars: dict[str, str] = {"AGY_CLI_DISABLE_AUTO_UPDATE": "false"}
@@ -1009,7 +1017,7 @@ def test_provision_writes_per_agent_settings_with_overrides_and_synced_base(
         json.dumps({"colorScheme": "dark", "model": "User Default"})
     )
     overrides = {"model": "Gemini 3.5 Flash (Medium)", "permissions": {"allow": ["command(git)"]}}
-    agent = _make_antigravity_agent(
+    agent = make_antigravity_agent(
         local_provider,
         tmp_path,
         AntigravityAgentConfig(auto_dismiss_dialogs_at_startup=True, settings_overrides=overrides),
@@ -1032,7 +1040,7 @@ def test_provision_per_agent_settings_ignores_user_base_when_sync_disabled(
 ) -> None:
     """sync_home_settings=False starts from an empty base, not the user's real settings."""
     get_antigravity_settings_path(isolated_home).write_text(json.dumps({"colorScheme": "dark"}))
-    agent = _make_antigravity_agent(
+    agent = make_antigravity_agent(
         local_provider,
         tmp_path,
         AntigravityAgentConfig(auto_dismiss_dialogs_at_startup=True, sync_home_settings=False),
@@ -1074,7 +1082,7 @@ def test_provision_copies_oauth_token_when_symlink_disabled(
     local_provider: LocalProviderInstance, tmp_path: Path, isolated_home: Path
 ) -> None:
     """symlink_oauth_token=False copies the token for full isolation."""
-    agent = _make_antigravity_agent(
+    agent = make_antigravity_agent(
         local_provider,
         tmp_path,
         AntigravityAgentConfig(auto_dismiss_dialogs_at_startup=True, symlink_oauth_token=False),
@@ -1097,7 +1105,7 @@ def test_provision_symlinks_token_to_shared_path_even_when_shared_absent(
     Does NOT request ``isolated_home`` (so no shared token is seeded); ``$HOME``
     is still the autouse-isolated ``tmp_path``.
     """
-    agent = _make_antigravity_agent(
+    agent = make_antigravity_agent(
         local_provider, tmp_path, AntigravityAgentConfig(auto_dismiss_dialogs_at_startup=True)
     )
 
@@ -1121,7 +1129,7 @@ def test_provision_copy_mode_skips_when_shared_token_absent(
     Does NOT request ``isolated_home`` (no shared token); ``$HOME`` is the
     autouse-isolated ``tmp_path``.
     """
-    agent = _make_antigravity_agent(
+    agent = make_antigravity_agent(
         local_provider,
         tmp_path,
         AntigravityAgentConfig(auto_dismiss_dialogs_at_startup=True, symlink_oauth_token=False),
@@ -1250,7 +1258,7 @@ def test_provision_composes_user_statusline_from_settings_overrides(
     it in the per-agent user_statusline_command file; statusline.sh runs it and
     appends its output. No warning for this composable case.
     """
-    agent = _make_antigravity_agent(
+    agent = make_antigravity_agent(
         local_provider,
         tmp_path,
         AntigravityAgentConfig(
@@ -1276,7 +1284,7 @@ def test_provision_warns_and_drops_non_composable_statusline(
     Only ``{"type": "command", "command": <str>}`` can be composed; any other shape
     (here a non-command type) can't be run, so mngr warns and records nothing.
     """
-    agent = _make_antigravity_agent(
+    agent = make_antigravity_agent(
         local_provider,
         tmp_path,
         AntigravityAgentConfig(
@@ -1343,7 +1351,7 @@ def antigravity_agent_without_common_transcript(
     tmp_path: Path,
 ) -> AntigravityAgent:
     """Agent with `auto_dismiss_dialogs_at_startup=True` so provision() can complete in tests."""
-    return _make_antigravity_agent(
+    return make_antigravity_agent(
         local_provider,
         tmp_path,
         AntigravityAgentConfig(emit_common_transcript=False, auto_dismiss_dialogs_at_startup=True),
@@ -1443,7 +1451,7 @@ def _populate_antigravity_transcripts(agent: AntigravityAgent) -> None:
 @pytest.mark.rsync
 def test_on_destroy_preserves_transcripts(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     """on_destroy copies transcripts and conversation-id history to the mirrored preserved layout."""
-    agent = _make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig(preserve_on_destroy=True))
+    agent = make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig(preserve_on_destroy=True))
     _populate_antigravity_transcripts(agent)
 
     agent.on_destroy(agent.host)
@@ -1459,7 +1467,7 @@ def test_on_destroy_preserves_transcripts(local_provider: LocalProviderInstance,
 
 def test_on_destroy_skips_preservation_when_disabled(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     """on_destroy preserves nothing when preserve_on_destroy is False."""
-    agent = _make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig(preserve_on_destroy=False))
+    agent = make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig(preserve_on_destroy=False))
     _populate_antigravity_transcripts(agent)
 
     agent.on_destroy(agent.host)
@@ -1786,7 +1794,7 @@ def test_output_style_and_stacked_prompts_reach_the_rules_text(
     """agy has no output-style concept, so the style body and the append-prompt blocks share
     one channel (the GEMINI.md rule). Blocks come first in stack order, style body last and
     verbatim -- three sentinels, so a dropped or reordered piece is visible."""
-    agent = _make_antigravity_agent(
+    agent = make_antigravity_agent(
         local_provider,
         tmp_path,
         AntigravityAgentConfig(
@@ -1814,7 +1822,7 @@ def test_rules_text_is_none_when_no_role_contributed_anything(antigravity_agent:
 
 def test_provision_writes_the_rules_file_from_a_role(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     """A role's appended prompt lands in the per-agent GEMINI.md rule."""
-    agent = _make_antigravity_agent(
+    agent = make_antigravity_agent(
         local_provider,
         tmp_path,
         AntigravityAgentConfig(append_system_prompt=(SystemPromptText("HELLO_RULE"),)),
@@ -1828,7 +1836,7 @@ def test_provision_omits_the_rules_file_when_no_role_contributes(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
     """A bare agent (no role output_style / append_system_prompt) writes no GEMINI.md."""
-    agent = _make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig())
+    agent = make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig())
     agy_home = tmp_path / "agy_home"
     agent._provision_agent_instructions(agent.host, agy_home)
     assert not get_antigravity_global_rules_path(agy_home).exists()
@@ -1839,7 +1847,7 @@ def test_provision_still_writes_the_rules_file_when_over_the_soft_limit(
 ) -> None:
     """Exceeding agy's 12k rule-file limit warns but never blocks the write (non-fatal)."""
     big = "x" * 13000
-    agent = _make_antigravity_agent(
+    agent = make_antigravity_agent(
         local_provider,
         tmp_path,
         AntigravityAgentConfig(append_system_prompt=(SystemPromptText(big),)),
@@ -1874,3 +1882,270 @@ def test_upgrade_stored_command_rewrites_the_session_name_an_older_mngr_stored(
 
     assert antigravity_agent.upgrade_stored_command(stored_by_older_mngr) == current
     assert antigravity_agent.upgrade_stored_command(current) == current
+
+
+_AGY_HOME_RELATIVE_PATH = Path("plugin", "antigravity", "home")
+_SETTINGS_RELATIVE_PATH = get_antigravity_settings_path(_AGY_HOME_RELATIVE_PATH)
+_HOOKS_RELATIVE_PATH = get_antigravity_hooks_config_path(_AGY_HOME_RELATIVE_PATH)
+_COMMON_TRANSCRIPT_RELATIVE_PATHS = (
+    Path("commands/common_transcript.sh"),
+    Path("commands/common_transcript_convert.py"),
+)
+_ALWAYS_UPGRADED_SCRIPT_PATHS = frozenset(
+    Path("commands") / name
+    for name in (
+        "antigravity_background_tasks.sh",
+        STATUSLINE_SCRIPT_NAME,
+        CAPTURE_CONVERSATION_ID_SCRIPT_NAME,
+        TURN_END_HOOK_SCRIPT_NAME,
+        "stream_transcript.sh",
+        "decode_agy_transcript.py",
+        *SHARED_SHELL_LIB_NAMES,
+    )
+)
+_USER_HOOK_GROUP = {"Stop": [{"type": "command", "command": "echo user-stop-hook-40917"}]}
+_STALE_MNGR_HOOK_GROUP = {"PreInvocation": [{"type": "command", "command": "echo retired-mngr-hook-40917"}]}
+_USER_STATUSLINE = {"type": "command", "command": "echo user-status-40917"}
+_MNGR_SETTINGS = {"trustedWorkspaces": ["/tmp/w-40917"], **build_antigravity_statusline_settings()}
+_COMMAND_DETAIL = "its launch command does not start mngr's background tasks and run agy under the agent's own home"
+
+
+def _upgrade_inputs(
+    agent: AntigravityAgent,
+    *,
+    command: str | None,
+    settings_text: str | None = serialize_antigravity_settings(_MNGR_SETTINGS),
+    hooks_text: str | None = serialize_antigravity_hooks(build_antigravity_hooks_config()),
+    is_common_transcript_present: bool = True,
+) -> dict[Path, str | None]:
+    """The inputs `mngr upgrade` reads for ``agent``, each None when the file is missing."""
+    assert set(agent.get_upgrade_input_paths()) == {
+        Path("data.json"),
+        _SETTINGS_RELATIVE_PATH,
+        _HOOKS_RELATIVE_PATH,
+        *_COMMON_TRANSCRIPT_RELATIVE_PATHS,
+    }
+    common_transcript_text = "echo common-transcript-40917\n" if is_common_transcript_present else None
+    return {
+        Path("data.json"): None if command is None else json.dumps({"command": command, "name": "test-antigravity"}),
+        _SETTINGS_RELATIVE_PATH: settings_text,
+        _HOOKS_RELATIVE_PATH: hooks_text,
+        **{path: common_transcript_text for path in _COMMON_TRANSCRIPT_RELATIVE_PATHS},
+    }
+
+
+def _current_command(agent: AntigravityAgent) -> str:
+    return str(agent.assemble_command(agent.host, (), command_override=None))
+
+
+@pytest.mark.parametrize(
+    ("build_stored_command", "expected_detail"),
+    [
+        pytest.param(_current_command, None, id="current"),
+        pytest.param(
+            lambda agent: _current_command(agent).replace(" --log-file", " --model-40917 x --log-file"),
+            None,
+            id="current_with_agent_args",
+        ),
+        pytest.param(lambda agent: None, _COMMAND_DETAIL, id="no_data_json"),
+        pytest.param(lambda agent: _current_command(agent).partition(") & ")[2], _COMMAND_DETAIL, id="no_supervisor"),
+        pytest.param(
+            lambda agent: _current_command(agent).replace(f"{agent._build_agy_home_assignment()} ", "env "),
+            _COMMAND_DETAIL,
+            id="no_agent_home",
+        ),
+        pytest.param(
+            lambda agent: _current_command(agent).replace(str(agent._get_agy_home_dir()), "/elsewhere-40917/home"),
+            _COMMAND_DETAIL,
+            id="another_home",
+        ),
+    ],
+)
+def test_get_upgrade_unsupported_detail_names_what_the_stored_launch_command_lacks(
+    antigravity_agent: AntigravityAgent,
+    build_stored_command: Callable[[AntigravityAgent], str | None],
+    expected_detail: str | None,
+) -> None:
+    inputs = _upgrade_inputs(antigravity_agent, command=build_stored_command(antigravity_agent))
+
+    assert antigravity_agent.get_upgrade_unsupported_detail(inputs) == expected_detail
+
+
+@pytest.mark.parametrize("is_common_transcript_present", [True, False])
+def test_build_upgraded_files_returns_mngrs_scripts_with_the_common_transcript_only_where_the_agent_has_it(
+    antigravity_agent: AntigravityAgent, is_common_transcript_present: bool
+) -> None:
+    inputs = _upgrade_inputs(
+        antigravity_agent,
+        command=_current_command(antigravity_agent),
+        is_common_transcript_present=is_common_transcript_present,
+    )
+
+    upgraded_files = antigravity_agent.build_upgraded_files(inputs)
+
+    assert set(upgraded_files) == _ALWAYS_UPGRADED_SCRIPT_PATHS | (
+        frozenset(_COMMON_TRANSCRIPT_RELATIVE_PATHS) if is_common_transcript_present else frozenset()
+    )
+    assert {upgraded_file.mode for upgraded_file in upgraded_files.values()} == {"0755"}
+
+
+@pytest.mark.parametrize("present_path", _COMMON_TRANSCRIPT_RELATIVE_PATHS, ids=lambda path: path.name)
+def test_build_upgraded_files_returns_both_common_transcript_scripts_where_the_agent_has_either(
+    antigravity_agent: AntigravityAgent, present_path: Path
+) -> None:
+    inputs = {
+        **_upgrade_inputs(
+            antigravity_agent, command=_current_command(antigravity_agent), is_common_transcript_present=False
+        ),
+        present_path: "echo common-transcript-40917\n",
+    }
+
+    upgraded_files = antigravity_agent.build_upgraded_files(inputs)
+
+    assert set(_COMMON_TRANSCRIPT_RELATIVE_PATHS) <= set(upgraded_files)
+
+
+@pytest.mark.parametrize(
+    ("settings_text", "hooks_text", "expected_settings", "expected_hooks_config"),
+    [
+        pytest.param(
+            json.dumps(_MNGR_SETTINGS, sort_keys=True),
+            json.dumps(build_antigravity_hooks_config()),
+            None,
+            None,
+            id="reformatted",
+        ),
+        pytest.param(
+            json.dumps({"model": "Gemini 3.8 Flash (Low)", **_MNGR_SETTINGS}),
+            json.dumps({"user-audit": _USER_HOOK_GROUP, **build_antigravity_hooks_config()}),
+            None,
+            None,
+            id="others_entries_beside_mngrs",
+        ),
+        pytest.param(
+            None,
+            None,
+            build_antigravity_statusline_settings(),
+            build_antigravity_hooks_config(),
+            id="missing",
+        ),
+        pytest.param(
+            json.dumps({"statusLine": _USER_STATUSLINE, "model": "Gemini 3.8 Flash (Low)"}),
+            json.dumps({"user-audit": _USER_HOOK_GROUP, "mngr": _STALE_MNGR_HOOK_GROUP}),
+            {**build_antigravity_statusline_settings(), "model": "Gemini 3.8 Flash (Low)"},
+            {"user-audit": _USER_HOOK_GROUP, **build_antigravity_hooks_config()},
+            id="stale_mngr_entries_beside_others",
+        ),
+        pytest.param(
+            json.dumps({"model": "Gemini 3.8 Flash (Low)"}),
+            json.dumps({"user-audit": _USER_HOOK_GROUP}),
+            {"model": "Gemini 3.8 Flash (Low)", **build_antigravity_statusline_settings()},
+            {"user-audit": _USER_HOOK_GROUP, **build_antigravity_hooks_config()},
+            id="no_mngr_entries",
+        ),
+    ],
+)
+def test_build_upgraded_files_rebuilds_only_mngrs_entries_of_agys_config_files_and_only_when_they_differ(
+    antigravity_agent: AntigravityAgent,
+    settings_text: str | None,
+    hooks_text: str | None,
+    expected_settings: dict[str, Any] | None,
+    expected_hooks_config: dict[str, Any] | None,
+) -> None:
+    inputs = _upgrade_inputs(
+        antigravity_agent,
+        command=_current_command(antigravity_agent),
+        settings_text=settings_text,
+        hooks_text=hooks_text,
+    )
+
+    upgraded_files = antigravity_agent.build_upgraded_files(inputs)
+
+    expected_config_files = {
+        **(
+            {}
+            if expected_settings is None
+            else {_SETTINGS_RELATIVE_PATH: (serialize_antigravity_settings(expected_settings), "0644")}
+        ),
+        **(
+            {}
+            if expected_hooks_config is None
+            else {_HOOKS_RELATIVE_PATH: (serialize_antigravity_hooks(expected_hooks_config), "0644")}
+        ),
+    }
+    assert {
+        path: (upgraded_file.content, upgraded_file.mode)
+        for path, upgraded_file in upgraded_files.items()
+        if path in (_SETTINGS_RELATIVE_PATH, _HOOKS_RELATIVE_PATH)
+    } == expected_config_files
+
+
+@pytest.mark.parametrize(
+    ("malformed_path", "malformed_text", "expected_message"),
+    [
+        pytest.param(
+            _SETTINGS_RELATIVE_PATH,
+            "{not json",
+            f"{_SETTINGS_RELATIVE_PATH} is not valid JSON: "
+            "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+            id="settings_not_json",
+        ),
+        pytest.param(
+            _SETTINGS_RELATIVE_PATH,
+            "",
+            f"{_SETTINGS_RELATIVE_PATH} is not valid JSON: Expecting value: line 1 column 1 (char 0)",
+            id="settings_empty",
+        ),
+        pytest.param(
+            _HOOKS_RELATIVE_PATH, '["mngr"]', f"{_HOOKS_RELATIVE_PATH} does not hold a JSON object", id="hooks_list"
+        ),
+    ],
+)
+def test_build_upgraded_files_raises_for_an_agy_config_file_that_holds_no_json_object(
+    antigravity_agent: AntigravityAgent, malformed_path: Path, malformed_text: str, expected_message: str
+) -> None:
+    inputs = {
+        **_upgrade_inputs(antigravity_agent, command=_current_command(antigravity_agent)),
+        malformed_path: malformed_text,
+    }
+
+    with pytest.raises(InvalidUpgradeInputError) as exc_info:
+        antigravity_agent.build_upgraded_files(inputs)
+    assert str(exc_info.value) == expected_message
+
+
+def test_get_ready_signal_paths_are_the_markers_the_launch_command_clears(
+    antigravity_agent: AntigravityAgent,
+) -> None:
+    command = _current_command(antigravity_agent)
+    ready_signal_paths = antigravity_agent.get_ready_signal_paths()
+
+    assert ready_signal_paths == (Path("active"), Path("antigravity_ready"))
+    quoted_paths = " ".join(shlex.quote(str(antigravity_agent._get_agent_dir() / path)) for path in ready_signal_paths)
+    assert command.index(f"rm -f {quoted_paths} ") < command.index(" agy ")
+
+
+def test_wait_for_ready_after_restart_returns_once_statusline_reports_agy_past_startup(
+    antigravity_agent: AntigravityAgent,
+) -> None:
+    state_dir = antigravity_agent._get_agent_dir()
+    state_dir.mkdir(parents=True)
+    run_statusline(state_dir, '{"agent_state":"authenticating"}')
+    run_statusline(state_dir, '{"agent_state":"idle"}')
+
+    antigravity_agent.wait_for_ready_after_restart(timeout=5.0)
+
+
+@pytest.mark.tmux
+def test_wait_for_ready_after_restart_raises_while_statusline_reports_agy_starting_up(
+    antigravity_agent: AntigravityAgent,
+) -> None:
+    state_dir = antigravity_agent._get_agent_dir()
+    state_dir.mkdir(parents=True)
+    run_statusline(state_dir, '{"agent_state":"authenticating"}')
+
+    with pytest.raises(AgentStartError) as exc_info:
+        antigravity_agent.wait_for_ready_after_restart(timeout=0.5)
+    assert exc_info.value.reason == (
+        "agy reported no state past initializing and authenticating within 0.5s (the pane content is in the log)"
+    )
