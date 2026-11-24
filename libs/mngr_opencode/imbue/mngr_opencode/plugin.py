@@ -5,9 +5,8 @@ unlike Claude Code / Antigravity, a **client-server** app: a server owns the
 sessions and an event bus, and TUI / CLI / HTTP clients talk to it. mngr leans
 into that shape rather than screen-scraping a TUI.
 
-How an opencode agent runs (see ``resources/opencode_launch.sh``)
------------------------------------------------------------------
-The agent's tmux pane runs ``opencode_launch.sh``, which starts two processes:
+How it runs: the agent's tmux pane runs ``resources/opencode_launch.sh``, which
+starts two processes:
 
 * a headless ``opencode serve`` (the SERVER) on a per-agent port -- the
   in-process lifecycle plugin's event hook runs here, maintaining the ``active``
@@ -20,19 +19,15 @@ The script pre-creates the session (or reuses the recorded one on restart) so
 the client attaches to a known session, records its id and the server's bound
 port, then attaches.
 
-Sending messages
-----------------
-``send_message`` POSTs the message to the agent's server (``prompt_async`` on the
-host via ``curl``), and the attached client renders it -- so the conversation is
-fully visible in ``mngr connect`` without typing into the TUI. This avoids the
-keystroke-paste race entirely (OpenCode drops keys during its post-launch
-repaint) and is structured rather than screen-scraped.
+Sending messages: ``send_message`` POSTs the message to the agent's server
+(``prompt_async`` on the host via ``curl``), and the attached client renders it
+-- so the conversation is fully visible in ``mngr connect`` without typing into
+the TUI. This avoids the keystroke-paste race entirely (OpenCode drops keys
+during its post-launch repaint) and is structured rather than screen-scraped.
 
-Per-agent isolation
--------------------
-``OPENCODE_CONFIG_DIR`` (config + the auto-loaded lifecycle plugin) and
-``XDG_DATA_HOME`` (db, ``auth.json``, storage, logs -- so sessions and
-credentials are per-agent), injected only on the OpenCode processes. The
+Per-agent isolation: ``OPENCODE_CONFIG_DIR`` (config + the auto-loaded lifecycle
+plugin) and ``XDG_DATA_HOME`` (db, ``auth.json``, storage, logs -- so sessions
+and credentials are per-agent), injected only on the OpenCode processes. The
 preferred config-dir shape; no ``$HOME`` relocation. Auth is shared by
 symlinking the per-agent ``auth.json`` to ``~/.local/share/opencode/auth.json``
 (OpenCode writes it in place, so one login authenticates all agents).
@@ -73,6 +68,9 @@ from imbue.mngr.agents.output_styles import read_output_style_files
 from imbue.mngr.agents.output_styles import resolve_output_style
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.agents.update_policy import is_self_update_disabled
+from imbue.mngr.agents.upgrade import AGENT_DATA_RELATIVE_PATH
+from imbue.mngr.agents.upgrade import build_command_script_files
+from imbue.mngr.agents.upgrade import read_stored_launch_command
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import build_transcript_preserved_items
@@ -98,7 +96,9 @@ from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.agent import InteractiveAgentMixin
+from imbue.mngr.interfaces.agent import UpgradableAgentMixin
 from imbue.mngr.interfaces.data_types import FileType
+from imbue.mngr.interfaces.data_types import HarnessFileSpec
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import HostLocation
@@ -188,6 +188,13 @@ _DB_SIDECAR_SUFFIXES: Final[tuple[str, ...]] = ("-wal", "-shm")
 # harness plugins use so a style reads identically across harnesses.
 _INSTRUCTIONS_SEPARATOR: Final[str] = "\n\n"
 
+# How the stored launch command runs the launch script.
+_LAUNCH_SCRIPT_INVOCATION: Final[str] = "bash $MNGR_AGENT_STATE_DIR/commands/" + LAUNCH_SCRIPT_NAME
+
+# The lifecycle plugin, relative to the agent's state dir.
+_PLUGIN_RELATIVE_PATH: Final[Path] = get_opencode_plugin_path(get_opencode_config_dir(Path()))
+_PLUGIN_FILE_MODE: Final[str] = "0644"
+
 
 def _build_prompt_post_command(port: str, session_id: str, message: str) -> str:
     """Build the host ``curl`` command that POSTs ``message`` to the agent's server.
@@ -204,6 +211,16 @@ def _load_opencode_resource(filename: str) -> str:
     """Load a resource file from the mngr_opencode resources package."""
     resource_files = importlib.resources.files(_opencode_resources)
     return resource_files.joinpath(filename).read_text()
+
+
+def _build_command_scripts() -> dict[str, str]:
+    """The scripts mngr generates in the agent's ``commands/`` dir, by name."""
+    return {LAUNCH_SCRIPT_NAME: _load_opencode_resource(LAUNCH_SCRIPT_NAME)}
+
+
+def _build_lifecycle_plugin_file() -> HarnessFileSpec:
+    """The lifecycle plugin opencode auto-loads from the agent's config dir."""
+    return HarnessFileSpec(content=_load_opencode_resource(PLUGIN_FILENAME), mode=_PLUGIN_FILE_MODE)
 
 
 def _adopt_search_db_paths(mngr_ctx: MngrContext) -> list[Path]:
@@ -334,6 +351,7 @@ class OpenCodeAgent(
     HasUnattendedModeMixin,
     HasPermissionPolicyMixin,
     HasAutoInstallMixin,
+    UpgradableAgentMixin,
 ):
     """Agent implementation for OpenCode (driven via its server, not TUI keystrokes)."""
 
@@ -371,21 +389,47 @@ class OpenCodeAgent(
         super().wait_for_ready_signal(is_readiness_awaited, start_action, timeout)
         if not is_readiness_awaited:
             return
-        effective_timeout = timeout if timeout is not None else _READY_TIMEOUT_SECONDS
+        self._wait_for_ready_sentinel(timeout if timeout is not None else _READY_TIMEOUT_SECONDS)
+
+    def get_ready_signal_paths(self) -> tuple[Path, ...]:
+        return (Path(READY_SENTINEL_FILENAME),)
+
+    def wait_for_ready_after_restart(self, timeout: float) -> None:
+        with log_span("Waiting for {} after a restart (timeout={}s)", READY_SENTINEL_FILENAME, timeout):
+            self._wait_for_ready_sentinel(timeout)
+
+    def _wait_for_ready_sentinel(self, timeout: float) -> None:
+        """Poll for the sentinel the launch script writes once the server is up and the session exists."""
         sentinel_path = self._get_agent_dir() / READY_SENTINEL_FILENAME
         if poll_until(
             lambda: self._check_file_exists(sentinel_path),
-            timeout=effective_timeout,
+            timeout=timeout,
             poll_interval=_READY_POLL_INTERVAL_SECONDS,
         ):
             return
         pane_content = self._capture_pane_content(self.tmux_target)
         raise AgentStartError(
             str(self.name),
-            f"OpenCode did not signal readiness within {effective_timeout:.0f}s "
+            f"OpenCode did not signal readiness within {timeout:.0f}s "
             "(did `opencode serve` fail to start? check the agent's logs/opencode_server.log)"
             + (f"\nPane content:\n{pane_content}" if pane_content else ""),
         )
+
+    def get_upgrade_input_paths(self) -> tuple[Path, ...]:
+        return (AGENT_DATA_RELATIVE_PATH,)
+
+    def get_upgrade_unsupported_detail(self, input_content_by_path: Mapping[Path, str | None]) -> str | None:
+        """None when the stored launch command runs mngr's launch script."""
+        if _LAUNCH_SCRIPT_INVOCATION in read_stored_launch_command(input_content_by_path[AGENT_DATA_RELATIVE_PATH]):
+            return None
+        return f"its launch command does not run commands/{LAUNCH_SCRIPT_NAME}"
+
+    def build_upgraded_files(self, input_content_by_path: Mapping[Path, str | None]) -> dict[Path, HarnessFileSpec]:
+        """The launch script and the lifecycle plugin."""
+        return {
+            **build_command_script_files(_build_command_scripts()),
+            _PLUGIN_RELATIVE_PATH: _build_lifecycle_plugin_file(),
+        }
 
     @property
     def is_common_transcript_enabled(self) -> bool:
@@ -540,12 +584,7 @@ class OpenCodeAgent(
         self._provision_plugin(host)
         self._provision_auth(host, host_home)
         with mngr_ctx.concurrency_group.make_concurrency_group("opencode_provisioning") as concurrency_group:
-            provision_scripts_to_commands_dir(
-                host,
-                self._get_agent_dir(),
-                {LAUNCH_SCRIPT_NAME: _load_opencode_resource(LAUNCH_SCRIPT_NAME)},
-                concurrency_group,
-            )
+            provision_scripts_to_commands_dir(host, self._get_agent_dir(), _build_command_scripts(), concurrency_group)
 
     def on_after_provisioning(
         self,
@@ -768,9 +807,10 @@ class OpenCodeAgent(
         OpenCode auto-loads ``$OPENCODE_CONFIG_DIR/plugin/*.ts`` (verified live),
         so no ``plugin`` entry in opencode.json is needed.
         """
-        plugin_path = get_opencode_plugin_path(self._get_opencode_config_dir())
+        plugin_path = self._get_agent_dir() / _PLUGIN_RELATIVE_PATH
+        plugin_file = _build_lifecycle_plugin_file()
         with log_span("Installing opencode lifecycle plugin at {}", plugin_path):
-            host.write_text_file(plugin_path, _load_opencode_resource(PLUGIN_FILENAME))
+            host.write_file(plugin_path, plugin_file.content.encode(), mode=plugin_file.mode)
 
     def _provision_auth(self, host: OnlineHostInterface, host_home: Path) -> None:
         """Point the per-agent ``auth.json`` at the shared host auth (symlink or copy).
@@ -824,7 +864,6 @@ class OpenCodeAgent(
         config_dir = self._get_opencode_config_dir()
         data_home = self._get_opencode_data_home()
         tmp_dir = self._get_opencode_tmp_dir()
-        launch_script = "$MNGR_AGENT_STATE_DIR/commands/" + LAUNCH_SCRIPT_NAME
         # The launch script puts this straight into the session-create URL query
         # (?directory=...), so URL-encode it here (in Python, via the stdlib)
         # rather than hand-rolling an encoder in bash. ``safe="/"`` keeps path
@@ -842,7 +881,7 @@ class OpenCodeAgent(
         if self.is_common_transcript_enabled:
             env_prefix = f"{env_prefix} {EMIT_COMMON_ENV_VAR}={EMIT_COMMON_ENABLED_VALUE}"
 
-        launch_command = f"{env_prefix} bash {launch_script}"
+        launch_command = f"{env_prefix} {_LAUNCH_SCRIPT_INVOCATION}"
         if forwarded_args:
             launch_command = f"{launch_command} {forwarded_args}"
         return CommandString(launch_command)

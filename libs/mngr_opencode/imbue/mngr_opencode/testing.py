@@ -1,14 +1,53 @@
 """Test utilities for mngr-opencode (explicitly imported; no fixtures here).
 
-Builders for minimal but real OpenCode-shaped SQLite dbs that the adopt resolver, the rebind
-SQL, and the multi-session merge SQL are exercised against. The schema mirrors the columns those
-code paths touch on the real opencode 1.17.7 db (``session``/``project``/``project_directory`` plus
-the session-scoped ``message``/``part``/``todo``/``session_share`` and project-scoped ``permission``
-tables), kept deliberately small so a test only declares the rows it cares about.
+A builder for opencode agents on the local host, and builders for minimal but real
+OpenCode-shaped SQLite dbs that the adopt resolver, the rebind SQL, and the multi-session merge
+SQL are exercised against. The schema mirrors the columns those code paths touch on the real
+opencode 1.17.7 db (``session``/``project``/``project_directory`` plus the session-scoped
+``message``/``part``/``todo``/``session_share`` and project-scoped ``permission`` tables), kept
+deliberately small so a test only declares the rows it cares about.
 """
 
 import sqlite3
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
+
+from imbue.imbue_common.model_update import to_update
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import HostName
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
+from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr_opencode.plugin import OpenCodeAgent
+from imbue.mngr_opencode.plugin import OpenCodeAgentConfig
+
+
+def make_opencode_agent(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    agent_config: OpenCodeAgentConfig,
+) -> OpenCodeAgent:
+    """An opencode agent on the local provider's host, with a fresh work dir under ``tmp_path``."""
+    # opencode is not installed on the test host, so the install check runs only when the caller sets it.
+    if "check_installation" not in agent_config.model_fields_set:
+        agent_config = agent_config.model_copy_update(to_update(agent_config.field_ref().check_installation, False))
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    return OpenCodeAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-opencode"),
+        agent_type=AgentTypeName("opencode"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
+        mngr_ctx=local_provider.mngr_ctx,
+        agent_config=agent_config,
+        host=host,
+    )
+
 
 # Mirrors the columns the opencode adopt/rebind/merge paths touch on the real opencode 1.17.7
 # schema. ``project_directory`` is included (the rebind upserts into it); session-scoped tables

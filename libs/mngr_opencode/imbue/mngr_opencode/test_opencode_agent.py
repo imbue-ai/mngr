@@ -13,6 +13,9 @@ Drive the real ``mngr`` CLI against the real ``opencode`` binary (no mocks):
 * ``test_opencode_turn_end_reports_a_completed_and_an_interrupted_turn`` and
   ``test_opencode_turn_end_reports_a_declined_permission_as_interrupted`` -- ``mngr list``
   publishes the ``turn_end`` the lifecycle plugin writes from opencode's own events.
+* ``test_opencode_upgrade_restarts_an_idle_agent_on_its_packaged_plugin_and_keeps_its_conversation``
+  -- ``mngr upgrade`` swaps a stale lifecycle plugin back in, the restarted agent resumes its
+  session, and the upgraded plugin records the next turn.
 
 All use OpenCode's free OpenCode-Zen model so no API key is required. The lifecycle
 arc and assertions live in ``imbue.mngr.agents.agent_release_testing``; this file
@@ -37,6 +40,7 @@ import subprocess
 import urllib.request
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -44,6 +48,7 @@ from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
 from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
 from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
 from imbue.mngr.agents.agent_release_testing import send_expecting_success
+from imbue.mngr.hosts.background_tasks import TURN_END_FILE_NAME
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import get_subprocess_test_env
@@ -51,10 +56,13 @@ from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import read_turn_end_in
 from imbue.mngr.utils.testing import run_mngr_subprocess
 from imbue.mngr_opencode.opencode_config import ACTIVE_MARKER_FILENAME
+from imbue.mngr_opencode.opencode_config import COMMON_TRANSCRIPT_RELATIVE_PATH
 from imbue.mngr_opencode.opencode_config import PERMISSIONS_WAITING_FILENAME
 from imbue.mngr_opencode.opencode_config import RAW_TRANSCRIPT_RELATIVE_PATH
 from imbue.mngr_opencode.opencode_config import ROOT_SESSION_FILENAME
 from imbue.mngr_opencode.opencode_config import SERVER_PORT_FILENAME
+from imbue.mngr_opencode.opencode_config import get_opencode_config_dir
+from imbue.mngr_opencode.opencode_config import get_opencode_plugin_path
 
 # A free model on the OpenCode Zen provider that needs no credentials. Pinned so the
 # test does not depend on the developer's configured default model.
@@ -79,6 +87,10 @@ _TURN_END_CONSUMER = (
     "mngr_opencode_plugin.ts's writeTurnEnd, which reads the root session's `session.status` busy and idle, "
     "`session.error`, `permission.replied` and `question.rejected`, and its reply's `finish`, `error` and tool parts"
 )
+_UPGRADE_TIMEOUT_SECONDS: Final[float] = 300.0
+# opencode installs its plugin dependencies on its first run in a fresh home, which each release test has.
+_FIRST_RUN_READY_TIMEOUT_SECONDS: Final[int] = 120
+_RECALL_PROMPT: Final[str] = "What is the secret I asked you to remember? Do not use any tools. Reply with just it."
 
 
 class _OpenCodeReleaseProfile(AgentReleaseProfile):
@@ -260,7 +272,9 @@ def test_opencode_waiting_reason_reports_permissions(tmp_path: Path) -> None:
             ctx.teardown()
 
 
-def _create_agent(profile: _OpenCodeReleaseProfile, ctx: AgentReleaseContext, agent_name: str) -> Path:
+def _create_agent(
+    profile: _OpenCodeReleaseProfile, ctx: AgentReleaseContext, agent_name: str, *extra_args: str
+) -> Path:
     """Create the agent and return its state dir."""
     create = profile.run_mngr(
         ctx,
@@ -270,6 +284,7 @@ def _create_agent(profile: _OpenCodeReleaseProfile, ctx: AgentReleaseContext, ag
         "--no-connect",
         "--yes",
         *profile.create_extra_args(ctx),
+        *extra_args,
         timeout=_CREATE_TIMEOUT_SECONDS,
     )
     assert create.returncode == 0, f"create failed:\n{create.stdout}\n{create.stderr}"
@@ -420,3 +435,99 @@ def test_opencode_turn_end_reports_a_declined_permission_as_interrupted(tmp_path
     assert declined_turn_end == ("INTERRUPTED", "PermissionRejectedError"), (
         f"mngr list published turn_end {declined_turn_end!r} after a declined permission; consumer: {_TURN_END_CONSUMER}"
     )
+
+
+def _send_and_wait_for_turn_end(
+    profile: _OpenCodeReleaseProfile, ctx: AgentReleaseContext, agent_name: str, state_dir: Path, prompt: str
+) -> list[str]:
+    """Send ``prompt``, wait until the lifecycle plugin records the end of its turn, and return the raw transcript lines the turn added."""
+    lines_before = len(_raw_transcript_lines(state_dir))
+    # The previous turn's turn_end goes so the poll below sees only this turn's.
+    (state_dir / TURN_END_FILE_NAME).unlink(missing_ok=True)
+    send_expecting_success(profile, ctx, agent_name, prompt)
+    assert poll_until(
+        condition=lambda: read_turn_end_in(state_dir) is not None, timeout=_TURN_TIMEOUT_SECONDS, poll_interval=0.5
+    ), f"the turn {prompt!r} never wrote turn_end"
+    return _raw_transcript_lines(state_dir)[lines_before:]
+
+
+def _read_common_transcript_user_messages(state_dir: Path) -> list[str]:
+    common_transcript = state_dir / COMMON_TRANSCRIPT_RELATIVE_PATH
+    if not common_transcript.exists():
+        return []
+    records = [json.loads(line) for line in common_transcript.read_text().splitlines() if line.strip()]
+    return [
+        record.get("message", "")
+        for record in records
+        if record.get("type") == "step" and record.get("source") == "user"
+    ]
+
+
+def _is_user_prompt_in_common_transcript(state_dir: Path, prompt: str) -> bool:
+    return any(prompt in message for message in _read_common_transcript_user_messages(state_dir))
+
+
+@pytest.mark.release
+@pytest.mark.harness_internals(harness="opencode")
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(1200)
+def test_opencode_upgrade_restarts_an_idle_agent_on_its_packaged_plugin_and_keeps_its_conversation(
+    tmp_path: Path,
+) -> None:
+    """An idle agent with a stale lifecycle plugin comes back from ``mngr upgrade`` on the packaged one, in its session.
+
+    The restarted agent recalls a secret it was told before the upgrade, and the upgraded plugin records that turn
+    and rebuilds the common transcript with the turns the previous plugin recorded.
+    """
+    profile = _OpenCodeReleaseProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    ctx = profile.setup(tmp_path)
+    agent_name = f"opencode-upgrade-{get_short_random_string()}"
+    secret = f"SECRET-{get_short_random_string()}"
+    remember_prompt = f"Remember this exact secret for later: {secret}. Reply with just OK."
+    try:
+        state_dir = _create_agent(
+            profile, ctx, agent_name, "-S", f"agent_ready_timeout={_FIRST_RUN_READY_TIMEOUT_SECONDS}"
+        )
+        _send_and_wait_for_turn_end(profile, ctx, agent_name, state_dir, remember_prompt)
+
+        plugin_path = get_opencode_plugin_path(get_opencode_config_dir(state_dir))
+        packaged_plugin = plugin_path.read_text()
+        plugin_path.write_text(f"{packaged_plugin}\n// stale-{get_short_random_string()}\n")
+        data_before = (state_dir / "data.json").read_bytes()
+        root_session_before = (state_dir / ROOT_SESSION_FILENAME).read_text()
+
+        upgrade = profile.run_mngr(ctx, "upgrade", agent_name, timeout=_UPGRADE_TIMEOUT_SECONDS)
+
+        assert upgrade.returncode == 0, f"upgrade failed:\n{upgrade.stdout}\n{upgrade.stderr}"
+        assert f"upgraded {agent_name} (restarted)" in upgrade.stdout, upgrade.stdout
+        assert plugin_path.read_text() == packaged_plugin
+        assert (state_dir / "data.json").read_bytes() == data_before
+        assert (state_dir / ROOT_SESSION_FILENAME).read_text() == root_session_before
+
+        recall_turn_lines = _send_and_wait_for_turn_end(profile, ctx, agent_name, state_dir, _RECALL_PROMPT)
+        assert any(secret in line for line in recall_turn_lines), (
+            "the restarted agent did not recall the secret; its turn recorded:\n" + "\n".join(recall_turn_lines)
+        )
+        assert poll_until(
+            condition=lambda: _is_user_prompt_in_common_transcript(state_dir, _RECALL_PROMPT),
+            timeout=_TURN_TIMEOUT_SECONDS,
+            poll_interval=0.5,
+        ), "the upgraded plugin never rebuilt the common transcript"
+        assert _is_user_prompt_in_common_transcript(state_dir, remember_prompt), (
+            "the common transcript the upgraded plugin rebuilt lost the turn from before the upgrade: "
+            f"{_read_common_transcript_user_messages(state_dir)}"
+        )
+
+        second_upgrade = profile.run_mngr(ctx, "upgrade", agent_name, timeout=_UPGRADE_TIMEOUT_SECONDS)
+
+        assert second_upgrade.returncode == 0, f"upgrade failed:\n{second_upgrade.stdout}\n{second_upgrade.stderr}"
+        assert f"current {agent_name}" in second_upgrade.stdout, second_upgrade.stdout
+    finally:
+        profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_LIFECYCLE_TIMEOUT_SECONDS)
+        if ctx.teardown is not None:
+            ctx.teardown()

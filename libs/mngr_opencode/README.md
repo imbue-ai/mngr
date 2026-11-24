@@ -95,5 +95,19 @@ Notes:
   not work: `--` args go to the `opencode attach` client, which has no `--model`
   flag; the model is read by the `serve` process from `opencode.json`.
 
+## Upgrade
+
+`mngr upgrade <name>` gives an opencode agent that an older mngr created this
+mngr's launch script (`commands/opencode_launch.sh`) and lifecycle plugin
+(`mngr_opencode_plugin.ts` in the agent's opencode config dir), restarting it if
+idle; it resumes its session. `opencode.json`, `AGENTS.md` and every other file
+stay as they are, including other plugins in the config dir's `plugin/`.
+
+- An agent whose launch command does not run `commands/opencode_launch.sh` is
+  skipped until `mngr create <name> --reuse --update` re-creates it.
+- The upgrade is `ready` once the restarted launch script writes `opencode_ready`
+  in the agent's state dir, after opencode's server is up and the agent's session
+  exists; otherwise it fails at `ready`, with the agent's screen in the error.
+
 See the [mngr agent types documentation](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/concepts/agent_types.md)
 for more details.

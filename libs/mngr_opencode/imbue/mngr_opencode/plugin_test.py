@@ -4,26 +4,29 @@ import json
 import shlex
 import shutil
 import sqlite3
+import threading
 from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import ClassVar
+from typing import Final
 
 import pytest
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
+from imbue.mngr.agents.upgrade import AGENT_DATA_RELATIVE_PATH
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.errors import AgentStartError
+from imbue.mngr.errors import InvalidUpgradeInputError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -61,6 +64,7 @@ from imbue.mngr_opencode.plugin import _build_prompt_post_command
 from imbue.mngr_opencode.plugin import _waiting_reason
 from imbue.mngr_opencode.plugin import agent_field_generators
 from imbue.mngr_opencode.plugin import register_agent_type
+from imbue.mngr_opencode.testing import make_opencode_agent
 from imbue.mngr_opencode.testing import write_opencode_session
 
 
@@ -175,7 +179,7 @@ def test_provision_runs_install_check_when_enabled(local_provider: LocalProvider
     The binary is reported present so no install command runs; reaching the
     ``command -v`` probe proves the install-check line executed.
     """
-    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(check_installation=True))
+    agent = make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(check_installation=True))
     stub_host: Any = _BinaryPresentStubHost(host_dir=tmp_path, is_local=True)
     agent.provision(
         host=stub_host,
@@ -191,7 +195,7 @@ def test_provision_verifies_pinned_version_through_the_binary_with_check_install
     # The launch wrapper does not resolve where provisioning runs, so a probe through
     # ``command`` would fail and skip the check; the pin must be verified via the binary.
     put_fake_cli_reporting_version_on_path(tmp_path, monkeypatch, "opencode", "1.0.0")
-    agent = _make_opencode_agent(
+    agent = make_opencode_agent(
         local_provider,
         tmp_path,
         OpenCodeAgentConfig(
@@ -222,40 +226,14 @@ def test_transcripts_have_no_commands_scripts_both_in_process() -> None:
     assert agent.get_common_transcript_scripts() == {}
 
 
-def _make_opencode_agent(
-    local_provider: LocalProviderInstance,
-    tmp_path: Path,
-    agent_config: OpenCodeAgentConfig,
-) -> OpenCodeAgent:
-    # These setup tests run against a real local host where opencode is not installed; the
-    # install check is irrelevant to provision setup (files/auth/config) and is covered
-    # separately, so skip it unless a caller opted in explicitly.
-    if "check_installation" not in agent_config.model_fields_set:
-        agent_config = agent_config.model_copy_update(to_update(agent_config.field_ref().check_installation, False))
-    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-    return OpenCodeAgent.model_construct(
-        id=AgentId.generate(),
-        name=AgentName("test-opencode"),
-        agent_type=AgentTypeName("opencode"),
-        work_dir=work_dir,
-        create_time=datetime.now(timezone.utc),
-        host_id=host.id,
-        mngr_ctx=local_provider.mngr_ctx,
-        agent_config=agent_config,
-        host=host,
-    )
-
-
 @pytest.fixture
 def opencode_agent(local_provider: LocalProviderInstance, tmp_path: Path) -> OpenCodeAgent:
-    return _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    return make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
 
 
 @pytest.fixture
 def opencode_agent_no_common(local_provider: LocalProviderInstance, tmp_path: Path) -> OpenCodeAgent:
-    return _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(emit_common_transcript=False))
+    return make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(emit_common_transcript=False))
 
 
 def test_assemble_command_runs_launch_script_with_isolation_and_server_env(opencode_agent: OpenCodeAgent) -> None:
@@ -360,7 +338,7 @@ def test_provision_inherits_user_global_config_and_applies_overrides(
     user_config_path = Path.home() / ".config" / "opencode" / "opencode.json"
     user_config_path.parent.mkdir(parents=True, exist_ok=True)
     user_config_path.write_text(json.dumps({"theme": "user-theme", "model": "old/model"}))
-    agent = _make_opencode_agent(
+    agent = make_opencode_agent(
         local_provider, tmp_path, OpenCodeAgentConfig(config_overrides={"model": "anthropic/claude-sonnet-4-5"})
     )
     _provision(agent)
@@ -372,7 +350,7 @@ def test_provision_inherits_user_global_config_and_applies_overrides(
 def test_provision_injects_wildcard_allow_when_auto_allow(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(auto_allow_permissions=True))
+    agent = make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(auto_allow_permissions=True))
     _provision(agent)
     parsed = json.loads(get_opencode_config_file_path(agent._get_opencode_config_dir()).read_text())
     assert parsed["permission"] == {"*": "allow"}
@@ -382,7 +360,7 @@ def test_provision_disables_autoupdate_when_policy_never(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
     """update_policy=NEVER writes autoupdate:false into the per-agent opencode.json."""
-    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(update_policy=AgentUpdatePolicy.NEVER))
+    agent = make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(update_policy=AgentUpdatePolicy.NEVER))
     _provision(agent)
     parsed = json.loads(get_opencode_config_file_path(agent._get_opencode_config_dir()).read_text())
     assert parsed["autoupdate"] is False
@@ -399,7 +377,7 @@ def test_provision_leaves_autoupdate_unset_when_policy_auto(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
     """Explicit AUTO opts back into opencode's auto-update (no autoupdate key written)."""
-    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(update_policy=AgentUpdatePolicy.AUTO))
+    agent = make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(update_policy=AgentUpdatePolicy.AUTO))
     _provision(agent)
     parsed = json.loads(get_opencode_config_file_path(agent._get_opencode_config_dir()).read_text())
     assert "autoupdate" not in parsed
@@ -423,7 +401,7 @@ def test_provision_copies_auth_when_symlink_disabled(local_provider: LocalProvid
     shared = get_shared_opencode_auth_path(Path.home())
     shared.parent.mkdir(parents=True, exist_ok=True)
     shared.write_text('{"anthropic":{"type":"api","key":"seed"}}')
-    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(symlink_auth=False))
+    agent = make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(symlink_auth=False))
     _provision(agent)
     auth_path = get_opencode_auth_path_for_data_home(agent._get_opencode_data_home())
     assert auth_path.exists()
@@ -449,7 +427,7 @@ def test_provision_does_not_write_into_work_dir(opencode_agent: OpenCodeAgent) -
 
 def test_provision_skips_auth_copy_when_no_shared_auth(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     """copy mode with no shared auth.json simply skips seeding (the agent runs OpenCode's login flow)."""
-    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(symlink_auth=False))
+    agent = make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(symlink_auth=False))
     _provision(agent)
     auth_path = get_opencode_auth_path_for_data_home(agent._get_opencode_data_home())
     assert not auth_path.exists()
@@ -558,7 +536,7 @@ def test_send_message_raises_when_launch_files_missing(local_provider: LocalProv
 
 def test_post_prompt_raises_when_server_unreachable(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     """A real curl to a closed port fails, and _post_prompt surfaces it as SendMessageError."""
-    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    agent = make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
     # Port 1 is not listening; curl -fsS returns non-zero.
     with pytest.raises(SendMessageError):
         agent._post_prompt("1", "ses_nope", "hello")
@@ -611,7 +589,7 @@ def _noop_start() -> None:
 def test_wait_for_ready_signal_returns_when_sentinel_present(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    agent = make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
     agent_dir = agent._get_agent_dir()
     agent_dir.mkdir(parents=True, exist_ok=True)
     (agent_dir / READY_SENTINEL_FILENAME).write_text("")
@@ -620,7 +598,7 @@ def test_wait_for_ready_signal_returns_when_sentinel_present(
 
 
 def test_wait_for_ready_signal_skips_when_not_creating(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
-    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    agent = make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
     # On a restart (is_readiness_awaited=False) we do not block on the sentinel.
     agent.wait_for_ready_signal(is_readiness_awaited=False, start_action=_noop_start, timeout=0.2)
 
@@ -629,9 +607,147 @@ def test_wait_for_ready_signal_skips_when_not_creating(local_provider: LocalProv
 def test_wait_for_ready_signal_raises_when_sentinel_never_appears(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    agent = make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
     with pytest.raises(AgentStartError):
         agent.wait_for_ready_signal(is_readiness_awaited=True, start_action=_noop_start, timeout=0.2)
+
+
+def test_wait_for_ready_after_restart_returns_on_the_marker_get_ready_signal_paths_names(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    agent = make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    (ready_signal_path,) = agent.get_ready_signal_paths()
+    marker_path = agent._get_agent_dir() / ready_signal_path
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    marker_path.touch()
+
+    agent.wait_for_ready_after_restart(timeout=0.2)
+
+    assert ready_signal_path == Path(READY_SENTINEL_FILENAME)
+
+
+def test_wait_for_ready_after_restart_keeps_polling_until_the_sentinel_appears(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    agent = make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    sentinel_path = agent._get_agent_dir() / READY_SENTINEL_FILENAME
+    sentinel_path.parent.mkdir(parents=True, exist_ok=True)
+    sentinel_writer = threading.Timer(0.5, sentinel_path.touch)
+    sentinel_writer.start()
+    try:
+        agent.wait_for_ready_after_restart(timeout=5.0)
+    finally:
+        sentinel_writer.cancel()
+        sentinel_writer.join()
+
+    assert sentinel_path.exists()
+
+
+@pytest.mark.tmux
+def test_wait_for_ready_after_restart_raises_when_the_sentinel_never_appears(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    agent = make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+
+    with pytest.raises(AgentStartError, match="OpenCode did not signal readiness"):
+        agent.wait_for_ready_after_restart(timeout=0.2)
+
+
+# Upgrade support
+
+_NO_LAUNCH_SCRIPT_DETAIL: Final[str] = "its launch command does not run commands/opencode_launch.sh"
+
+
+def _make_upgrade_inputs(agent: OpenCodeAgent, agent_data_content: str | None) -> dict[Path, str | None]:
+    """The content of each path the agent's upgrade reads."""
+    (agent_data_path,) = agent.get_upgrade_input_paths()
+    return {agent_data_path: agent_data_content}
+
+
+def _agent_data_storing(launch_command: str) -> str:
+    return json.dumps({"name": "test-opencode", "command": launch_command})
+
+
+def test_get_upgrade_input_paths_names_only_the_agent_record(opencode_agent: OpenCodeAgent) -> None:
+    assert opencode_agent.get_upgrade_input_paths() == (AGENT_DATA_RELATIVE_PATH,)
+
+
+@pytest.mark.parametrize(
+    "command_override",
+    [
+        pytest.param(None, id="configured_binary"),
+        pytest.param(CommandString("python3 /opt/oom_launch_51834.py opencode"), id="multi_word_launch_command"),
+    ],
+)
+def test_get_upgrade_unsupported_detail_accepts_the_command_the_agent_type_assembles(
+    local_provider: LocalProviderInstance, tmp_path: Path, command_override: CommandString | None
+) -> None:
+    agent = make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(cli_args=("--agent", "plan")))
+    stored_launch_command = str(agent.assemble_command(agent.host, ("--log-level", "DEBUG"), command_override))
+
+    detail = agent.get_upgrade_unsupported_detail(
+        _make_upgrade_inputs(agent, _agent_data_storing(stored_launch_command))
+    )
+
+    assert detail is None
+
+
+@pytest.mark.parametrize(
+    "agent_data_content",
+    [
+        pytest.param(_agent_data_storing("opencode"), id="bare_binary"),
+        pytest.param(_agent_data_storing("opencode --model opencode/model-51834"), id="bare_binary_with_arguments"),
+        pytest.param(json.dumps({"name": "test-opencode"}), id="no_command"),
+        pytest.param(None, id="no_agent_record"),
+    ],
+)
+def test_get_upgrade_unsupported_detail_names_the_launch_script_a_stored_command_does_not_run(
+    opencode_agent: OpenCodeAgent, agent_data_content: str | None
+) -> None:
+    detail = opencode_agent.get_upgrade_unsupported_detail(_make_upgrade_inputs(opencode_agent, agent_data_content))
+
+    assert detail == _NO_LAUNCH_SCRIPT_DETAIL
+
+
+def test_get_upgrade_unsupported_detail_refuses_a_record_that_is_not_json(opencode_agent: OpenCodeAgent) -> None:
+    with pytest.raises(InvalidUpgradeInputError, match="data.json is not valid JSON"):
+        opencode_agent.get_upgrade_unsupported_detail(_make_upgrade_inputs(opencode_agent, "{not json"))
+
+
+@pytest.mark.parametrize(
+    "agent_config",
+    [
+        pytest.param(OpenCodeAgentConfig(), id="default"),
+        pytest.param(
+            OpenCodeAgentConfig(
+                emit_common_transcript=False,
+                auto_allow_permissions=True,
+                append_system_prompt=(SystemPromptText("Review code 51834."),),
+                config_overrides={"model": "opencode/model-51834"},
+            ),
+            id="role_and_options",
+        ),
+    ],
+)
+def test_build_upgraded_files_are_the_launch_script_and_plugin_create_writes_with_the_same_executable_bits(
+    local_provider: LocalProviderInstance, tmp_path: Path, agent_config: OpenCodeAgentConfig
+) -> None:
+    agent = make_opencode_agent(local_provider, tmp_path, agent_config)
+    agent_dir = agent._get_agent_dir()
+    _provision(agent)
+
+    upgraded_files = agent.build_upgraded_files(
+        _make_upgrade_inputs(agent, _agent_data_storing(str(agent.assemble_command(agent.host, (), None))))
+    )
+
+    assert {
+        path: (upgraded_file.content, int(upgraded_file.mode, 8) & 0o111)
+        for path, upgraded_file in upgraded_files.items()
+    } == {path: ((agent_dir / path).read_text(), (agent_dir / path).stat().st_mode & 0o111) for path in upgraded_files}
+    assert {path: upgraded_file.mode for path, upgraded_file in upgraded_files.items()} == {
+        Path("commands/opencode_launch.sh"): "0755",
+        Path("plugin/opencode/config/plugin/mngr_opencode_plugin.ts"): "0644",
+    }
 
 
 # Preservation on destroy
@@ -654,7 +770,7 @@ def _populate_opencode_transcripts(agent: OpenCodeAgent) -> None:
 @pytest.mark.rsync
 def test_on_destroy_preserves_transcripts(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     """on_destroy copies transcripts and session-id history to the mirrored preserved layout."""
-    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(preserve_on_destroy=True))
+    agent = make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(preserve_on_destroy=True))
     _populate_opencode_transcripts(agent)
 
     agent.on_destroy(agent.host)
@@ -669,7 +785,7 @@ def test_on_destroy_preserves_transcripts(local_provider: LocalProviderInstance,
 
 def test_on_destroy_skips_preservation_when_disabled(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     """on_destroy preserves nothing when preserve_on_destroy is False."""
-    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(preserve_on_destroy=False))
+    agent = make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(preserve_on_destroy=False))
     _populate_opencode_transcripts(agent)
 
     agent.on_destroy(agent.host)
@@ -701,7 +817,7 @@ def test_adopt_session_single_copies_db_rebinds_and_resumes(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
     """A single ``--adopt`` copies the source db in, rebinds it to the work dir, and resumes it."""
-    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    agent = make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
     source_db = tmp_path / "src_a" / "opencode.db"
     write_opencode_session(source_db, "ses_a", "/old/work", message_id="msg_a")
 
@@ -727,7 +843,7 @@ def test_adopt_session_multi_merges_both_sessions_and_resumes_last(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
     """``--adopt A B`` merges both sessions into one db (B folded in) and resumes B (the last)."""
-    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    agent = make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
     source_a = tmp_path / "src_a" / "opencode.db"
     source_b = tmp_path / "src_b" / "opencode.db"
     write_opencode_session(source_a, "ses_a", "/work/a", message_id="msg_a")
@@ -757,7 +873,7 @@ def test_adopt_session_multi_merges_both_sessions_and_resumes_last(
 @pytest.mark.rsync
 def test_adopt_session_from_clone_resumes_the_clone(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     """``--adopt A --from X`` merges A and the clone, then resumes the clone's session."""
-    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    agent = make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
     source_a = tmp_path / "src_a" / "opencode.db"
     write_opencode_session(source_a, "ses_a", "/work/a", message_id="msg_a")
 
@@ -786,7 +902,7 @@ def test_adopt_session_from_clone_with_no_store_starts_fresh(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
     """A ``--from`` clone whose source has no opencode store warns and starts fresh, not a hard error."""
-    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    agent = make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
     # A source state dir with no native opencode store at all.
     source_location = HostLocation(host=agent.host, path=tmp_path / "empty_source")
 
@@ -822,7 +938,7 @@ def test_adopt_cloned_session_from_remote_source_pulls_db_locally(
     ``_localize_source_db`` must copy the source ``opencode.db`` (and its sidecars) off the remote host
     before the local stdlib-``sqlite3`` merge/rebind can touch it; the staged db then lands on the dest.
     """
-    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    agent = make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
     source_state_dir = tmp_path / "remote_source"
     clone_db = source_state_dir / AGENT_OPENCODE_DB_RELPATH
     write_opencode_session(clone_db, "ses_remote", "/remote/work", message_id="msg_remote")
@@ -851,7 +967,7 @@ def test_lifecycle_reports_waiting_when_blocked_on_permission(
     permissions_waiting marker turns it to WAITING; removing the marker restores RUNNING.
     (The state rule itself is unit-tested without tmux in mngr core, over
     ``determine_lifecycle_probe_result``.)"""
-    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    agent = make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
     # A long-lived process that ps reports as "opencode" (the expected process name)
     # so the base lifecycle reads RUNNING -- the renamed-sleep trick.
     sleep_bin = shutil.which("sleep")
@@ -953,7 +1069,7 @@ def test_build_agent_rules_text_is_none_when_no_role_contributes(opencode_agent:
 def test_provision_writes_agents_md_from_append_system_prompt(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    agent = _make_opencode_agent(
+    agent = make_opencode_agent(
         local_provider,
         tmp_path,
         OpenCodeAgentConfig(append_system_prompt=(SystemPromptText("HELLO_RULE"),)),
@@ -965,7 +1081,7 @@ def test_provision_writes_agents_md_from_append_system_prompt(
 def test_provision_joins_stacked_prompts_with_blank_lines(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    agent = _make_opencode_agent(
+    agent = make_opencode_agent(
         local_provider,
         tmp_path,
         OpenCodeAgentConfig(append_system_prompt=(SystemPromptText("BLOCK_A"), SystemPromptText("BLOCK_B"))),
@@ -977,7 +1093,7 @@ def test_provision_joins_stacked_prompts_with_blank_lines(
 def test_provision_omits_agents_md_when_no_role_contributes(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    agent = make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
     agent._provision_agent_instructions(agent.host)
     assert not get_opencode_agents_md_path(agent._get_opencode_config_dir()).exists()
 
@@ -986,7 +1102,7 @@ def test_output_style_body_follows_the_append_prompt_blocks(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
     # append_system_prompt blocks come first (in order), then the output-style file's body.
-    agent = _make_opencode_agent(
+    agent = make_opencode_agent(
         local_provider,
         tmp_path,
         OpenCodeAgentConfig(
