@@ -139,10 +139,10 @@ class LocalFileDescriptorsExhaustedError(HostConnectionError):
 class PyinfraConnectorUnavailableError(HostError, KeyError):
     """Raised when pyinfra cannot find the connector needed to build a host object.
 
-    pyinfra looks its connectors up from installed package metadata each time,
-    so this can start happening in a process that built hosts fine earlier.
-    Still a ``KeyError``, which is what pyinfra raises here, so handlers written
-    against pyinfra's error keep catching it.
+    pyinfra's package metadata was unreachable when the lookup ran; see
+    ``imbue.mngr.hosts.pyinfra_host_builder`` for when lookups happen. Still a
+    ``KeyError``, which is what pyinfra raises here, so handlers written against
+    pyinfra's error keep catching it.
     """
 
 

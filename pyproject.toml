@@ -197,6 +197,14 @@ exclude = ["scripts/style_guide.py", "contrib/", "apps/minds/scripts/", "apps/mi
 [tool.ty.environment]
 extra-paths = ["scripts"]
 
+# importlib_metadata is not installed in the public tree, so pyinfra's entry_points has a
+# different type here, and the ty: ignore this file needs where it is installed goes unused.
+[[tool.ty.overrides]]
+include = ["libs/mngr/imbue/mngr/hosts/pyinfra_host_builder.py"]
+
+[tool.ty.overrides.rules]
+unused-ignore-comment = "ignore"
+
 [tool.coverage.run]
 source = ["imbue"]
 parallel = true

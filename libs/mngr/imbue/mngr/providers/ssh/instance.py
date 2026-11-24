@@ -13,14 +13,13 @@ from pydantic import Field
 from pydantic import PrivateAttr
 from pydantic import ValidationError
 from pyinfra.api import Host as PyinfraHost
-from pyinfra.api import State as PyinfraState
-from pyinfra.api.inventory import Inventory
 from pyinfra.connectors.sshuserclient.client import get_host_keys
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.hosts.pyinfra_host_builder import build_pyinfra_host
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
@@ -144,14 +143,7 @@ class SSHProviderInstance(BaseProviderInstance):
             host_data["ssh_known_hosts_file"] = str(host_config.known_hosts_file)
             host_data["ssh_strict_host_key_checking"] = "yes"
 
-        names_data = ([(host_config.address, host_data)], {})
-        inventory = Inventory(names_data)
-        state = PyinfraState(inventory=inventory)
-
-        pyinfra_host = inventory.get_host(host_config.address)
-        pyinfra_host.init(state)
-
-        return pyinfra_host
+        return build_pyinfra_host(host_config.address, host_data)
 
     def _create_host_object(
         self,

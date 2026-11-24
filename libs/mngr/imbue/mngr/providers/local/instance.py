@@ -14,8 +14,6 @@ from typing import assert_never
 import psutil
 from loguru import logger
 from pyinfra.api import Host as PyinfraHost
-from pyinfra.api import State
-from pyinfra.api.inventory import Inventory
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import log_span
@@ -28,6 +26,7 @@ from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.host import parse_certified_host_data
+from imbue.mngr.hosts.pyinfra_host_builder import build_pyinfra_host
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
@@ -199,18 +198,7 @@ class LocalProviderInstance(BaseProviderInstance):
         atomic_write(tags_path, json.dumps(data, indent=2))
 
     def _create_local_pyinfra_host(self) -> PyinfraHost:
-        """Create a pyinfra host for local execution.
-
-        When the host name starts with '@', pyinfra automatically uses the
-        LocalConnector, which executes commands locally without SSH.
-        The host must be initialized with a State for connection to work.
-        """
-        names_data = (["@local"], {})
-        inventory = Inventory(names_data)
-        state = State(inventory=inventory)
-        pyinfra_host = inventory.get_host("@local")
-        pyinfra_host.init(state)
-        return pyinfra_host
+        return build_pyinfra_host("@local")
 
     def _create_host(self, name: HostName, tags: Mapping[str, str] | None = None) -> Host:
         """Create a Host object for the local machine."""

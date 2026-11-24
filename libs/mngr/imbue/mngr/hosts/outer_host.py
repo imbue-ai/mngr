@@ -56,10 +56,8 @@ from pydantic import Field
 from pydantic import PrivateAttr
 from pydantic import SkipValidation
 from pyinfra.api import Host as PyinfraHost
-from pyinfra.api import State as PyinfraState
 from pyinfra.api.command import StringCommand
 from pyinfra.api.exceptions import ConnectError
-from pyinfra.api.inventory import Inventory
 from pyinfra.connectors.util import CommandOutput
 from pyinfra.connectors.util import OutputLine
 from tenacity import Retrying
@@ -84,6 +82,7 @@ from imbue.mngr.errors import LocalFileDescriptorsExhaustedError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.common import LOCAL_CONNECTOR_NAME
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
+from imbue.mngr.hosts.pyinfra_host_builder import build_pyinfra_host
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileTailRead
 from imbue.mngr.interfaces.data_types import FileType
@@ -110,18 +109,7 @@ def _raise_local_spawn_failure_as_command_start_error(command: str) -> Generator
 
 
 def create_local_pyinfra_host() -> PyinfraHost:
-    """Create a pyinfra host that executes commands on the local machine.
-
-    Mirrors ``LocalProviderInstance.create_local_pyinfra_host``. Pyinfra's
-    LocalConnector is selected automatically when the host name starts with
-    ``@``.
-    """
-    names_data = (["@local"], {})
-    inventory = Inventory(names_data)
-    state = PyinfraState(inventory=inventory)
-    pyinfra_host = inventory.get_host("@local")
-    pyinfra_host.init(state)
-    return pyinfra_host
+    return build_pyinfra_host("@local")
 
 
 def create_ssh_pyinfra_host_using_user_config(
@@ -144,12 +132,7 @@ def create_ssh_pyinfra_host_using_user_config(
     if port is not None:
         host_data["ssh_port"] = port
 
-    names_data = ([(hostname, host_data)], {})
-    inventory = Inventory(names_data)
-    state = PyinfraState(inventory=inventory)
-    pyinfra_host = inventory.get_host(hostname)
-    pyinfra_host.init(state)
-    return pyinfra_host
+    return build_pyinfra_host(hostname, host_data)
 
 
 def _local_dir_entry(entry_path: str) -> VolumeFile | None:

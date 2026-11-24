@@ -15,12 +15,10 @@ from imbue.imbue_common.frozen_model import FrozenModel
 
 
 class PyinfraInstallSnapshot(FrozenModel):
-    """What this process can currently see of its pyinfra install, for diagnosing a vanished connector.
+    """What this process can currently see of its pyinfra install, for diagnosing a missing connector.
 
-    pyinfra rebuilds its connector registry from package entry points on every
-    ``Inventory``, so a long-running process whose venv is rewritten under it can
-    lose a connector it resolved earlier, while every module it already imported
-    keeps working.
+    The fields separate the ways pyinfra's connector metadata can be unreachable: gone,
+    shadowed by another pyinfra distribution, or mid-rewrite.
     """
 
     module_dir: Path = Field(description="The imported pyinfra package directory")
