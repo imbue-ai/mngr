@@ -296,8 +296,10 @@ def wait_for_first_workspace_creation_page(session: StudioAppSession) -> str:
             f"The app could not start the account's first workspace: {page.locator(_CREATE_REFUSED).inner_text()}"
         )
     raise SmokeAppError(
-        "The app took the account to its home page instead of creating its first workspace: the connector "
-        "counts a workspace for the account, one the check made before the launch did not find it holding."
+        "The app took the account to its home page instead of creating its first workspace, though the check "
+        "made before the launch found the account with no pool lease and no active workspace record: either a "
+        "record became active between that check and the sign-in, or the app went to its home page for an "
+        "account the connector counts no workspace for."
     )
 
 

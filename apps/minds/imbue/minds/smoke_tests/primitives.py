@@ -144,8 +144,9 @@ class SmokeSignInRefusedError(SmokeAccountError):
 class SmokeAccountHoldsWorkspacesError(SmokeAccountError):
     """Raised when the account a journey through the first run signs in as still holds workspaces.
 
-    The app's first run creates a workspace only for an account that has none,
-    so the journey cannot start until the leftovers are released.
+    A pool lease and an active workspace record both count. The app's first
+    run creates a workspace only for an account that has none, so the journey
+    cannot start until the leftovers are released and retired.
     """
 
     ...

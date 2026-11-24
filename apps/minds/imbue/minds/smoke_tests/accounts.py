@@ -3,11 +3,12 @@
 Every request carries the smoke User-Agent, so the connector's access log (and
 the download events it records) can tell a smoke run apart from a real user.
 
-The owner routes (sign in, list leases and workspaces, release, unshare) are
-what a smoke test's own account can do; the admin routes (test signup, account
-lookup, operator release) and the pool-DB read are what only the setup and
-teardown jobs hold credentials for. Both live here because teardown drives them
-in one pass: release what the run leased, then delete the account that leased it.
+The owner routes (sign in, list leases, workspaces and workspace records,
+release, retire, unshare) are what a smoke test's own account can do; the admin
+routes (test signup, account lookup, operator release) and the pool-DB read are
+what only the setup and teardown jobs hold credentials for. Both live here
+because teardown drives them in one pass: release what the run leased, then
+delete the account that leased it.
 """
 
 import threading
@@ -24,6 +25,7 @@ import psycopg2
 from loguru import logger
 from pydantic import AnyUrl
 from pydantic import SecretStr
+from pydantic import ValidationError
 
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.pure import pure
@@ -36,11 +38,15 @@ from imbue.minds.smoke_tests.primitives import PERSISTENT_ACCOUNT_EMAIL_VAULT_KE
 from imbue.minds.smoke_tests.primitives import PERSISTENT_ACCOUNT_PASSWORD_VAULT_KEY
 from imbue.minds.smoke_tests.primitives import SMOKE_ACCOUNT_EMAIL_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_ACCOUNT_PASSWORD_ENV_VAR
+from imbue.minds.smoke_tests.primitives import SMOKE_EMAIL_PREFIX
 from imbue.minds.smoke_tests.primitives import SmokeAccountError
 from imbue.minds.smoke_tests.primitives import SmokeAccountExistsError
 from imbue.minds.smoke_tests.primitives import SmokeAccountHoldsWorkspacesError
 from imbue.minds.smoke_tests.primitives import SmokeSignInRefusedError
 from imbue.minds.smoke_tests.primitives import persistent_account_vault_dir
+from imbue.minds.smoke_tests.wire_types import SmokeWorkspaceRecord
+from imbue.minds.smoke_tests.wire_types import SmokeWorkspaceRecordState
+from imbue.mngr_imbue_cloud.wire import validate_wire
 
 # Sent on every request a smoke run makes.
 SMOKE_USER_AGENT: Final[str] = "imbue-studio-smoke-test/1"
@@ -293,12 +299,85 @@ def held_workspaces_refusal(email: str, host_db_ids: Sequence[str]) -> str:
     )
 
 
+def workspace_records_of(payload: object) -> tuple[SmokeWorkspaceRecord, ...]:
+    """Every record in a ``GET /sync/records`` payload, tombstones included.
+
+    An entry that cannot be read fails the whole listing instead of being left
+    out of it: it may be the active record the connector counts, and a listing
+    read without it would pass the account as having none.
+    """
+    raw_records = payload.get("records") if isinstance(payload, Mapping) else None
+    if not isinstance(raw_records, list):
+        raise SmokeAccountError(
+            f"GET /sync/records answered a {type(payload).__name__} with no list of records in it."
+        )
+    records: list[SmokeWorkspaceRecord] = []
+    for entry_idx, raw_record in enumerate(raw_records):
+        try:
+            records.append(validate_wire(SmokeWorkspaceRecord, raw_record))
+        except ValidationError as exc:
+            problems = "; ".join(
+                f"{'.'.join(str(part) for part in error['loc']) or 'entry'}: {error['msg']}" for error in exc.errors()
+            )
+            raise SmokeAccountError(
+                f"Record {entry_idx + 1} of the {len(raw_records)} that GET /sync/records listed could not be read "
+                f"({problems}), so whether the account has an active workspace record is unknown."
+            ) from exc
+    return tuple(records)
+
+
+@pure
+def active_workspace_records_of(records: Sequence[SmokeWorkspaceRecord]) -> tuple[SmokeWorkspaceRecord, ...]:
+    """The records the connector counts as workspaces of the account, which leaves out every tombstone."""
+    return tuple(record for record in records if record.state == SmokeWorkspaceRecordState.ACTIVE)
+
+
+def list_workspace_records(*, connector_url: AnyUrl, bearer: SecretStr) -> tuple[SmokeWorkspaceRecord, ...]:
+    """Every workspace record of the signed-in account, tombstones included.
+
+    Read from ``GET /sync/records``: its active rows are what the connector
+    counts when it tells the app at sign-in whether the account has a
+    workspace. ``GET /workspaces`` lists pool leases only, so the record of a
+    workspace on someone's own machine appears here alone.
+    """
+    with httpx2.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
+        response = client.get(f"{origin_of(connector_url)}/sync/records", headers=smoke_headers(bearer))
+    if response.status_code != 200:
+        raise SmokeAccountError(f"GET /sync/records answered {response.status_code}: {response.text[:300]!r}")
+    return workspace_records_of(response.json())
+
+
+@pure
+def describe_workspace_record(record: SmokeWorkspaceRecord) -> str:
+    """One record as a refusal or a teardown names it: its workspace id, display name and provider."""
+    return f"{record.agent_id} ({record.display_name!r}, provider {record.provider_kind!r})"
+
+
+@pure
+def active_records_refusal(email: str, active_records: Sequence[SmokeWorkspaceRecord]) -> str:
+    """What a journey through the first run says of an account that still has active workspace records, naming each."""
+    described_records = "; ".join(describe_workspace_record(record) for record in active_records)
+    return (
+        f"{email} still has {len(active_records)} active workspace record(s): {described_records}. The connector "
+        "counts each as a workspace of the account, and the app's first run creates a workspace only for an "
+        "account that has none. Retire them first: `just minds-smoke-teardown <tier> <run-id>` retires whatever "
+        "records the account still has active."
+    )
+
+
 def require_account_holds_no_workspace(*, connector_url: AnyUrl, credentials: SmokeAccountCredentials) -> None:
-    """Fail, naming them, when the account still holds workspaces, running or stopped."""
+    """Fail, naming them, when the account still holds workspaces: pool leases, running or stopped, or active records.
+
+    The leases are checked first because releasing one retires its record too,
+    so an active record found after them is one no lease backs.
+    """
     bearer = sign_in(connector_url=connector_url, credentials=credentials)
     host_db_ids = list_workspace_host_db_ids(connector_url=connector_url, bearer=bearer)
     if host_db_ids:
         raise SmokeAccountHoldsWorkspacesError(held_workspaces_refusal(str(credentials.email), host_db_ids))
+    active_records = active_workspace_records_of(list_workspace_records(connector_url=connector_url, bearer=bearer))
+    if active_records:
+        raise SmokeAccountHoldsWorkspacesError(active_records_refusal(str(credentials.email), active_records))
 
 
 def _read_workspace_or_none(*, connector_url: AnyUrl, bearer: SecretStr, host_db_id: str) -> dict[str, Any] | None:
@@ -417,6 +496,61 @@ def release_host_as_admin(*, connector_url: AnyUrl, admin_api_key: SecretStr, ho
             f"POST /admin/workspaces/{host_db_id}/release answered {response.status_code}: {response.text[:300]!r}"
         )
     return str(response.json().get("status", ""))
+
+
+def retire_workspace_record(*, connector_url: AnyUrl, bearer: SecretStr, workspace_id: str) -> str:
+    """Retire one workspace record as its owner; return the status the connector reported.
+
+    The route takes the account from the session alone, so this can only
+    retire a record of the account ``bearer`` belongs to. The connector
+    refuses a record whose workspace still holds a pool lease, which releasing
+    the lease is the way out of.
+    """
+    with httpx2.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
+        response = client.post(
+            f"{origin_of(connector_url)}/sync/records/by-workspace/{quote(workspace_id, safe='')}/retire",
+            headers=smoke_headers(bearer),
+        )
+    if response.status_code != 200:
+        raise SmokeAccountError(
+            f"POST /sync/records/by-workspace/{workspace_id}/retire answered {response.status_code}: "
+            f"{response.text[:300]!r}"
+        )
+    return str(response.json().get("status", ""))
+
+
+def retire_active_workspace_records(*, connector_url: AnyUrl, credentials: SmokeAccountCredentials) -> list[str]:
+    """Retire every workspace record a smoke account still has active; return ``<workspace id>=<status>`` for each.
+
+    Refuses any address that is not a smoke account's before signing in. Signs
+    in for itself, so it never acts on a token the releases before it outlived.
+    Every record is tried before a refusal is raised, so one the connector will
+    not retire does not leave the others active.
+    """
+    if not str(credentials.email).startswith(SMOKE_EMAIL_PREFIX):
+        raise SmokeAccountError(
+            f"Refusing to retire the workspace records of {credentials.email}: not a smoke address."
+        )
+    bearer = sign_in(connector_url=connector_url, credentials=credentials)
+    retired: list[str] = []
+    refusals: list[str] = []
+    for record in active_workspace_records_of(list_workspace_records(connector_url=connector_url, bearer=bearer)):
+        try:
+            status = retire_workspace_record(
+                connector_url=connector_url, bearer=bearer, workspace_id=str(record.agent_id)
+            )
+        except SmokeAccountError as exc:
+            logger.warning("Could not retire workspace record {} of {}: {}", record.agent_id, credentials.email, exc)
+            refusals.append(f"{describe_workspace_record(record)}: {exc}")
+        else:
+            logger.info("Retired workspace record {} of {}: {}", record.agent_id, credentials.email, status)
+            retired.append(f"{record.agent_id}={status}")
+    if refusals:
+        raise SmokeAccountError(
+            f"Could not retire {len(refusals)} active workspace record(s): {'; '.join(refusals)}. "
+            f"Retired {len(retired)} other(s) [{', '.join(retired)}]."
+        )
+    return retired
 
 
 def disable_share(*, connector_url: AnyUrl, bearer: SecretStr, host_id: str) -> bool:

@@ -352,7 +352,9 @@ never delete resources and the cleanup happens regardless of what the test did:
   throwaway account. It acts as a user, records every resource it creates in a
   run manifest, and never holds administrative or database credentials.
 - **`teardown`** runs regardless: it releases any workspaces the run's accounts
-  still hold, stopped ones included, turns off any shares left on, deletes the throwaway account (through
+  still hold, stopped ones included, turns off any shares left on, retires any
+  workspace record the accounts still have active after that (one no pool lease
+  backs, which a release would not reach), deletes the throwaway account (through
   the connector's own `DELETE /account`, as its holder), deletes the mail.tm inbox and the per-run Vault
   path, and sweeps stale smoke resources from earlier runs by their
   `studio-smoke-` prefix.
@@ -419,7 +421,15 @@ run creates a workspace only for an account that has none, so before the app is
 launched (and before a channel's build is downloaded) the suite asks the
 connector, as the persistent account, for the workspaces it holds (`GET
 /workspaces`, which lists stopped ones too), and fails naming their pool rows
-if there are any; `just minds-smoke-teardown` releases them. On the sign-in
+if there are any. It then reads the account's workspace records (`GET
+/sync/records`) and fails naming each active one by workspace id, display name
+and provider. The app decides from the number of active records the sign-in
+hand-off reports, and `GET /workspaces` lists pool leases only, so the record
+of a workspace no lease backs (one created on someone's own machine while
+signed in as the account) shows up in that second read alone. A record the
+suite cannot read fails the check as well, since it may be an active one.
+`just minds-smoke-teardown` clears both: it releases the leases, then retires
+whatever records are still active. On the sign-in
 page the suite unticks "Help improve Studio" (a test run is not a user's
 install), presses Sign in, which records that answer, and completes the hosted
 sign-in the modal offers in its own headless Chromium.
@@ -670,9 +680,10 @@ MINDS_SMOKE_DEV_CHECKOUT=1 just minds-smoke <tier>                    # -k journ
 just minds-smoke-teardown <tier> <run-id> --state /tmp/smoke-<run-id>.json
 ```
 
-A run needs the persistent account to hold no workspace when it starts (the
-journey fails before launching otherwise, naming the pool rows; `just
-minds-smoke-teardown` releases them). It leases one pool row in the region the
+A run needs the persistent account to hold no workspace when it starts: no
+pool lease and no active workspace record (the journey fails before launching
+otherwise, naming the pool rows or the records; `just minds-smoke-teardown`
+releases the former and retires the latter). It leases one pool row in the region the
 app picks for this machine:
 one baked at the build's template tag when the pool has one available there,
 else any row there, whose container the create rebuilds at the tag (the slow
@@ -688,7 +699,8 @@ has a real agent build the hello-world app, and stops and starts the workspace
 the start restores it from object storage); a
 passing journey destroys its workspace and turns its share off itself. After a
 failed run, `just minds-smoke-teardown` releases whatever the manifest and the
-two accounts still hold, turns off their shares, deletes the throwaway account
+two accounts still hold, turns off their shares, retires the workspace records
+they still have active, deletes the throwaway account
 and its mailbox, and sweeps `studio-smoke-` accounts older than a day. A fixture
 whose input is missing skips and names the input. Screenshots land under
 `.test_output/smoke/<test name>/`, and the run manifest at
