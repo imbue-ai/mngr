@@ -6,6 +6,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [minds-v0.10.7] - 2026-11-23
+
+A patch release over 0.10.6, pinning workspace template `minds-v0.10.7`. Every workspace create now shows one creation page and opens on the workspace's AI-provider page and first conversation, an Imbue account is signed in only once its email is verified, the first run decides at once whether a new account gets a first workspace, Report a bug opened from an error keeps the workspace on screen and can be sent without a description, and a new Modal workspace uses one host directory for every caller.
+Workspace changes in this release: https://github.com/imbue-ai/default-workspace-template/blob/minds-v0.10.7/CHANGELOG.md
+
 ### Added
 
 - Added: `MINDS_DEFAULT_WORKSPACE_NAME_BASE` sets the base of the name given to a workspace created without one.
