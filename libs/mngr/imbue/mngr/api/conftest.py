@@ -19,6 +19,7 @@ from imbue.mngr.providers.local.config import LocalProviderConfig
 from imbue.mngr.providers.mock_provider_test import DiscoveryRecordingProvider
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.providers.mock_provider_test import make_offline_host
+from imbue.mngr.utils.testing import link_executables_on_path_except
 
 
 @pytest.fixture
@@ -29,6 +30,14 @@ def gc_mock_provider(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> MockPro
         host_dir=temp_host_dir,
         mngr_ctx=temp_mngr_ctx,
     )
+
+
+@pytest.fixture
+def path_without_ssh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace PATH with one dir of links to every executable on it except ``ssh``."""
+    bin_dir = tmp_path / "bin-without-ssh"
+    link_executables_on_path_except(bin_dir, "ssh")
+    monkeypatch.setenv("PATH", str(bin_dir))
 
 
 @pytest.fixture

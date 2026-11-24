@@ -15,12 +15,17 @@ from imbue.mngr.api.testing import UpgradableCommandAgent
 from imbue.mngr.api.testing import make_recorded_upgradable_agent
 from imbue.mngr.api.testing import make_skipped_outcome
 from imbue.mngr.api.testing import make_upgradable_command_agent
+from imbue.mngr.api.testing import make_upgrade_outcome_host
+from imbue.mngr.api.testing import upgrade_agent
 from imbue.mngr.api.testing import write_command_agent_record
 from imbue.mngr.api.upgrade import AgentCurrent
 from imbue.mngr.api.upgrade import AgentUpgradeFailed
 from imbue.mngr.api.upgrade import AgentUpgradeOutcome
 from imbue.mngr.api.upgrade import AgentUpgradeSkipped
 from imbue.mngr.api.upgrade import AgentUpgraded
+from imbue.mngr.api.upgrade import MatchedHost
+from imbue.mngr.api.upgrade import NotOnlineHost
+from imbue.mngr.api.upgrade import ReachedHost
 from imbue.mngr.api.upgrade import SKIP_ABORTED
 from imbue.mngr.api.upgrade import SKIP_BACKGROUND_WORK
 from imbue.mngr.api.upgrade import SKIP_DESTROYED
@@ -28,29 +33,36 @@ from imbue.mngr.api.upgrade import SKIP_EXITED
 from imbue.mngr.api.upgrade import SKIP_IS_CALLER
 from imbue.mngr.api.upgrade import SKIP_MID_TURN
 from imbue.mngr.api.upgrade import SKIP_ON_DIALOG
-from imbue.mngr.api.upgrade import SKIP_REMOTE
 from imbue.mngr.api.upgrade import SKIP_REPLACED
 from imbue.mngr.api.upgrade import SKIP_STATE_UNREADABLE
+from imbue.mngr.api.upgrade import UnreachableHost
 from imbue.mngr.api.upgrade import UpgradeFailedStep
+from imbue.mngr.api.upgrade import UpgradeOutcomeHost
 from imbue.mngr.api.upgrade import UpgradePlan
 from imbue.mngr.api.upgrade import UpgradeSkip
 from imbue.mngr.api.upgrade import UpgradeSkipKind
 from imbue.mngr.api.upgrade import _append_recreate_command
+from imbue.mngr.api.upgrade import format_agent_label
+from imbue.mngr.api.upgrade import is_upgrade_caller
 from imbue.mngr.api.upgrade import iter_upgrade_outcomes
+from imbue.mngr.api.upgrade import parse_upgrade_inputs_output
 from imbue.mngr.api.upgrade import plan_agent_upgrade
-from imbue.mngr.api.upgrade import upgrade_agent
 from imbue.mngr.api.upgrade import upgrade_matched_agent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import InvalidUpgradeInputError
+from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import UpgradeSkipDetail
@@ -74,9 +86,18 @@ def _match(agent_name: str, provider_name: ProviderInstanceName) -> AgentMatch:
     )
 
 
+def _host_of_match(match: AgentMatch) -> UpgradeOutcomeHost:
+    return UpgradeOutcomeHost(id=match.host_id, name=match.host_name, provider_name=match.provider_name)
+
+
 def _skipped_match(match: AgentMatch, skip: UpgradeSkip, is_dry_run: bool) -> AgentUpgradeSkipped:
     return AgentUpgradeSkipped(
-        agent_id=match.agent_id, agent_name=match.agent_name, kind=skip.kind, detail=skip.detail, is_dry_run=is_dry_run
+        agent_id=match.agent_id,
+        agent_name=match.agent_name,
+        host=_host_of_match(match),
+        kind=skip.kind,
+        detail=skip.detail,
+        is_dry_run=is_dry_run,
     )
 
 
@@ -128,7 +149,6 @@ def test_plan_agent_upgrade_restarts_only_an_idle_agent_unless_forced(
             UpgradeSkipKind.UNSUPPORTED,
             id="the_harnesss_detail",
         ),
-        pytest.param(SKIP_REMOTE, UpgradeSkipKind.UNSUPPORTED, id="on_another_host"),
         pytest.param(SKIP_ABORTED, UpgradeSkipKind.ABORTED, id="an_earlier_agent_failed"),
     ],
 )
@@ -144,12 +164,14 @@ def _fail_the_agent_named_second(match: AgentMatch) -> AgentUpgradeOutcome:
         return AgentUpgradeFailed(
             agent_id=match.agent_id,
             agent_name=match.agent_name,
+            host=_host_of_match(match),
             step=UpgradeFailedStep.SWAP,
             error_message="disk full",
         )
     return AgentUpgraded(
         agent_id=match.agent_id,
         agent_name=match.agent_name,
+        host=_host_of_match(match),
         plan=UpgradePlan.LEAVE_STOPPED,
         prior_state=AgentLifecycleState.STOPPED,
         changed_paths=(Path("commands/changed.sh"),),
@@ -194,27 +216,66 @@ def test_iter_upgrade_outcomes_attempts_every_agent_when_none_fails(error_behavi
     outcomes = list(
         iter_upgrade_outcomes(
             matches,
-            lambda match: AgentCurrent(agent_id=match.agent_id, agent_name=match.agent_name, is_dry_run=False),
+            lambda match: AgentCurrent(
+                agent_id=match.agent_id, agent_name=match.agent_name, host=_host_of_match(match), is_dry_run=False
+            ),
             error_behavior,
             is_dry_run=False,
         )
     )
 
     assert outcomes == [
-        AgentCurrent(agent_id=match.agent_id, agent_name=match.agent_name, is_dry_run=False) for match in matches
+        AgentCurrent(
+            agent_id=match.agent_id, agent_name=match.agent_name, host=_host_of_match(match), is_dry_run=False
+        )
+        for match in matches
     ]
 
 
-def test_upgrade_matched_agent_skips_a_remote_agent_without_reading_it(
-    local_host: Host, temp_mngr_ctx: MngrContext
+@pytest.mark.parametrize(
+    ("matched_host", "expected_detail"),
+    [
+        pytest.param(
+            NotOnlineHost(state=HostState.STOPPED),
+            "its host is stopped (`mngr start on-docker@host.docker` starts it)",
+            id="stopped",
+        ),
+        pytest.param(
+            NotOnlineHost(state=HostState.PAUSED),
+            "its host is paused (`mngr start on-docker@host.docker` starts it)",
+            id="paused",
+        ),
+        pytest.param(
+            NotOnlineHost(state=HostState.CRASHED),
+            "its host is crashed (`mngr start on-docker@host.docker` starts it)",
+            id="crashed",
+        ),
+        pytest.param(NotOnlineHost(state=HostState.DESTROYED), "its host is destroyed", id="destroyed"),
+        pytest.param(NotOnlineHost(state=HostState.FAILED), "its host is failed", id="failed"),
+        pytest.param(
+            NotOnlineHost(state=HostState.UNAUTHENTICATED), "its host is unauthenticated", id="unauthenticated"
+        ),
+        pytest.param(
+            UnreachableHost(error_message="Connection refused"),
+            "its host could not be reached: Connection refused",
+            id="unreachable",
+        ),
+    ],
+)
+def test_upgrade_matched_agent_skips_an_agent_whose_host_is_offline_as_not_idle_and_says_why(
+    temp_mngr_ctx: MngrContext, matched_host: MatchedHost, expected_detail: str
 ) -> None:
-    match = _match("on-modal", ProviderInstanceName("modal"))
+    match = _match("on-docker", ProviderInstanceName("docker"))
 
     outcome = upgrade_matched_agent(
-        match, local_host, {}, is_forced=True, is_dry_run=False, caller_agent_id=None, mngr_ctx=temp_mngr_ctx
+        match, matched_host, is_forced=True, is_dry_run=True, is_caller=False, mngr_ctx=temp_mngr_ctx
     )
 
-    assert outcome == _skipped_match(match, SKIP_REMOTE, is_dry_run=False)
+    assert outcome == _skipped_match(
+        match,
+        UpgradeSkip(kind=UpgradeSkipKind.NOT_IDLE, detail=UpgradeSkipDetail(expected_detail)),
+        is_dry_run=True,
+    )
 
 
 @pytest.mark.rsync
@@ -236,11 +297,10 @@ def test_upgrade_matched_agent_skips_the_agent_running_the_command(
 
     outcome = upgrade_matched_agent(
         match,
-        local_host,
-        {agent.id: agent},
+        ReachedHost(host=local_host, agent_by_id={agent.id: agent}),
         is_forced=is_forced,
         is_dry_run=False,
-        caller_agent_id=agent.id,
+        is_caller=True,
         mngr_ctx=temp_mngr_ctx,
     )
 
@@ -254,10 +314,60 @@ def test_upgrade_matched_agent_skips_an_agent_no_longer_on_the_host(
     match = _match("destroyed", LOCAL_PROVIDER_NAME)
 
     outcome = upgrade_matched_agent(
-        match, local_host, {}, is_forced=False, is_dry_run=False, caller_agent_id=None, mngr_ctx=temp_mngr_ctx
+        match,
+        ReachedHost(host=local_host, agent_by_id={}),
+        is_forced=False,
+        is_dry_run=False,
+        is_caller=False,
+        mngr_ctx=temp_mngr_ctx,
     )
 
     assert outcome == _skipped_match(match, SKIP_DESTROYED, is_dry_run=False)
+
+
+_CALLER_AGENT_ID: Final[AgentId] = AgentId.generate()
+_CALLER_HOST_ID: Final[HostId] = HostId.generate()
+
+
+@pytest.mark.parametrize(
+    ("agent_id", "host_id", "provider_name", "expected"),
+    [
+        pytest.param(_CALLER_AGENT_ID, _CALLER_HOST_ID, LOCAL_PROVIDER_NAME, True, id="the_caller"),
+        pytest.param(AgentId.generate(), _CALLER_HOST_ID, LOCAL_PROVIDER_NAME, False, id="another_local_agent"),
+        pytest.param(_CALLER_AGENT_ID, HostId.generate(), LOCAL_PROVIDER_NAME, False, id="same_id_on_another_host"),
+        pytest.param(
+            _CALLER_AGENT_ID, _CALLER_HOST_ID, ProviderInstanceName("docker"), False, id="same_ids_on_another_provider"
+        ),
+    ],
+)
+def test_is_upgrade_caller_requires_the_callers_id_on_the_local_host(
+    agent_id: AgentId, host_id: HostId, provider_name: ProviderInstanceName, expected: bool
+) -> None:
+    match = AgentMatch(
+        agent_id=agent_id,
+        agent_name=AgentName("caller"),
+        host_id=host_id,
+        host_name=HostName("host"),
+        provider_name=provider_name,
+    )
+
+    assert is_upgrade_caller(match, AgentInstanceKey.build(_CALLER_AGENT_ID, _CALLER_HOST_ID)) is expected
+    assert is_upgrade_caller(match, None) is False
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "expected_label"),
+    [
+        pytest.param(LOCAL_PROVIDER_NAME, "my-agent", id="local"),
+        pytest.param(ProviderInstanceName("docker"), "my-agent@my-host.docker", id="remote"),
+    ],
+)
+def test_format_agent_label_gives_an_agent_on_another_host_its_address(
+    provider_name: ProviderInstanceName, expected_label: str
+) -> None:
+    host = UpgradeOutcomeHost(id=HostId.generate(), name=HostName("my-host"), provider_name=provider_name)
+
+    assert format_agent_label(AgentName("my-agent"), host) == expected_label
 
 
 @pytest.mark.parametrize("is_headless", [False, True], ids=["command", "headless_command"])
@@ -284,7 +394,9 @@ def test_upgrade_agent_finds_a_command_agent_current(
 
     outcome = upgrade_agent(agent, host, is_forced=True, is_dry_run=False, is_caller=False, mngr_ctx=temp_mngr_ctx)
 
-    assert outcome == AgentCurrent(agent_id=agent.id, agent_name=agent.name, is_dry_run=False)
+    assert outcome == AgentCurrent(
+        agent_id=agent.id, agent_name=agent.name, host=make_upgrade_outcome_host(host), is_dry_run=False
+    )
 
 
 @pytest.mark.parametrize(
@@ -412,6 +524,7 @@ def test_upgrade_refuses_a_harness_path_outside_the_state_dir_before_stopping_an
     assert outcome == AgentUpgradeFailed(
         agent_id=agent.id,
         agent_name=agent.name,
+        host=make_upgrade_outcome_host(host),
         step=UpgradeFailedStep.PREPARE,
         error_message=f"{escaping_path} is not a path inside the agent's state dir",
     )
@@ -439,3 +552,44 @@ def test_upgrade_reports_an_input_that_is_not_utf8_text_as_a_prepare_failure(
     assert isinstance(outcome, AgentUpgradeFailed)
     assert outcome.step == UpgradeFailedStep.PREPARE
     assert outcome.error_message.startswith("binary-input-48213 is not UTF-8 text: ")
+
+
+_INPUT_A: Final[Path] = Path("a-59124.json")
+_INPUT_B: Final[Path] = Path("nested") / "b-59124.sh"
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        pytest.param(
+            "---MNGR_UPGRADE_INPUT_PRESENT---\neyJrIjog\nMX0=\n\n---MNGR_UPGRADE_INPUT_MISSING---\n",
+            {_INPUT_A: '{"k": 1}', _INPUT_B: None},
+            id="wrapped_and_missing",
+        ),
+        pytest.param(
+            "---MNGR_UPGRADE_INPUT_PRESENT---\n\n---MNGR_UPGRADE_INPUT_PRESENT---\nZWNobyDinJMK\n",
+            {_INPUT_A: "", _INPUT_B: "echo \u2713\n"},
+            id="empty_and_unicode",
+        ),
+        pytest.param("agent-record-missing\n", None, id="record_gone"),
+    ],
+)
+def test_parse_upgrade_inputs_output_decodes_each_input_in_the_order_named(
+    stdout: str, expected: dict[Path, str | None] | None
+) -> None:
+    assert parse_upgrade_inputs_output(stdout, (_INPUT_A, _INPUT_B)) == expected
+
+
+def test_parse_upgrade_inputs_output_refuses_a_reply_that_lists_too_few_inputs() -> None:
+    with pytest.raises(MngrError, match="^the host reported 1 of the agent's 2 upgrade inputs$"):
+        parse_upgrade_inputs_output("---MNGR_UPGRADE_INPUT_MISSING---\n", (_INPUT_A, _INPUT_B))
+
+
+def test_parse_upgrade_inputs_output_refuses_content_that_does_not_decode() -> None:
+    with pytest.raises(MngrError, match=f"^the host sent {_INPUT_A} in a form that does not decode: "):
+        parse_upgrade_inputs_output("---MNGR_UPGRADE_INPUT_PRESENT---\nnot base64!\n", (_INPUT_A,))
+
+
+def test_parse_upgrade_inputs_output_refuses_an_input_that_is_not_utf8_text() -> None:
+    with pytest.raises(InvalidUpgradeInputError, match=f"^{_INPUT_A} is not UTF-8 text: "):
+        parse_upgrade_inputs_output("---MNGR_UPGRADE_INPUT_PRESENT---\n//4=\n", (_INPUT_A,))

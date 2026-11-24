@@ -1,0 +1,1 @@
+`mngr upgrade` upgrades claude agents on remote hosts, each of which has its own Claude config dir, reading the settings file that holds the agent's hooks on its host; the credential-sync and auto-allow hooks stay as the agent was created, whatever OS runs the upgrade.

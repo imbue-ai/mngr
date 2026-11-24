@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -6,13 +7,15 @@ from typing import Final
 import pytest
 
 from imbue.imbue_common.model_update import to_update
+from imbue.mngr.api.testing import InProcessSshHost
 from imbue.mngr.api.testing import make_current_outcome
+from imbue.mngr.api.testing import make_in_process_ssh_host
 from imbue.mngr.api.testing import make_prepare_failed_outcome
 from imbue.mngr.api.testing import make_unsupported_until_recreated_outcome
 from imbue.mngr.api.testing import make_upgraded_while_stopped_outcome
 from imbue.mngr.api.testing import run_upgrade_as_cli
+from imbue.mngr.api.testing import upgrade_agent
 from imbue.mngr.api.upgrade import UPGRADE_STAGING_DIR_NAME
-from imbue.mngr.api.upgrade import upgrade_agent
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import Host
@@ -21,6 +24,7 @@ from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.testing import ExecOnlyParamikoServer
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import make_local_host_of_class
 from imbue.mngr_claude.claude_config import MANAGED_SETTINGS_RELATIVE_PATH
@@ -482,6 +486,45 @@ def test_upgrade_leaves_credential_sync_as_the_agent_was_created_with_it(
     assert first_outcome == make_current_outcome(agent)
     assert second_outcome == make_current_outcome(agent)
     assert settings_path.read_bytes() == created_settings_bytes
+    assert has_credential_sync_hook(_read_live_hooks(agent)) is is_created_with_credential_sync
+
+
+@pytest.mark.tmux
+@pytest.mark.parametrize("is_created_with_credential_sync", [True, False])
+def test_upgrade_over_ssh_restores_mngrs_files_in_a_remote_agents_own_config_dir_keeping_its_options(
+    paramiko_ssh_host_factory: tuple[Callable[[str], Host], ExecOnlyParamikoServer],
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    is_created_with_credential_sync: bool,
+) -> None:
+    create_ssh_host, _server = paramiko_ssh_host_factory
+    created_config = _ISOLATED_CONFIG.model_copy_update(
+        to_update(_ISOLATED_CONFIG.field_ref().sync_credentials_on_login, is_created_with_credential_sync)
+    )
+    created_agent = _create_isolated_config_claude_agent(local_provider, tmp_path, temp_mngr_ctx, created_config)
+    if is_created_with_credential_sync:
+        _add_credential_sync_hook(created_agent)
+    remote_host = make_in_process_ssh_host(create_ssh_host, InProcessSshHost)
+    agent = created_agent.model_copy_update(to_update(created_agent.field_ref().host, remote_host))
+    stop_hook_path = agent._get_agent_dir() / "commands" / "wait_for_stop_hook.sh"
+    created_stop_hook = stop_hook_path.read_text()
+    stop_hook_path.write_text("echo old-stop-hook-59124\n")
+    settings_path = _get_hook_settings_path(agent)
+    created_settings = json.loads(settings_path.read_text())
+    stale_hooks = {**created_settings["hooks"], "SubagentStart": [_STALE_MNGR_HOOK_GROUP]}
+    settings_path.write_text(json.dumps({**created_settings, "hooks": stale_hooks}, indent=2) + "\n")
+
+    outcome = run_upgrade_as_cli(agent)
+    second_outcome = run_upgrade_as_cli(agent)
+
+    assert not remote_host.is_local
+    assert outcome == make_upgraded_while_stopped_outcome(
+        agent, (Path("commands/wait_for_stop_hook.sh"), _CONFIG_DIR_SETTINGS_PATH)
+    )
+    assert second_outcome == make_current_outcome(agent)
+    assert stop_hook_path.read_text() == created_stop_hook
+    assert json.loads(settings_path.read_text()) == created_settings
     assert has_credential_sync_hook(_read_live_hooks(agent)) is is_created_with_credential_sync
 
 

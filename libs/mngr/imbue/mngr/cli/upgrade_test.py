@@ -18,9 +18,9 @@ from imbue.mngr.api.upgrade import AgentUpgraded
 from imbue.mngr.api.upgrade import SKIP_ABORTED
 from imbue.mngr.api.upgrade import SKIP_EXITED
 from imbue.mngr.api.upgrade import SKIP_MID_TURN
-from imbue.mngr.api.upgrade import SKIP_REMOTE
 from imbue.mngr.api.upgrade import SKIP_REPLACED
 from imbue.mngr.api.upgrade import UpgradeFailedStep
+from imbue.mngr.api.upgrade import UpgradeOutcomeHost
 from imbue.mngr.api.upgrade import UpgradePlan
 from imbue.mngr.api.upgrade import UpgradeSkip
 from imbue.mngr.api.upgrade import UpgradeSkipKind
@@ -41,11 +41,22 @@ from imbue.mngr.hosts.host import Host
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import UpgradeSkipDetail
 
 _ID: Final[AgentId] = AgentId.generate()
 _NAME: Final[AgentName] = AgentName("ov-a")
+_HOST: Final[UpgradeOutcomeHost] = UpgradeOutcomeHost(
+    id=HostId.generate(), name=HostName("localhost"), provider_name=LOCAL_PROVIDER_NAME
+)
+_DOCKER_HOST: Final[UpgradeOutcomeHost] = UpgradeOutcomeHost(
+    id=HostId.generate(), name=HostName("box-1"), provider_name=ProviderInstanceName("docker")
+)
+_HOST_DATA: Final[dict[str, str]] = {"id": str(_HOST.id), "name": "localhost", "provider_name": "local"}
 _CHANGED_PATHS: Final[tuple[Path, ...]] = (Path("commands/a.sh"), Path("settings.json"))
 
 
@@ -53,6 +64,7 @@ def _upgraded(plan: UpgradePlan, prior_state: AgentLifecycleState, is_dry_run: b
     return AgentUpgraded(
         agent_id=_ID,
         agent_name=_NAME,
+        host=_HOST,
         plan=plan,
         prior_state=prior_state,
         changed_paths=_CHANGED_PATHS,
@@ -62,16 +74,16 @@ def _upgraded(plan: UpgradePlan, prior_state: AgentLifecycleState, is_dry_run: b
 
 def _skipped(skip: UpgradeSkip, is_dry_run: bool) -> AgentUpgradeSkipped:
     return AgentUpgradeSkipped(
-        agent_id=_ID, agent_name=_NAME, kind=skip.kind, detail=skip.detail, is_dry_run=is_dry_run
+        agent_id=_ID, agent_name=_NAME, host=_HOST, kind=skip.kind, detail=skip.detail, is_dry_run=is_dry_run
     )
 
 
 def _failed(step: UpgradeFailedStep, error_message: str) -> AgentUpgradeFailed:
-    return AgentUpgradeFailed(agent_id=_ID, agent_name=_NAME, step=step, error_message=error_message)
+    return AgentUpgradeFailed(agent_id=_ID, agent_name=_NAME, host=_HOST, step=step, error_message=error_message)
 
 
 _UPGRADED: Final[AgentUpgraded] = _upgraded(UpgradePlan.RESTART_IDLE, AgentLifecycleState.WAITING, is_dry_run=False)
-_CURRENT: Final[AgentCurrent] = AgentCurrent(agent_id=_ID, agent_name=_NAME, is_dry_run=False)
+_CURRENT: Final[AgentCurrent] = AgentCurrent(agent_id=_ID, agent_name=_NAME, host=_HOST, is_dry_run=False)
 _BUSY: Final[AgentUpgradeSkipped] = _skipped(SKIP_MID_TURN, is_dry_run=False)
 _ABORTED: Final[AgentUpgradeSkipped] = _skipped(SKIP_ABORTED, is_dry_run=False)
 _FAILED: Final[AgentUpgradeFailed] = _failed(UpgradeFailedStep.PREPARE, "no hooks")
@@ -109,6 +121,7 @@ _FAILED: Final[AgentUpgradeFailed] = _failed(UpgradeFailedStep.PREPARE, "no hook
             AgentUpgraded(
                 agent_id=_ID,
                 agent_name=_NAME,
+                host=_HOST,
                 plan=UpgradePlan.LEAVE_STOPPED,
                 prior_state=AgentLifecycleState.STOPPED,
                 changed_paths=(Path("commands/a.sh"),),
@@ -117,7 +130,11 @@ _FAILED: Final[AgentUpgradeFailed] = _failed(UpgradeFailedStep.PREPARE, "no hook
             "would upgrade ov-a (stopped)\n  commands/a.sh",
         ),
         (_CURRENT, "current ov-a"),
-        (AgentCurrent(agent_id=_ID, agent_name=_NAME, is_dry_run=True), "current ov-a"),
+        (AgentCurrent(agent_id=_ID, agent_name=_NAME, host=_HOST, is_dry_run=True), "current ov-a"),
+        (
+            AgentCurrent(agent_id=_ID, agent_name=_NAME, host=_DOCKER_HOST, is_dry_run=False),
+            "current ov-a@box-1.docker",
+        ),
         (_BUSY, f"skipped ov-a: {SKIP_MID_TURN.detail}"),
         (_skipped(SKIP_MID_TURN, is_dry_run=True), f"would skip ov-a: {SKIP_MID_TURN.detail}"),
         (_skipped(SKIP_EXITED, is_dry_run=False), "skipped ov-a: its program has exited (--force restarts it)"),
@@ -126,8 +143,29 @@ _FAILED: Final[AgentUpgradeFailed] = _failed(UpgradeFailedStep.PREPARE, "no hook
             "skipped ov-a: another program is running in its terminal (--force ends it and restarts the agent)",
         ),
         (
-            _skipped(SKIP_REMOTE, is_dry_run=False),
-            "skipped ov-a: it is on another host (only agents on the local host are upgraded)",
+            AgentUpgradeSkipped(
+                agent_id=_ID,
+                agent_name=_NAME,
+                host=_DOCKER_HOST,
+                kind=UpgradeSkipKind.NOT_IDLE,
+                detail=UpgradeSkipDetail("its host is stopped (`mngr start ov-a@box-1.docker` starts it)"),
+                is_dry_run=False,
+            ),
+            "skipped ov-a@box-1.docker: its host is stopped (`mngr start ov-a@box-1.docker` starts it)",
+        ),
+        (
+            AgentUpgradeSkipped(
+                agent_id=_ID,
+                agent_name=_NAME,
+                host=_DOCKER_HOST,
+                kind=UpgradeSkipKind.NOT_IDLE,
+                detail=UpgradeSkipDetail(
+                    "its host could not be reached: rsync failed: Connection closed\nrsync error: code 255\n"
+                ),
+                is_dry_run=False,
+            ),
+            "skipped ov-a@box-1.docker: "
+            "its host could not be reached: rsync failed: Connection closed; rsync error: code 255",
         ),
         (
             _skipped(
@@ -151,6 +189,10 @@ _FAILED: Final[AgentUpgradeFailed] = _failed(UpgradeFailedStep.PREPARE, "no hook
             "failed ov-a: swap (disk full); left stopped; some files may already be replaced",
         ),
         (
+            _failed(UpgradeFailedStep.SWAP, "mv: cannot move\n\n  disk full\n"),
+            "failed ov-a: swap (mv: cannot move; disk full); left stopped; some files may already be replaced",
+        ),
+        (
             _failed(UpgradeFailedStep.START, "no work dir"),
             "failed ov-a: start (no work dir); "
             "not running on the new files; start it with `mngr start ov-a --restart`",
@@ -159,6 +201,18 @@ _FAILED: Final[AgentUpgradeFailed] = _failed(UpgradeFailedStep.PREPARE, "no hook
             _failed(UpgradeFailedStep.READY, "dialog"),
             "failed ov-a: ready (dialog); started but did not signal readiness; session left for inspection; "
             "restart it with `mngr start ov-a --restart`",
+        ),
+        (
+            _failed(UpgradeFailedStep.UNLOCK, "Host lock was lost"),
+            "failed ov-a: unlock (Host lock was lost); "
+            "its upgrade ran, but another mngr may have changed it while the host lock was not held",
+        ),
+        (
+            AgentUpgradeFailed(
+                agent_id=_ID, agent_name=_NAME, host=_DOCKER_HOST, step=UpgradeFailedStep.START, error_message="gone"
+            ),
+            "failed ov-a@box-1.docker: start (gone); "
+            "not running on the new files; start it with `mngr start ov-a@box-1.docker --restart`",
         ),
     ],
 )
@@ -230,23 +284,37 @@ def test_build_upgrade_result_data_lists_every_outcomes_fields_by_kind() -> None
             {
                 "agent_id": str(_ID),
                 "agent_name": "ov-a",
+                "host": _HOST_DATA,
                 "plan": "RESTART_IDLE",
                 "prior_state": "WAITING",
                 "changed_paths": ["commands/a.sh", "settings.json"],
             }
         ],
-        "current_agents": [{"agent_id": str(_ID), "agent_name": "ov-a"}],
+        "current_agents": [{"agent_id": str(_ID), "agent_name": "ov-a", "host": _HOST_DATA}],
         "skipped_agents": [
-            {"agent_id": str(_ID), "agent_name": "ov-a", "kind": "NOT_IDLE", "detail": SKIP_MID_TURN.detail},
             {
                 "agent_id": str(_ID),
                 "agent_name": "ov-a",
+                "host": _HOST_DATA,
+                "kind": "NOT_IDLE",
+                "detail": SKIP_MID_TURN.detail,
+            },
+            {
+                "agent_id": str(_ID),
+                "agent_name": "ov-a",
+                "host": _HOST_DATA,
                 "kind": "ABORTED",
                 "detail": SKIP_ABORTED.detail,
             },
         ],
         "failed_agents": [
-            {"agent_id": str(_ID), "agent_name": "ov-a", "step": "PREPARE", "error_message": "no hooks"}
+            {
+                "agent_id": str(_ID),
+                "agent_name": "ov-a",
+                "host": _HOST_DATA,
+                "step": "PREPARE",
+                "error_message": "no hooks",
+            }
         ],
         "dry_run": False,
         "upgraded_count": 1,
@@ -278,6 +346,7 @@ def _yield_recording_the_output_before_each(
                     "event": "agent_upgraded",
                     "agent_id": str(_ID),
                     "agent_name": "ov-a",
+                    "host": _HOST_DATA,
                     "plan": "RESTART_IDLE",
                     "prior_state": "WAITING",
                     "changed_paths": ["commands/a.sh", "settings.json"],

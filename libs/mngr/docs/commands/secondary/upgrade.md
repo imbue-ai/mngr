@@ -20,7 +20,8 @@ recreated. Only those files change: the agent keeps its options, branch
 and conversation.
 
 An idle agent is restarted (closing any attached terminal) and resumes
-its conversation. A stopped agent gets the new files and stays stopped.
+its conversation. A stopped agent gets the new files and stays stopped;
+one whose host is not running is skipped, and its host is not started.
 An agent that is busy, or whose program has exited, is skipped unless
 --force.
 

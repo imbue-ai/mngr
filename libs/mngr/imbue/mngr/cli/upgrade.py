@@ -10,6 +10,7 @@ from click_option_group import optgroup
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.find import order_agent_matches_as_named
+from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.api.upgrade import AgentCurrent
 from imbue.mngr.api.upgrade import AgentUpgradeFailed
 from imbue.mngr.api.upgrade import AgentUpgradeOutcome
@@ -17,6 +18,7 @@ from imbue.mngr.api.upgrade import AgentUpgradeSkipped
 from imbue.mngr.api.upgrade import AgentUpgraded
 from imbue.mngr.api.upgrade import UpgradeFailedStep
 from imbue.mngr.api.upgrade import UpgradePlan
+from imbue.mngr.api.upgrade import format_agent_label
 from imbue.mngr.api.upgrade import upgrade_agents
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.address_params import parse_agent_addresses_or_raise
@@ -35,6 +37,7 @@ from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
@@ -53,25 +56,32 @@ class UpgradeCliOptions(CommonCliOptions):
 @pure
 def format_upgrade_outcome(outcome: AgentUpgradeOutcome) -> str:
     """The agent's line of human output; a dry run lists the paths it would rewrite under the line."""
+    agent_label = format_agent_label(outcome.agent_name, outcome.host)
     match outcome:
         case AgentUpgraded():
-            return _format_upgraded(outcome)
+            return _format_upgraded(outcome, agent_label)
         case AgentCurrent():
-            return f"current {outcome.agent_name}"
+            return f"current {agent_label}"
         case AgentUpgradeSkipped():
             verb = "would skip" if outcome.is_dry_run else "skipped"
-            return f"{verb} {outcome.agent_name}: {outcome.detail}"
+            return f"{verb} {agent_label}: {_join_lines(outcome.detail)}"
         case AgentUpgradeFailed():
             return (
-                f"failed {outcome.agent_name}: {outcome.step.lower()} ({outcome.error_message}); "
-                f"{_describe_agent_after_failed_step(outcome)}"
+                f"failed {agent_label}: {outcome.step.lower()} ({_join_lines(outcome.error_message)}); "
+                f"{_describe_agent_after_failed_step(outcome.step, agent_label)}"
             )
         case _ as unreachable:
             assert_never(unreachable)
 
 
 @pure
-def _format_upgraded(outcome: AgentUpgraded) -> str:
+def _join_lines(text: str) -> str:
+    """``text``'s non-blank lines joined by "; ", so a multi-line error stays on its agent's line."""
+    return "; ".join(line.strip() for line in text.splitlines() if line.strip())
+
+
+@pure
+def _format_upgraded(outcome: AgentUpgraded, agent_label: str) -> str:
     match outcome.plan:
         case UpgradePlan.LEAVE_STOPPED:
             detail = "stopped"
@@ -88,15 +98,13 @@ def _format_upgraded(outcome: AgentUpgraded) -> str:
         case _ as unreachable:
             assert_never(unreachable)
     if not outcome.is_dry_run:
-        return f"upgraded {outcome.agent_name} ({detail})"
-    return "\n".join(
-        [f"would upgrade {outcome.agent_name} ({detail})", *(f"  {path}" for path in outcome.changed_paths)]
-    )
+        return f"upgraded {agent_label} ({detail})"
+    return "\n".join([f"would upgrade {agent_label} ({detail})", *(f"  {path}" for path in outcome.changed_paths)])
 
 
 @pure
-def _describe_agent_after_failed_step(outcome: AgentUpgradeFailed) -> str:
-    match outcome.step:
+def _describe_agent_after_failed_step(step: UpgradeFailedStep, agent_label: str) -> str:
+    match step:
         case UpgradeFailedStep.LOCK | UpgradeFailedStep.PREPARE | UpgradeFailedStep.START_CHECK:
             return "untouched"
         case UpgradeFailedStep.STOP:
@@ -104,11 +112,13 @@ def _describe_agent_after_failed_step(outcome: AgentUpgradeFailed) -> str:
         case UpgradeFailedStep.SWAP:
             return "left stopped; some files may already be replaced"
         case UpgradeFailedStep.START:
-            return f"not running on the new files; start it with `mngr start {outcome.agent_name} --restart`"
+            return f"not running on the new files; start it with `mngr start {agent_label} --restart`"
+        case UpgradeFailedStep.UNLOCK:
+            return "its upgrade ran, but another mngr may have changed it while the host lock was not held"
         case UpgradeFailedStep.READY:
             return (
                 "started but did not signal readiness; session left for inspection; "
-                f"restart it with `mngr start {outcome.agent_name} --restart`"
+                f"restart it with `mngr start {agent_label} --restart`"
             )
         case _ as unreachable:
             assert_never(unreachable)
@@ -304,7 +314,11 @@ def upgrade(ctx: click.Context, **kwargs: Any) -> None:
             is_forced=opts.force,
             is_dry_run=opts.dry_run,
             error_behavior=ErrorBehavior(opts.on_error.upper()),
-            caller_agent_id=AgentId(caller_agent_id_value) if caller_agent_id_value else None,
+            caller=(
+                AgentInstanceKey.build(AgentId(caller_agent_id_value), get_local_host(mngr_ctx).id)
+                if caller_agent_id_value
+                else None
+            ),
             mngr_ctx=mngr_ctx,
         ),
         opts.dry_run,
@@ -329,7 +343,8 @@ recreated. Only those files change: the agent keeps its options, branch
 and conversation.
 
 An idle agent is restarted (closing any attached terminal) and resumes
-its conversation. A stopped agent gets the new files and stays stopped.
+its conversation. A stopped agent gets the new files and stays stopped;
+one whose host is not running is skipped, and its host is not started.
 An agent that is busy, or whose program has exited, is skipped unless
 --force.
 

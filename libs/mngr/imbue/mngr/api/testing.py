@@ -25,17 +25,21 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.default_plugins.command_agent import CommandAgent
 from imbue.mngr.agents.upgrade import build_shared_shell_lib_files
+from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.git import LocalGitContext
 from imbue.mngr.api.upgrade import AgentCurrent
 from imbue.mngr.api.upgrade import AgentUpgradeFailed
 from imbue.mngr.api.upgrade import AgentUpgradeOutcome
 from imbue.mngr.api.upgrade import AgentUpgradeSkipped
 from imbue.mngr.api.upgrade import AgentUpgraded
+from imbue.mngr.api.upgrade import ReachedHost
 from imbue.mngr.api.upgrade import UpgradeFailedStep
+from imbue.mngr.api.upgrade import UpgradeOutcomeHost
 from imbue.mngr.api.upgrade import UpgradePlan
 from imbue.mngr.api.upgrade import UpgradeSkip
 from imbue.mngr.api.upgrade import UpgradeSkipKind
-from imbue.mngr.api.upgrade import upgrade_agent
+from imbue.mngr.api.upgrade import format_agent_label
+from imbue.mngr.api.upgrade import upgrade_matched_agent
 from imbue.mngr.config.agent_class_registry import register_agent_class
 from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -486,6 +490,88 @@ def make_recorded_upgradable_agent(
     )
 
 
+def make_upgrade_outcome_host(host: OnlineHostInterface) -> UpgradeOutcomeHost:
+    """``host`` as an outcome of ``mngr upgrade`` names it."""
+    return UpgradeOutcomeHost(id=host.id, name=host.get_name(), provider_name=host.get_provider_name())
+
+
+class InProcessSshHost(Host):
+    """An SSH host on the in-process paramiko server that records its reads, uploads and lock acquisitions.
+
+    That server has no SFTP subsystem and runs a command only once its stdin closes, so reads, uploads and the host
+    lock go through the filesystem it shares with this process.
+    """
+
+    read_paths: list[Path] = Field(default_factory=list, description="Each file read, in order")
+    upload_count: int = Field(default=0, description="How many directory uploads ran")
+    lock_count: int = Field(default=0, description="How many times the host lock was taken")
+
+    def read_file(self, path: Path) -> bytes:
+        self.read_paths.append(path)
+        return path.read_bytes()
+
+    @contextmanager
+    def lock_cooperatively(self, timeout_seconds: float | None = 300.0) -> Generator[None, None, None]:
+        self.lock_count += 1
+        yield
+
+    def copy_local_directory(self, source_path: Path, target_path: Path, extra_args: str | None) -> None:
+        self.upload_count += 1
+        self.execute_idempotent_command(f"mkdir -p {shlex.quote(str(target_path))}")
+        shutil.copytree(source_path, target_path, dirs_exist_ok=True)
+
+    def count_operations_besides_ssh_commands(self) -> int:
+        """The reads, uploads and lock acquisitions so far, each of which is one round trip to a real host."""
+        return len(self.read_paths) + self.upload_count + self.lock_count
+
+
+InProcessSshHostT = TypeVar("InProcessSshHostT", bound=InProcessSshHost)
+
+
+def make_in_process_ssh_host(
+    create_ssh_host: Callable[[str], Host], host_class: type[InProcessSshHostT], **extra_fields: Any
+) -> InProcessSshHostT:
+    """A ``host_class`` view of an SSH host ``create_ssh_host`` makes on the in-process server, which takes over that host's connection."""
+    ssh_host = create_ssh_host("upgrade-remote")
+    in_process_host = host_class(
+        id=ssh_host.id,
+        host_name=ssh_host.host_name,
+        connector=ssh_host.connector,
+        provider_instance=ssh_host.provider_instance,
+        mngr_ctx=ssh_host.mngr_ctx,
+        **extra_fields,
+    )
+    # The factory host has not connected yet, so this only stops it closing the shared client when it is collected.
+    ssh_host.disconnect()
+    return in_process_host
+
+
+def upgrade_agent(
+    agent: AgentInterface[Any],
+    host: OnlineHostInterface,
+    is_forced: bool,
+    is_dry_run: bool,
+    is_caller: bool,
+    mngr_ctx: MngrContext,
+) -> AgentUpgradeOutcome:
+    """The outcome of ``mngr upgrade`` for ``agent`` on ``host``, which it reached.
+
+    A connection lost at the host lock, the input read, the staging, the dialog check or the start check raises
+    HostConnectionError, and one lost at the stop, swap or start raises ConnectionLostAtUpgradeStepError; one lost while
+    the agent's tmux panes and work state are read skips the agent as unreadable.
+    """
+    match = AgentMatch(
+        agent_id=agent.id,
+        agent_name=agent.name,
+        host_id=host.id,
+        host_name=host.get_name(),
+        provider_name=host.get_provider_name(),
+    )
+    return upgrade_matched_agent(
+        match, ReachedHost(host=host, agent_by_id={agent.id: agent}), is_forced, is_dry_run, is_caller, mngr_ctx
+    )
+
+
 def run_upgrade_as_cli(agent: AgentInterface[Any]) -> AgentUpgradeOutcome:
     """The outcome of ``mngr upgrade NAME`` for ``agent``: on its own host, not forced and not a dry run."""
     return upgrade_agent(
@@ -496,7 +582,9 @@ def run_upgrade_as_cli(agent: AgentInterface[Any]) -> AgentUpgradeOutcome:
 @pure
 def make_current_outcome(agent: AgentInterface[Any]) -> AgentCurrent:
     """The outcome of a real run that finds ``agent`` current."""
-    return AgentCurrent(agent_id=agent.id, agent_name=agent.name, is_dry_run=False)
+    return AgentCurrent(
+        agent_id=agent.id, agent_name=agent.name, host=make_upgrade_outcome_host(agent.get_host()), is_dry_run=False
+    )
 
 
 @pure
@@ -505,6 +593,7 @@ def make_upgraded_while_stopped_outcome(agent: AgentInterface[Any], changed_path
     return AgentUpgraded(
         agent_id=agent.id,
         agent_name=agent.name,
+        host=make_upgrade_outcome_host(agent.get_host()),
         plan=UpgradePlan.LEAVE_STOPPED,
         prior_state=AgentLifecycleState.STOPPED,
         changed_paths=tuple(changed_paths),
@@ -516,7 +605,12 @@ def make_upgraded_while_stopped_outcome(agent: AgentInterface[Any], changed_path
 def make_skipped_outcome(agent: AgentInterface[Any], skip: UpgradeSkip) -> AgentUpgradeSkipped:
     """The outcome of a real run that skips ``agent`` for ``skip``."""
     return AgentUpgradeSkipped(
-        agent_id=agent.id, agent_name=agent.name, kind=skip.kind, detail=skip.detail, is_dry_run=False
+        agent_id=agent.id,
+        agent_name=agent.name,
+        host=make_upgrade_outcome_host(agent.get_host()),
+        kind=skip.kind,
+        detail=skip.detail,
+        is_dry_run=False,
     )
 
 
@@ -526,12 +620,13 @@ def make_unsupported_until_recreated_outcome(agent: AgentInterface[Any], harness
     assert "mngr create" not in harness_detail, (
         f"mngr upgrade appends the re-create command, so a harness's unsupported detail leaves it out: {harness_detail!r}"
     )
+    agent_label = format_agent_label(agent.name, make_upgrade_outcome_host(agent.get_host()))
     return make_skipped_outcome(
         agent,
         UpgradeSkip(
             kind=UpgradeSkipKind.UNSUPPORTED,
             detail=UpgradeSkipDetail(
-                f"{harness_detail}; re-create it with `mngr create {agent.name} --reuse --update`"
+                f"{harness_detail}; re-create it with `mngr create {agent_label} --reuse --update`"
             ),
         ),
     )
@@ -541,5 +636,9 @@ def make_unsupported_until_recreated_outcome(agent: AgentInterface[Any], harness
 def make_prepare_failed_outcome(agent: AgentInterface[Any], error_message: str) -> AgentUpgradeFailed:
     """The outcome of a run whose prepare step failed for ``agent`` with ``error_message``."""
     return AgentUpgradeFailed(
-        agent_id=agent.id, agent_name=agent.name, step=UpgradeFailedStep.PREPARE, error_message=error_message
+        agent_id=agent.id,
+        agent_name=agent.name,
+        host=make_upgrade_outcome_host(agent.get_host()),
+        step=UpgradeFailedStep.PREPARE,
+        error_message=error_message,
     )

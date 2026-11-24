@@ -1461,6 +1461,21 @@ def write_executable_script(path: Path, content: str) -> None:
     path.chmod(0o755)
 
 
+def link_executables_on_path_except(bin_dir: Path, excluded_name: str) -> None:
+    """Create ``bin_dir`` with a link to the first executable of each name on PATH, except ``excluded_name``."""
+    bin_dir.mkdir()
+    for path_dir in (Path(entry) for entry in os.environ["PATH"].split(os.pathsep) if entry):
+        if not path_dir.is_dir():
+            continue
+        for executable in path_dir.iterdir():
+            link = bin_dir / executable.name
+            is_linked = (
+                executable.name != excluded_name and os.path.isfile(executable) and os.access(executable, os.X_OK)
+            )
+            if is_linked and not os.path.lexists(link):
+                link.symlink_to(executable)
+
+
 def setup_claude_trust_config_for_subprocess(
     trusted_paths: list[Path],
     root_name: str = "mngr-acceptance-test",

@@ -61,6 +61,11 @@ def _create_running_upgradable_agent(
     )
 
 
+def _get_host_data(host: Host) -> dict[str, str]:
+    """The host of an agent on ``host`` as JSON output gives it."""
+    return {"id": str(host.id), "name": str(host.get_name()), "provider_name": str(host.get_provider_name())}
+
+
 def _get_state_dir(host: Host, agent_name: str) -> Path:
     (agent,) = [agent for agent in host.get_agents() if agent.name == agent_name]
     return get_agent_state_dir_path(host.host_dir, agent.id)
@@ -242,6 +247,7 @@ def test_upgrade_leaves_the_agent_running_the_command_out_of_date_with_its_own_e
             {
                 "agent_id": str(agent.id),
                 "agent_name": str(agent.name),
+                "host": _get_host_data(local_host),
                 "kind": "NOT_IDLE",
                 "detail": SKIP_IS_CALLER.detail,
             }
@@ -305,6 +311,7 @@ def test_upgrade_leaves_the_agent_running_the_command_unsupported_when_its_type_
         {
             "agent_id": str(agent.id),
             "agent_name": str(agent.name),
+            "host": _get_host_data(local_host),
             "kind": "UNSUPPORTED",
             "detail": f"agent type '{PLACEHOLDER_AGENT_TYPE}' has no upgrade support",
         }
@@ -467,16 +474,24 @@ def test_upgrade_json_output_carries_every_outcome_and_the_exit_code(
             {
                 "agent_id": str(stale_agent.id),
                 "agent_name": str(stale_agent.name),
+                "host": _get_host_data(local_host),
                 "plan": "LEAVE_STOPPED",
                 "prior_state": "STOPPED",
                 "changed_paths": _UNPROVISIONED_CHANGED_PATHS,
             }
         ],
-        "current_agents": [{"agent_id": str(current_agent.id), "agent_name": str(current_agent.name)}],
+        "current_agents": [
+            {
+                "agent_id": str(current_agent.id),
+                "agent_name": str(current_agent.name),
+                "host": _get_host_data(local_host),
+            }
+        ],
         "skipped_agents": [
             {
                 "agent_id": str(unsupported_agent.id),
                 "agent_name": str(unsupported_agent.name),
+                "host": _get_host_data(local_host),
                 "kind": "UNSUPPORTED",
                 "detail": f"agent type '{PLACEHOLDER_AGENT_TYPE}' has no upgrade support",
             }
@@ -485,6 +500,7 @@ def test_upgrade_json_output_carries_every_outcome_and_the_exit_code(
             {
                 "agent_id": str(failing_agent.id),
                 "agent_name": str(failing_agent.name),
+                "host": _get_host_data(local_host),
                 "step": "PREPARE",
                 "error_message": UPGRADE_FAILURE_MESSAGE,
             }
@@ -525,6 +541,7 @@ def test_upgrade_json_output_reports_the_agents_upgraded_before_an_error_escapes
             {
                 "agent_id": str(stale_agent.id),
                 "agent_name": str(stale_agent.name),
+                "host": _get_host_data(local_host),
                 "plan": "LEAVE_STOPPED",
                 "prior_state": "STOPPED",
                 "changed_paths": _UNPROVISIONED_CHANGED_PATHS,
@@ -577,6 +594,7 @@ def test_upgrade_jsonl_dry_run_emits_an_event_per_outcome_in_the_order_named_pas
             "event": "agent_upgraded",
             "agent_id": str(stale_agent.id),
             "agent_name": str(stale_agent.name),
+            "host": _get_host_data(local_host),
             "plan": "LEAVE_STOPPED",
             "prior_state": "STOPPED",
             "changed_paths": _UNPROVISIONED_CHANGED_PATHS,
@@ -586,6 +604,7 @@ def test_upgrade_jsonl_dry_run_emits_an_event_per_outcome_in_the_order_named_pas
             "event": "agent_failed",
             "agent_id": str(failing_agent.id),
             "agent_name": str(failing_agent.name),
+            "host": _get_host_data(local_host),
             "step": "PREPARE",
             "error_message": UPGRADE_FAILURE_MESSAGE,
             "dry_run": True,
@@ -594,6 +613,7 @@ def test_upgrade_jsonl_dry_run_emits_an_event_per_outcome_in_the_order_named_pas
             "event": "agent_skipped",
             "agent_id": str(unsupported_agent.id),
             "agent_name": str(unsupported_agent.name),
+            "host": _get_host_data(local_host),
             "kind": "UNSUPPORTED",
             "detail": f"agent type '{PLACEHOLDER_AGENT_TYPE}' has no upgrade support",
             "dry_run": True,
@@ -602,6 +622,7 @@ def test_upgrade_jsonl_dry_run_emits_an_event_per_outcome_in_the_order_named_pas
             "event": "agent_current",
             "agent_id": str(current_agent.id),
             "agent_name": str(current_agent.name),
+            "host": _get_host_data(local_host),
             "dry_run": True,
         },
         {
@@ -682,6 +703,7 @@ def test_upgrade_leaves_an_agent_of_a_type_this_config_does_not_define_unsupport
         {
             "agent_id": str(agent_id),
             "agent_name": "undefined-type-agent-48213",
+            "host": _get_host_data(local_host),
             "kind": "UNSUPPORTED",
             "detail": "agent type 'undefined-type-48213' is not defined in this config",
         }

@@ -799,6 +799,7 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         files without resolving a local host (which would require ``mngr.api.providers``
         and hit an import cycle). Uses rsync (additive, no ``--delete``); ``extra_args``
         is appended to the rsync invocation (e.g. ``--include``/``--exclude`` filters).
+        Raises ``HostConnectionError`` when the host cannot be reached.
         """
         ...
 

@@ -127,6 +127,7 @@ from imbue.mngr.utils.progress import summarize_command_for_label
 from imbue.mngr.utils.read_deadline import remaining_read_timeout
 from imbue.mngr.utils.ssh_transport import SSH_CONNECT_HANDSHAKE_RETRY_BACKOFF_SECONDS
 from imbue.mngr.utils.ssh_transport import SSH_CONNECT_HANDSHAKE_RETRY_DEADLINE_SECONDS
+from imbue.mngr.utils.ssh_transport import is_ssh_transport_failure
 from imbue.mngr.utils.ssh_transport import run_process_retrying_closed_ssh_connections
 from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 
@@ -2563,6 +2564,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             try:
                 self._run_process_over_ssh(rsync_args, None)
             except ProcessError as e:
+                if is_ssh_transport_failure(e):
+                    raise HostConnectionError(f"rsync failed (push to {hostname}): {e.stderr}") from e
                 raise MngrError(f"rsync failed (push to {hostname}): {e.stderr}") from e
 
     def _run_process_over_ssh(self, command: Sequence[str], env: Mapping[str, str] | None) -> FinishedProcess:

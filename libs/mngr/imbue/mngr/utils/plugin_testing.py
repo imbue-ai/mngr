@@ -7,6 +7,7 @@ to register the standard set of fixtures.
 
 import importlib.resources
 import textwrap
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from typing import Generator
@@ -45,10 +46,14 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
+from imbue.mngr.utils.testing import ExecOnlyParamikoServer
 from imbue.mngr.utils.testing import capture_log_warnings
+from imbue.mngr.utils.testing import in_process_paramiko_sshd
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import isolate_git
 from imbue.mngr.utils.testing import isolate_tmux_server
+from imbue.mngr.utils.testing import make_client_and_host_ssh_keys
+from imbue.mngr.utils.testing import make_local_ssh_host_factory
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr.utils.testing import setup_mngr_test_environment
 
@@ -362,6 +367,27 @@ def mngr_transcript_lib_sh() -> str:
     return importlib.resources.files(mngr_resources).joinpath("mngr_transcript_lib.sh").read_text()
 
 
+@pytest.fixture
+def paramiko_ssh_host_factory(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext, tmp_path: Path
+) -> Generator[tuple[Callable[[str], Host], ExecOnlyParamikoServer], None, None]:
+    """SSH hosts backed by an in-process paramiko server that runs exec requests through the local shell.
+
+    Yields (factory, server): the factory creates hosts by name, all on the one
+    server, and the server records every command it was asked to run. Needs
+    neither an sshd nor an ssh-keygen binary, so it runs wherever the unit tests do.
+    """
+    private_key_path, host_key_path = make_client_and_host_ssh_keys(tmp_path)
+    with in_process_paramiko_sshd(host_key_path, private_key_path, is_auth_held=False, dropped_connection_count=0) as (
+        port,
+        server,
+    ):
+        factory = make_local_ssh_host_factory(
+            port, host_key_path, private_key_path, temp_host_dir, temp_mngr_ctx, tmp_path
+        )
+        yield factory, server
+
+
 def register_plugin_test_fixtures(namespace: dict[str, Any]) -> None:
     """Register common plugin test fixtures into the given namespace.
 
@@ -381,6 +407,7 @@ def register_plugin_test_fixtures(namespace: dict[str, Any]) -> None:
     namespace["mngr_test_prefix"] = mngr_test_prefix
     namespace["mngr_test_root_name"] = mngr_test_root_name
     namespace["mngr_transcript_lib_sh"] = mngr_transcript_lib_sh
+    namespace["paramiko_ssh_host_factory"] = paramiko_ssh_host_factory
     namespace["per_host_dir"] = per_host_dir
     namespace["plugin_manager"] = plugin_manager
     namespace["project_config_dir"] = project_config_dir

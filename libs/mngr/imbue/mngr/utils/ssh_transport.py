@@ -48,6 +48,16 @@ def is_closed_ssh_connection_stderr(stderr: str) -> bool:
     return any(message in stderr for message in _CLOSED_SSH_CONNECTION_STDERR_MESSAGES)
 
 
+# ssh's exit status for its own failures (refused, timed out, rejected or dropped connections), which rsync passes on.
+_SSH_TRANSPORT_FAILURE_EXIT_CODE: Final[int] = 255
+
+
+@pure
+def is_ssh_transport_failure(error: ProcessError) -> bool:
+    """Whether an rsync over ssh failed because ssh could not reach or stay connected to the host."""
+    return error.returncode == _SSH_TRANSPORT_FAILURE_EXIT_CODE
+
+
 # How long a caller keeps re-establishing an ssh connection that a freshly provisioned or
 # tunnel-fronted sshd is not completing yet, and how long it pauses between tries. One
 # budget for every transport that hits that window, since the window is the host's and not

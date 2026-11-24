@@ -20,6 +20,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.agents.agent_registry import reset_agent_registry
 from imbue.mngr.api.providers import reset_provider_instances
+from imbue.mngr.api.testing import register_upgradable_command_agent_types
 from imbue.mngr.plugin_catalog import get_independent_entry_point_names
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.providers.registry import load_local_backend_only
@@ -388,6 +389,12 @@ def plugin_manager(
     reset_backend_registry()
     reset_agent_registry()
     reset_provider_instances()
+
+
+@pytest.fixture
+def upgradable_agent_types(plugin_manager: pluggy.PluginManager) -> None:
+    """Register the test agent types ``mngr upgrade`` covers in the registry ``plugin_manager`` loaded."""
+    register_upgradable_command_agent_types()
 
 
 # Session Cleanup - Detect and clean up leaked test resources

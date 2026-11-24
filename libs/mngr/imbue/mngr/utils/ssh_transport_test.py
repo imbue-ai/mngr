@@ -6,6 +6,7 @@ import pytest
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.mngr.utils.ssh_transport import is_closed_ssh_connection_stderr
+from imbue.mngr.utils.ssh_transport import is_ssh_transport_failure
 from imbue.mngr.utils.ssh_transport import run_process_retrying_closed_ssh_connections
 from imbue.mngr.utils.testing import make_command_failing_n_times
 
@@ -50,6 +51,22 @@ def test_is_closed_ssh_connection_stderr_matches_only_a_peer_that_hung_up(stderr
     repository" is excluded because it accompanies every push failure, retryable or not.
     """
     assert is_closed_ssh_connection_stderr(stderr) is expected
+
+
+@pytest.mark.parametrize(
+    ("returncode", "expected"),
+    [
+        pytest.param(255, True, id="ssh-failed"),
+        pytest.param(12, False, id="rsync-protocol-error"),
+        pytest.param(23, False, id="rsync-partial-transfer"),
+        pytest.param(127, False, id="remote-command-not-found"),
+        pytest.param(None, False, id="no-exit-status"),
+    ],
+)
+def test_is_ssh_transport_failure_matches_only_sshs_own_exit_status(returncode: int | None, expected: bool) -> None:
+    error = ProcessError(command=("rsync",), stdout="", stderr="", returncode=returncode)
+
+    assert is_ssh_transport_failure(error) is expected
 
 
 def test_a_transfer_whose_ssh_connection_the_peer_closed_runs_again_and_succeeds(

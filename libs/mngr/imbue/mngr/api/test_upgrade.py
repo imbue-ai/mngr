@@ -22,6 +22,8 @@ from pydantic import Field
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.upgrade import AGENT_DATA_RELATIVE_PATH
 from imbue.mngr.agents.upgrade import build_shared_shell_lib_files
+from imbue.mngr.api.conftest import PinnedLookupHarness
+from imbue.mngr.api.conftest import PinnedLookupHarnessFactory
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import get_discovery_events_path
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
@@ -33,16 +35,21 @@ from imbue.mngr.api.testing import NEVER_READY_TIMEOUT_SECONDS
 from imbue.mngr.api.testing import NeverReadyCommandAgent
 from imbue.mngr.api.testing import READY_MARKER_NAME
 from imbue.mngr.api.testing import ScriptedStateCommandAgent
+from imbue.mngr.api.testing import UPGRADABLE_COMMAND_AGENT_TYPE
 from imbue.mngr.api.testing import UPGRADED_SCRIPT_NAME
 from imbue.mngr.api.testing import UpgradableCommandAgent
+from imbue.mngr.api.testing import make_current_outcome
 from imbue.mngr.api.testing import make_recorded_upgradable_agent
 from imbue.mngr.api.testing import make_skipped_outcome
 from imbue.mngr.api.testing import make_upgradable_command_agent
+from imbue.mngr.api.testing import make_upgrade_outcome_host
+from imbue.mngr.api.testing import upgrade_agent
 from imbue.mngr.api.testing import write_command_agent_record
 from imbue.mngr.api.upgrade import AgentCurrent
 from imbue.mngr.api.upgrade import AgentUpgradeFailed
 from imbue.mngr.api.upgrade import AgentUpgradeSkipped
 from imbue.mngr.api.upgrade import AgentUpgraded
+from imbue.mngr.api.upgrade import ReachedHost
 from imbue.mngr.api.upgrade import SKIP_ABORTED
 from imbue.mngr.api.upgrade import SKIP_DESTROYED
 from imbue.mngr.api.upgrade import SKIP_EXITED
@@ -54,25 +61,39 @@ from imbue.mngr.api.upgrade import UPGRADE_STAGING_DIR_NAME
 from imbue.mngr.api.upgrade import UpgradeFailedStep
 from imbue.mngr.api.upgrade import UpgradePlan
 from imbue.mngr.api.upgrade import UpgradeSkip
+from imbue.mngr.api.upgrade import UpgradeSkipKind
+from imbue.mngr.api.upgrade import build_compare_staged_files_command
+from imbue.mngr.api.upgrade import build_read_upgrade_inputs_command
+from imbue.mngr.api.upgrade import build_swap_command
 from imbue.mngr.api.upgrade import iter_upgrade_outcomes
-from imbue.mngr.api.upgrade import upgrade_agent
+from imbue.mngr.api.upgrade import parse_upgrade_inputs_output
+from imbue.mngr.api.upgrade import upgrade_agents
 from imbue.mngr.api.upgrade import upgrade_matched_agent
+from imbue.mngr.cli.testing import create_test_agent_state
 from imbue.mngr.cli.upgrade import format_upgrade_outcome
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import HostConnectionError
+from imbue.mngr.errors import HostNotFoundError
+from imbue.mngr.errors import LockLostError
 from imbue.mngr.errors import MessageLockTimeoutError
 from imbue.mngr.hosts.common import get_agent_state_dir_path
+from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.host import SHARED_SHELL_LIB_NAMES
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
+from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import HarnessFileSpec
 from imbue.mngr.interfaces.data_types import HostLifecycleSnapshot
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ErrorBehavior
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.polling import poll_until
@@ -91,6 +112,11 @@ _UPGRADED_SCRIPT_PATH: Final[Path] = Path("commands") / UPGRADED_SCRIPT_NAME
 _MERGED_SETTINGS_PATH: Final[Path] = Path("harness-settings-948229.json")
 
 _MISSING_RECORD_DETAIL: Final[str] = "its record is missing"
+_LOCK_LOST_AT_STATE_READ_MESSAGE: Final[str] = (
+    "Host lock was lost while the connection was dropped: acquisition counter is 9, expected 7 "
+    "(another actor acquired the lock)"
+)
+_CONNECTION_LOST_MESSAGE: Final[str] = "Connection was closed while running command"
 _MESSAGE_LOCK_NAME: Final[str] = "message.lock"
 _SHORT_MESSAGE_LOCK_WAIT_SECONDS: Final[float] = 0.5
 _SHARED_SHELL_LIB_PATHS: Final[tuple[Path, ...]] = tuple(Path("commands") / name for name in SHARED_SHELL_LIB_NAMES)
@@ -144,6 +170,15 @@ class _RecordRequiringCommandAgent(ScriptedStateCommandAgent):
 
     def get_upgrade_unsupported_detail(self, input_content_by_path: Mapping[Path, str | None]) -> str | None:
         return _MISSING_RECORD_DETAIL if input_content_by_path[AGENT_DATA_RELATIVE_PATH] is None else None
+
+
+class _LockLosingStateCommandAgent(ScriptedStateCommandAgent):
+    """A command agent whose state reads return its scripted states once each and then raise, as a read that reconnects after another mngr took the host lock does."""
+
+    def get_lifecycle_state(self) -> AgentLifecycleState:
+        if not self.lifecycle_states:
+            raise LockLostError(_LOCK_LOST_AT_STATE_READ_MESSAGE)
+        return self.lifecycle_states.pop(0)
 
 
 class _SettingsWritingHost(LockRecordingHost):
@@ -216,23 +251,45 @@ class _DestroyingAtStartCheckHost(LockRecordingHost):
         super().check_agent_can_start(agent)
 
 
-class _DestroyingAfterRecordCheckHost(LockRecordingHost):
-    """A LockRecordingHost on which another program destroys an agent right after its upgrade found its record still there."""
+class _DestroyingAtHostCommandHost(LockRecordingHost):
+    """A LockRecordingHost on which another program destroys every agent just before the first host command holding ``destroy_before_command_containing`` runs."""
 
-    def path_exists(self, path: Path) -> bool:
-        is_existing = super().path_exists(path)
-        if is_existing and path.name == AGENT_DATA_RELATIVE_PATH.name:
-            shutil.rmtree(path.parent)
-        return is_existing
+    destroy_before_command_containing: str = Field(description="Text of the host command the destroy comes before")
+    is_destroyed: bool = Field(default=False, description="Whether the destroy happened")
+
+    def execute_idempotent_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+        raise_on_timeout: bool = False,
+    ) -> CommandResult:
+        if not self.is_destroyed and self.destroy_before_command_containing in command:
+            for agent_state_dir in get_agents_root_dir(self.host_dir).iterdir():
+                shutil.rmtree(agent_state_dir)
+            self.is_destroyed = True
+        return super().execute_idempotent_command(command, user, cwd, env, timeout_seconds, raise_on_timeout)
 
 
-class _DestroyingAtInputReadHost(LockRecordingHost):
-    """A LockRecordingHost on which another program destroys an agent just before its upgrade reads its record."""
+class _LockLosingHost(Host):
+    """Local Host whose cooperative lock reports, as it is released, that another actor took it during the block."""
 
-    def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
-        if path.name == AGENT_DATA_RELATIVE_PATH.name:
-            shutil.rmtree(path.parent)
-        return super().read_text_file(path, encoding)
+    @contextmanager
+    def lock_cooperatively(self, timeout_seconds: float | None = 300.0) -> Generator[None, None, None]:
+        yield
+        raise LockLostError("Host lock was lost during the critical section: acquisition counter is 8, expected 7")
+
+
+class _ConnectionLosingHost(LockRecordingHost):
+    """A LockRecordingHost whose connection is lost at each attempt to take its lock."""
+
+    @contextmanager
+    def lock_cooperatively(self, timeout_seconds: float | None = 300.0) -> Generator[None, None, None]:
+        self.lock_timeouts.append(timeout_seconds)
+        raise HostConnectionError(_CONNECTION_LOST_MESSAGE)
+        yield
 
 
 class _UnreadableLifecycleHost(Host):
@@ -429,6 +486,7 @@ def test_upgrade_rewrites_a_stopped_agents_files_leaves_it_stopped_and_then_repo
     assert outcome == AgentUpgraded(
         agent_id=agent.id,
         agent_name=agent.name,
+        host=make_upgrade_outcome_host(agent.get_host()),
         plan=UpgradePlan.LEAVE_STOPPED,
         prior_state=AgentLifecycleState.STOPPED,
         changed_paths=_ALL_STAGED_PATHS,
@@ -444,10 +502,49 @@ def test_upgrade_rewrites_a_stopped_agents_files_leaves_it_stopped_and_then_repo
 
     assert upgrade_agent(
         agent, local_host, is_forced=False, is_dry_run=True, is_caller=False, mngr_ctx=temp_mngr_ctx
-    ) == (AgentCurrent(agent_id=agent.id, agent_name=agent.name, is_dry_run=True))
+    ) == (
+        AgentCurrent(
+            agent_id=agent.id, agent_name=agent.name, host=make_upgrade_outcome_host(agent.get_host()), is_dry_run=True
+        )
+    )
     assert upgrade_agent(
         agent, local_host, is_forced=False, is_dry_run=False, is_caller=False, mngr_ctx=temp_mngr_ctx
-    ) == (AgentCurrent(agent_id=agent.id, agent_name=agent.name, is_dry_run=False))
+    ) == (
+        AgentCurrent(
+            agent_id=agent.id,
+            agent_name=agent.name,
+            host=make_upgrade_outcome_host(agent.get_host()),
+            is_dry_run=False,
+        )
+    )
+
+
+@pytest.mark.tmux
+@pytest.mark.rsync
+def test_upgrade_replaces_a_file_an_earlier_run_left_in_the_staging_dir_rather_than_moving_it_in(
+    local_host: Host, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    agent = _make_stopped_agent_with_old_files(local_host, tmp_path, temp_mngr_ctx, build_error_message=None)
+    state_dir = get_agent_state_dir_path(local_host.host_dir, agent.id)
+    left_behind_path = Path("commands") / "left-by-an-earlier-run-48213.sh"
+    (state_dir / UPGRADE_STAGING_DIR_NAME / left_behind_path).parent.mkdir(parents=True)
+    (state_dir / UPGRADE_STAGING_DIR_NAME / left_behind_path).write_text("echo left-behind-48213\n")
+
+    outcome = upgrade_agent(
+        agent, local_host, is_forced=False, is_dry_run=False, is_caller=False, mngr_ctx=temp_mngr_ctx
+    )
+
+    assert outcome == AgentUpgraded(
+        agent_id=agent.id,
+        agent_name=agent.name,
+        host=make_upgrade_outcome_host(agent.get_host()),
+        plan=UpgradePlan.LEAVE_STOPPED,
+        prior_state=AgentLifecycleState.STOPPED,
+        changed_paths=_ALL_STAGED_PATHS,
+        is_dry_run=False,
+    )
+    assert not (state_dir / left_behind_path).exists()
+    assert not (state_dir / UPGRADE_STAGING_DIR_NAME).exists()
 
 
 @pytest.mark.tmux
@@ -471,6 +568,7 @@ def test_upgrade_applies_a_change_of_only_the_executable_bit_and_ignores_other_p
     assert outcome == AgentUpgraded(
         agent_id=agent.id,
         agent_name=agent.name,
+        host=make_upgrade_outcome_host(agent.get_host()),
         plan=UpgradePlan.LEAVE_STOPPED,
         prior_state=AgentLifecycleState.STOPPED,
         changed_paths=(_UPGRADED_SCRIPT_PATH,),
@@ -494,6 +592,7 @@ def test_upgrade_dry_run_writes_nothing(local_host: Host, tmp_path: Path, temp_m
     assert outcome == AgentUpgraded(
         agent_id=agent.id,
         agent_name=agent.name,
+        host=make_upgrade_outcome_host(agent.get_host()),
         plan=UpgradePlan.LEAVE_STOPPED,
         prior_state=AgentLifecycleState.STOPPED,
         changed_paths=_ALL_STAGED_PATHS,
@@ -520,6 +619,7 @@ def test_upgrade_that_cannot_write_the_new_files_leaves_a_stopped_agent_untouche
     assert outcome == AgentUpgradeFailed(
         agent_id=agent.id,
         agent_name=agent.name,
+        host=make_upgrade_outcome_host(agent.get_host()),
         step=UpgradeFailedStep.PREPARE,
         error_message="cannot build the hooks",
     )
@@ -546,6 +646,7 @@ def test_upgrade_swaps_in_a_file_whose_new_directory_and_name_contain_spaces_and
     assert outcome == AgentUpgraded(
         agent_id=agent.id,
         agent_name=agent.name,
+        host=make_upgrade_outcome_host(agent.get_host()),
         plan=UpgradePlan.LEAVE_STOPPED,
         prior_state=AgentLifecycleState.STOPPED,
         changed_paths=tuple(sorted([*_SHARED_SHELL_LIB_PATHS, spaced_path])),
@@ -566,6 +667,7 @@ def test_upgrade_that_cannot_take_the_host_lock_leaves_the_agent_untouched(
     assert outcome == AgentUpgradeFailed(
         agent_id=agent.id,
         agent_name=agent.name,
+        host=make_upgrade_outcome_host(agent.get_host()),
         step=UpgradeFailedStep.LOCK,
         error_message="Timed out waiting to acquire the host lock",
     )
@@ -699,6 +801,7 @@ def test_upgrade_skips_an_agent_destroyed_before_its_files_were_staged_and_remov
     assert outcome == AgentUpgradeSkipped(
         agent_id=agent.id,
         agent_name=agent.name,
+        host=make_upgrade_outcome_host(agent.get_host()),
         kind=SKIP_DESTROYED.kind,
         detail=SKIP_DESTROYED.detail,
         is_dry_run=is_dry_run,
@@ -725,6 +828,7 @@ def test_upgrade_skips_an_agent_destroyed_right_after_its_files_were_staged_rath
     assert outcome == AgentUpgradeSkipped(
         agent_id=agent.id,
         agent_name=agent.name,
+        host=make_upgrade_outcome_host(agent.get_host()),
         kind=SKIP_DESTROYED.kind,
         detail=SKIP_DESTROYED.detail,
         is_dry_run=is_dry_run,
@@ -737,7 +841,9 @@ def test_upgrade_skips_an_agent_destroyed_right_after_its_files_were_staged_rath
 def test_upgrade_skips_an_agent_destroyed_as_its_inputs_are_read_rather_than_reporting_it_unsupported(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext, is_dry_run: bool
 ) -> None:
-    host = make_local_host_of_class(local_provider, _DestroyingAtInputReadHost)
+    host = make_local_host_of_class(
+        local_provider, _DestroyingAtHostCommandHost, destroy_before_command_containing="MNGR_UPGRADE_INPUT_PRESENT"
+    )
     agent = _with_lifecycle_states(
         make_recorded_upgradable_agent(host, tmp_path, temp_mngr_ctx, {}, _NEW_SCRIPT, _RecordRequiringCommandAgent),
         (AgentLifecycleState.WAITING,),
@@ -751,6 +857,7 @@ def test_upgrade_skips_an_agent_destroyed_as_its_inputs_are_read_rather_than_rep
     assert outcome == AgentUpgradeSkipped(
         agent_id=agent.id,
         agent_name=agent.name,
+        host=make_upgrade_outcome_host(agent.get_host()),
         kind=SKIP_DESTROYED.kind,
         detail=SKIP_DESTROYED.detail,
         is_dry_run=is_dry_run,
@@ -796,6 +903,7 @@ def test_upgrade_skips_an_agent_destroyed_before_its_start_check_rather_than_fai
     assert outcome == AgentUpgradeSkipped(
         agent_id=agent.id,
         agent_name=agent.name,
+        host=make_upgrade_outcome_host(agent.get_host()),
         kind=SKIP_DESTROYED.kind,
         detail=SKIP_DESTROYED.detail,
         is_dry_run=is_dry_run,
@@ -806,10 +914,12 @@ def test_upgrade_skips_an_agent_destroyed_before_its_start_check_rather_than_fai
 
 
 @pytest.mark.rsync
-def test_upgrade_skips_an_agent_destroyed_between_its_record_check_and_the_rename_without_recreating_its_state_dir(
+def test_upgrade_skips_an_agent_destroyed_just_before_the_swap_without_recreating_its_state_dir(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    host = make_local_host_of_class(local_provider, _DestroyingAfterRecordCheckHost)
+    host = make_local_host_of_class(
+        local_provider, _DestroyingAtHostCommandHost, destroy_before_command_containing="mv -f"
+    )
     agent = _with_lifecycle_states(
         make_recorded_upgradable_agent(host, tmp_path, temp_mngr_ctx, {}, _NEW_SCRIPT, ScriptedStateCommandAgent),
         (AgentLifecycleState.WAITING,),
@@ -866,6 +976,7 @@ def test_upgrade_restarts_an_idle_agent_on_its_new_files(
         assert outcome == AgentUpgraded(
             agent_id=agent.id,
             agent_name=agent.name,
+            host=make_upgrade_outcome_host(agent.get_host()),
             plan=UpgradePlan.RESTART_IDLE,
             prior_state=AgentLifecycleState.WAITING,
             changed_paths=(_UPGRADED_SCRIPT_PATH,),
@@ -903,6 +1014,7 @@ def test_upgrade_stops_and_starts_an_agent_under_the_host_lock(
         assert outcome == AgentUpgraded(
             agent_id=agent.id,
             agent_name=agent.name,
+            host=make_upgrade_outcome_host(agent.get_host()),
             plan=UpgradePlan.RESTART_IDLE,
             prior_state=AgentLifecycleState.WAITING,
             changed_paths=(_UPGRADED_SCRIPT_PATH,),
@@ -940,6 +1052,7 @@ def test_upgrade_removes_a_stale_ready_marker_and_reports_an_agent_that_never_si
         assert outcome == AgentUpgradeFailed(
             agent_id=agent.id,
             agent_name=agent.name,
+            host=make_upgrade_outcome_host(agent.get_host()),
             step=UpgradeFailedStep.READY,
             error_message=(
                 f"Failed to start agent {agent.name}: "
@@ -977,6 +1090,7 @@ def test_upgrade_that_cannot_write_the_new_files_never_stops_a_running_agent(
         assert outcome == AgentUpgradeFailed(
             agent_id=agent.id,
             agent_name=agent.name,
+            host=make_upgrade_outcome_host(agent.get_host()),
             step=UpgradeFailedStep.PREPARE,
             error_message="cannot build the hooks",
         )
@@ -1007,6 +1121,7 @@ def test_upgrade_of_an_agent_whose_work_dir_is_gone_fails_before_stopping_it(
         expected_outcome = AgentUpgradeFailed(
             agent_id=agent.id,
             agent_name=agent.name,
+            host=make_upgrade_outcome_host(agent.get_host()),
             step=UpgradeFailedStep.START_CHECK,
             error_message=(
                 f"Failed to start agent {agent_name}: "
@@ -1099,11 +1214,10 @@ def test_upgrade_that_cannot_stop_an_agent_leaves_its_files_and_under_abort_skip
             matches,
             lambda match: upgrade_matched_agent(
                 match,
-                host,
-                {agent.id: agent},
+                ReachedHost(host=host, agent_by_id={agent.id: agent}),
                 is_forced=False,
                 is_dry_run=False,
-                caller_agent_id=None,
+                is_caller=False,
                 mngr_ctx=agent.mngr_ctx,
             ),
             ErrorBehavior.ABORT,
@@ -1156,6 +1270,7 @@ def test_upgrade_skips_an_agent_on_a_dialog_unless_forced(
         assert forced_outcome == AgentUpgraded(
             agent_id=agent.id,
             agent_name=agent.name,
+            host=make_upgrade_outcome_host(agent.get_host()),
             plan=UpgradePlan.RESTART_INTERRUPTING,
             prior_state=AgentLifecycleState.WAITING,
             changed_paths=(_UPGRADED_SCRIPT_PATH,),
@@ -1216,6 +1331,7 @@ def test_upgrade_skips_an_agent_whose_program_exited_and_leaves_it_untouched_unl
         assert forced_outcome == AgentUpgraded(
             agent_id=agent.id,
             agent_name=agent.name,
+            host=make_upgrade_outcome_host(agent.get_host()),
             plan=UpgradePlan.RESTART_INTERRUPTING,
             prior_state=AgentLifecycleState.DONE,
             changed_paths=(_UPGRADED_SCRIPT_PATH,),
@@ -1298,7 +1414,12 @@ def test_upgrade_finds_an_agent_whose_program_exited_current_when_its_files_matc
             agent, local_host, is_forced=True, is_dry_run=False, is_caller=False, mngr_ctx=agent.mngr_ctx
         )
 
-        assert outcome == AgentCurrent(agent_id=agent.id, agent_name=agent.name, is_dry_run=False)
+        assert outcome == AgentCurrent(
+            agent_id=agent.id,
+            agent_name=agent.name,
+            host=make_upgrade_outcome_host(agent.get_host()),
+            is_dry_run=False,
+        )
         assert read_tmux_pane_pid(session_name) == pane_pid_before
         assert agent.get_lifecycle_state() == AgentLifecycleState.DONE
 
@@ -1337,6 +1458,7 @@ def test_upgrade_skips_a_busy_agent_unless_forced(
         assert forced_outcome == AgentUpgraded(
             agent_id=agent.id,
             agent_name=agent.name,
+            host=make_upgrade_outcome_host(agent.get_host()),
             plan=UpgradePlan.RESTART_INTERRUPTING,
             prior_state=AgentLifecycleState.RUNNING,
             changed_paths=(_UPGRADED_SCRIPT_PATH,),
@@ -1349,7 +1471,14 @@ def test_upgrade_skips_a_busy_agent_unless_forced(
         assert agent.get_lifecycle_state() == AgentLifecycleState.RUNNING
         assert upgrade_agent(
             agent, local_host, is_forced=False, is_dry_run=False, is_caller=False, mngr_ctx=agent.mngr_ctx
-        ) == (AgentCurrent(agent_id=agent.id, agent_name=agent.name, is_dry_run=False))
+        ) == (
+            AgentCurrent(
+                agent_id=agent.id,
+                agent_name=agent.name,
+                host=make_upgrade_outcome_host(agent.get_host()),
+                is_dry_run=False,
+            )
+        )
 
 
 @pytest.mark.rsync
@@ -1414,6 +1543,7 @@ def test_upgrade_applies_the_plan_for_the_state_an_idle_agent_is_in_just_before_
     assert outcome == AgentUpgraded(
         agent_id=agent.id,
         agent_name=agent.name,
+        host=make_upgrade_outcome_host(agent.get_host()),
         plan=expected_plan,
         prior_state=state_just_before_stop,
         changed_paths=_ALL_STAGED_PATHS,
@@ -1462,6 +1592,7 @@ def test_upgrade_waits_for_a_send_in_flight_and_restarts_an_agent_still_idle_aft
     assert outcome == AgentUpgraded(
         agent_id=agent.id,
         agent_name=agent.name,
+        host=make_upgrade_outcome_host(agent.get_host()),
         plan=UpgradePlan.RESTART_IDLE,
         prior_state=AgentLifecycleState.WAITING,
         changed_paths=_ALL_STAGED_PATHS,
@@ -1496,6 +1627,7 @@ def test_upgrade_that_waits_out_its_bound_for_a_send_in_flight_fails_at_the_lock
     assert outcome == AgentUpgradeFailed(
         agent_id=agent.id,
         agent_name=agent.name,
+        host=make_upgrade_outcome_host(agent.get_host()),
         step=UpgradeFailedStep.LOCK,
         error_message=str(MessageLockTimeoutError(str(agent.name), _SHORT_MESSAGE_LOCK_WAIT_SECONDS)),
     )
@@ -1504,6 +1636,43 @@ def test_upgrade_that_waits_out_its_bound_for_a_send_in_flight_fails_at_the_lock
     assert host.is_lock_held_at_stop == []
     assert host.is_lock_held_at_start == []
     assert files_after == files_before
+
+
+@pytest.mark.rsync
+@pytest.mark.parametrize(
+    "states_read_before_the_loss",
+    [
+        pytest.param((), id="first_state_read"),
+        pytest.param((AgentLifecycleState.WAITING,), id="state_read_again_before_the_stop"),
+    ],
+)
+def test_upgrade_whose_host_lock_is_lost_to_another_mngr_before_it_changed_the_agent_fails_at_the_lock_step_untouched(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    states_read_before_the_loss: tuple[AgentLifecycleState, ...],
+) -> None:
+    host = make_local_host_of_class(local_provider, LockRecordingHost)
+    agent = _with_lifecycle_states(
+        make_recorded_upgradable_agent(host, tmp_path, temp_mngr_ctx, {}, _NEW_SCRIPT, _LockLosingStateCommandAgent),
+        states_read_before_the_loss,
+    )
+    state_dir = get_agent_state_dir_path(host.host_dir, agent.id)
+
+    outcome = upgrade_agent(agent, host, is_forced=False, is_dry_run=False, is_caller=False, mngr_ctx=temp_mngr_ctx)
+
+    assert outcome == AgentUpgradeFailed(
+        agent_id=agent.id,
+        agent_name=agent.name,
+        host=make_upgrade_outcome_host(host),
+        step=UpgradeFailedStep.LOCK,
+        error_message=_LOCK_LOST_AT_STATE_READ_MESSAGE,
+    )
+    assert format_upgrade_outcome(outcome).endswith("; untouched")
+    assert host.is_lock_held_at_stop == []
+    assert host.is_lock_held_at_start == []
+    assert not (state_dir / _UPGRADED_SCRIPT_PATH).exists()
+    assert not (state_dir / UPGRADE_STAGING_DIR_NAME).exists()
 
 
 @pytest.mark.tmux
@@ -1531,6 +1700,7 @@ def test_upgrade_restarts_an_idle_agent_holding_its_message_lock_through_the_sto
         assert outcome == AgentUpgraded(
             agent_id=agent.id,
             agent_name=agent.name,
+            host=make_upgrade_outcome_host(agent.get_host()),
             plan=UpgradePlan.RESTART_IDLE,
             prior_state=AgentLifecycleState.WAITING,
             changed_paths=(_UPGRADED_SCRIPT_PATH,),
@@ -1600,6 +1770,7 @@ def test_upgrade_keeps_a_write_another_program_makes_to_an_input_after_upgrade_f
     assert outcome == AgentUpgraded(
         agent_id=agent.id,
         agent_name=agent.name,
+        host=make_upgrade_outcome_host(agent.get_host()),
         plan=expected_plan,
         prior_state=lifecycle_state,
         changed_paths=expected_changed_paths,
@@ -1608,3 +1779,274 @@ def test_upgrade_keeps_a_write_another_program_makes_to_an_input_after_upgrade_f
     assert host.is_written
     assert json.loads(settings_path.read_text()) == {**written_settings, "mngr_key": "new"}
     assert host.is_lock_held_at_start == ([True] if expected_plan == UpgradePlan.RESTART_IDLE else [])
+
+
+@pytest.mark.tmux
+@pytest.mark.rsync
+def test_upgrade_whose_host_lock_is_lost_by_the_end_fails_a_real_upgrade_at_unlock_and_keeps_any_other_outcome(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    host = make_local_host_of_class(local_provider, _LockLosingHost)
+    agent = _make_stopped_agent_with_old_files(host, tmp_path, temp_mngr_ctx, build_error_message=None)
+
+    dry_run_outcome = upgrade_agent(
+        agent, host, is_forced=False, is_dry_run=True, is_caller=False, mngr_ctx=temp_mngr_ctx
+    )
+    outcome = upgrade_agent(agent, host, is_forced=False, is_dry_run=False, is_caller=False, mngr_ctx=temp_mngr_ctx)
+    current_outcome = upgrade_agent(
+        agent, host, is_forced=False, is_dry_run=False, is_caller=False, mngr_ctx=temp_mngr_ctx
+    )
+
+    assert isinstance(dry_run_outcome, AgentUpgraded)
+    assert outcome == AgentUpgradeFailed(
+        agent_id=agent.id,
+        agent_name=agent.name,
+        host=make_upgrade_outcome_host(host),
+        step=UpgradeFailedStep.UNLOCK,
+        error_message="Host lock was lost during the critical section: acquisition counter is 8, expected 7",
+    )
+    assert format_upgrade_outcome(outcome).endswith(
+        "; its upgrade ran, but another mngr may have changed it while the host lock was not held"
+    )
+    assert (get_agent_state_dir_path(host.host_dir, agent.id) / _UPGRADED_SCRIPT_PATH).read_text() == _NEW_SCRIPT
+    assert current_outcome == make_current_outcome(agent)
+
+
+def test_upgrade_reads_each_input_exactly_in_one_host_command(local_host: Host, tmp_path: Path) -> None:
+    state_dir = tmp_path / "state-59124"
+    (state_dir / "nested").mkdir(parents=True)
+    contents = {
+        AGENT_DATA_RELATIVE_PATH: "{}",
+        Path("empty-59124"): "",
+        Path("no-final-newline-59124"): "last line without a newline",
+        Path("nested") / "unicode-59124.json": '{"name": "caf\u00e9 \u2713"}\n\n',
+        Path("long-59124.sh"): "echo " + "x" * 300 + "\n",
+    }
+    for relative_path, content in contents.items():
+        (state_dir / relative_path).write_text(content)
+    (state_dir / "dangling-link-59124").symlink_to(state_dir / "nothing-there-59124")
+    input_paths = (*contents, Path("missing-59124"), Path("dangling-link-59124"))
+
+    result = local_host.execute_idempotent_command(build_read_upgrade_inputs_command(state_dir, input_paths))
+
+    assert result.success, result.stderr
+    assert parse_upgrade_inputs_output(result.stdout, input_paths) == {
+        **contents,
+        Path("missing-59124"): None,
+        Path("dangling-link-59124"): None,
+    }
+    (state_dir / AGENT_DATA_RELATIVE_PATH).unlink()
+    for missing_record_state_dir in (state_dir, tmp_path / "gone-59124"):
+        record_missing_result = local_host.execute_idempotent_command(
+            build_read_upgrade_inputs_command(missing_record_state_dir, input_paths)
+        )
+        assert parse_upgrade_inputs_output(record_missing_result.stdout, input_paths) is None
+
+
+def _write_staged_files(staging_dir: Path) -> None:
+    for relative_path, upgraded_file in build_shared_shell_lib_files().items():
+        (staging_dir / relative_path).parent.mkdir(parents=True, exist_ok=True)
+        (staging_dir / relative_path).write_text(upgraded_file.content)
+    (staging_dir / "new dir").mkdir()
+    (staging_dir / "new dir" / "script.sh").write_text(_NEW_SCRIPT)
+
+
+def test_upgrade_swap_command_finishes_the_same_when_run_again_and_changes_nothing_once_the_record_is_gone(
+    local_host: Host, tmp_path: Path
+) -> None:
+    state_dir = tmp_path / "state-59124"
+    staging_dir = state_dir / UPGRADE_STAGING_DIR_NAME
+    host_commands_dir = tmp_path / "host-commands-59124"
+    _write_staged_files(staging_dir)
+    (state_dir / AGENT_DATA_RELATIVE_PATH).write_text("{}")
+    (state_dir / READY_MARKER_NAME).touch()
+    changed_paths = (*_SHARED_SHELL_LIB_PATHS, Path("new dir") / "script.sh")
+    swap_command = build_swap_command(
+        staging_dir, state_dir, changed_paths, (Path(READY_MARKER_NAME),), host_commands_dir
+    )
+    assert swap_command is not None
+
+    first_result = local_host.execute_idempotent_command(swap_command)
+    replayed_result = local_host.execute_idempotent_command(swap_command)
+
+    assert (first_result.success, first_result.stdout) == (True, ""), first_result.stderr
+    assert (replayed_result.success, replayed_result.stdout) == (True, ""), replayed_result.stderr
+    assert (state_dir / "new dir" / "script.sh").read_text() == _NEW_SCRIPT
+    assert not (state_dir / READY_MARKER_NAME).exists()
+    for name in SHARED_SHELL_LIB_NAMES:
+        assert (host_commands_dir / name).read_text() == (state_dir / "commands" / name).read_text()
+        assert stat.S_IMODE((host_commands_dir / name).stat().st_mode) == 0o755
+    assert sorted(path.name for path in host_commands_dir.iterdir()) == sorted(SHARED_SHELL_LIB_NAMES)
+
+    destroyed_state_dir = tmp_path / "destroyed-59124"
+    _write_staged_files(destroyed_state_dir / UPGRADE_STAGING_DIR_NAME)
+    destroyed_swap_command = build_swap_command(
+        destroyed_state_dir / UPGRADE_STAGING_DIR_NAME, destroyed_state_dir, changed_paths, (), None
+    )
+    assert destroyed_swap_command is not None
+    destroyed_result = local_host.execute_idempotent_command(destroyed_swap_command)
+    assert (destroyed_result.success, destroyed_result.stdout.strip()) == (True, "agent-record-missing")
+    assert sorted(path.name for path in destroyed_state_dir.iterdir()) == [UPGRADE_STAGING_DIR_NAME]
+
+
+def test_upgrade_compare_command_removes_staged_files_that_match_and_prints_nothing_when_run_again(
+    local_host: Host, tmp_path: Path
+) -> None:
+    state_dir = tmp_path / "state-59124"
+    staging_dir = state_dir / UPGRADE_STAGING_DIR_NAME
+    for commands_dir in (staging_dir / "commands", state_dir / "commands"):
+        commands_dir.mkdir(parents=True)
+        (commands_dir / "same.sh").write_text(_NEW_SCRIPT)
+    (state_dir / AGENT_DATA_RELATIVE_PATH).write_text("{}")
+    compare_command = build_compare_staged_files_command(staging_dir, state_dir)
+
+    first_result = local_host.execute_idempotent_command(compare_command)
+    replayed_result = local_host.execute_idempotent_command(compare_command)
+
+    assert (first_result.success, first_result.stdout) == (True, "")
+    assert (replayed_result.success, replayed_result.stdout) == (True, "")
+    assert not staging_dir.exists()
+
+
+def test_upgrade_compare_command_removes_the_staging_and_the_state_dir_it_leaves_empty_once_the_record_is_gone(
+    local_host: Host, tmp_path: Path
+) -> None:
+    state_dir = tmp_path / "state-59124"
+    staging_dir = state_dir / UPGRADE_STAGING_DIR_NAME
+    (staging_dir / "commands").mkdir(parents=True)
+    (staging_dir / "commands" / "new.sh").write_text(_NEW_SCRIPT)
+
+    result = local_host.execute_idempotent_command(build_compare_staged_files_command(staging_dir, state_dir))
+
+    assert (result.success, result.stdout.strip()) == (True, "agent-record-missing")
+    assert not state_dir.exists()
+
+
+def _make_stopped_host_matches(harness: PinnedLookupHarness, names: Sequence[str]) -> list[AgentMatch]:
+    return [
+        AgentMatch(
+            agent_id=AgentId.generate(),
+            agent_name=AgentName(name),
+            host_id=harness.first_host_id,
+            host_name=HostName("pinned-first-host"),
+            provider_name=harness.first_provider.name,
+        )
+        for name in names
+    ]
+
+
+def test_upgrade_agents_skips_the_agents_of_a_stopped_or_unreachable_host_as_offline_and_upgrades_the_rest(
+    pinned_lookup_harness: PinnedLookupHarness, local_host: Host, temp_work_dir: Path
+) -> None:
+    mngr_ctx = pinned_lookup_harness.mngr_ctx
+    local_agent = create_test_agent_state(local_host, temp_work_dir, "local-59124", "command")
+    stopped_matches = _make_stopped_host_matches(pinned_lookup_harness, ("stopped-a-59124", "stopped-b-59124"))
+    local_match = AgentMatch(
+        agent_id=local_agent.id,
+        agent_name=local_agent.name,
+        host_id=local_host.id,
+        host_name=local_host.get_name(),
+        provider_name=LOCAL_PROVIDER_NAME,
+    )
+    unreachable_match = AgentMatch(
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("unreachable-59124"),
+        host_id=HostId.generate(),
+        host_name=HostName("nowhere-59124"),
+        provider_name=pinned_lookup_harness.second_provider.name,
+    )
+    matches = [stopped_matches[0], local_match, unreachable_match, stopped_matches[1]]
+
+    outcomes = list(
+        upgrade_agents(
+            matches,
+            is_forced=False,
+            is_dry_run=False,
+            error_behavior=ErrorBehavior.CONTINUE,
+            caller=None,
+            mngr_ctx=mngr_ctx,
+        )
+    )
+
+    assert [format_upgrade_outcome(outcome) for outcome in outcomes] == [
+        "skipped stopped-a-59124@pinned-first-host.pinned-first: its host is stopped "
+        "(`mngr start stopped-a-59124@pinned-first-host.pinned-first` starts it)",
+        "current local-59124",
+        "skipped unreachable-59124@nowhere-59124.pinned-second: its host could not be reached: "
+        f"{HostNotFoundError(pinned_lookup_harness.second_provider.name, unreachable_match.host_id)}",
+        "skipped stopped-b-59124@pinned-first-host.pinned-first: its host is stopped "
+        "(`mngr start stopped-b-59124@pinned-first-host.pinned-first` starts it)",
+    ]
+    assert all(
+        outcome.kind == UpgradeSkipKind.NOT_IDLE for outcome in outcomes if isinstance(outcome, AgentUpgradeSkipped)
+    )
+    assert pinned_lookup_harness.first_provider.looked_up_hosts == [pinned_lookup_harness.first_host_id]
+
+
+def test_upgrade_agents_skips_an_agent_whose_host_is_destroyed_as_offline_without_a_start_command(
+    make_pinned_lookup_harness: PinnedLookupHarnessFactory,
+) -> None:
+    harness = make_pinned_lookup_harness.build(first_host_stop_reason=HostState.DESTROYED)
+
+    outcomes = list(
+        upgrade_agents(
+            _make_stopped_host_matches(harness, ("destroyed-host-59124",)),
+            is_forced=False,
+            is_dry_run=False,
+            error_behavior=ErrorBehavior.CONTINUE,
+            caller=None,
+            mngr_ctx=harness.mngr_ctx,
+        )
+    )
+
+    assert [format_upgrade_outcome(outcome) for outcome in outcomes] == [
+        "skipped destroyed-host-59124@pinned-first-host.pinned-first: its host is destroyed"
+    ]
+
+
+def test_upgrade_agents_skips_the_later_agents_of_a_host_whose_connection_was_lost_without_reaching_it_again(
+    pinned_lookup_harness: PinnedLookupHarness,
+    local_provider: LocalProviderInstance,
+    temp_work_dir: Path,
+    upgradable_agent_types: None,
+) -> None:
+    host_of_local_provider = make_local_host_of_class(local_provider, _ConnectionLosingHost)
+    host = host_of_local_provider.model_copy_update(
+        to_update(host_of_local_provider.field_ref().provider_instance, pinned_lookup_harness.first_provider)
+    )
+    assert isinstance(host, _ConnectionLosingHost)
+    pinned_lookup_harness.first_provider.mock_hosts.append(host)
+    agent_names = ("lost-first-59124", "lost-second-59124")
+    matches = [
+        AgentMatch(
+            agent_id=agent.id,
+            agent_name=agent.name,
+            host_id=host.id,
+            host_name=host.get_name(),
+            provider_name=pinned_lookup_harness.first_provider.name,
+        )
+        for agent in (
+            create_test_agent_state(host, temp_work_dir, name, UPGRADABLE_COMMAND_AGENT_TYPE) for name in agent_names
+        )
+    ]
+
+    outcomes = list(
+        upgrade_agents(
+            matches,
+            is_forced=False,
+            is_dry_run=False,
+            error_behavior=ErrorBehavior.CONTINUE,
+            caller=None,
+            mngr_ctx=pinned_lookup_harness.mngr_ctx,
+        )
+    )
+
+    assert [format_upgrade_outcome(outcome) for outcome in outcomes] == [
+        f"skipped {name}@{host.get_name()}.{pinned_lookup_harness.first_provider.name}: "
+        f"its host could not be reached: {_CONNECTION_LOST_MESSAGE}"
+        for name in agent_names
+    ]
+    assert [outcome.kind for outcome in outcomes if isinstance(outcome, AgentUpgradeSkipped)] == [
+        UpgradeSkipKind.NOT_IDLE
+    ] * len(agent_names)
+    assert host.lock_timeouts == [START_HOST_LOCK_TIMEOUT_SECONDS]

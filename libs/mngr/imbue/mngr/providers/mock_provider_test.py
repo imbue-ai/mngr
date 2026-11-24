@@ -227,6 +227,11 @@ class DiscoveryRecordingProvider(MockProviderInstance):
     agent_read_host_ids: list[HostId] = Field(default_factory=list)
     provider_wide_discovery_calls: list[str] = Field(default_factory=list)
     pinned_read_host_ids: list[HostId] = Field(default_factory=list)
+    looked_up_hosts: list[HostId | HostName] = Field(default_factory=list)
+
+    def get_host(self, host: HostId | HostName) -> HostInterface:
+        self.looked_up_hosts.append(host)
+        return super().get_host(host)
 
     def add_agent(self, host_id: HostId, agent_id: AgentId, agent_name: AgentName) -> None:
         self.agent_data_by_host_id.setdefault(host_id, []).append({"id": str(agent_id), "name": str(agent_name)})
