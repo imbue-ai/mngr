@@ -27,11 +27,12 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: The connector client's HTTP requests now use `httpx2` (dependency `httpx2>=2.13.1` in place of `httpx`); TLS is verified against the OS trust store unless `SSL_CERT_FILE` names a bundle.
 - Changed: Fast-path workspace creation makes fewer round trips (one SSH connection for slice adoption, no redundant container sshd wait, host env and `data.json` cached under the host lock) and logs where the time goes.
 - Changed: `ShareGrantsPushResult` gains `share`, `outcomes` and `identities`, printed by `shares push-grants`.
-- Changed: `auth login` JSON output includes `is_email_verified`.
 - Changed: The batched listing collects work leases, so agents can report `RUNNING_BACKGROUND`, and publishes them as the agent's `background_tasks`.
 - Changed: `connector/session_store.py`'s `_decode_jwt_exp` is now public as `decode_jwt_exp` and returns None instead of raising for an unreadable payload or `exp`.
 - Changed: The page after `auth login` for an unverified account links to the account page to resend the verification email, and `auth resend-verification` reports `already_verified` when nothing was sent.
 - Changed: Fast-path creation makes fewer remote calls: published endpoints come from the lease response, and the host env file and pre-baked agent's `data.json` are kept in memory during the create instead of being read back.
+- Changed: `mngr imbue_cloud auth` saves a session only for a verified email: `auth login` and `auth signin` fail with `ImbueCloudEmailNotVerifiedError` (`email_not_verified`) for an unverified account, and `auth signup` reports `is_signed_in` (false, with no session saved, for a new unverified account).
+- Changed: `auth login` JSON output includes `active_workspace_count`, the account's active workspace count as reported by the hosted page (null when not reported).
 
 ### Removed
 

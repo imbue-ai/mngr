@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-23
+
+A claude agent keeps mngr's own hooks when its `settings_overrides` replaces a hook event. An override that assigns over a hook event (`__mngr_merge = {"hooks" = "extend", "hooks.Stop" = "assign"}`, the fix the narrowing error suggests) or over all of `hooks` used to drop mngr's groups there, so an agent with its own Stop hook lost the Stop hook that marks it idle at the end of each turn. mngr's groups now follow the user's in that event, in both config-dir modes. A bare key that would drop only mngr's hooks is no longer refused as a narrowing; the guard still refuses one that drops hooks or other settings from the home `settings.json`. `extend` overrides and agents without overrides get the same settings file as before. Create now refuses a `settings_overrides` hook value that is not shaped as Claude reads it (a `hooks` that is not a map, or an event such as `hooks.Stop` that is not a list of hook groups) with an error naming the key, instead of writing it into the settings file.
+
+A message sent to a claude agent while its SessionStart hooks still run now leaves the agent reading RUNNING from the moment `mngr message` returns. Claude takes such a message off its input box at once but starts the turn, and fires the UserPromptSubmit hook that sets the agent's `active` marker, only when the hooks finish, so the agent used to read idle in between with the message held only in Claude's memory, and anything that restarts an idle agent then (such as `mngr upgrade`) lost the message. When Claude's screen is what confirms the send, mngr now sets that marker itself, as that hook does. If Claude takes a message but never starts its turn (a UserPromptSubmit hook of your own blocks it, or Esc before the turn starts), the agent reads RUNNING, and its host is not idled, until its next turn ends or Claude restarts.
+
 ## 2026-11-22
 
 `mngr upgrade` covers interactive claude agents, whether they share the user's Claude config dir or have their own. It rewrites the agent's `commands/` scripts and mngr's own hooks in the settings file it loads, keeping every other key, every hook mngr did not write and the agent's own options: the auto-allow and credential-sync hooks and the optional scripts are rewritten only where it has them.

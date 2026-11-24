@@ -6,6 +6,24 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `MINDS_DEFAULT_WORKSPACE_NAME_BASE` sets the base of the name given to a workspace created without one.
+
+### Changed
+
+- Changed: Every workspace create shows one creation page ("Welcome, <name>!" for an account's first workspace, "Setting up <workspace>" otherwise), its progress, and Continue when ready; the chat-style creation page, its example recording and the "Show onboarding examples?" switch are removed, and every new workspace opens on its AI-provider page.
+- Changed: An Imbue account counts as signed in only once its email is verified; the app no longer waits on verification links anywhere (first run, create form, template stepper, plan switches, sharing), and signing in with an unverified address says so and offers Try again.
+- Changed: The first run decides at once whether to create an account's first workspace, from the workspace count the sign-in reports, instead of waiting up to 15 seconds for the first record sync.
+- Changed: A bug report opened from an error leads with the error's details (shown open), can be sent without a description, and is titled by the details' first line.
+
+### Fixed
+
+- Fixed: Report a bug on an error no longer swaps the workspace on screen for Home; the report collects the logs and chats of the workspace the error is about.
+- Fixed: A failed create's Retry and "Run on this computer" work from the welcome page, and reloading the creation page keeps it.
+- Fixed: The first-run pages keep their light colors whatever theme the app uses.
+- Fixed: New Modal workspaces set `MNGR_HOST_DIR=/mngr`, so terminals, services and `mngr exec` share one host dir and chats land on the persistent volume; existing workspaces keep their host env.
+
 ## [minds-v0.10.6] - 2026-11-22
 
 A patch release over 0.10.5 that carries everything merged to `main` since 0.10.4, pinning workspace template `minds-v0.10.6`. It carries the new first run (a sign-in page, a first Imbue Cloud workspace that starts on sign-in, and a welcome with start suggestions), chat suggestions with their workspace settings, the redesigned home page and top bar, one Settings in place of the accounts page and the options panel, Shared with me, experimental connectors, per-workspace microphone permission, and resource warnings for the computer Studio runs on.

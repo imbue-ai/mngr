@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-23
+
+`MODAL_DEFAULT_HOST_DIR` (`/mngr`) names the host dir a Modal sandbox uses when its provider block sets no `host_dir`, so callers can name it without repeating the path.
+
 ## 2026-11-19
 
 Agent listings publish `turn_end`, how and when the agent's last turn ended, read in the same listing command as the state.

@@ -19,6 +19,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `SendKeysAgent._is_message_delivered_as_paste` lets an agent type paste (bracketed paste) a message instead of typing it.
 - Added: `mngr list`, `mngr observe` and `AgentDetails` publish `turn_end` (`kind` `COMPLETED`/`FAILED`/`INTERRUPTED`, `native_type`, `ended_at`), recorded by each harness plugin (shell scripts use `mngr_turn_end_write`); null while a turn is open or when the harness records none.
 - Added: `mngr upgrade` rewrites mngr-generated files for existing local agents to this mngr's versions without recreating them (`--dry-run`, `--force`, `--on-error abort`); agent types opt in via `UpgradableAgentMixin`, and exit code 9 (`EXIT_CODE_AGENTS_NOT_UPGRADED`) means an agent was skipped.
+- Added: `InteractiveTuiAgent._on_message_taken_before_turn` hook (no-op by default), called when a strict send no probe confirmed is settled from the screen as taken.
 
 ### Changed
 

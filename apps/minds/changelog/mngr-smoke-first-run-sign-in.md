@@ -1,1 +1,0 @@
-The smoke journey signs in on a fresh install again: it unticks "Help improve Studio" on the first-run sign-in page, takes "Use without an account", and opens the sign-in over that page with the shell's `web-login=1` param. It had waited for the start chat's error-reporting answer, which the sign-in page replaced.

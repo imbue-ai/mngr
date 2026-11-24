@@ -19,6 +19,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `is_shell_command_message` moved from `imbue.mngr_claude.dialogs` to `imbue.mngr.agents.tui_utils`.
 - Changed: The TUI dialog registry is verified against Claude Code 2.1.323; all patterns are unchanged.
 - Changed: The Claude common transcript files the progress updates Claude 5 models write between tool calls as the step's `message` instead of `reasoning_content` ("(thinking)").
+- Changed: `mngr create` refuses a `settings_overrides` hook value not shaped as Claude reads it (non-map `hooks`, or an event that is not a list of hook groups), naming the key.
 
 ### Fixed
 
@@ -28,6 +29,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: The Stop hook finds code-guardian's `.reviewer/outputs/orchestrator_success` at the project root, so a turn ending in a subfolder still uploads autofix issues.
 - Fixed: Sending a lone `?` no longer opens Claude Code's shortcuts panel and times out after 90s; it is pasted.
 - Fixed: Messages with no letters or digits (e.g. `?`, an emoji) are confirmed once Claude records them.
+- Fixed: A `settings_overrides` that assigns over a hook event or all of `hooks` no longer drops mngr's own hooks there (such as the Stop hook that marks the agent idle); mngr's groups follow the user's.
+- Fixed: A message sent while Claude's SessionStart hooks run leaves the agent RUNNING from the moment `mngr message` returns, so a restart of an apparently idle agent (e.g. `mngr upgrade`) no longer loses the message.
 
 ## [v0.3.1] - 2026-10-28
 

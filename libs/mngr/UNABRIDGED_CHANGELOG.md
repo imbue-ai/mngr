@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-23
+
+`InteractiveTuiAgent` calls a new `_on_message_taken_before_turn` hook, a no-op by default, when a strict send that no evidence probe confirmed within the confirmation window is settled from the screen as taken, so an agent type can record that its TUI holds the message.
+
 ## 2026-11-22
 
 The Modal tutorial release test `test_create_modal_idle_timeout_60` is marked flaky: Modal can keep answering not-found for the snapshot endpoint a create just deployed for longer than the lookup retries.

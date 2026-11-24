@@ -4,6 +4,42 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-23
+
+The workspace programs README (`imbue/minds/workspace_programs/README.md`) matches the package. Its entry for `program_support.py` describes the helpers the module holds; the paragraph about an `AGENT_LIFECYCLE_STATES` mirror and the `workspace_program_agent_states_test.py` that pinned it is gone, since neither exists. Its list of backup programs includes `backup_verification_flag.py`.
+
+- The workspace programs README (`imbue/minds/workspace_programs/README.md`) matches the code. It says the update program takes its mode and a context rather than `main(argv)`, and that its `tick` mode answers nothing; that a backup program's failure reason is validated strictly while the update program's values are plain strings the app reads leniently; what `update_protocol.py` holds and which of it the app reads; that ruff and ty check against Python 3.11; which two ratchets skip the package; and every test file that exercises the programs. The gate probe's docstring points to `backup_support.list_running_chats` for which chats count as running, instead of repeating a list of states that had missed `RUNNING_UNKNOWN_AGENT_TYPE`.
+
+- The path of the template's background-task CLI (`system/scripts/background_tasks.py`) has one definition, `program_support.BACKGROUND_TASKS_CLI_PATH`, which the backup gate, the update dispatcher and the app's update-run probe all read; each had kept its own copy.
+
+- The backup check no longer receives an `--agent-id` flag; the check program never read it.
+
+- Report a bug on an error no longer swaps the workspace on screen for Home behind the report form. The report collects that workspace's logs and chats, or those of the workspace the error is about when that is a different one, and offers agent help only when the two are the same.
+
+- A report opened from an error can be sent without a description: the form leads with the error's attached details, shown open, and asks only for anything else to add, and the report is titled by the first line of those details.
+
+A new Modal workspace's host env names `MNGR_HOST_DIR=/mngr`, the Modal provider's own host dir, instead of `/home/user/.mngr`, which the Modal connection block never sets. Shells that read `.bashrc` (terminals, the bootstrap window and the services it starts) and a plain `mngr exec` into the workspace now agree on one host dir, so chats are created on the persistent host volume and are visible to every caller. Workspaces created earlier keep the host env they were created with.
+
+- Every workspace create shows one creation page: a heading ("Welcome, \<name\>!" for an account's first workspace, "Setting up \<workspace name\>" for a later one), the build's progress, and Continue once the workspace is ready. The chat-style creation page, its "honest software" exchange, the example recording, and the "Show onboarding examples?" switch are gone, and every new workspace opens on its AI-provider page and first conversation.
+
+- A failed create's Retry and "Run on this computer" open the create form on the welcome page (they did nothing there), and reloading the creation page keeps the same page.
+
+- An Imbue account is signed in only once its email is verified. The app no longer waits on a verification link anywhere (the first run, the create form, the template stepper, plan switches, sharing); a sign-in for an unverified address says so and offers Try again.
+
+- The first run decides at once whether a signed-in account gets a first workspace, from the workspace count the sign-in reports, in place of waiting up to 15 seconds on the first record sync.
+
+- The first-run pages keep their light colors whatever theme the app wears.
+
+- `MINDS_DEFAULT_WORKSPACE_NAME_BASE` sets the base of the name given to a workspace created with none. The smoke journey uses it, and now goes through the first run as a user does: Sign in, the workspace the app starts by itself, Continue, and the AI-provider page. The next-deploy checklist says that journey fits only builds cut after 0.10.6.
+
+The deploy docs gain the minds-v0.10.6 history entry: cut, tagged and built, rehearsed on staging with the full smoke suite, deployed and baked on production (10 rows per region), and promoted to no channel by the deploying user's decision. The next-deploy checklist carries production's and staging's new state, the decision still owed on 0.10.6, the smoke journey fitting only builds with the first-run sign-in page, the 0.10.6 wire-compat snapshot's date and the Modal flake.
+
+The smoke journey signs in on a fresh install again: it unticks "Help improve Studio" on the first-run sign-in page, takes "Use without an account", and opens the sign-in over that page with the shell's `web-login=1` param. It had waited for the start chat's error-reporting answer, which the sign-in page replaced.
+
+The desktop client README (`imbue/minds/desktop_client/README.md`) describes a create's progress bar as it works: the desktop's own two steps on either side of mngr's phases under the `mngr create` call, and a running step that reads four fifths of its share at its expected time and keeps creeping while it runs on. Nothing a user sees changes: comments in the suggestion-settings code no longer say how many switches there are, the create progress code's comment on a step that runs long speaks of its remaining time alone, and the Settings page's test for a workspace whose settings cannot be read covers the Suggestions page.
+
+Two inbox tests build their request card with the `refusal_notice` field a card now always carries, so the frontend type-checks again and `main`'s build and install jobs pass. A third test, of the bug-report form opened from the request popup, expects what the app does there: the form stacks on the popup, which is not one of the title bar's flyouts.
+
 ## 2026-11-22
 
 The first run's welcome page no longer asks "What type of studio do you want to make?". While the first workspace is built it shows "Welcome, \<first name\>!" over the progress bar and "Show details", then "Your workspace is ready!" and Continue. Nothing about the user is handed to the new workspace: a first-run create's seed carries only the flag that says it is one, and the first conversation is the workspace's own (`specs/chat-suggestions/spec.md`).
