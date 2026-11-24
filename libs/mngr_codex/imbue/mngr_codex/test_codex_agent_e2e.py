@@ -25,6 +25,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import tomllib
 from collections.abc import Callable
 from collections.abc import Generator
 from collections.abc import Mapping
@@ -36,6 +37,8 @@ from typing import Any
 from typing import Final
 
 import pytest
+import tomlkit
+from websockets.exceptions import WebSocketException
 
 from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
 from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
@@ -45,6 +48,7 @@ from imbue.mngr.agents.agent_release_testing import marker_path
 from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
 from imbue.mngr.agents.agent_release_testing import run_message_delivery_journey
 from imbue.mngr.agents.agent_release_testing import send_expecting_success
+from imbue.mngr.agents.agent_release_testing import step_message
 from imbue.mngr.agents.agent_release_testing import wait_for_records
 from imbue.mngr.hosts.background_tasks import TURN_END_FILE_NAME
 from imbue.mngr.utils.polling import poll_for_value
@@ -60,8 +64,15 @@ from imbue.mngr_codex.app_server_client import connect_app_server_transport
 from imbue.mngr_codex.codex_config import ACTIVE_MARKER_FILENAME
 from imbue.mngr_codex.codex_config import APP_SERVER_THREAD_FILENAME
 from imbue.mngr_codex.codex_config import PERMISSIONS_WAITING_FILENAME
+from imbue.mngr_codex.codex_config import RECORD_BACKGROUND_TASKS_SCRIPT_NAME
+from imbue.mngr_codex.codex_config import TURN_HOOK_SCRIPT_NAME
+from imbue.mngr_codex.codex_config import build_codex_hooks_config
 from imbue.mngr_codex.codex_config import get_codex_app_server_socket_path
+from imbue.mngr_codex.codex_config import get_codex_config_path
 from imbue.mngr_codex.codex_config import get_codex_home
+from imbue.mngr_codex.codex_config import get_codex_hooks_path
+from imbue.mngr_codex.codex_config import serialize_codex_hooks
+from imbue.mngr_codex.plugin_test import HOOKS_BEFORE_THE_TURN_HOOK
 
 # Resolved at import time, before the autouse ``setup_test_mngr_env`` fixture redirects
 # $HOME / mutates PATH: the real home (auth source) and the real codex binary.
@@ -894,3 +905,166 @@ def _assert_the_dialog_is_read_until_answered(
     assert reading(while_asked) == ("WAITING", "PERMISSIONS"), f"{reading(while_asked)}; {_DIALOG_MARKER_CONSUMER}"
     assert is_cleared_by_the_answer, f"`permissions_waiting` outlived the answer; {_DIALOG_MARKER_CONSUMER}"
     assert reading(after_turn) == ("WAITING", "END_OF_TURN"), f"{reading(after_turn)}; {_TURN_MARKER_CONSUMER}"
+
+
+_HOOK_PROBE_LOG_NAME: Final[str] = "hook_probe.log"
+
+
+def _run_mngr_expecting_success(
+    profile: _CodexReleaseProfile, ctx: AgentReleaseContext, *args: str
+) -> subprocess.CompletedProcess[str]:
+    result = profile.run_mngr(ctx, *args, timeout=600)
+    assert result.returncode == 0, f"mngr {' '.join(args)} failed:\n{result.stdout}\n{result.stderr}"
+    return result
+
+
+def _hook_trust_keys(state_dir: Path) -> set[str]:
+    """The hooks codex has recorded as trusted in the agent's config.toml."""
+    config = tomllib.loads(get_codex_config_path(get_codex_home(state_dir)).read_text())
+    return set(config.get("hooks", {}).get("state", {}))
+
+
+def _make_hooks_look_written_before_the_turn_hook(state_dir: Path) -> None:
+    """Give the stopped agent the hooks.json, trust and scripts of a codex agent an mngr before codex_turn_hook.sh created."""
+    codex_home = get_codex_home(state_dir)
+    get_codex_hooks_path(codex_home).write_text(serialize_codex_hooks(HOOKS_BEFORE_THE_TURN_HOOK))
+    config_path = get_codex_config_path(codex_home)
+    config = tomlkit.parse(config_path.read_text())
+    hook_states = config["hooks"]["state"]
+    for hook_key in [key for key in hook_states if not key.endswith(":user_prompt_submit:0:0")]:
+        del hook_states[hook_key]
+    config_path.write_text(tomlkit.dumps(config))
+    for script_name in (TURN_HOOK_SCRIPT_NAME, RECORD_BACKGROUND_TASKS_SCRIPT_NAME):
+        (state_dir / "commands" / script_name).unlink(missing_ok=True)
+
+
+def _probe_turn_hook(state_dir: Path) -> None:
+    """Make the agent's codex_turn_hook.sh log each event it runs for, to the hook probe log."""
+    hook_path = state_dir / "commands" / TURN_HOOK_SCRIPT_NAME
+    shebang, rest = hook_path.read_text().split("\n", 1)
+    probe = f'echo "$1" >> "$MNGR_AGENT_STATE_DIR/{_HOOK_PROBE_LOG_NAME}"'
+    hook_path.write_text(f"{shebang}\n{probe}\n{rest}")
+    (state_dir / _HOOK_PROBE_LOG_NAME).unlink(missing_ok=True)
+
+
+def _wait_for_turn_hook_events(state_dir: Path) -> list[str]:
+    """The events codex ran the turn hook for, once it has run it for a turn's start and end."""
+    probe_log = state_dir / _HOOK_PROBE_LOG_NAME
+    poll_until(
+        lambda: probe_log.exists() and {"UserPromptSubmit", "Stop"} <= set(probe_log.read_text().split()),
+        timeout=180,
+        poll_interval=1,
+    )
+    return probe_log.read_text().split() if probe_log.exists() else []
+
+
+def _capture_agent_pane(agent_name: str) -> str:
+    return subprocess.run(
+        ["tmux", "capture-pane", "-p", "-t", f"={os.environ['MNGR_PREFIX']}{agent_name}:"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout
+
+
+def _is_on_hook_review(agent_name: str) -> bool:
+    return "Hooks need review" in _capture_agent_pane(agent_name)
+
+
+def _is_any_thread_loaded(state_dir: Path) -> bool:
+    try:
+        client = CodexAppServerClient(
+            transport=connect_app_server_transport(get_codex_app_server_socket_path(get_codex_home(state_dir)))
+        )
+    except (OSError, WebSocketException):
+        return False
+    try:
+        client.initialize("mngr-codex-release-test", "0")
+        return bool(client.thread_loaded_list())
+    except (CodexAppServerError, OSError, WebSocketException):
+        return False
+    finally:
+        client.close()
+
+
+def _wait_for_tui_conversation_loaded(state_dir: Path, agent_name: str) -> None:
+    """Wait for the restarted daemon to load the TUI's conversation, failing with the agent's pane and hook trust log."""
+    if poll_until(lambda: _is_any_thread_loaded(state_dir), timeout=120):
+        return
+    hook_trust_log = state_dir / "hook_trust.log"
+    log_text = hook_trust_log.read_text() if hook_trust_log.exists() else "(none)"
+    pytest.fail(
+        f"the TUI never opened its conversation\npane:\n{_capture_agent_pane(agent_name)}\nhook trust log:\n{log_text}"
+    )
+
+
+@pytest.mark.release
+@pytest.mark.harness_internals(harness="codex")
+@pytest.mark.flaky
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(900)
+def test_codex_upgrade_moves_an_agent_onto_new_hooks_trusts_them_and_keeps_its_conversation(tmp_path: Path) -> None:
+    """An agent holding an older mngr's hooks runs this mngr's after `mngr upgrade`, restarted or started later, with no hook review up."""
+    profile = _CodexReleaseProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+    ctx = profile.setup(tmp_path)
+    agent_name = f"codex-upgrade-{get_short_random_string()}"
+    secret = f"SECRET-{get_short_random_string()}"
+    with _created_codex_agent(profile, ctx, agent_name, *profile.create_extra_args(ctx)):
+        state_dir = agent_state_dir(ctx.host_dir)
+        send_expecting_success(
+            profile, ctx, agent_name, f"Remember this exact secret for later: {secret}. Reply with just OK."
+        )
+        _wait_for_turn_end(profile, ctx, agent_name, "COMPLETED")
+        created_hook_trust_keys = _hook_trust_keys(state_dir)
+
+        # Give it the hooks.json, hook trust and scripts of an agent an older mngr created and ran.
+        _run_mngr_expecting_success(profile, ctx, "stop", agent_name)
+        _make_hooks_look_written_before_the_turn_hook(state_dir)
+        _run_mngr_expecting_success(profile, ctx, "start", agent_name)
+        assert poll_until(lambda: _published_agent(profile, ctx, agent_name)["state"] == "WAITING", timeout=120)
+
+        restart_upgrade = _run_mngr_expecting_success(profile, ctx, "upgrade", agent_name)
+
+        hooks_after_restart = json.loads(get_codex_hooks_path(get_codex_home(state_dir)).read_text())
+        trust_keys_after_restart = _hook_trust_keys(state_dir)
+        is_on_review_after_restart = _is_on_hook_review(agent_name)
+        second_upgrade = _run_mngr_expecting_success(profile, ctx, "upgrade", agent_name)
+        _probe_turn_hook(state_dir)
+        send_expecting_success(profile, ctx, agent_name, profile.recall_prompt())
+        turn_hook_events_after_restart = _wait_for_turn_hook_events(state_dir)
+        recalled = wait_for_records(
+            ctx.host_dir,
+            profile.common_transcript_subdir,
+            lambda records: any(is_step_from(r, "agent") and secret in step_message(r) for r in records),
+            timeout=180,
+            description="the agent did not recall the secret after the upgrade",
+        )
+
+        # The same older agent, upgraded while stopped and started afterwards with a plain `mngr start`.
+        _run_mngr_expecting_success(profile, ctx, "stop", agent_name)
+        _make_hooks_look_written_before_the_turn_hook(state_dir)
+        stopped_upgrade = _run_mngr_expecting_success(profile, ctx, "upgrade", agent_name)
+        _probe_turn_hook(state_dir)
+        _run_mngr_expecting_success(profile, ctx, "start", agent_name)
+        _wait_for_tui_conversation_loaded(state_dir, agent_name)
+        trust_keys_after_start = _hook_trust_keys(state_dir)
+        is_on_review_after_start = _is_on_hook_review(agent_name)
+        send_expecting_success(profile, ctx, agent_name, "Reply with just OK.")
+        turn_hook_events_after_start = _wait_for_turn_hook_events(state_dir)
+
+    assert len(created_hook_trust_keys) == 7, created_hook_trust_keys
+    assert f"upgraded {agent_name} (restarted)" in restart_upgrade.stdout, restart_upgrade.stdout
+    assert hooks_after_restart == build_codex_hooks_config()
+    assert trust_keys_after_restart == created_hook_trust_keys
+    assert not is_on_review_after_restart
+    assert {"UserPromptSubmit", "Stop"} <= set(turn_hook_events_after_restart), turn_hook_events_after_restart
+    assert any(is_step_from(r, "agent") and secret in step_message(r) for r in recalled)
+    assert f"current {agent_name}" in second_upgrade.stdout, second_upgrade.stdout
+    assert f"upgraded {agent_name} (stopped)" in stopped_upgrade.stdout, stopped_upgrade.stdout
+    assert trust_keys_after_start == created_hook_trust_keys
+    assert not is_on_review_after_start
+    assert {"UserPromptSubmit", "Stop"} <= set(turn_hook_events_after_start), turn_hook_events_after_start

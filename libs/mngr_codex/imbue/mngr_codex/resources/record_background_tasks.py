@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Rewrites a codex agent's ``background_tasks/task-*`` records from what its ``codex app-server`` lists.
+"""Calls a codex agent's ``codex app-server`` from the agent's host.
+
+By default it rewrites the agent's ``background_tasks/task-*`` records from what the app-server lists. With
+``--trust-hooks`` it trusts the hooks codex lists as new or changed in the current directory, as the "Trust all and
+continue" of codex's hook review does.
 
 Standard library only, for Python 3.9 and later: it runs under the ``python3`` of the agent's host.
 """
@@ -17,10 +21,12 @@ import re
 import socket
 import struct
 import time
+from collections.abc import Generator
 from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from collections.abc import Set
+from contextlib import contextmanager
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -35,6 +41,8 @@ SHELL_KIND: Final[str] = "SHELL"
 SUBAGENT_KIND: Final[str] = "SUBAGENT"
 BACKGROUND_TERMINAL_NATIVE_TYPE: Final[str] = "backgroundTerminals"
 DEFAULT_TIME_LIMIT_SECONDS: Final[float] = 5.0
+# How ``--trust-hooks`` starts its outcome once it has trusted every hook codex would review.
+HOOKS_TRUSTED_OUTCOME_PREFIX: Final[str] = "trusted:"
 
 _PLUGIN_DIR_PARTS: Final[tuple[str, ...]] = ("plugin", "codex")
 _CODEX_HOME_DIR_NAME: Final[str] = "home"
@@ -44,6 +52,8 @@ _SOCKET_DIR_PREFIX: Final[str] = "mngr-codex-"
 _SOCKET_FILE_NAME: Final[str] = "app-server.sock"
 _CLIENT_NAME: Final[str] = "mngr"
 _TURN_OPEN_STATUS: Final[str] = "active"
+# The ``trustStatus`` values of the hooks codex's review lists.
+_HOOK_REVIEW_STATUSES: Final[frozenset[str]] = frozenset({"untrusted", "modified"})
 _RECORD_NAME_DISALLOWED: Final[re.Pattern[str]] = re.compile(r"[^A-Za-z0-9_.-]")
 _MAX_PAGES: Final[int] = 100
 _MAX_HEADER_LINES: Final[int] = 100
@@ -307,8 +317,9 @@ def _read_thread(connection: _Connection, thread_id: str) -> CodexThread:
     )
 
 
-def read_codex_threads(socket_path: Path, time_limit_seconds: float) -> list[CodexThread]:
-    """Every thread the app-server has loaded, with its status and background terminals."""
+@contextmanager
+def _initialized_connection(socket_path: Path, time_limit_seconds: float) -> Generator[_Connection, None, None]:
+    """A connection to the app-server past its ``initialize`` handshake, closed on exit."""
     with _connect(socket_path, time_limit_seconds) as sock, sock.makefile("rb") as reader:
         try:
             connection = _Connection(
@@ -325,15 +336,54 @@ def read_codex_threads(socket_path: Path, time_limit_seconds: float) -> list[Cod
             )
             initialized = {"jsonrpc": "2.0", "method": "initialized", "params": {}}
             _send_frame(sock, _OPCODE_TEXT, json.dumps(initialized).encode("utf-8"))
-            thread_ids = _list_all(connection, "thread/loaded/list", {})
-            if not all(isinstance(thread_id, str) for thread_id in thread_ids):
-                raise AppServerReadError("thread/loaded/list: an answer this writer does not know")
-            threads = [_read_thread(connection, thread_id) for thread_id in thread_ids]
+            yield connection
         except OSError as error:
             raise AppServerReadError(f"the app-server connection failed: {error}") from error
         with suppress(OSError):
             _send_frame(sock, _OPCODE_CLOSE, b"")
-    return threads
+
+
+def read_codex_threads(socket_path: Path, time_limit_seconds: float) -> list[CodexThread]:
+    """Every thread the app-server has loaded, with its status and background terminals."""
+    with _initialized_connection(socket_path, time_limit_seconds) as connection:
+        thread_ids = _list_all(connection, "thread/loaded/list", {})
+        if not all(isinstance(thread_id, str) for thread_id in thread_ids):
+            raise AppServerReadError("thread/loaded/list: an answer this writer does not know")
+        return [_read_thread(connection, thread_id) for thread_id in thread_ids]
+
+
+def plan_hook_trust(hooks_list_result: Any) -> dict[str, dict[str, str]]:
+    """The ``hooks.state`` entries, by hook key, that trust each hook a ``hooks/list`` answer lists as new or changed."""
+    entries = hooks_list_result.get("data") if isinstance(hooks_list_result, dict) else None
+    if not isinstance(entries, list) or not all(
+        isinstance(entry, dict) and isinstance(entry.get("hooks"), list) for entry in entries
+    ):
+        raise AppServerReadError("hooks/list: an answer this script does not know")
+    hooks = [hook for entry in entries for hook in entry["hooks"]]
+    if not all(
+        isinstance(hook, dict)
+        and all(isinstance(hook.get(field), str) for field in ("key", "currentHash", "trustStatus"))
+        for hook in hooks
+    ):
+        raise AppServerReadError("hooks/list: a hook this script does not know")
+    return {
+        hook["key"]: {"trusted_hash": hook["currentHash"]}
+        for hook in hooks
+        if hook["trustStatus"] in _HOOK_REVIEW_STATUSES
+    }
+
+
+def trust_hooks(socket_path: Path, cwd: Path, time_limit_seconds: float = DEFAULT_TIME_LIMIT_SECONDS) -> str:
+    """Trust each hook the app-server on ``socket_path`` lists as new or changed in ``cwd``; return the outcome."""
+    try:
+        with _initialized_connection(socket_path, time_limit_seconds) as connection:
+            trust_by_key = plan_hook_trust(_call(connection, "hooks/list", {"cwds": [str(cwd)]}))
+            if trust_by_key:
+                edit = {"keyPath": "hooks.state", "value": trust_by_key, "mergeStrategy": "upsert"}
+                _call(connection, "config/batchWrite", {"edits": [edit], "reloadUserConfig": True})
+    except (AppServerGoneError, AppServerReadError) as error:
+        return f"unchanged: {error}"
+    return f"{HOOKS_TRUSTED_OUTCOME_PREFIX} " + (" ".join(sorted(trust_by_key)) or "none")
 
 
 def sync_records(
@@ -366,10 +416,15 @@ def sync_records(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--turn-ended", metavar="THREAD_ID", help="a thread whose turn is ending")
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument("--turn-ended", metavar="THREAD_ID", help="a thread whose turn is ending")
+    action.add_argument("--trust-hooks", action="store_true", help="trust the hooks codex would ask to review")
     arguments = parser.parse_args()
     state_dir = Path(os.environ["MNGR_AGENT_STATE_DIR"])
-    print(sync_records(state_dir, app_server_socket_path(state_dir), int(time.time()), arguments.turn_ended))
+    if arguments.trust_hooks:
+        print(trust_hooks(app_server_socket_path(state_dir), Path.cwd()))
+    else:
+        print(sync_records(state_dir, app_server_socket_path(state_dir), int(time.time()), arguments.turn_ended))
 
 
 if __name__ == "__main__":

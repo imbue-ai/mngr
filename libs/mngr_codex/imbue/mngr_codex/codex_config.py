@@ -55,6 +55,7 @@ from typing import Final
 import tomlkit
 
 from imbue.imbue_common.pure import pure
+from imbue.mngr.agents.upgrade import rebuild_hook_groups_keeping_other_entries
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.host import OnlineHostInterface
 
@@ -556,9 +557,10 @@ def _parse_semver_tuple(version: str) -> tuple[int, ...] | None:
 
 # hooks.json
 
-# Commands codex runs for a hook event, with the event JSON on stdin. ``$MNGR_AGENT_STATE_DIR``
-# expands in codex's shell when the hook runs; the scripts live in the agent's commands/ dir.
-_RECORD_SESSION_POINTERS_COMMAND: str = f'bash "$MNGR_AGENT_STATE_DIR/commands/{RECORD_SESSION_POINTERS_SCRIPT_NAME}"'
+# The start of every hook command mngr writes; ``$MNGR_AGENT_STATE_DIR`` expands in codex's shell when the hook runs.
+_MNGR_HOOK_COMMAND_PREFIX: Final[str] = 'bash "$MNGR_AGENT_STATE_DIR/commands/'
+
+_RECORD_SESSION_POINTERS_COMMAND: str = f'{_MNGR_HOOK_COMMAND_PREFIX}{RECORD_SESSION_POINTERS_SCRIPT_NAME}"'
 
 # The events ``codex_turn_hook.sh`` handles, each passed to it as its argument.
 _TURN_HOOK_EVENTS: Final[tuple[str, ...]] = (
@@ -587,14 +589,10 @@ def build_codex_hooks_config() -> dict[str, Any]:
 
     Guards a repo wants on its own agents go in its ``.codex/hooks.json``, which codex loads
     as its own config layer and runs alongside this one.
-
-    The file is mngr-owned and rewritten from scratch each provision. Codex requires command
-    hooks to be trusted before they run; the plugin passes ``--dangerously-bypass-hook-trust``
-    (consent-gated).
     """
     hooks: dict[str, list[dict[str, Any]]] = {}
     for event in _TURN_HOOK_EVENTS:
-        commands = [_command_hook(f'bash "$MNGR_AGENT_STATE_DIR/commands/{TURN_HOOK_SCRIPT_NAME}" {event}')]
+        commands = [_command_hook(f'{_MNGR_HOOK_COMMAND_PREFIX}{TURN_HOOK_SCRIPT_NAME}" {event}')]
         if event == "UserPromptSubmit":
             commands.insert(0, _command_hook(_RECORD_SESSION_POINTERS_COMMAND))
         hooks[event] = [{"hooks": commands}]
@@ -611,6 +609,25 @@ def is_turn_hook_installed(hooks_json_text: str) -> bool:
 def serialize_codex_hooks(hooks_config: Mapping[str, Any]) -> str:
     """Serialize a ``hooks.json`` body as two-space-indented JSON."""
     return json.dumps(dict(hooks_config), indent=2)
+
+
+@pure
+def is_mngr_hook_entry(hook_entry: Any) -> bool:
+    """Whether mngr wrote this entry of a ``hooks.json`` group: its command runs a script in the agent's commands/ dir."""
+    command = hook_entry.get("command") if isinstance(hook_entry, dict) else None
+    return isinstance(command, str) and command.startswith(_MNGR_HOOK_COMMAND_PREFIX)
+
+
+@pure
+def rebuild_codex_hooks_keeping_other_entries(
+    live_hooks: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> dict[str, Any]:
+    """This mngr's hooks for an agent whose ``hooks.json`` holds ``live_hooks``, keeping every entry mngr did not write."""
+    return rebuild_hook_groups_keeping_other_entries(
+        live_hooks,
+        build_codex_hooks_config()["hooks"],
+        lambda hook_entry, _hook_group: is_mngr_hook_entry(hook_entry),
+    )
 
 
 # Rollout cwd rebind (session adoption)

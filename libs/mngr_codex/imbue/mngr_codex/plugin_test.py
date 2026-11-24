@@ -33,6 +33,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.errors import AgentStartError
+from imbue.mngr.errors import InvalidUpgradeInputError
 from imbue.mngr.errors import MessageDeliveredButBlockedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
@@ -186,7 +187,7 @@ def test_verify_pinned_codex_version_passes_on_match(
     local_provider: LocalProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     put_fake_cli_reporting_version_on_path(tmp_path, monkeypatch, "codex", "codex-cli 0.139.0")
-    agent = _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(version="0.139.0"))
+    agent = make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(version="0.139.0"))
     agent._verify_pinned_codex_version(agent.host)
 
 
@@ -194,7 +195,7 @@ def test_verify_pinned_codex_version_raises_on_mismatch(
     local_provider: LocalProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     put_fake_cli_reporting_version_on_path(tmp_path, monkeypatch, "codex", "codex-cli 0.139.0")
-    agent = _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(version="0.140.0"))
+    agent = make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(version="0.140.0"))
     with pytest.raises(AgentInstallationError, match="codex version mismatch"):
         agent._verify_pinned_codex_version(agent.host)
 
@@ -203,7 +204,7 @@ def test_verify_pinned_codex_version_warns_on_mismatch_under_warn(
     local_provider: LocalProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     put_fake_cli_reporting_version_on_path(tmp_path, monkeypatch, "codex", "codex-cli 0.139.0")
-    agent = _make_codex_agent(
+    agent = make_codex_agent(
         CodexAgent,
         local_provider,
         tmp_path,
@@ -309,7 +310,7 @@ def _stub_host(
 # Construction helpers
 
 
-def _make_codex_agent(
+def make_codex_agent(
     agent_cls: type[CodexAgent],
     local_provider: LocalProviderInstance,
     tmp_path: Path,
@@ -319,6 +320,7 @@ def _make_codex_agent(
     is_auto_approve: bool = False,
     host_class: type[Host] = Host,
 ) -> CodexAgent:
+    """An ``agent_cls`` codex agent named test-codex on a real local host, with its work dir under ``tmp_path``."""
     # These setup tests run against a real local host where codex is not installed; the
     # install check is irrelevant to provision setup (files/trust/config) and is covered
     # separately, so skip it unless a caller opted in explicitly.
@@ -364,7 +366,7 @@ class _DecliningCodexAgent(CodexAgent):
 
 @pytest.fixture
 def codex_agent(local_provider: LocalProviderInstance, tmp_path: Path) -> CodexAgent:
-    return _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
+    return make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
 
 
 # send_message (app-server drive)
@@ -450,7 +452,16 @@ def _scripted_codex_agent(
         def _connect_app_server_transport(self) -> AppServerTransport:
             return transport
 
-    return _make_codex_agent(_ScriptedCodexAgent, local_provider, tmp_path, agent_config, is_auto_approve=True)
+    return make_codex_agent(_ScriptedCodexAgent, local_provider, tmp_path, agent_config, is_auto_approve=True)
+
+
+_HOOKS_TRUSTED_LOG: Final[str] = "trusted: none\n"
+
+
+def _write_hook_trust_log(agent: CodexAgent, content: str) -> None:
+    log_path = agent._get_agent_dir() / "hook_trust.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(content)
 
 
 def _establishing_codex_agent(
@@ -460,18 +471,18 @@ def _establishing_codex_agent(
     agent_config: CodexAgentConfig,
     rollouts_by_session_id: Mapping[str, Path],
 ) -> CodexAgent:
-    """A codex agent that can run ``wait_for_ready_signal``'s root-conversation establishment offline."""
+    """A codex agent that can run ``wait_for_ready_signal``'s root-conversation establishment offline, its hooks trusted."""
 
     class _EstablishingCodexAgent(CodexAgent):
         def _connect_app_server_transport(self) -> AppServerTransport:
             return transport
 
         # Skip the real socket handshake; the scripted transport stands in for the daemon.
-        def _wait_for_app_server_ready(self, timeout: float | None) -> None:
+        def _wait_for_app_server_ready(self, timeout: float) -> None:
             return None
 
-        # No live tmux pane here; the hook-trust clear is a tmux concern, tested separately.
-        def _clear_hook_trust_prompt(self) -> None:
+        # No live tmux pane here.
+        def _wait_for_tui_attached(self, timeout: float = 6_734.0) -> None:
             return None
 
         # Stand in for the rollout the daemon would materialize, so the transcript-path write runs
@@ -481,7 +492,9 @@ def _establishing_codex_agent(
         ) -> Path | None:
             return rollouts_by_session_id.get(session_id)
 
-    return _make_codex_agent(_EstablishingCodexAgent, local_provider, tmp_path, agent_config, is_auto_approve=True)
+    agent = make_codex_agent(_EstablishingCodexAgent, local_provider, tmp_path, agent_config, is_auto_approve=True)
+    _write_hook_trust_log(agent, _HOOKS_TRUSTED_LOG)
+    return agent
 
 
 def test_send_message_delivers_when_idle(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
@@ -719,22 +732,19 @@ def _status_transport(
 
 
 _TURN_IN_FLIGHT: Final[tuple[Mapping[str, Any], ...]] = ({"id": "turn-1", "status": "inProgress"},)
-_HOOKS_BEFORE_THE_TURN_HOOK: Final[str] = json.dumps(
-    {
-        "hooks": {
-            "UserPromptSubmit": [
-                {
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": 'bash "$MNGR_AGENT_STATE_DIR/commands/record_session_pointers.sh"',
-                        }
-                    ]
-                }
-            ]
-        }
+# The hooks.json of a codex agent created before codex_turn_hook.sh, which ran only the session-pointer recorder.
+HOOKS_BEFORE_THE_TURN_HOOK: Final[dict[str, Any]] = {
+    "hooks": {
+        "UserPromptSubmit": [
+            {
+                "hooks": [
+                    {"type": "command", "command": 'bash "$MNGR_AGENT_STATE_DIR/commands/record_session_pointers.sh"'}
+                ]
+            }
+        ]
     }
-)
+}
+_HOOKS_BEFORE_THE_TURN_HOOK_TEXT: Final[str] = json.dumps(HOOKS_BEFORE_THE_TURN_HOOK)
 
 
 def _codex_pane_agent(
@@ -758,7 +768,7 @@ def _codex_pane_agent(
         def _connect_app_server_transport(self) -> AppServerTransport:
             return transport
 
-    agent = _make_codex_agent(
+    agent = make_codex_agent(
         _DaemonCodexAgent,
         local_provider,
         tmp_path,
@@ -874,7 +884,7 @@ def test_an_agent_whose_hooks_predate_the_turn_hook_reads_its_turn_from_the_daem
     tmp_path: Path,
 ) -> None:
     agent = _codex_pane_agent(
-        local_provider, tmp_path, _status_transport(status, turns), hooks_json_text=_HOOKS_BEFORE_THE_TURN_HOOK
+        local_provider, tmp_path, _status_transport(status, turns), hooks_json_text=_HOOKS_BEFORE_THE_TURN_HOOK_TEXT
     )
 
     assert agent.probe_lifecycle().state == expected_state
@@ -888,7 +898,7 @@ def test_an_agent_whose_hooks_predate_the_turn_hook_keeps_its_turn_end_while_its
         local_provider,
         tmp_path,
         _status_transport({"type": "idle"}, ()),
-        hooks_json_text=_HOOKS_BEFORE_THE_TURN_HOOK,
+        hooks_json_text=_HOOKS_BEFORE_THE_TURN_HOOK_TEXT,
     )
     agent.host.write_text_file(agent._get_agent_dir() / TURN_END_FILE_NAME, "ended:1795089000 kind:COMPLETED\n")
 
@@ -903,7 +913,7 @@ def test_an_agent_whose_hooks_predate_the_turn_hook_reads_waiting_when_its_daemo
 ) -> None:
     transport = _ScriptedTransport()
     transport.respond_error("initialize", -32600, "handshake refused")
-    agent = _codex_pane_agent(local_provider, tmp_path, transport, hooks_json_text=_HOOKS_BEFORE_THE_TURN_HOOK)
+    agent = _codex_pane_agent(local_provider, tmp_path, transport, hooks_json_text=_HOOKS_BEFORE_THE_TURN_HOOK_TEXT)
 
     assert agent.probe_lifecycle().state == AgentLifecycleState.WAITING
     assert _waiting_reason(agent, agent.host) == WaitingReason.END_OF_TURN
@@ -923,7 +933,7 @@ def test_an_agent_whose_hooks_predate_the_turn_hook_is_not_read_from_its_daemon_
     tmp_path: Path,
 ) -> None:
     transport = _status_transport({"type": "active", "activeFlags": []}, _TURN_IN_FLIGHT)
-    agent = _codex_pane_agent(local_provider, tmp_path, transport, hooks_json_text=_HOOKS_BEFORE_THE_TURN_HOOK)
+    agent = _codex_pane_agent(local_provider, tmp_path, transport, hooks_json_text=_HOOKS_BEFORE_THE_TURN_HOOK_TEXT)
 
     probe = agent.probe_lifecycle_from_snapshot(lifecycle_snapshot)
 
@@ -945,7 +955,7 @@ def test_status_probe_never_starts_a_thread(local_provider: LocalProviderInstanc
         def _connect_app_server_transport(self) -> AppServerTransport:
             return transport
 
-    agent = _make_codex_agent(_NoPersistLiveAgent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
+    agent = make_codex_agent(_NoPersistLiveAgent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
     # No persisted root id and nothing loaded -> nothing to bind.
     assert agent._read_live_thread_status() is None
     assert "thread/start" not in transport.sent_methods()
@@ -974,8 +984,8 @@ def test_type_only_listing_expects_the_same_process_name_as_a_loaded_agent(codex
 
 
 def test_is_common_transcript_enabled_follows_config(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
-    on = _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig())
-    off = _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(emit_common_transcript=False))
+    on = make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig())
+    off = make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(emit_common_transcript=False))
     assert on.is_common_transcript_enabled is True
     assert off.is_common_transcript_enabled is False
 
@@ -1081,19 +1091,14 @@ def test_assemble_command_launches_both_windows(codex_agent: CodexAgent) -> None
     """The primary window runs the visible `--remote` TUI; a detached sidecar runs the daemon."""
     command = str(codex_agent.assemble_command(codex_agent.host, (), None))
     socket_url = f"unix://{get_codex_app_server_socket_path(codex_agent._get_codex_home())}"
-    # Sidecar daemon window, named and detached, running the app-server on the socket. The daemon
-    # carries --dangerously-bypass-hook-trust --enable hooks (top-level, before the subcommand):
-    # codex gates hooks behind a default-off feature flag, and an enabled command hook still stays
-    # untrusted until bypassed, so without both the daemon fires NO hooks (verified live).
+    # Sidecar daemon window, named and detached, running the app-server with hooks on at the socket.
     assert "codex-app-server" in command
     daemon_index = command.index("app-server --listen")
-    assert f"--dangerously-bypass-hook-trust --enable hooks app-server --listen {socket_url}" in command
+    assert f"codex --enable hooks app-server --listen {socket_url}" in command
     # Primary window: the visible remote TUI on the same socket, after the daemon spawn.
     remote_index = command.index("codex --remote")
     assert f"codex --remote {socket_url}" in command
-    # The remote TUI also carries --dangerously-bypass-hook-trust. (Hooks fire only on turns TYPED
-    # into this TUI; codex does not fire hooks on programmatic app-server turns -- verified live.)
-    assert "codex --remote" in command
+    # The remote TUI carries --dangerously-bypass-hook-trust for the threads it starts or resumes.
     assert "--dangerously-bypass-hook-trust" in command[remote_index:]
     # The primary window waits (bounded) for the socket before attaching.
     assert "-S" in command and "while" in command
@@ -1160,8 +1165,25 @@ def test_assemble_command_resumes_root_conversation_self_healing(codex_agent: Co
     assert "codex_root_session" in command and "-lt" in command
 
 
+# The launch's hook trust step, whose output lands in hook_trust.log only once it has finished.
+_HOOK_TRUST_STEP: Final[str] = (
+    'python3 "$MNGR_AGENT_STATE_DIR/commands/record_background_tasks.py" --trust-hooks '
+    '> "$MNGR_AGENT_STATE_DIR/hook_trust.log.partial" 2>&1; '
+    'mv -f "$MNGR_AGENT_STATE_DIR/hook_trust.log.partial" "$MNGR_AGENT_STATE_DIR/hook_trust.log"; '
+)
+
+
+def test_assemble_command_trusts_the_hooks_codex_would_review_once_its_socket_is_up_and_before_its_tui(
+    codex_agent: CodexAgent,
+) -> None:
+    command = str(codex_agent.assemble_command(codex_agent.host, (), None))
+
+    assert command.count(_HOOK_TRUST_STEP) == 1
+    assert command.index("while [ ! -S") < command.index(_HOOK_TRUST_STEP) < command.index("--remote unix://")
+
+
 def test_assemble_command_appends_cli_and_agent_args(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
-    agent = _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(cli_args=("--oss",)))
+    agent = make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(cli_args=("--oss",)))
     command = str(agent.assemble_command(agent.host, ("hello world",), None))
     assert "--oss" in command
     # agent_args are shell-quoted (raw argv).
@@ -1172,7 +1194,7 @@ def test_assemble_command_honors_command_override(codex_agent: CodexAgent) -> No
     command = str(codex_agent.assemble_command(codex_agent.host, (), CommandString("/opt/codex")))
     assert "env CODEX_HOME=" in command
     # The override binary drives both the daemon and the visible remote TUI.
-    assert "/opt/codex --dangerously-bypass-hook-trust --enable hooks app-server --listen" in command
+    assert "/opt/codex --enable hooks app-server --listen" in command
     assert "/opt/codex --remote" in command
 
 
@@ -1335,121 +1357,299 @@ _COMPOSER_SCREEN = (
     "  OpenAI Codex (v0.147.0)\n  model: gpt-5.5   /model to change\n"
     "› Ask Codex to do anything\n  gpt-5.5 default · ~/workspace\n"
 )
-# What the TUI shows between the keypress and its resume finishing: the trust screen is gone,
-# the composer is not up yet.
-_RESUMING_SCREEN = "  OpenAI Codex (v0.147.0)\n"
+_RESUMING_SCREEN = "  >_ OpenAI Codex (v0.163.0)\n  Resuming session…\n\n› Ask Codex to do anything\n"
 
 
-def test_clear_hook_trust_prompt_selects_trust_all_and_waits_for_the_tui_to_attach(
-    local_provider: LocalProviderInstance, tmp_path: Path
-) -> None:
-    """When the --remote TUI shows "Hooks need review", mngr selects "Trust all and continue", then waits
-    for the TUI to attach before the create sends its initial message.
+def _pane_codex_agent(
+    local_provider: LocalProviderInstance, tmp_path: Path, panes: Sequence[str | None], reads: list[str | None]
+) -> CodexAgent:
+    """A codex agent whose primary pane shows each of ``panes`` in turn, then the last one, appending each to ``reads``."""
 
-    Until the screen is cleared the daemon's hooks stay untrusted and never fire (safety guards +
-    the session-pointer recorder), on typed OR programmatic turns -- so the create-time clear is what
-    makes the workspace hooks actually run. And the freed TUI's ``thread/resume`` rebuilds the idle
-    root thread, aborting any turn started meanwhile, so the clear returns only once the composer is
-    up (the resume is over), not the moment the keypress went out.
-    """
-    sent: list[str] = []
-    # The pane after the keypress: still resuming for two polls, then the composer.
-    panes_after_keypress = [_RESUMING_SCREEN, _RESUMING_SCREEN, _COMPOSER_SCREEN]
-    seen_after_keypress: list[str] = []
-
-    class _Agent(CodexAgent):
+    class _PaneCodexAgent(CodexAgent):
         def capture_pane_content(
             self, include_scrollback: bool = False, window: "int | str | None" = None
         ) -> str | None:
-            if not sent:
-                return _HOOK_TRUST_SCREEN
-            pane = panes_after_keypress[min(len(seen_after_keypress), len(panes_after_keypress) - 1)]
-            seen_after_keypress.append(pane)
+            pane = panes[min(len(reads), len(panes) - 1)]
+            reads.append(pane)
             return pane
 
-        def _send_hook_trust_keypress(self) -> bool:
-            sent.append("trust")
-            return True
-
-    agent = _make_codex_agent(_Agent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
-    agent._clear_hook_trust_prompt()
-    assert sent == ["trust"]
-    # The clear outlasted the resume: it kept reading the pane until the composer showed.
-    assert seen_after_keypress == panes_after_keypress
+    return make_codex_agent(_PaneCodexAgent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
 
 
-def test_clear_hook_trust_prompt_does_not_wait_for_an_attach_after_the_keypress_failed(
+def test_wait_for_tui_attached_returns_once_the_pane_shows_the_composer_with_the_resume_over(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    """A keypress that did not go out leaves the trust screen up, so no TUI is resuming and the composer is not
-    coming: the clear returns at once rather than spending the attach timeout on it."""
-    attach_waits: list[float] = []
-    sent: list[str] = []
+    panes = (None, _RESUMING_SCREEN, _RESUMING_SCREEN, _COMPOSER_SCREEN)
+    reads: list[str | None] = []
+    agent = _pane_codex_agent(local_provider, tmp_path, panes, reads)
 
-    class _Agent(CodexAgent):
-        def capture_pane_content(
-            self, include_scrollback: bool = False, window: "int | str | None" = None
-        ) -> str | None:
-            return _HOOK_TRUST_SCREEN
+    agent._wait_for_tui_attached(timeout=5.0)
 
-        def _send_hook_trust_keypress(self) -> bool:
-            sent.append("trust")
-            return False
+    assert reads == list(panes)
+
+
+def test_wait_for_tui_attached_gives_up_after_its_timeout_without_raising(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    agent = _pane_codex_agent(local_provider, tmp_path, (_RESUMING_SCREEN,), [])
+
+    with capture_loguru(level="WARNING") as warnings:
+        agent._wait_for_tui_attached(timeout=0.3)
+
+    assert "did not show its composer within 0s; sending the initial message anyway" in warnings.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("pane", "is_attached"),
+    [
+        pytest.param(_COMPOSER_SCREEN, True, id="composer"),
+        pytest.param(_RESUMING_SCREEN, False, id="resuming"),
+        pytest.param(_HOOK_TRUST_SCREEN, False, id="hook_review"),
+        pytest.param(None, False, id="no_pane"),
+    ],
+)
+def test_is_tui_attached_only_for_the_composer_with_the_resume_over(
+    local_provider: LocalProviderInstance, tmp_path: Path, pane: str | None, is_attached: bool
+) -> None:
+    assert _pane_codex_agent(local_provider, tmp_path, (pane,), [])._is_tui_attached() is is_attached
+
+
+def _restarted_codex_agent(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    loaded_thread_ids_by_connection: Sequence[Sequence[str]],
+    transports: list[_ScriptedTransport],
+    hook_trust_log: str = _HOOKS_TRUSTED_LOG,
+) -> CodexAgent:
+    """A codex agent whose daemon is ready, whose launch logged ``hook_trust_log``, and whose nth connection lists the nth loaded threads, the last from then on."""
+
+    class _RestartedCodexAgent(CodexAgent):
+        def _wait_for_app_server_ready(self, timeout: float) -> None:
+            return None
+
+        def _connect_app_server_transport(self) -> AppServerTransport:
+            loaded = loaded_thread_ids_by_connection[min(len(transports), len(loaded_thread_ids_by_connection) - 1)]
+            transport = _ScriptedTransport()
+            transport.respond_result("initialize", _initialize_result())
+            transport.respond_result("thread/loaded/list", {"data": list(loaded)})
+            transports.append(transport)
+            return transport
+
+    agent = make_codex_agent(_RestartedCodexAgent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
+    _write_hook_trust_log(agent, hook_trust_log)
+    return agent
+
+
+def test_wait_for_ready_after_restart_waits_for_a_loaded_thread_and_loads_none_itself(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    transports: list[_ScriptedTransport] = []
+    agent = _restarted_codex_agent(local_provider, tmp_path, [[], [], ["thread-1"]], transports)
+
+    agent.wait_for_ready_after_restart(timeout=5.0)
+
+    assert len(transports) == 3
+    assert {method for transport in transports for method in transport.sent_methods()} == {
+        "initialize",
+        "initialized",
+        "thread/loaded/list",
+    }
+    assert all(transport.is_closed for transport in transports)
+
+
+def test_wait_for_ready_after_restart_fails_when_the_tui_never_opens_its_conversation(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    agent = _restarted_codex_agent(local_provider, tmp_path, [[]], [])
+
+    with pytest.raises(AgentStartError, match="codex's TUI did not open its conversation within 0s"):
+        agent.wait_for_ready_after_restart(timeout=0.3)
+
+
+_FAILED_HOOK_TRUST_LOGS: Final[tuple[Any, ...]] = (
+    pytest.param("bash: python3: command not found\n", id="no_python3"),
+    pytest.param("unchanged: the app-server connection failed: timed out\n", id="app_server_timed_out"),
+)
+
+
+@pytest.mark.parametrize("hook_trust_log", _FAILED_HOOK_TRUST_LOGS)
+def test_wait_for_ready_after_restart_fails_with_the_hook_trust_log_before_looking_for_a_thread(
+    local_provider: LocalProviderInstance, tmp_path: Path, hook_trust_log: str
+) -> None:
+    transports: list[_ScriptedTransport] = []
+    agent = _restarted_codex_agent(local_provider, tmp_path, [["thread-1"]], transports, hook_trust_log)
+
+    with pytest.raises(AgentStartError) as raised:
+        agent.wait_for_ready_after_restart(timeout=5.0)
+
+    assert raised.value.reason == f"codex's hook trust step did not trust its hooks: {hook_trust_log.strip()}"
+    assert transports == []
+
+
+def _step_recording_codex_agent(
+    local_provider: LocalProviderInstance, tmp_path: Path, steps: list[str], hook_trust_log: str
+) -> CodexAgent:
+    """A codex agent on a local host whose launch logged ``hook_trust_log``, recording its other create readiness steps in ``steps``."""
+
+    class _StepRecordingCodexAgent(CodexAgent):
+        def _wait_for_app_server_ready(self, timeout: float) -> None:
+            steps.append("daemon")
+
+        def _establish_root_conversation(self) -> None:
+            steps.append("root")
 
         def _wait_for_tui_attached(self, timeout: float = 6_734.0) -> None:
-            attach_waits.append(timeout)
+            steps.append("tui")
 
-    agent = _make_codex_agent(_Agent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
-    agent._clear_hook_trust_prompt()
-    assert sent == ["trust"]
-    assert attach_waits == []
+    agent = make_codex_agent(
+        _StepRecordingCodexAgent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True
+    )
+    _write_hook_trust_log(agent, hook_trust_log)
+    return agent
 
 
-def test_wait_for_tui_attached_gives_up_after_the_timeout_without_raising(
+def test_wait_for_ready_signal_on_create_waits_for_the_tui_to_attach_once_the_root_is_established(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    """A TUI that never shows its composer does not hang the create: the wait is bounded and the
-    initial message goes out as it did before the wait existed."""
-    reads = 0
+    steps: list[str] = []
+    agent = _step_recording_codex_agent(local_provider, tmp_path, steps, _HOOKS_TRUSTED_LOG)
 
-    class _Agent(CodexAgent):
-        def capture_pane_content(
-            self, include_scrollback: bool = False, window: "int | str | None" = None
-        ) -> str | None:
-            nonlocal reads
-            reads += 1
-            return _RESUMING_SCREEN
+    agent.wait_for_ready_signal(True, lambda: steps.append("start"))
 
-    agent = _make_codex_agent(_Agent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
-    agent._wait_for_tui_attached(timeout=0.3)
-    # It gave up at its deadline rather than never waiting: a timeout above the poll interval reads
-    # the pane again after sleeping on it.
-    assert reads >= 2
+    assert steps == ["start", "daemon", "root", "tui"]
 
 
-def test_is_on_hook_trust_prompt_detects_only_the_trust_screen(
+@pytest.mark.parametrize("hook_trust_log", _FAILED_HOOK_TRUST_LOGS)
+def test_wait_for_ready_signal_on_a_local_create_fails_with_the_hook_trust_log_before_waiting_for_the_tui(
+    local_provider: LocalProviderInstance, tmp_path: Path, hook_trust_log: str
+) -> None:
+    steps: list[str] = []
+    agent = _step_recording_codex_agent(local_provider, tmp_path, steps, hook_trust_log)
+
+    with pytest.raises(AgentStartError) as raised:
+        agent.wait_for_ready_signal(True, lambda: steps.append("start"), timeout=5.0)
+
+    assert raised.value.reason == f"codex's hook trust step did not trust its hooks: {hook_trust_log.strip()}"
+    assert steps == ["start", "daemon", "root"]
+
+
+def _timeout_recording_codex_agent(
+    local_provider: LocalProviderInstance, tmp_path: Path, timeouts: dict[str, float]
+) -> CodexAgent:
+    """A codex agent on a local host whose readiness waits each record the timeout they get in ``timeouts`` and return."""
+
+    class _TimeoutRecordingCodexAgent(CodexAgent):
+        def _wait_for_app_server_ready(self, timeout: float) -> None:
+            timeouts["daemon"] = timeout
+
+        def _establish_root_conversation(self) -> None:
+            return None
+
+        def _wait_for_hooks_trusted(self, timeout: float) -> None:
+            timeouts["hooks"] = timeout
+
+        def _wait_for_tui_conversation_loaded(self, timeout: float) -> None:
+            timeouts["tui"] = timeout
+
+        def _wait_for_tui_attached(self, timeout: float = 6_734.0) -> None:
+            return None
+
+    return make_codex_agent(
+        _TimeoutRecordingCodexAgent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True
+    )
+
+
+def test_wait_for_ready_after_restart_waits_for_each_step_only_until_one_deadline(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    """The detector is True only for the trust screen -- not the composer, not a blank/absent pane
-    (a false positive there would send a stray "2" into the conversation)."""
+    timeouts: dict[str, float] = {}
+    agent = _timeout_recording_codex_agent(local_provider, tmp_path, timeouts)
 
-    def _agent_with_pane(pane: str | None) -> CodexAgent:
-        class _Agent(CodexAgent):
-            def capture_pane_content(
-                self, include_scrollback: bool = False, window: "int | str | None" = None
-            ) -> str | None:
-                return pane
+    agent.wait_for_ready_after_restart(timeout=30.0)
 
-        return _make_codex_agent(_Agent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
+    assert timeouts["daemon"] == 30.0
+    assert 30.0 > timeouts["hooks"] >= timeouts["tui"] > 0.0
 
-    assert _agent_with_pane(_HOOK_TRUST_SCREEN)._is_on_hook_trust_prompt() is True
-    assert _agent_with_pane(_COMPOSER_SCREEN)._is_on_hook_trust_prompt() is False
-    assert _agent_with_pane(None)._is_on_hook_trust_prompt() is False
-    # The attach detector is the mirror image: only the composer, with the trust screen gone.
-    assert _agent_with_pane(_COMPOSER_SCREEN)._is_tui_attached() is True
-    assert _agent_with_pane(_HOOK_TRUST_SCREEN)._is_tui_attached() is False
-    assert _agent_with_pane(_RESUMING_SCREEN)._is_tui_attached() is False
-    assert _agent_with_pane(None)._is_tui_attached() is False
+
+def test_wait_for_ready_signal_on_a_local_create_waits_for_hook_trust_only_until_the_daemons_deadline(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    timeouts: dict[str, float] = {}
+    agent = _timeout_recording_codex_agent(local_provider, tmp_path, timeouts)
+
+    agent.wait_for_ready_signal(True, lambda: None, timeout=30.0)
+
+    assert timeouts["daemon"] == 30.0
+    assert 30.0 > timeouts["hooks"] > 0.0
+
+
+def _remote_codex_agent_with_its_socket_up(local_provider: LocalProviderInstance, tmp_path: Path) -> CodexAgent:
+    return _make_remote_codex_agent(
+        local_provider, tmp_path, {"test -S": CommandResult(stdout="ready\n", stderr="", success=True)}
+    )
+
+
+@pytest.mark.parametrize(
+    "hook_trust_log",
+    [
+        pytest.param(_HOOKS_TRUSTED_LOG, id="outcome_only"),
+        pytest.param(
+            "/state/commands/record_background_tasks.py:9: DeprecationWarning: a warning\n  import re\n"
+            "trusted: /state/plugin/codex/home/hooks.json:stop:0:0\n",
+            id="outcome_after_a_warning",
+        ),
+    ],
+)
+def test_wait_for_ready_after_restart_on_a_remote_host_is_ready_once_its_socket_is_up_and_its_hooks_trusted(
+    local_provider: LocalProviderInstance, tmp_path: Path, hook_trust_log: str
+) -> None:
+    agent = _remote_codex_agent_with_its_socket_up(local_provider, tmp_path)
+    _write_hook_trust_log(agent, hook_trust_log)
+
+    agent.wait_for_ready_after_restart(timeout=0.3)
+
+
+@pytest.mark.parametrize("hook_trust_log", _FAILED_HOOK_TRUST_LOGS)
+def test_wait_for_ready_after_restart_on_a_remote_host_fails_with_the_hook_trust_log(
+    local_provider: LocalProviderInstance, tmp_path: Path, hook_trust_log: str
+) -> None:
+    agent = _remote_codex_agent_with_its_socket_up(local_provider, tmp_path)
+    _write_hook_trust_log(agent, hook_trust_log)
+
+    with pytest.raises(AgentStartError) as raised:
+        agent.wait_for_ready_after_restart(timeout=5.0)
+
+    assert raised.value.reason == f"codex's hook trust step did not trust its hooks: {hook_trust_log.strip()}"
+
+
+@pytest.mark.parametrize("hook_trust_log", [None, ""], ids=["missing", "empty"])
+def test_wait_for_ready_after_restart_fails_when_the_hook_trust_step_logs_no_outcome(
+    local_provider: LocalProviderInstance, tmp_path: Path, hook_trust_log: str | None
+) -> None:
+    agent = _remote_codex_agent_with_its_socket_up(local_provider, tmp_path)
+    if hook_trust_log is not None:
+        _write_hook_trust_log(agent, hook_trust_log)
+
+    with pytest.raises(AgentStartError, match="codex's hook trust step logged no outcome to hook_trust.log in 0s"):
+        agent.wait_for_ready_after_restart(timeout=0.3)
+
+
+def test_wait_for_ready_after_restart_fails_when_the_daemon_never_binds(codex_agent: CodexAgent) -> None:
+    with pytest.raises(AgentStartError, match="codex app-server did not become ready"):
+        codex_agent.wait_for_ready_after_restart(timeout=0.3)
+
+
+def test_the_ready_signal_path_is_the_log_the_launch_clears_before_its_daemon_then_writes_its_hook_trust_outcome_to(
+    codex_agent: CodexAgent,
+) -> None:
+    (ready_signal_path,) = codex_agent.get_ready_signal_paths()
+    command = str(codex_agent.assemble_command(codex_agent.host, (), None))
+    clear_step = f'rm -f "$MNGR_AGENT_STATE_DIR/{ready_signal_path}";'
+    move_into_place = f'"$MNGR_AGENT_STATE_DIR/{ready_signal_path}"; '
+
+    assert command.count(clear_step) == 1
+    assert _HOOK_TRUST_STEP.endswith(move_into_place)
+    assert command.index(clear_step) < command.index("tmux new-window") < command.index(_HOOK_TRUST_STEP)
 
 
 def test_app_server_client_version_is_a_nonempty_string() -> None:
@@ -1506,7 +1706,7 @@ def test_provision_builds_the_codex_home_tree(codex_agent: CodexAgent, isolated_
 
 
 def test_provision_sets_approval_never_when_auto_allow(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
-    agent = _make_codex_agent(
+    agent = make_codex_agent(
         CodexAgent,
         local_provider,
         tmp_path,
@@ -1547,20 +1747,20 @@ def test_already_trusted_source_is_a_noop(codex_agent: CodexAgent) -> None:
 
 
 def test_interactive_confirm_persists_trust(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
-    agent = _make_codex_agent(_ConfirmingCodexAgent, local_provider, tmp_path, CodexAgentConfig(), is_interactive=True)
+    agent = make_codex_agent(_ConfirmingCodexAgent, local_provider, tmp_path, CodexAgentConfig(), is_interactive=True)
     _provision(agent)
     assert is_project_trusted(_read_user_codex_config(agent), str(agent.work_dir.resolve()))
 
 
 def test_interactive_decline_aborts(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
-    agent = _make_codex_agent(_DecliningCodexAgent, local_provider, tmp_path, CodexAgentConfig(), is_interactive=True)
+    agent = make_codex_agent(_DecliningCodexAgent, local_provider, tmp_path, CodexAgentConfig(), is_interactive=True)
     with pytest.raises(SystemExit):
         _provision(agent)
 
 
 def test_non_interactive_without_optin_aborts(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     """Default ctx (not interactive, not auto-approve) must refuse to run on untrusted code."""
-    agent = _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig())
+    agent = make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig())
     with pytest.raises(SystemExit):
         _provision(agent)
 
@@ -1569,7 +1769,7 @@ def test_auto_dismiss_dialogs_persists_trust_without_optin_ctx(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
     """auto_dismiss_dialogs_at_startup trusts silently even when the ctx is non-interactive."""
-    agent = _make_codex_agent(
+    agent = make_codex_agent(
         CodexAgent, local_provider, tmp_path, CodexAgentConfig(auto_dismiss_dialogs_at_startup=True)
     )
     _provision(agent)
@@ -1649,7 +1849,7 @@ def test_auto_policy_runs_codex_update_without_prompting(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
     """The AUTO policy applies the update directly and never consults the interactive prompt."""
-    agent = _make_codex_agent(
+    agent = make_codex_agent(
         _OutdatedPromptRaisesAgent,
         local_provider,
         tmp_path,
@@ -1661,7 +1861,7 @@ def test_auto_policy_runs_codex_update_without_prompting(
 
 
 def test_interactive_prompt_yes_runs_update(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
-    agent = _make_codex_agent(
+    agent = make_codex_agent(
         _OutdatedPromptYesAgent, local_provider, tmp_path, CodexAgentConfig(), is_interactive=True
     )
     with pytest.raises(_CodexUpdateRan):
@@ -1670,15 +1870,13 @@ def test_interactive_prompt_yes_runs_update(local_provider: LocalProviderInstanc
 
 def test_interactive_prompt_no_does_not_update(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     """A declined prompt falls through to the non-blocking notice -- no update, no abort."""
-    agent = _make_codex_agent(
-        _OutdatedPromptNoAgent, local_provider, tmp_path, CodexAgentConfig(), is_interactive=True
-    )
+    agent = make_codex_agent(_OutdatedPromptNoAgent, local_provider, tmp_path, CodexAgentConfig(), is_interactive=True)
     _check_update(agent)
 
 
 def test_non_interactive_only_notifies(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     """Non-interactive: never prompt and never mutate the global install -- just notify."""
-    agent = _make_codex_agent(_OutdatedPromptRaisesAgent, local_provider, tmp_path, CodexAgentConfig())
+    agent = make_codex_agent(_OutdatedPromptRaisesAgent, local_provider, tmp_path, CodexAgentConfig())
     _check_update(agent)
 
 
@@ -1689,7 +1887,7 @@ def test_unattended_remote_host_only_notifies(local_provider: LocalProviderInsta
     remote codex agent from a local interactive terminal must not prompt to upgrade the
     remote's global install (the prompt override raises if consulted), nor run the update.
     """
-    agent = _make_codex_agent(
+    agent = make_codex_agent(
         _OutdatedPromptRaisesAgent, local_provider, tmp_path, CodexAgentConfig(), is_interactive=True
     )
     remote_host = cast(OnlineHostInterface, FakeHost(is_local=False))
@@ -1698,7 +1896,7 @@ def test_unattended_remote_host_only_notifies(local_provider: LocalProviderInsta
 
 def test_unattended_remote_host_still_auto_updates(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     """The AUTO policy is an explicit opt-in, so it upgrades even on an unattended remote host."""
-    agent = _make_codex_agent(
+    agent = make_codex_agent(
         _OutdatedPromptRaisesAgent,
         local_provider,
         tmp_path,
@@ -1712,7 +1910,7 @@ def test_unattended_remote_host_still_auto_updates(local_provider: LocalProvider
 
 def test_auto_approve_does_not_trigger_global_update(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     """`--yes` clears blocking prerequisites but does NOT opt into a heavy global upgrade."""
-    agent = _make_codex_agent(
+    agent = make_codex_agent(
         _OutdatedPromptRaisesAgent,
         local_provider,
         tmp_path,
@@ -1724,7 +1922,7 @@ def test_auto_approve_does_not_trigger_global_update(local_provider: LocalProvid
 
 
 def test_up_to_date_skips_update(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
-    agent = _make_codex_agent(
+    agent = make_codex_agent(
         _UpToDateCodexAgent, local_provider, tmp_path, CodexAgentConfig(update_policy=CodexUpdatePolicy.AUTO)
     )
     _check_update(agent)
@@ -1732,7 +1930,7 @@ def test_up_to_date_skips_update(local_provider: LocalProviderInstance, tmp_path
 
 def test_unknown_version_skips_update(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     """An undeterminable version (codex absent / no cache) skips the check entirely."""
-    agent = _make_codex_agent(
+    agent = make_codex_agent(
         _UnknownVersionCodexAgent, local_provider, tmp_path, CodexAgentConfig(update_policy=CodexUpdatePolicy.AUTO)
     )
     _check_update(agent)
@@ -1744,7 +1942,7 @@ def test_never_policy_only_notifies(local_provider: LocalProviderInstance, tmp_p
     Even on an attended local interactive run, the prompt override raises if consulted and
     the update sentinel fires if run, so reaching neither confirms NEVER just logs the notice.
     """
-    agent = _make_codex_agent(
+    agent = make_codex_agent(
         _OutdatedPromptRaisesAgent,
         local_provider,
         tmp_path,
@@ -1756,7 +1954,7 @@ def test_never_policy_only_notifies(local_provider: LocalProviderInstance, tmp_p
 
 def test_auto_policy_runs_real_codex_update_on_success(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     """AUTO with an outdated codex shells out ``codex update`` over the host; a clean exit just logs."""
-    agent = _make_codex_agent(
+    agent = make_codex_agent(
         _OutdatedRealUpdateAgent, local_provider, tmp_path, CodexAgentConfig(update_policy=CodexUpdatePolicy.AUTO)
     )
     host = _stub_host(tmp_path, command_results={"codex update": CommandResult(stdout="ok", stderr="", success=True)})
@@ -1768,7 +1966,7 @@ def test_auto_policy_real_codex_update_failure_is_not_fatal(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
     """A non-zero ``codex update`` is warned about but never aborts provisioning."""
-    agent = _make_codex_agent(
+    agent = make_codex_agent(
         _OutdatedRealUpdateAgent, local_provider, tmp_path, CodexAgentConfig(update_policy=CodexUpdatePolicy.AUTO)
     )
     host = _stub_host(
@@ -1787,7 +1985,7 @@ def test_read_codex_versions_parses_installed_and_cached(
     Uses a fake `command` (`sh -c 'echo ...'` ignores the appended --version) so the
     test needs no real codex binary; the cache is a real file under the user's home.
     """
-    agent = _make_codex_agent(
+    agent = make_codex_agent(
         CodexAgent, local_provider, tmp_path, CodexAgentConfig(command=CommandString("sh -c 'echo codex-cli 1.2.3'"))
     )
     user_home = agent._resolve_user_codex_home(agent.host)
@@ -1803,7 +2001,7 @@ def test_read_codex_versions_parses_installed_and_cached(
 def test_read_codex_versions_latest_is_none_when_cache_absent(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    agent = _make_codex_agent(
+    agent = make_codex_agent(
         CodexAgent, local_provider, tmp_path, CodexAgentConfig(command=CommandString("sh -c 'echo codex-cli 1.2.3'"))
     )
     installed, latest = agent._read_codex_versions(agent.host, agent._resolve_user_codex_home(agent.host))
@@ -1815,7 +2013,7 @@ def test_read_codex_versions_returns_none_when_probe_fails(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
     """A non-zero version probe (codex absent / shell error) yields (None, None) without raising."""
-    agent = _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig())
+    agent = make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig())
     host = _stub_host(
         tmp_path,
         command_results={"--version": CommandResult(stdout="", stderr="no such file", success=False)},
@@ -1836,7 +2034,7 @@ def test_read_codex_versions_latest_is_none_for_unusable_cache(
     -- the update check then just skips rather than aborting provisioning. `installed`
     still parses, proving the unusable cache does not poison the whole probe.
     """
-    agent = _make_codex_agent(
+    agent = make_codex_agent(
         CodexAgent, local_provider, tmp_path, CodexAgentConfig(command=CommandString("sh -c 'echo codex-cli 1.2.3'"))
     )
     user_home = agent._resolve_user_codex_home(agent.host)
@@ -1867,7 +2065,7 @@ def _populate_codex_transcripts(agent: CodexAgent) -> None:
 @pytest.mark.rsync
 def test_on_destroy_preserves_transcripts(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     """on_destroy copies transcripts and session-id history to the mirrored preserved layout."""
-    agent = _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(preserve_on_destroy=True))
+    agent = make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(preserve_on_destroy=True))
     _populate_codex_transcripts(agent)
 
     agent.on_destroy(agent.host)
@@ -1880,7 +2078,7 @@ def test_on_destroy_preserves_transcripts(local_provider: LocalProviderInstance,
 
 def test_on_destroy_skips_preservation_when_disabled(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     """on_destroy preserves nothing when preserve_on_destroy is False."""
-    agent = _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(preserve_on_destroy=False))
+    agent = make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(preserve_on_destroy=False))
     _populate_codex_transcripts(agent)
 
     agent.on_destroy(agent.host)
@@ -2333,3 +2531,239 @@ def test_a_style_and_every_stacked_prompt_reach_codex_developer_instructions(tmp
 def test_codex_developer_instructions_is_none_when_no_role_contributed_anything() -> None:
     agent = CodexAgent.model_construct(agent_config=CodexAgentConfig(), work_dir="/nonexistent")
     assert agent._build_developer_instructions(cast(Any, object())) is None
+
+
+# mngr upgrade
+
+_HOOKS_PATH: Final[Path] = Path("plugin/codex/home/hooks.json")
+_COMMON_TRANSCRIPT_SCRIPT_PATHS: Final[tuple[Path, ...]] = (
+    Path("commands/common_transcript.sh"),
+    Path("commands/common_transcript_convert.py"),
+)
+_USER_HOOK_GROUP: Final[dict[str, Any]] = {
+    "hooks": [{"type": "command", "command": 'bash "$MNGR_AGENT_WORK_DIR/scripts/guard-53018.sh"'}]
+}
+
+
+def _upgrade_inputs(
+    agent: CodexAgent,
+    stored_command: str | None,
+    hooks_text: str | None,
+    common_transcript_paths: Sequence[Path],
+) -> dict[Path, str | None]:
+    """The content of each path the agent's upgrade reads, None for the ones the agent does not have."""
+    content_by_path: dict[Path, str | None] = {
+        Path("data.json"): None if stored_command is None else json.dumps({"command": stored_command}),
+        _HOOKS_PATH: hooks_text,
+        **{path: "echo old-converter-53018\n" for path in common_transcript_paths},
+    }
+    return {path: content_by_path.get(path) for path in agent.get_upgrade_input_paths()}
+
+
+def _assembled_command(agent: CodexAgent) -> str:
+    return str(agent.assemble_command(agent.host, (), None))
+
+
+def test_get_upgrade_input_paths_names_the_record_the_hooks_file_and_the_common_transcript_scripts(
+    codex_agent: CodexAgent,
+) -> None:
+    assert codex_agent.get_upgrade_input_paths() == (Path("data.json"), _HOOKS_PATH, *_COMMON_TRANSCRIPT_SCRIPT_PATHS)
+
+
+def _command_launching_the_tui_without_the_app_server(agent: CodexAgent) -> str:
+    """The shape of a launch command stored before mngr drove codex through its app-server."""
+    return (
+        f"( bash $MNGR_AGENT_STATE_DIR/commands/codex_background_tasks.sh 'agent-session' ) & "
+        f"cd {agent.work_dir} && {{ env CODEX_HOME={agent._get_codex_home()} codex --dangerously-bypass-hook-trust ; }}"
+    )
+
+
+def command_stored_before_the_hook_trust_step(agent: CodexAgent) -> str:
+    """The launch command as stored before each launch trusted codex's hooks ahead of its TUI."""
+    assembled_command = _assembled_command(agent)
+    assert _HOOK_TRUST_STEP in assembled_command
+    return assembled_command.replace(_HOOK_TRUST_STEP, "")
+
+
+def _command_with_the_socket_directly_in_tmp(agent: CodexAgent) -> str:
+    """The launch command as stored before the app-server socket got a directory of its own."""
+    socket_path = get_codex_app_server_socket_path(agent._get_codex_home())
+    return _assembled_command(agent).replace(str(socket_path), f"{socket_path.parent}.sock")
+
+
+@pytest.mark.parametrize(
+    ("build_stored_command", "is_supported"),
+    [
+        pytest.param(_assembled_command, True, id="assembled_by_this_mngr"),
+        pytest.param(
+            lambda agent: _assembled_command(agent).replace(
+                PANE_SESSION_NAME_SHELL_EXPRESSION, shlex.quote("agent-session")
+            ),
+            True,
+            id="naming_its_session_literally",
+        ),
+        pytest.param(
+            lambda agent: _assembled_command(agent).replace("--enable hooks ", ""),
+            False,
+            id="app_server_without_hooks",
+        ),
+        pytest.param(_command_with_the_socket_directly_in_tmp, False, id="socket_directly_in_tmp"),
+        pytest.param(_command_launching_the_tui_without_the_app_server, False, id="tui_without_app_server"),
+        pytest.param(
+            lambda agent: _assembled_command(agent).replace("( bash $MNGR_AGENT_STATE_DIR/commands/", "( "),
+            False,
+            id="no_supervisor_launch",
+        ),
+        pytest.param(command_stored_before_the_hook_trust_step, False, id="no_hook_trust_step"),
+        pytest.param(lambda agent: None, False, id="no_record"),
+    ],
+)
+def test_get_upgrade_unsupported_detail_is_none_only_when_the_stored_command_starts_the_supervisor_the_hooked_app_server_and_the_hook_trust_step(
+    codex_agent: CodexAgent, build_stored_command: Callable[[CodexAgent], str | None], is_supported: bool
+) -> None:
+    inputs = _upgrade_inputs(codex_agent, build_stored_command(codex_agent), None, ())
+
+    detail = codex_agent.get_upgrade_unsupported_detail(inputs)
+
+    assert detail == (
+        None
+        if is_supported
+        else "its launch command does not start mngr's background tasks, codex's app-server with hooks on at the "
+        "socket this mngr uses, and the step that trusts codex's hooks before its TUI"
+    )
+
+
+def test_get_upgrade_unsupported_detail_refuses_a_record_that_is_not_json(codex_agent: CodexAgent) -> None:
+    inputs = {**_upgrade_inputs(codex_agent, None, None, ()), Path("data.json"): "{not json"}
+
+    with pytest.raises(InvalidUpgradeInputError, match="data.json is not valid JSON"):
+        codex_agent.get_upgrade_unsupported_detail(inputs)
+
+
+def test_build_upgraded_files_writes_what_create_writes_with_the_same_modes(
+    codex_agent: CodexAgent, isolated_codex_home: Path
+) -> None:
+    _provision(codex_agent)
+    state_dir = codex_agent._get_agent_dir()
+    inputs = {
+        path: (state_dir / path).read_text() if (state_dir / path).exists() else None
+        for path in codex_agent.get_upgrade_input_paths()
+    }
+
+    upgraded_files = codex_agent.build_upgraded_files(inputs)
+
+    provisioned_scripts = {path.relative_to(state_dir) for path in (state_dir / "commands").iterdir()}
+    assert provisioned_scripts <= set(upgraded_files)
+    for relative_path in provisioned_scripts:
+        live_path = state_dir / relative_path
+        assert upgraded_files[relative_path].content == live_path.read_text(), relative_path
+        assert int(upgraded_files[relative_path].mode, 8) & 0o111 == live_path.stat().st_mode & 0o111, relative_path
+    assert _HOOKS_PATH not in upgraded_files
+    assert set(upgraded_files) - provisioned_scripts == {
+        Path("commands") / name
+        for name in (
+            "mngr_log.sh",
+            "mngr_transcript_lib.sh",
+            "mngr_common_transcript_lib.sh",
+            "mngr_background_task_lib.sh",
+        )
+    }
+
+
+@pytest.mark.parametrize("is_enabled_by_running_config", [True, False])
+@pytest.mark.parametrize(
+    ("common_transcript_paths_agent_has", "expected_upgraded_paths"),
+    [
+        pytest.param(_COMMON_TRANSCRIPT_SCRIPT_PATHS, _COMMON_TRANSCRIPT_SCRIPT_PATHS, id="agent_has_them"),
+        pytest.param(_COMMON_TRANSCRIPT_SCRIPT_PATHS[1:], _COMMON_TRANSCRIPT_SCRIPT_PATHS, id="agent_has_one"),
+        pytest.param((), (), id="agent_has_none"),
+    ],
+)
+def test_build_upgraded_files_includes_the_common_transcript_scripts_only_where_the_agent_has_them(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    is_enabled_by_running_config: bool,
+    common_transcript_paths_agent_has: tuple[Path, ...],
+    expected_upgraded_paths: tuple[Path, ...],
+) -> None:
+    agent = make_codex_agent(
+        CodexAgent, local_provider, tmp_path, CodexAgentConfig(emit_common_transcript=is_enabled_by_running_config)
+    )
+    inputs = _upgrade_inputs(agent, _assembled_command(agent), None, common_transcript_paths_agent_has)
+
+    upgraded_files = agent.build_upgraded_files(inputs)
+
+    assert tuple(path for path in _COMMON_TRANSCRIPT_SCRIPT_PATHS if path in upgraded_files) == (
+        expected_upgraded_paths
+    )
+    for script_name in (
+        "codex_background_tasks.sh",
+        RECORD_SESSION_POINTERS_SCRIPT_NAME,
+        TURN_HOOK_SCRIPT_NAME,
+        RECORD_BACKGROUND_TASKS_SCRIPT_NAME,
+        "stream_transcript.sh",
+    ):
+        assert upgraded_files[Path("commands") / script_name].mode == "0755"
+
+
+def test_build_upgraded_files_rebuilds_mngrs_hooks_keeping_the_rest_of_the_hooks_file(
+    codex_agent: CodexAgent,
+) -> None:
+    hooks_written_before_the_turn_hook = {
+        "hooks": {
+            "SessionStart": [_USER_HOOK_GROUP],
+            "UserPromptSubmit": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f'bash "$MNGR_AGENT_STATE_DIR/commands/{RECORD_SESSION_POINTERS_SCRIPT_NAME}"',
+                        }
+                    ]
+                }
+            ],
+        },
+        "description": "kept-53018",
+    }
+    inputs = _upgrade_inputs(
+        codex_agent, _assembled_command(codex_agent), serialize_codex_hooks(hooks_written_before_the_turn_hook), ()
+    )
+
+    upgraded_hooks_file = codex_agent.build_upgraded_files(inputs)[_HOOKS_PATH]
+
+    assert json.loads(upgraded_hooks_file.content) == {
+        "hooks": {"SessionStart": [_USER_HOOK_GROUP], **build_codex_hooks_config()["hooks"]},
+        "description": "kept-53018",
+    }
+    assert upgraded_hooks_file.mode == "0644"
+
+
+def test_build_upgraded_files_writes_the_hooks_file_create_writes_for_an_agent_that_has_none(
+    codex_agent: CodexAgent,
+) -> None:
+    inputs = _upgrade_inputs(codex_agent, _assembled_command(codex_agent), None, ())
+
+    upgraded_hooks_file = codex_agent.build_upgraded_files(inputs)[_HOOKS_PATH]
+
+    assert upgraded_hooks_file.content == serialize_codex_hooks(build_codex_hooks_config())
+
+
+@pytest.mark.parametrize(
+    ("hooks_text", "expected_error"),
+    [
+        pytest.param("{not json", "is not valid JSON", id="not_json"),
+        pytest.param("[]", "does not hold a JSON object", id="not_an_object"),
+        pytest.param(
+            '{"hooks": {"Stop": {"hooks": []}}}',
+            "has a `hooks` value that does not map each event to a list of hook groups",
+            id="groups_not_a_list",
+        ),
+    ],
+)
+def test_build_upgraded_files_refuses_a_hooks_file_it_cannot_rebuild(
+    codex_agent: CodexAgent, hooks_text: str, expected_error: str
+) -> None:
+    inputs = _upgrade_inputs(codex_agent, _assembled_command(codex_agent), hooks_text, ())
+
+    with pytest.raises(InvalidUpgradeInputError, match=expected_error):
+        codex_agent.build_upgraded_files(inputs)

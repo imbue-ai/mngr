@@ -25,11 +25,13 @@ from imbue.mngr_codex.codex_config import get_codex_hooks_path
 from imbue.mngr_codex.codex_config import get_codex_personality_migration_path
 from imbue.mngr_codex.codex_config import get_codex_version_cache_path
 from imbue.mngr_codex.codex_config import is_codex_update_available
+from imbue.mngr_codex.codex_config import is_mngr_hook_entry
 from imbue.mngr_codex.codex_config import is_project_trusted
 from imbue.mngr_codex.codex_config import is_turn_hook_installed
 from imbue.mngr_codex.codex_config import merge_project_trust
 from imbue.mngr_codex.codex_config import parse_codex_cli_version
 from imbue.mngr_codex.codex_config import read_codex_config
+from imbue.mngr_codex.codex_config import rebuild_codex_hooks_keeping_other_entries
 from imbue.mngr_codex.codex_config import rewrite_rollout_record_cwd
 from imbue.mngr_codex.codex_config import serialize_codex_config
 from imbue.mngr_codex.codex_config import serialize_codex_hooks
@@ -309,6 +311,73 @@ def test_serialize_codex_hooks_round_trips_to_json() -> None:
     assert json.loads(serialized) == hooks
     # two-space indent
     assert "  " in serialized
+
+
+def _command_entry(command: str) -> dict[str, str]:
+    return {"type": "command", "command": command}
+
+
+_RECORD_SESSION_POINTERS_ENTRY = _command_entry(
+    f'bash "$MNGR_AGENT_STATE_DIR/commands/{RECORD_SESSION_POINTERS_SCRIPT_NAME}"'
+)
+# An entry an older mngr wrote, running a script this mngr no longer ships.
+_RETIRED_MNGR_ENTRY = _command_entry('bash "$MNGR_AGENT_STATE_DIR/commands/set_active_marker.sh"')
+_USER_ENTRY = _command_entry('bash "$MNGR_AGENT_WORK_DIR/scripts/guard-71402.sh"')
+_USER_GROUP = {"hooks": [_USER_ENTRY]}
+
+
+@pytest.mark.parametrize(
+    ("hook_entry", "expected"),
+    [
+        pytest.param(_RECORD_SESSION_POINTERS_ENTRY, True, id="a_script_this_mngr_ships"),
+        pytest.param(_RETIRED_MNGR_ENTRY, True, id="a_script_an_older_mngr_shipped"),
+        pytest.param(_USER_ENTRY, False, id="a_work_dir_script"),
+        pytest.param(_command_entry('python3 "$MNGR_AGENT_STATE_DIR/commands/x.py"'), False, id="not_run_by_bash"),
+        pytest.param(
+            _command_entry('cd /tmp && bash "$MNGR_AGENT_STATE_DIR/commands/x.sh"'),
+            False,
+            id="run_after_another_command",
+        ),
+        pytest.param({"type": "command"}, False, id="no_command"),
+        pytest.param("not-an-entry", False, id="not_an_object"),
+    ],
+)
+def test_is_mngr_hook_entry_recognizes_only_mngrs_commands_script_hooks(hook_entry: object, expected: bool) -> None:
+    assert is_mngr_hook_entry(hook_entry) is expected
+
+
+def test_rebuild_codex_hooks_keeping_other_entries_is_mngrs_hooks_for_an_agent_with_none() -> None:
+    assert rebuild_codex_hooks_keeping_other_entries({}) == build_codex_hooks_config()["hooks"]
+
+
+def test_rebuild_codex_hooks_keeping_other_entries_leaves_current_hooks_as_they_are() -> None:
+    current_hooks = build_codex_hooks_config()["hooks"]
+
+    assert rebuild_codex_hooks_keeping_other_entries(current_hooks) == current_hooks
+
+
+def test_rebuild_codex_hooks_keeping_other_entries_puts_mngrs_groups_where_its_entries_were() -> None:
+    mngr_hooks = build_codex_hooks_config()["hooks"]
+    live_hooks = {
+        "SessionStart": [_USER_GROUP],
+        "UserPromptSubmit": [_USER_GROUP, {"matcher": "*", "hooks": [_RECORD_SESSION_POINTERS_ENTRY, _USER_ENTRY]}],
+        "Stop": [{"hooks": [_RETIRED_MNGR_ENTRY]}],
+        "SubagentStop": [{"hooks": [_RETIRED_MNGR_ENTRY]}],
+        "Notification": [],
+        "PreToolUse": [_USER_GROUP],
+    }
+
+    rebuilt_hooks = rebuild_codex_hooks_keeping_other_entries(live_hooks)
+
+    assert rebuilt_hooks == {
+        "SessionStart": [_USER_GROUP],
+        "UserPromptSubmit": [_USER_GROUP, *mngr_hooks["UserPromptSubmit"], {"matcher": "*", "hooks": [_USER_ENTRY]}],
+        "Stop": mngr_hooks["Stop"],
+        "Notification": [],
+        "PreToolUse": [_USER_GROUP, *mngr_hooks["PreToolUse"]],
+        **{event: mngr_hooks[event] for event in ("Interrupt", "PermissionRequest", "PostToolUse")},
+    }
+    assert list(rebuilt_hooks)[:5] == ["SessionStart", "UserPromptSubmit", "Stop", "Notification", "PreToolUse"]
 
 
 # read_codex_config (host-backed)

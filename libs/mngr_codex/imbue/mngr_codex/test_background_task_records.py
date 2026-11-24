@@ -22,8 +22,10 @@ from imbue.mngr_codex.codex_config import TURN_HOOK_SCRIPT_NAME
 from imbue.mngr_codex.resources.record_background_tasks import RECORD_DIR_NAME
 from imbue.mngr_codex.resources.record_background_tasks import pass_lock_path
 from imbue.mngr_codex.resources.record_background_tasks import sync_records
+from imbue.mngr_codex.resources.record_background_tasks import trust_hooks
 from imbue.mngr_codex.resources.testing import FakeCodexAppServer
 from imbue.mngr_codex.resources.testing import codex_background_terminal
+from imbue.mngr_codex.resources.testing import codex_hook
 from imbue.mngr_codex.resources.testing import codex_thread
 from imbue.mngr_codex.resources.testing import provision_commands_dir
 from imbue.mngr_codex.resources.testing import serving_fake_codex_app_server
@@ -281,3 +283,100 @@ def test_the_stop_after_another_stop_hook_blocked_rewrites_the_records(tmp_path:
     assert records_while_continuing == {f"task-{_TERMINAL}": "kind:SHELL native_type:backgroundTerminals\n"}
     assert _active(state_dir) == f"{_TURN}\n"
     assert _record_kinds(state_dir) == {f"task-{_SECOND_TERMINAL}": "kind:SHELL native_type:backgroundTerminals\n"}
+
+
+_HOOKS_FILE: Final[str] = "/state/plugin/codex/home/hooks.json"
+_NEW_HOOK: Final[dict[str, Any]] = codex_hook(f"{_HOOKS_FILE}:user_prompt_submit:0:1", "untrusted")
+_CHANGED_HOOK: Final[dict[str, Any]] = codex_hook("/work/.codex/hooks.json:pre_tool_use:0:0", "modified")
+_REVIEWED_HOOKS: Final[tuple[dict[str, Any], ...]] = (
+    codex_hook(f"{_HOOKS_FILE}:user_prompt_submit:0:0", "trusted"),
+    codex_hook("/etc/codex/managed_config.toml:stop:0:0", "managed"),
+)
+
+
+def _hooks_list_reply(*hooks: dict[str, Any]) -> dict[str, Any]:
+    return {"result": {"data": [{"cwd": "/work", "hooks": list(hooks), "warnings": [], "errors": []}]}}
+
+
+def _trusting_app_server(cwd: Path, hooks_list_reply: dict[str, Any]) -> FakeCodexAppServer:
+    """An app-server listing ``hooks_list_reply`` for ``cwd`` that takes only the trust of the new and changed hooks."""
+    trust = {hook["key"]: {"trusted_hash": hook["currentHash"]} for hook in (_NEW_HOOK, _CHANGED_HOOK)}
+    return FakeCodexAppServer(
+        replies_by_method={
+            "hooks/list": hooks_list_reply,
+            "config/batchWrite": {"result": {"status": "ok", "version": "sha256:1", "filePath": "/h/config.toml"}},
+        },
+        expected_params_by_method={
+            "hooks/list": {"cwds": [str(cwd)]},
+            "config/batchWrite": {
+                "edits": [{"keyPath": "hooks.state", "value": trust, "mergeStrategy": "upsert"}],
+                "reloadUserConfig": True,
+            },
+        },
+    )
+
+
+def test_trusting_hooks_writes_the_trust_codexs_review_would_for_each_new_or_changed_hook(
+    short_socket_path: Path, tmp_path: Path
+) -> None:
+    server = _trusting_app_server(tmp_path, _hooks_list_reply(*_REVIEWED_HOOKS, _NEW_HOOK, _CHANGED_HOOK))
+
+    with serving_fake_codex_app_server(short_socket_path, server):
+        outcome = trust_hooks(short_socket_path, tmp_path)
+
+    assert outcome == f"trusted: {_NEW_HOOK['key']} {_CHANGED_HOOK['key']}"
+
+
+def test_trusting_hooks_writes_nothing_when_no_hook_needs_review(short_socket_path: Path, tmp_path: Path) -> None:
+    server = FakeCodexAppServer(replies_by_method={"hooks/list": _hooks_list_reply(*_REVIEWED_HOOKS)})
+
+    with serving_fake_codex_app_server(short_socket_path, server):
+        outcome = trust_hooks(short_socket_path, tmp_path)
+
+    assert outcome == "trusted: none"
+
+
+_UNTRUSTABLE_REPLIES: Final[dict[str, dict[str, Any]]] = {
+    "listing_error": {"hooks/list": {"error": {"code": -32600, "message": "config failed to load"}}},
+    "unknown_listing_shape": {"hooks/list": {"result": {"data": {"hooks": []}}}},
+    "unknown_hook_shape": {"hooks/list": _hooks_list_reply({"key": "k", "trustStatus": "untrusted"})},
+    "write_error": {
+        "hooks/list": _hooks_list_reply(_NEW_HOOK),
+        "config/batchWrite": {"error": {"code": -32600, "message": "version conflict"}},
+    },
+}
+
+
+@pytest.mark.parametrize("replies", list(_UNTRUSTABLE_REPLIES.values()), ids=list(_UNTRUSTABLE_REPLIES))
+def test_trusting_hooks_reports_a_failed_call_unchanged(
+    replies: dict[str, dict[str, Any]], short_socket_path: Path, tmp_path: Path
+) -> None:
+    with serving_fake_codex_app_server(short_socket_path, FakeCodexAppServer(replies_by_method=replies)):
+        outcome = trust_hooks(short_socket_path, tmp_path)
+
+    assert outcome.startswith("unchanged: ")
+
+
+def test_trusting_hooks_with_nothing_listening_reports_it_unchanged(short_socket_path: Path, tmp_path: Path) -> None:
+    assert trust_hooks(short_socket_path, tmp_path) == f"unchanged: nothing listens on {short_socket_path}"
+
+
+def test_the_launch_step_trusts_the_hooks_codex_lists_for_its_working_directory(tmp_path: Path) -> None:
+    state_dir = tmp_path / "agent"
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    provision_commands_dir(state_dir, [RECORD_BACKGROUND_TASKS_SCRIPT_NAME])
+    server = _trusting_app_server(work_dir.resolve(), _hooks_list_reply(_NEW_HOOK, _CHANGED_HOOK))
+
+    with serving_fake_codex_app_server_for_agent(state_dir, server):
+        result = subprocess.run(
+            ["python3", str(state_dir / "commands" / RECORD_BACKGROUND_TASKS_SCRIPT_NAME), "--trust-hooks"],
+            cwd=work_dir,
+            env={**os.environ, "MNGR_AGENT_STATE_DIR": str(state_dir)},
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+
+    assert result.stdout == f"trusted: {_NEW_HOOK['key']} {_CHANGED_HOOK['key']}\n"

@@ -1,0 +1,5 @@
+`mngr upgrade` covers codex agents. It rewrites the agent's `commands/` scripts and mngr's entries in its `hooks.json`, keeping every other hook and its `config.toml` (options and hook trust); the common-transcript scripts are rewritten only where the agent has them. An idle agent restarts and resumes its conversation. The upgrade fails at `ready` when the restarted agent's launch does not trust its hooks, or when, on a local host, its TUI does not open its conversation in time.
+
+- Every codex launch, on any host, trusts the hooks codex lists as new or changed in the work dir before codex's TUI starts, with the app-server calls of its review's "Trust all and continue", so codex no longer shows "Hooks need review" after a restart. This covers the repo's `.codex/hooks.json` too, which the agent already ran unreviewed. A create on a local host no longer picks that option on codex's screen; it fails when this step does not trust the hooks.
+
+- An agent whose launch command does not do that, which is every codex agent created before this change, is skipped until `mngr create NAME --reuse --update` re-creates it.

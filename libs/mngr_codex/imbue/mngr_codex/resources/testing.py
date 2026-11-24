@@ -252,6 +252,22 @@ def codex_thread(
     }
 
 
+def codex_hook(key: str, trust_status: str) -> dict[str, Any]:
+    """One hook of codex 0.172.0's ``hooks/list``, trimmed to the fields that vary here."""
+    return {
+        "key": key,
+        "eventName": "userPromptSubmit",
+        "handlerType": "command",
+        "command": 'bash "$MNGR_AGENT_STATE_DIR/commands/codex_turn_hook.sh" UserPromptSubmit',
+        "sourcePath": key.split(":", 1)[0],
+        "source": "user",
+        "enabled": True,
+        "isManaged": trust_status == "managed",
+        "currentHash": f"sha256:{key.rsplit('/', 1)[-1]}",
+        "trustStatus": trust_status,
+    }
+
+
 def codex_background_terminal(item_id: str, command: str = "sleep 47213") -> dict[str, Any]:
     """One entry of codex 0.163.0's ``thread/backgroundTerminals/list``."""
     return {
@@ -269,18 +285,23 @@ class FakeCodexAppServer(FrozenModel):
     """Answers the requests of one codex app-server client: each loaded thread, and each thread's background terminals.
 
     Each reply follows an ``account/updated`` notification. A reply in ``replies_by_method`` replaces the one built
-    from the listing; ``page_size`` splits each list into pages; ``is_framing_varied`` sends each reply after a ping,
-    in three fragments; ``is_silent`` never replies.
+    from the listing; a request whose params differ from its entry in ``expected_params_by_method`` gets an error;
+    ``page_size`` splits each list into pages; ``is_framing_varied`` sends each reply after a ping, in three fragments;
+    ``is_silent`` never replies.
     """
 
     threads: tuple[Mapping[str, Any], ...] = ()
     background_terminals: Mapping[str, tuple[Mapping[str, Any], ...]] = Field(default_factory=dict)
     replies_by_method: Mapping[str, Mapping[str, Any]] = Field(default_factory=dict)
+    expected_params_by_method: Mapping[str, Mapping[str, Any]] = Field(default_factory=dict)
     page_size: int | None = None
     is_framing_varied: bool = False
     is_silent: bool = False
 
     def answer(self, method: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
+        expected_params = self.expected_params_by_method.get(method)
+        if expected_params is not None and params != expected_params:
+            return {"error": {"code": -32602, "message": f"unexpected {method} params {json.dumps(params)}"}}
         if method in self.replies_by_method:
             return self.replies_by_method[method]
         if method == "initialize":

@@ -9,6 +9,30 @@ support for the OpenAI Codex CLI (the Rust `codex` binary) as a first-class mngr
 `mngr stop` then `mngr start` resumes the prior conversation. One `codex` login
 authenticates every agent (the per-agent auth is shared with `~/.codex`).
 
+`mngr upgrade <name>` gives a codex agent that an older mngr created this mngr's scripts and
+hooks, restarting it if idle; it resumes the same conversation. It leaves the agent's
+`config.toml` (its options, and the hook trust codex records there) and every hook in
+`hooks.json` that does not run one of mngr's scripts as they are. It skips an agent whose
+launch does not trust codex's hooks before codex's TUI starts (see Hook trust) until
+`mngr create <name> --reuse --update` re-creates it. The upgrade is `ready` once the
+restarted agent's launch has trusted its hooks and, on a local host, its TUI
+has opened its conversation in codex's app-server; otherwise it fails at `ready`.
+
+## Hook trust
+
+codex runs a hook only once it is trusted, and a resumed codex TUI first shows "Hooks need
+review" for every hook that is new or changed since it was trusted. Before the TUI starts,
+each launch of the agent trusts every hook codex lists as new or changed in the work dir, with
+the same two app-server calls the review's "Trust all and continue" makes, so the review never
+shows and the hooks an upgrade rewrote run. That includes new or changed hooks in the repo's
+`.codex/hooks.json`, which creating the agent already let codex run unreviewed
+(`--dangerously-bypass-hook-trust`, consented to with the repo's trust). The step runs
+`python3` on the agent's host and writes its outcome to `hook_trust.log` in the agent's state
+dir. When it fails, `mngr upgrade` fails at `ready` with that outcome, as does `mngr create` on
+a local host, whose TUI resumes the conversation mngr started; codex then reviews any new or
+changed hook in the agent's terminal until you pick an option. On a host without `python3` the
+step can never run, so every upgrade that restarts the agent fails at `ready`.
+
 ## Configuration
 
 Set fields under an `[agent_types.codex]` table in your mngr config, or pass overrides.
@@ -95,10 +119,9 @@ With `auto_allow_permissions = true` codex never asks for an approval.
   seconds after it.
 - Work left running after a turn does not count as the agent's activity, so it does not keep a
   docker, lima, vps or modal host with idle detection on from stopping.
-- codex runs mngr's hooks only once they are trusted. mngr trusts them when it creates an
-  agent on a local host. On a remote host, codex shows "Hooks need review" in the agent's
-  terminal after its first restart. Until someone picks "Trust all" there, turns still read
-  `RUNNING` and `WAITING` from the rollout, but an approval or a question reads `RUNNING`, and
-  work a turn leaves running reads `WAITING` for up to 5 seconds after it.
 - An agent created before the turn hook reads its turn from codex's app-server instead, on a
   local host only, until it is re-provisioned (`mngr create <name> --reuse --update`).
+- An agent whose launch does not trust its hooks, which `mngr upgrade` skips, shows codex's
+  "Hooks need review" after a restart (on a remote host after its first restart, on a local
+  host once a hook is new or changed), and those hooks do not run until someone picks "Trust
+  all and continue" there or `mngr create <name> --reuse --update` re-creates it.

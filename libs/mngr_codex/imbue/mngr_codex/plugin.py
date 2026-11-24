@@ -43,13 +43,16 @@ daemon over its unix socket -- an unambiguous programmatic signal, unlike the
 lazy ``SessionStart`` hook (openai/codex issue #15269) the old glyph poll had to
 work around. See ``wait_for_ready_signal`` / ``_probe_app_server_ready``.
 
-Hook trust: codex requires command hooks to be trusted before they run. mngr
-passes ``--dangerously-bypass-hook-trust`` so its own hooks run
-without a per-hash trust dance. Because trusting the workspace also lets codex
-load any repo-local ``.codex/hooks.json``, that bypass is consent-gated together
-with workspace trust (see ``_ensure_source_repo_trusted``) -- mngr never runs an
-agent on untrusted code, or bypasses codex's hook review, without the user's
-say-so.
+Hook trust: codex runs a command hook only once it is trusted, and a resumed TUI
+first stops on a review of every hook that is new or changed since it was trusted.
+Before the TUI starts, each launch runs ``record_background_tasks.py --trust-hooks``,
+which makes the two app-server calls the review's "Trust all and continue" makes
+(``hooks/list``, then a ``config/batchWrite`` of ``hooks.state``), so the review never
+shows. Because trusting the workspace also lets codex load any repo-local
+``.codex/hooks.json``, that trust, like ``--dangerously-bypass-hook-trust``, is
+consent-gated together with workspace trust (see ``_ensure_source_repo_trusted``) --
+mngr never runs an agent on untrusted code, or bypasses codex's hook review, without
+the user's say-so.
 
 Resume: ``mngr stop``/``start`` resumes the prior conversation over the daemon
 (the client's ``thread/resume`` on the persisted app-server thread id; codex's
@@ -67,6 +70,7 @@ import json
 import os
 import re
 import shlex
+import time
 from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
@@ -90,14 +94,18 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
-from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
-from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.installation import VersionMismatchPolicy
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.installation import verify_pinned_cli_version
 from imbue.mngr.agents.output_styles import read_output_style_files
 from imbue.mngr.agents.output_styles import resolve_output_style
+from imbue.mngr.agents.upgrade import AGENT_DATA_RELATIVE_PATH
+from imbue.mngr.agents.upgrade import build_command_script_files
+from imbue.mngr.agents.upgrade import build_shared_shell_lib_files
+from imbue.mngr.agents.upgrade import is_hooks_value_well_formed
+from imbue.mngr.agents.upgrade import parse_json_object_input
+from imbue.mngr.agents.upgrade import read_stored_launch_command
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import build_transcript_preserved_items
@@ -113,6 +121,7 @@ from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.field_markers import SettingsPatchField
 from imbue.mngr.errors import AgentStartError
+from imbue.mngr.errors import InvalidUpgradeInputError
 from imbue.mngr.errors import MessageDeliveredButBlockedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
@@ -133,8 +142,10 @@ from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.agent import HasVersionManagementMixin
 from imbue.mngr.interfaces.agent import InteractiveAgentMixin
+from imbue.mngr.interfaces.agent import UpgradableAgentMixin
 from imbue.mngr.interfaces.agent import read_idle_since_for_compaction
 from imbue.mngr.interfaces.data_types import FileType
+from imbue.mngr.interfaces.data_types import HarnessFileSpec
 from imbue.mngr.interfaces.data_types import HostLifecycleSnapshot
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
@@ -195,6 +206,7 @@ from imbue.mngr_codex.codex_config import is_turn_hook_installed
 from imbue.mngr_codex.codex_config import merge_project_trust
 from imbue.mngr_codex.codex_config import parse_codex_cli_version
 from imbue.mngr_codex.codex_config import read_codex_config
+from imbue.mngr_codex.codex_config import rebuild_codex_hooks_keeping_other_entries
 from imbue.mngr_codex.codex_config import rewrite_rollout_record_cwd
 from imbue.mngr_codex.codex_config import serialize_codex_config
 from imbue.mngr_codex.codex_config import serialize_codex_hooks
@@ -202,6 +214,7 @@ from imbue.mngr_codex.compaction import CODEX_DEFAULT_CACHE_TTL_MINUTES
 from imbue.mngr_codex.compaction import get_agent_context_tokens
 from imbue.mngr_codex.compaction import get_agent_idle_since
 from imbue.mngr_codex.compaction import record_agent_compacted
+from imbue.mngr_codex.resources.record_background_tasks import HOOKS_TRUSTED_OUTCOME_PREFIX
 
 # codex approval policy that suppresses every interactive approval dialog while
 # keeping the sandbox on (the right unattended default). Applied only when
@@ -237,15 +250,8 @@ _SESSION_NAMING_APP_SERVER_WINDOW_SPAWN_PATTERN: Final[re.Pattern[str]] = re.com
     rf"tmux new-window -d -t (?:'[^']*'|[^\s'\"$]+) -n {re.escape(shlex.quote(_APP_SERVER_WINDOW_NAME))}"
 )
 
-# Top-level flags the DAEMON needs so its hooks actually run. codex gates hooks behind a
-# feature flag that is OFF by default (``--enable hooks`` == ``-c features.hooks=true``), and
-# even enabled, a command hook stays "in review" (never fires) until trusted --
-# ``--dangerously-bypass-hook-trust`` runs enabled hooks without that persisted trust. Turns run
-# in the daemon, so this is where the hooks fire; without both flags the transcript marker and the
-# PreToolUse safety guards silently never run (verified live: a daemon launched with both fires
-# SessionStart / UserPromptSubmit / PreToolUse; a bare ``codex app-server`` fires nothing). Both
-# are top-level flags, placed before the ``app-server`` subcommand.
-_DAEMON_HOOK_FLAGS: Final[str] = "--dangerously-bypass-hook-trust --enable hooks"
+# Turns on codex's hooks, off by default, in the daemon, where turns and so hooks run; each hook fires once trusted.
+_DAEMON_HOOK_FLAGS: Final[str] = "--enable hooks"
 
 # The primary window waits (bounded) for the daemon's unix socket to appear before
 # launching ``codex --remote`` against it, so the two windows' start order does not
@@ -308,25 +314,52 @@ def _app_server_client_version() -> str:
 # How long the readiness poll waits between connect+initialize attempts.
 _READY_POLL_INTERVAL_SECONDS: Final[float] = 0.25
 
-# The stable header of codex's "Hooks need review" screen. The ``codex resume <id> --remote`` TUI
-# stops on it and ignores ``--dangerously-bypass-hook-trust`` (a codex limitation of the resume
-# path), so until it is cleared the daemon's hooks stay untrusted and NEVER fire -- on typed OR
-# programmatic turns (verified live). ``_clear_hook_trust_prompt`` selects "Trust all and continue".
-_HOOK_TRUST_PROMPT_MARKER: Final[str] = "Hooks need review"
-
-# How long to wait for the ``--remote`` TUI to render the hook-trust prompt after it launches
-# (the primary window resumes only after mngr has established the root, then codex renders in ~1-2s).
-# A no-show within this window means there is nothing to clear (already trusted, or not that screen).
-_HOOK_TRUST_PROMPT_TIMEOUT_SECONDS: Final[float] = 15.0
-
-# The composer placeholder the ``--remote`` TUI renders once it has resumed the root thread. Absent
-# while the TUI is still on the hook-trust screen or mid-resume, so its presence is the signal that
-# the resume is over (``_wait_for_tui_attached``).
+# What the ``--remote`` TUI shows in its composer, and while its ``thread/resume`` is still in flight.
 _TUI_COMPOSER_MARKER: Final[str] = "Ask Codex to do anything"
+_TUI_RESUMING_MARKER: Final[str] = "Resuming session"
 
-# How long to wait for the TUI to attach after the hook-trust prompt was cleared. The resume takes
-# well under a second; a no-show is logged, not fatal.
+# How long create waits for the TUI to attach; a no-show is logged, not fatal.
 _TUI_ATTACH_TIMEOUT_SECONDS: Final[float] = 15.0
+
+# The start of the stored launch command's backgrounded supervisor launch.
+_BACKGROUND_TASKS_INVOCATION: Final[str] = f"( bash $MNGR_AGENT_STATE_DIR/commands/{BACKGROUND_TASKS_SCRIPT_NAME}"
+
+# The launch step that trusts the hooks codex would ask to review, run before the TUI starts.
+_TRUST_HOOKS_INVOCATION: Final[str] = (
+    f'python3 "$MNGR_AGENT_STATE_DIR/commands/{RECORD_BACKGROUND_TASKS_SCRIPT_NAME}" --trust-hooks'
+)
+_HOOK_TRUST_LOG_FILENAME: Final[str] = "hook_trust.log"
+
+# The scripts every codex agent gets in its commands/ dir besides its raw-transcript streamer.
+_ALWAYS_PROVISIONED_SCRIPT_NAMES: Final[tuple[str, ...]] = (
+    BACKGROUND_TASKS_SCRIPT_NAME,
+    RECORD_SESSION_POINTERS_SCRIPT_NAME,
+    TURN_HOOK_SCRIPT_NAME,
+    RECORD_BACKGROUND_TASKS_SCRIPT_NAME,
+)
+
+# What an upgrade reads and writes, relative to the agent's state dir.
+_HOOKS_RELATIVE_PATH: Final[Path] = get_codex_hooks_path(get_codex_home(Path()))
+_COMMON_TRANSCRIPT_SCRIPT_RELATIVE_PATHS: Final[tuple[Path, ...]] = tuple(
+    Path("commands") / name for name in (COMMON_TRANSCRIPT_SCRIPT_NAME, COMMON_TRANSCRIPT_CONVERT_SCRIPT_NAME)
+)
+_HOOKS_FILE_MODE: Final[str] = "0644"
+
+
+@pure
+def _parse_live_hooks_file(hooks_content: str | None) -> dict[str, Any]:
+    """The body of the agent's ``hooks.json``, with a ``hooks`` value that can be rebuilt; empty when the file is missing."""
+    live_body = parse_json_object_input(_HOOKS_RELATIVE_PATH, hooks_content)
+    if not is_hooks_value_well_formed(live_body.get("hooks", {})):
+        raise InvalidUpgradeInputError(
+            f"{_HOOKS_RELATIVE_PATH} has a `hooks` value that does not map each event to a list of hook groups"
+        )
+    return live_body
+
+
+def _seconds_until(deadline: float) -> float:
+    """The seconds left before ``deadline`` on the ``time.monotonic`` clock, or 0 once it has passed."""
+    return max(0.0, deadline - time.monotonic())
 
 
 def _probe_app_server_ready(socket_path: Path) -> bool:
@@ -532,6 +565,7 @@ class CodexAgent(
     HasVersionManagementMixin,
     HasAutoInstallMixin,
     HasCompactionMixin,
+    UpgradableAgentMixin,
 ):
     """Agent implementation for the OpenAI Codex CLI (``codex``), driven over the app-server.
 
@@ -679,59 +713,91 @@ class CodexAgent(
         start/resume. The signature is unchanged from ``AgentInterface``. On create,
         once the daemon is ready, mngr establishes+materializes+persists the ONE root
         conversation (see :meth:`_establish_root_conversation`) -- the app-server
-        analogue of the session file a TUI agent gets for free at launch.
+        analogue of the session file a TUI agent gets for free at launch. On a local host,
+        where the TUI resumes that conversation, it then waits for the launch's hook trust
+        (raising AgentStartError unless the hooks were trusted, within the same ``timeout``
+        as the daemon) and for the TUI to attach (see :meth:`_wait_for_tui_attached`).
         """
         start_action()
         if is_readiness_awaited:
-            self._wait_for_app_server_ready(timeout)
+            timeout_seconds = timeout if timeout is not None else self.get_ready_timeout_seconds()
+            deadline = time.monotonic() + timeout_seconds
+            self._wait_for_app_server_ready(timeout_seconds)
             self._establish_root_conversation()
-            self._clear_hook_trust_prompt()
+            if self.host.is_local:
+                self._wait_for_hooks_trusted(_seconds_until(deadline))
+                self._wait_for_tui_attached()
 
-    def _clear_hook_trust_prompt(self) -> None:
-        """Clear codex's one-time "Hooks need review" prompt on the ``--remote`` TUI so hooks run.
+    def get_ready_signal_paths(self) -> tuple[Path, ...]:
+        return (Path(_HOOK_TRUST_LOG_FILENAME),)
 
-        The visible ``codex resume <id> --remote`` TUI stops on a "Hooks need review" screen and
-        ignores ``--dangerously-bypass-hook-trust`` (a codex limitation of the resume path). Turns
-        run in the daemon, but until this screen is cleared the daemon's hooks stay UNTRUSTED and
-        never fire -- so the PreToolUse workspace safety guards (and the session-pointer recorder)
-        are inert on every turn, typed or programmatic (verified live). Selecting "Trust all and
-        continue" clears it AND persists the trust under ``CODEX_HOME``, so this is a one-time action
-        at create: ``start`` / ``connect`` never see the screen again. It is consent-consistent with
-        the workspace trust the user already granted (which is what gates the bypass flag), so mngr
-        does not re-prompt. Best-effort: no screen within the timeout (already trusted, or the TUI
-        never rendered it) is a no-op, and a re-check right before the keypress keeps a stray "2"
-        from ever landing in the composer as a message. Having pressed, this returns only once the
-        freed TUI has finished attaching (see :meth:`_wait_for_tui_attached`), so the create's
-        initial message does not race the TUI's resume; a keypress that did not go out leaves the
-        screen up, so there is no attach to wait for.
-        """
-        if not self.host.is_local:
-            return
+    def wait_for_ready_after_restart(self, timeout: float) -> None:
+        """The daemon, the launch's hook trust, then on a local host the TUI's conversation loaded in the daemon, all within ``timeout``; raises AgentStartError."""
+        deadline = time.monotonic() + timeout
+        with log_span("Waiting for codex's app-server, hook trust and TUI after a restart (timeout={}s)", timeout):
+            self._wait_for_app_server_ready(timeout)
+            self._wait_for_hooks_trusted(_seconds_until(deadline))
+            if self.host.is_local:
+                self._wait_for_tui_conversation_loaded(_seconds_until(deadline))
+
+    def _wait_for_hooks_trusted(self, timeout: float) -> None:
+        """Wait for the launch's hook trust step to log its outcome; raises AgentStartError unless its last line says it trusted the hooks."""
         try:
             wait_for(
-                self._is_on_hook_trust_prompt,
-                timeout=_HOOK_TRUST_PROMPT_TIMEOUT_SECONDS,
+                lambda: self._read_hook_trust_log() != "",
+                timeout=timeout,
                 poll_interval=_READY_POLL_INTERVAL_SECONDS,
-                error_message="codex hook-trust prompt did not appear",
+                error_message="codex's hook trust step logged no outcome",
             )
-        except TimeoutError:
-            return
-        if not self._is_on_hook_trust_prompt():
-            return
-        if self._send_hook_trust_keypress():
-            self._wait_for_tui_attached()
+        except TimeoutError as exc:
+            raise AgentStartError(
+                str(self.name),
+                f"codex's hook trust step logged no outcome to {_HOOK_TRUST_LOG_FILENAME} in {timeout:.0f}s",
+            ) from exc
+        hook_trust_log = self._read_hook_trust_log()
+        if not hook_trust_log.splitlines()[-1].startswith(HOOKS_TRUSTED_OUTCOME_PREFIX):
+            raise AgentStartError(str(self.name), f"codex's hook trust step did not trust its hooks: {hook_trust_log}")
+
+    def _read_hook_trust_log(self) -> str:
+        """The trust step's output, which the launch moves into place only once the step has finished; empty until then."""
+        try:
+            return self.host.read_text_file(self._get_agent_dir() / _HOOK_TRUST_LOG_FILENAME).strip()
+        except FileNotFoundError:
+            return ""
+
+    def _wait_for_tui_conversation_loaded(self, timeout: float) -> None:
+        """Wait until the daemon has a thread loaded: in a daemon that just started, only the TUI opening its conversation loads one."""
+        try:
+            wait_for(
+                self._is_any_thread_loaded,
+                timeout=timeout,
+                poll_interval=_READY_POLL_INTERVAL_SECONDS,
+                error_message="codex's TUI did not open its conversation",
+            )
+        except TimeoutError as exc:
+            raise AgentStartError(
+                str(self.name), f"codex's TUI did not open its conversation within {timeout:.0f}s of its app-server"
+            ) from exc
+
+    def _is_any_thread_loaded(self) -> bool:
+        try:
+            client = self._open_app_server_client()
+        except SendMessageError as exc:
+            logger.debug("codex app-server of {} not reachable to list its loaded threads: {}", self.name, exc)
+            return False
+        try:
+            return bool(client.thread_loaded_list())
+        except (CodexAppServerError, OSError, WebSocketException) as exc:
+            logger.debug("could not list the loaded threads of codex agent {}: {}", self.name, exc)
+            return False
+        finally:
+            client.close()
 
     def _wait_for_tui_attached(self, timeout: float = _TUI_ATTACH_TIMEOUT_SECONDS) -> None:
-        """Wait for the ``--remote`` TUI to finish resuming the root thread once the hook-trust screen is cleared.
+        """Wait for the ``--remote`` TUI to finish resuming the root thread mngr established; a no-show is logged.
 
-        Freed from the screen, the TUI sends ``thread/resume`` with its own config overrides, and
-        the app-server answers a resume whose overrides differ from the loaded thread's by shutting
-        that thread down and rebuilding it from the rollout, when the thread is idle and
-        unsubscribed at that instant. A ``turn/start`` that lands inside that window is aborted by
-        the shutdown (the turn ends "interrupted" a few ms in; verified live), so the initial
-        message must not go out until the resume is over. The composer placeholder appears only
-        once the TUI has attached, so the pane is the signal. A no-show within the timeout is
-        logged and not fatal: the send then proceeds as it did before.
+        The TUI's ``thread/resume`` rebuilds that idle thread, and a ``turn/start`` that lands meanwhile is aborted,
+        so the initial message waits until the pane shows the resume is over.
         """
         try:
             wait_for(
@@ -742,40 +808,15 @@ class CodexAgent(
             )
         except TimeoutError:
             logger.warning(
-                "codex TUI for {} did not show its composer within {:.0f}s of the hook-trust prompt being "
-                "cleared; sending the initial message anyway",
+                "codex TUI for {} did not show its composer within {:.0f}s; sending the initial message anyway",
                 self.name,
                 timeout,
             )
 
-    def _is_on_hook_trust_prompt(self) -> bool:
-        """Whether the agent's primary (``--remote`` TUI) window is showing the hook-trust screen."""
-        pane = self.capture_pane_content()
-        return pane is not None and _HOOK_TRUST_PROMPT_MARKER in pane
-
     def _is_tui_attached(self) -> bool:
-        """Whether the primary window shows the attached TUI's composer, with the hook-trust screen gone."""
+        """Whether the primary window shows the TUI's composer with its resume over."""
         pane = self.capture_pane_content()
-        return pane is not None and _HOOK_TRUST_PROMPT_MARKER not in pane and _TUI_COMPOSER_MARKER in pane
-
-    def _send_hook_trust_keypress(self) -> bool:
-        """Select "Trust all and continue" on the hook-trust screen (a test seam); whether the keypress went out.
-
-        ``2`` selects the "Trust all and continue" option, ``Enter`` confirms (verified live: this
-        clears the screen and makes every hook fire on subsequent programmatic and typed turns).
-        """
-        target_arg = self.tmux_target.as_shell_arg()
-        result = self.host.execute_stateful_command(f"tmux send-keys -t {target_arg} 2 Enter")
-        if result.success:
-            logger.info("cleared codex hook-trust prompt for {} (hooks now trusted for this agent)", self.name)
-        else:
-            logger.warning(
-                "could not clear codex hook-trust prompt for {} ({}); the safety hooks may stay "
-                "untrusted until a human selects 'Trust all' in the terminal",
-                self.name,
-                result.stderr or result.stdout,
-            )
-        return result.success
+        return pane is not None and _TUI_COMPOSER_MARKER in pane and _TUI_RESUMING_MARKER not in pane
 
     def _establish_root_conversation(self) -> None:
         """Establish, materialize, and persist this agent's ONE root conversation (create only).
@@ -876,7 +917,7 @@ class CodexAgent(
         self.host.write_text_file(self._get_root_session_file_path(), thread_id)
         self._write_persisted_thread_id(thread_id)
 
-    def _wait_for_app_server_ready(self, timeout: float | None) -> None:
+    def _wait_for_app_server_ready(self, timeout: float) -> None:
         """Poll until the daemon is ready, or raise ``AgentStartError`` on timeout.
 
         On a local host readiness connects to the unix socket directly and completes
@@ -884,17 +925,16 @@ class CodexAgent(
         remote host (where the mngr process cannot reach the agent host's unix socket)
         it falls back to confirming the socket is present over the host shell.
         """
-        timeout_seconds = timeout if timeout is not None else self.get_ready_timeout_seconds()
         socket_path = get_codex_app_server_socket_path(self._get_codex_home())
         try:
             wait_for(
                 lambda: self._is_app_server_ready(socket_path),
-                timeout=timeout_seconds,
+                timeout=timeout,
                 poll_interval=_READY_POLL_INTERVAL_SECONDS,
-                error_message=f"codex app-server did not become ready within {timeout_seconds:.0f}s",
+                error_message=f"codex app-server did not become ready within {timeout:.0f}s",
             )
         except TimeoutError as exc:
-            reason = f"codex app-server did not become ready within {timeout_seconds:.0f}s (socket {socket_path})"
+            reason = f"codex app-server did not become ready within {timeout:.0f}s (socket {socket_path})"
             raise AgentStartError(str(self.name), reason) from exc
 
     def _is_app_server_ready(self, socket_path: Path) -> bool:
@@ -1299,23 +1339,59 @@ class CodexAgent(
         self.reconcile_installed_version(host, mngr_ctx)
         self._provision_codex_home(host, user_codex_home, canonical_work_dir)
         with mngr_ctx.concurrency_group.make_concurrency_group("codex_provisioning") as concurrency_group:
-            provision_raw_transcript_scripts(self, host, self._get_agent_dir(), concurrency_group)
-            maybe_provision_common_transcript_scripts(self, host, self._get_agent_dir(), concurrency_group)
             provision_scripts_to_commands_dir(
                 host,
                 self._get_agent_dir(),
-                {
-                    BACKGROUND_TASKS_SCRIPT_NAME: _load_codex_resource_script(BACKGROUND_TASKS_SCRIPT_NAME),
-                    RECORD_SESSION_POINTERS_SCRIPT_NAME: _load_codex_resource_script(
-                        RECORD_SESSION_POINTERS_SCRIPT_NAME
-                    ),
-                    TURN_HOOK_SCRIPT_NAME: _load_codex_resource_script(TURN_HOOK_SCRIPT_NAME),
-                    RECORD_BACKGROUND_TASKS_SCRIPT_NAME: _load_codex_resource_script(
-                        RECORD_BACKGROUND_TASKS_SCRIPT_NAME
-                    ),
-                },
+                self._build_command_scripts(is_common_transcript_written=self.is_common_transcript_enabled),
                 concurrency_group,
             )
+
+    def _build_command_scripts(self, *, is_common_transcript_written: bool) -> dict[str, str]:
+        """The scripts mngr generates for this agent in its ``commands/`` dir, by name.
+
+        codex_background_tasks.sh launches the common-transcript converter only when it finds
+        it there, so an agent with the option off gets no converter.
+        """
+        scripts = {name: _load_codex_resource_script(name) for name in _ALWAYS_PROVISIONED_SCRIPT_NAMES}
+        scripts.update(self.get_raw_transcript_scripts())
+        if is_common_transcript_written:
+            scripts.update(self.get_common_transcript_scripts())
+        return scripts
+
+    def get_upgrade_input_paths(self) -> tuple[Path, ...]:
+        return (AGENT_DATA_RELATIVE_PATH, _HOOKS_RELATIVE_PATH, *_COMMON_TRANSCRIPT_SCRIPT_RELATIVE_PATHS)
+
+    def get_upgrade_unsupported_detail(self, input_content_by_path: Mapping[Path, str | None]) -> str | None:
+        """None when the stored launch command starts the supervisor, the app-server with hooks on at the socket this mngr connects to, and the hook trust step."""
+        stored_launch_command = read_stored_launch_command(input_content_by_path[AGENT_DATA_RELATIVE_PATH])
+        if (
+            _BACKGROUND_TASKS_INVOCATION in stored_launch_command
+            and self._build_daemon_invocation() in stored_launch_command
+            and _TRUST_HOOKS_INVOCATION in stored_launch_command
+        ):
+            return None
+        return (
+            "its launch command does not start mngr's background tasks, codex's app-server with hooks on at the "
+            "socket this mngr uses, and the step that trusts codex's hooks before its TUI"
+        )
+
+    def build_upgraded_files(self, input_content_by_path: Mapping[Path, str | None]) -> dict[Path, HarnessFileSpec]:
+        """mngr's shared libs and scripts, the common-transcript converter only where the agent has it, and ``hooks.json`` when mngr's entries in it differ."""
+        live_hooks_body = _parse_live_hooks_file(input_content_by_path[_HOOKS_RELATIVE_PATH])
+        command_scripts = self._build_command_scripts(
+            is_common_transcript_written=any(
+                input_content_by_path[path] is not None for path in _COMMON_TRANSCRIPT_SCRIPT_RELATIVE_PATHS
+            )
+        )
+        upgraded_files = {**build_shared_shell_lib_files(), **build_command_script_files(command_scripts)}
+        upgraded_hooks = rebuild_codex_hooks_keeping_other_entries(live_hooks_body.get("hooks", {}))
+        if upgraded_hooks == live_hooks_body.get("hooks"):
+            return upgraded_files
+        upgraded_hooks_content = serialize_codex_hooks({**live_hooks_body, "hooks": upgraded_hooks})
+        return {
+            **upgraded_files,
+            _HOOKS_RELATIVE_PATH: HarnessFileSpec(content=upgraded_hooks_content, mode=_HOOKS_FILE_MODE),
+        }
 
     def _build_developer_instructions(self, host: OnlineHostInterface) -> str | None:
         """Join this agent type's system-prompt additions into one blob, or None if there are none.
@@ -1643,13 +1719,15 @@ class CodexAgent(
         (pidfile-deduped, restart-on-death), so replaying the command on restart
         is safe.
         """
-        script_path = f"$MNGR_AGENT_STATE_DIR/commands/{BACKGROUND_TASKS_SCRIPT_NAME}"
-        return f"( bash {script_path} {PANE_SESSION_NAME_SHELL_EXPRESSION} ) &"
+        return f"{_BACKGROUND_TASKS_INVOCATION} {PANE_SESSION_NAME_SHELL_EXPRESSION} ) &"
+
+    def _build_daemon_invocation(self) -> str:
+        """The end of the daemon's command: its hook flags, the subcommand and the socket it listens on."""
+        socket_url = shlex.quote(f"unix://{get_codex_app_server_socket_path(self._get_codex_home())}")
+        return f"{_DAEMON_HOOK_FLAGS} app-server --listen {socket_url}"
 
     def upgrade_stored_command(self, command: CommandString) -> CommandString:
-        upgraded = upgrade_literal_session_name_argument(
-            command, f"( bash $MNGR_AGENT_STATE_DIR/commands/{BACKGROUND_TASKS_SCRIPT_NAME}"
-        )
+        upgraded = upgrade_literal_session_name_argument(command, _BACKGROUND_TASKS_INVOCATION)
         return CommandString(upgrade_app_server_window_spawn(upgraded))
 
     def assemble_command(
@@ -1669,11 +1747,13 @@ class CodexAgent(
            transcript supervisor (scoped to ``&`` so the foreground process is codex).
         2. ``mkdir -p <TUI-log dir>`` + ``cd <work_dir>`` -- ensure dirs, and codex's
            cwd becomes the (trusted) work dir.
-        3. ``{ <stamp-process-start>; rm -f <sock>; <spawn daemon window>; <wait for
-           sock>; env CODEX_HOME=<home> codex --remote unix://<sock>; }`` -- clean the
-           stale socket, spawn the daemon as the FOREGROUND process of a detached sidecar
+        3. ``{ <stamp-process-start>; rm -f <hook_trust.log>; rm -f <sock>; <spawn daemon
+           window>; <wait for sock>; <trust hooks>; env CODEX_HOME=<home> codex --remote
+           unix://<sock>; }`` -- clear the last launch's hook trust outcome and the stale
+           socket, spawn the daemon as the FOREGROUND process of a detached sidecar
            window (so ``tmux kill-session`` reaps it -- no orphan daemons, no leaked
-           sockets), wait (bounded) for the socket, then run the visible ``--remote`` TUI
+           sockets), wait (bounded) for the socket, trust the hooks codex would ask to review
+           (its output moved to ``hook_trust.log`` once it ends), then run the visible ``--remote`` TUI
            in the foreground (what ``connect``/open-terminal attaches to, what
            ``capture_pane_content`` reads, and what process detection matches -- still
            ``codex``).
@@ -1747,7 +1827,7 @@ class CodexAgent(
         daemon_log = shlex.quote(str(self._get_agent_dir() / "app_server.log"))
         daemon_cmd = (
             f"{{ {source_env_prefix}{cd_cmd} && exec {daemon_env} {base}{extra_str} "
-            f"{_DAEMON_HOOK_FLAGS} app-server --listen {socket_url} ; }} > {daemon_log} 2>&1"
+            f"{self._build_daemon_invocation()} ; }} > {daemon_log} 2>&1"
         )
         spawn_daemon_cmd = f"{_APP_SERVER_WINDOW_SPAWN_PREFIX} {shlex.quote(daemon_cmd)}"
 
@@ -1757,6 +1837,10 @@ class CodexAgent(
             f'[ "$__mngr_i" -lt {_SOCKET_WAIT_POLLS} ]; do sleep {_SOCKET_WAIT_INTERVAL_SECONDS}; '
             "__mngr_i=$((__mngr_i+1)); done"
         )
+        hook_trust_log = f'"{state}/{_HOOK_TRUST_LOG_FILENAME}"'
+        partial_hook_trust_log = f'"{state}/{_HOOK_TRUST_LOG_FILENAME}.partial"'
+        clear_hook_trust_log_cmd = f"rm -f {hook_trust_log}"
+        trust_hooks_cmd = f"{_TRUST_HOOKS_INVOCATION} > {partial_hook_trust_log} 2>&1; mv -f {partial_hook_trust_log} {hook_trust_log}"
         # Wait (bounded) for mngr to persist the root session id before the TUI launches, so the
         # visible window attaches to the ONE root conversation. On create, ``wait_for_ready_signal``
         # writes ``codex_root_session`` after the daemon is ready (which happens in parallel with
@@ -1776,14 +1860,8 @@ class CodexAgent(
         # only when there is genuinely no persisted root. Mirrors pi's ``pi --session <file>`` /
         # claude's ``--resume`` chain, so ``stop`` -> ``start`` returns to the same conversation.
         #
-        # ``--dangerously-bypass-hook-trust`` is what makes mngr's hooks actually run: codex parks
-        # newly-discovered command hooks as UNTRUSTED ("in review") until a human approves them in
-        # the TUI, and an untrusted hook never fires -- not for a typed turn and not for a
-        # programmatic (web/CLI) ``turn/start``. The daemon holds the hook engine, and this flag on
-        # the ``--remote`` client that drives it clears the review gate so the workspace's safety
-        # guards (PreToolUse: pipe/rebase blockers, the OOM + git-identity rewrite, the tk
-        # discipline guards) run on EVERY turn regardless of who sent it. Consent-gated: the flag
-        # only takes effect on a workspace the user has trusted (``[projects] trust_level``).
+        # ``--dangerously-bypass-hook-trust`` asks the daemon to run hooks without trust on the threads
+        # this TUI starts or resumes, but does not skip the startup review of a ``codex resume`` against it.
         remote_base = f"{home_env} {base}"
         remote_tail = f"--remote {socket_url} --dangerously-bypass-hook-trust"
         remote_cmd = (
@@ -1794,8 +1872,8 @@ class CodexAgent(
 
         return CommandString(
             f"{background_cmd} {mkdir_cmd} && {cd_cmd} "
-            f"&& {{ {process_started_cmd}; {prepare_socket_cmd}; "
-            f"{spawn_daemon_cmd}; {wait_for_socket_cmd}; {wait_for_root_id_cmd}; {remote_cmd} ; }}"
+            f"&& {{ {process_started_cmd}; {clear_hook_trust_log_cmd}; {prepare_socket_cmd}; "
+            f"{spawn_daemon_cmd}; {wait_for_socket_cmd}; {trust_hooks_cmd}; {wait_for_root_id_cmd}; {remote_cmd} ; }}"
         )
 
     def on_after_provisioning(
