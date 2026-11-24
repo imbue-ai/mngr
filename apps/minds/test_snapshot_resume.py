@@ -256,13 +256,6 @@ def _ensure_dockerd_after_snapshot_resume(snapshot_sandbox_dockerd: None) -> Non
     """
 
 
-# @pytest.mark.docker tells the host-side pytest resource guard that this
-# test's fixture chain invokes the `docker` CLI -- so the guard's PATH wrapper
-# expects (and tolerates) the call. The guard isn't actually installed inside
-# the snapshot-resumed offload sandbox where this test runs, but the
-# mark also satisfies the `test_prevent_hardcoded_guarded_binary`
-# ratchet, which inspects this test file's source from the local host
-# regardless of where the test ultimately executes.
 def _baked_mngr_host_dir(root_name: str, real_home: Path) -> Path:
     """Where the snapshot's desktop-side mngr host dir was baked.
 

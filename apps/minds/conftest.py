@@ -55,6 +55,7 @@ from imbue.mngr.utils.logging import suppress_warnings
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mngr.utils.testing import generate_test_environment_name
 from imbue.mngr.utils.testing import get_short_random_string
+from imbue.resource_guards.resource_guards import fixture_uses_resources
 
 # Point ``MINDS_RESTIC_BINARY`` at the bundled ``resources/restic/restic``
 # binary so restic_cli tests don't require a system-wide restic install.
@@ -205,6 +206,7 @@ def snapshot_container_states(snapshot_sandbox_dockerd: None) -> Mapping[str, Do
 
 
 @pytest.fixture(scope="session")
+@fixture_uses_resources("docker")
 def snapshot_sandbox_dockerd() -> None:
     """Bring ``dockerd`` back up in a snapshot-resumed sandbox, and record what it restored.
 
