@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from typing import ClassVar
+from typing import Final
 
 import click
 from loguru import logger
@@ -16,6 +17,7 @@ from pydantic import Field
 from pydantic import field_validator
 
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.pure import pure
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.base_agent import build_stderr_tee_redirect
@@ -27,6 +29,8 @@ from imbue.mngr.agents.output_styles import read_output_style_files
 from imbue.mngr.agents.output_styles import resolve_output_style
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.agents.update_policy import is_self_update_disabled
+from imbue.mngr.agents.upgrade import AGENT_DATA_RELATIVE_PATH
+from imbue.mngr.agents.upgrade import read_stored_launch_command
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import build_transcript_preserved_items
@@ -41,6 +45,7 @@ from imbue.mngr.api.preservation import transfer_cloned_agent_session_store
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
+from imbue.mngr.errors import InvalidUpgradeInputError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
@@ -56,9 +61,11 @@ from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
 from imbue.mngr.interfaces.agent import InteractiveAgentMixin
+from imbue.mngr.interfaces.agent import UpgradableAgentMixin
 from imbue.mngr.interfaces.agent import read_idle_since_for_compaction
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import FileType
+from imbue.mngr.interfaces.data_types import HarnessFileSpec
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import HostLocation
@@ -118,9 +125,14 @@ _PI_AGENT_TYPE: str = "pi-coding"
 # shell-hook surface, so an extension is the only lever for these.
 _LIFECYCLE_EXTENSION_NAME: str = "mngr_pi_lifecycle.ts"
 
-# Written by the extension's ``session_start`` handler; polled by
-# ``wait_for_ready_signal`` as the "input is ready" signal. Kept in sync with
-# ``SESSION_STARTED_SENTINEL_NAME`` in mngr_pi_lifecycle.ts.
+_LIFECYCLE_EXTENSION_RELATIVE_PATH: Final[Path] = Path("commands") / _LIFECYCLE_EXTENSION_NAME
+
+_LIFECYCLE_EXTENSION_FILE_MODE: Final[str] = "0644"
+
+_PI_NO_SESSION_FLAG: Final[str] = "--no-session"
+
+# Written by the extension's ``session_start`` handler as the "input is ready" signal.
+# Kept in sync with ``SESSION_STARTED_SENTINEL_NAME`` in mngr_pi_lifecycle.ts.
 _SESSION_STARTED_SENTINEL_NAME: str = "pi_session_started"
 
 # Written by the extension with the main session's file path; read (shell-
@@ -192,6 +204,37 @@ _TURN_CONFIRM_TIMEOUT_SECONDS: float = 16.0
 def _load_resource(filename: str) -> str:
     """Load a resource file (e.g. the lifecycle extension) shipped in the wheel."""
     return importlib.resources.files(_pi_resources).joinpath(filename).read_text()
+
+
+def _build_lifecycle_extension_file() -> HarnessFileSpec:
+    return HarnessFileSpec(content=_load_resource(_LIFECYCLE_EXTENSION_NAME), mode=_LIFECYCLE_EXTENSION_FILE_MODE)
+
+
+@pure
+def _build_lifecycle_extension_load_arg(extension_path: Path) -> str:
+    return f"-e {shlex.quote(str(extension_path))}"
+
+
+@pure
+def _build_resume_prelude(session_file_path: Path) -> str:
+    """Shell that sets the positional args to ``--session <file>`` when ``session_file_path`` names an existing session."""
+    return (
+        f"__mngr_pi_sess=$(cat {shlex.quote(str(session_file_path))} 2>/dev/null || true); set --; "
+        'if [ -n "$__mngr_pi_sess" ] && [ -f "$__mngr_pi_sess" ]; then set -- --session "$__mngr_pi_sess"; fi'
+    )
+
+
+@pure
+def _is_word_of_stored_launch_command(word: str, stored_command: str) -> bool:
+    """Whether ``word`` is a whole shell word of the stored launch command once unquoted, e.g. ``--no-session`` in ``pi '--no-session';``."""
+    lexer = shlex.shlex(stored_command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        return word in tuple(lexer)
+    except ValueError as e:
+        raise InvalidUpgradeInputError(
+            f"the launch command in {AGENT_DATA_RELATIVE_PATH} is not valid shell: {e}"
+        ) from e
 
 
 # pi 0.79+ shows a "Trust project folder?" dialog when there is no saved decision
@@ -537,6 +580,7 @@ class PiCodingAgent(
     HasUnattendedModeMixin,
     HasAutoInstallMixin,
     HasCompactionMixin,
+    UpgradableAgentMixin,
 ):
     """Agent implementation for the pi coding agent.
 
@@ -701,7 +745,7 @@ class PiCodingAgent(
 
     def _get_lifecycle_extension_path(self) -> Path:
         """Path the lifecycle extension is provisioned to and loaded from (``pi -e``)."""
-        return self._get_agent_dir() / "commands" / _LIFECYCLE_EXTENSION_NAME
+        return self._get_agent_dir() / _LIFECYCLE_EXTENSION_RELATIVE_PATH
 
     def assemble_command(
         self,
@@ -735,7 +779,7 @@ class PiCodingAgent(
         word-splitting, so a path with spaces survives under both bash and zsh.
         """
         base_command = super().assemble_command(host, agent_args, command_override, initial_message)
-        invocation = f"{base_command} -e {shlex.quote(str(self._get_lifecycle_extension_path()))}"
+        invocation = f"{base_command} {_build_lifecycle_extension_load_arg(self._get_lifecycle_extension_path())}"
         if self.agent_config.auto_dismiss_dialogs_at_startup:
             invocation = f"{invocation} {_PI_APPROVE_FLAG}"
         # Stamp the process-start boundary and clear a stale `active` marker on every
@@ -756,11 +800,7 @@ class PiCodingAgent(
         stderr_redirect = build_stderr_tee_redirect(shlex.quote(str(self._get_agent_dir() / _STDERR_LOG_NAME)))
         if not self.agent_config.resume_session:
             return CommandString(f"{marker_prelude}; {invocation} {stderr_redirect}")
-        quoted_session_file = shlex.quote(str(self._get_agent_dir() / _SESSION_FILE_NAME))
-        resume_prelude = (
-            f"__mngr_pi_sess=$(cat {quoted_session_file} 2>/dev/null || true); set --; "
-            'if [ -n "$__mngr_pi_sess" ] && [ -f "$__mngr_pi_sess" ]; then set -- --session "$__mngr_pi_sess"; fi'
-        )
+        resume_prelude = _build_resume_prelude(self._get_agent_dir() / _SESSION_FILE_NAME)
         return CommandString(f'{marker_prelude}; {resume_prelude}; {invocation} "$@" {stderr_redirect}')
 
     def wait_for_ready_signal(
@@ -776,21 +816,55 @@ class PiCodingAgent(
         start_action()
         if not is_readiness_awaited:
             return
-        effective_timeout = timeout if timeout is not None else _READY_TIMEOUT_SECONDS
+        self._wait_for_session_started_sentinel(timeout if timeout is not None else _READY_TIMEOUT_SECONDS)
+
+    def get_ready_signal_paths(self) -> tuple[Path, ...]:
+        return (Path(_SESSION_STARTED_SENTINEL_NAME),)
+
+    def wait_for_ready_after_restart(self, timeout: float) -> None:
+        with log_span("Waiting for pi's readiness sentinel after a restart (timeout={}s)", timeout):
+            self._wait_for_session_started_sentinel(timeout)
+
+    def _wait_for_session_started_sentinel(self, timeout: float) -> None:
+        """Poll for the sentinel the extension writes on ``session_start``, raising ``AgentStartError`` when it does not appear in time."""
         sentinel_path = self._get_agent_dir() / _SESSION_STARTED_SENTINEL_NAME
         if poll_until(
             lambda: self._check_file_exists(sentinel_path),
-            timeout=effective_timeout,
+            timeout=timeout,
             poll_interval=0.25,
         ):
             return
         pane_content = self._capture_pane_content(self.tmux_target)
         raise AgentStartError(
             str(self.name),
-            f"pi did not write its readiness sentinel within {effective_timeout:.1f}s "
+            f"pi did not write its readiness sentinel within {timeout:.1f}s "
             "(is the mngr lifecycle extension loading?)"
             + (f"\nPane content:\n{pane_content}" if pane_content else ""),
         )
+
+    def get_upgrade_input_paths(self) -> tuple[Path, ...]:
+        return (AGENT_DATA_RELATIVE_PATH,)
+
+    def get_upgrade_unsupported_detail(self, input_content_by_path: Mapping[Path, str | None]) -> str | None:
+        """None when the stored launch command loads the lifecycle extension from the agent's state dir and resumes its saved session."""
+        stored_command = read_stored_launch_command(input_content_by_path[AGENT_DATA_RELATIVE_PATH])
+        if _build_lifecycle_extension_load_arg(self._get_lifecycle_extension_path()) not in stored_command:
+            return f"its launch command does not load {_LIFECYCLE_EXTENSION_RELATIVE_PATH}"
+        if _build_resume_prelude(self._get_agent_dir() / _SESSION_FILE_NAME) not in stored_command:
+            return (
+                "its launch command does not resume its pi session, so a restart would lose its conversation; "
+                "first turn resume_session on for its agent type"
+            )
+        if _is_word_of_stored_launch_command(_PI_NO_SESSION_FLAG, stored_command):
+            return (
+                f"its launch command passes {_PI_NO_SESSION_FLAG}, so a restart would lose its conversation; "
+                f"first drop {_PI_NO_SESSION_FLAG} from its arguments"
+            )
+        return None
+
+    def build_upgraded_files(self, input_content_by_path: Mapping[Path, str | None]) -> dict[Path, HarnessFileSpec]:
+        """The lifecycle extension, the one file whose content comes from mngr rather than the agent's options or pi."""
+        return {_LIFECYCLE_EXTENSION_RELATIVE_PATH: _build_lifecycle_extension_file()}
 
     def on_before_provisioning(
         self,
@@ -1140,8 +1214,9 @@ class PiCodingAgent(
         intermediate directories.
         """
         extension_path = self._get_lifecycle_extension_path()
+        extension_file = _build_lifecycle_extension_file()
         with log_span("Installing pi lifecycle extension at {}", extension_path):
-            host.write_text_file(extension_path, _load_resource(_LIFECYCLE_EXTENSION_NAME))
+            host.write_text_file(extension_path, extension_file.content, mode=extension_file.mode)
 
     def on_after_provisioning(
         self,

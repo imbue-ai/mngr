@@ -34,6 +34,17 @@ plugin shares into each agent).
 - **Transcripts.** `mngr transcript my-agent` renders the conversation.
 - **Resume.** `mngr stop` then `mngr start` continues the same pi session with full
   context.
+- **Upgrade.** `mngr upgrade my-agent` gives an agent that an older mngr created this mngr's
+  lifecycle extension (`commands/mngr_pi_lifecycle.ts`), restarting it if idle; it resumes the
+  same pi session. Every other file stays as it is.
+  - An agent whose launch command does not load the extension is skipped until
+    `mngr create my-agent --reuse --update` re-creates it. One that does not resume its pi
+    session is skipped until you turn `resume_session` on (or drop `--no-session`) and
+    re-create it the same way.
+  - The upgrade is `ready` once the restarted extension writes its readiness sentinel;
+    otherwise it fails at `ready`.
+  - pi reports no dialog and no work between turns, so the restart ends a running `!`
+    command or a process the agent started.
 
 ## Configuration
 

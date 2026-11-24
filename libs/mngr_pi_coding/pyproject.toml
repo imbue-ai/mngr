@@ -51,6 +51,7 @@ omit = [
   "*/tests/*",
   "*/conftest.py",
   "*/utils/testing.py",
+  "*/testing.py",
 ]
 
 [tool.inline-snapshot]

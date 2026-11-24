@@ -6,8 +6,6 @@ import os
 import shlex
 from collections.abc import Callable
 from collections.abc import Mapping
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -26,12 +24,15 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import AgentInstallationError
+from imbue.mngr.errors import AgentStartError
+from imbue.mngr.errors import InvalidUpgradeInputError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.agent import HasCompactionMixin
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileType
+from imbue.mngr.interfaces.data_types import HarnessFileSpec
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostLocation
@@ -39,11 +40,9 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
-from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import OutputStyleName
 from imbue.mngr.primitives import SystemPromptText
 from imbue.mngr.primitives import WaitingReason
-from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import make_command_agent
@@ -64,6 +63,7 @@ from imbue.mngr_pi_coding.plugin import _waiting_reason
 from imbue.mngr_pi_coding.plugin import agent_field_generators
 from imbue.mngr_pi_coding.plugin import register_agent_aliases
 from imbue.mngr_pi_coding.plugin import register_agent_type
+from imbue.mngr_pi_coding.testing import make_local_pi_agent
 
 # Test helpers
 
@@ -828,6 +828,120 @@ def test_wait_for_ready_signal_returns_once_sentinel_present(pi_agent: PiCodingA
     assert calls == [1]
 
 
+def test_wait_for_ready_after_restart_returns_on_the_sentinel_get_ready_signal_paths_names(
+    pi_agent: PiCodingAgent,
+) -> None:
+    (ready_signal_path,) = pi_agent.get_ready_signal_paths()
+    sentinel = pi_agent._get_agent_dir() / ready_signal_path
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    sentinel.write_text("1")
+
+    pi_agent.wait_for_ready_after_restart(timeout=0.1)
+
+    assert ready_signal_path == Path(_SESSION_STARTED_SENTINEL_NAME)
+
+
+@pytest.mark.tmux
+def test_wait_for_ready_after_restart_raises_when_the_extension_writes_no_sentinel(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    agent = make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
+
+    with pytest.raises(AgentStartError, match="pi did not write its readiness sentinel within 0.1s"):
+        agent.wait_for_ready_after_restart(timeout=0.1)
+
+
+@pytest.mark.tmux
+def test_wait_for_ready_signal_raises_when_the_extension_writes_no_sentinel_within_the_given_timeout(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    agent = make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
+
+    with pytest.raises(AgentStartError, match="pi did not write its readiness sentinel within 0.1s"):
+        agent.wait_for_ready_signal(is_readiness_awaited=True, start_action=lambda: None, timeout=0.1)
+
+
+_SESSION_NOT_RESUMED_DETAIL = (
+    "its launch command does not resume its pi session, so a restart would lose its conversation; "
+    "first turn resume_session on for its agent type"
+)
+_NO_SESSION_DETAIL = (
+    "its launch command passes --no-session, so a restart would lose its conversation; "
+    "first drop --no-session from its arguments"
+)
+
+
+def _make_upgrade_inputs_with_stored_command(stored_command: str) -> dict[Path, str | None]:
+    return {Path("data.json"): json.dumps({"command": stored_command})}
+
+
+@pytest.mark.parametrize(
+    ("resume_session", "agent_args", "expected_detail"),
+    [
+        pytest.param(True, ("--model", "claude-haiku-4-5"), None, id="resuming"),
+        pytest.param(False, ("--model", "claude-haiku-4-5"), _SESSION_NOT_RESUMED_DETAIL, id="not_resuming"),
+        pytest.param(True, ("--no-session",), _NO_SESSION_DETAIL, id="no_session"),
+        pytest.param(True, ("--append-system-prompt", "keep --no-session out"), None, id="no_session_in_an_argument"),
+    ],
+)
+def test_get_upgrade_unsupported_detail_for_the_launch_command_this_mngr_assembles(
+    make_pi_agent: Callable[..., PiCodingAgent],
+    tmp_path: Path,
+    resume_session: bool,
+    agent_args: tuple[str, ...],
+    expected_detail: str | None,
+) -> None:
+    agent = make_pi_agent(
+        agent_config=PiCodingAgentConfig(resume_session=resume_session, auto_dismiss_dialogs_at_startup=True)
+    )
+    stored_command = str(agent.assemble_command(_fake_host(tmp_path), agent_args, None))
+
+    detail = agent.get_upgrade_unsupported_detail(_make_upgrade_inputs_with_stored_command(stored_command))
+
+    assert detail == expected_detail
+
+
+def test_get_upgrade_unsupported_detail_raises_on_a_launch_command_that_is_not_valid_shell(
+    make_pi_agent: Callable[..., PiCodingAgent], tmp_path: Path
+) -> None:
+    agent = make_pi_agent(agent_config=PiCodingAgentConfig())
+    stored_command = f"{agent.assemble_command(_fake_host(tmp_path), (), None)} 'unclosed"
+
+    with pytest.raises(InvalidUpgradeInputError, match="the launch command in data.json is not valid shell"):
+        agent.get_upgrade_unsupported_detail(_make_upgrade_inputs_with_stored_command(stored_command))
+
+
+@pytest.mark.parametrize(
+    "agent_config",
+    [
+        pytest.param(PiCodingAgentConfig(), id="default"),
+        pytest.param(
+            PiCodingAgentConfig(resume_session=False, emit_common_transcript=False, emit_raw_transcript=False),
+            id="options_off",
+        ),
+        pytest.param(
+            PiCodingAgentConfig(
+                auto_dismiss_dialogs_at_startup=True, append_system_prompt=(SystemPromptText("HELLO_APPEND"),)
+            ),
+            id="options_on",
+        ),
+    ],
+)
+def test_build_upgraded_files_is_the_lifecycle_extension_whatever_the_config(
+    make_pi_agent: Callable[..., PiCodingAgent], tmp_path: Path, agent_config: PiCodingAgentConfig
+) -> None:
+    agent = make_pi_agent(agent_config=agent_config)
+    stored_command = str(agent.assemble_command(_fake_host(tmp_path), (), None))
+
+    upgraded_files = agent.build_upgraded_files(_make_upgrade_inputs_with_stored_command(stored_command))
+
+    assert upgraded_files == {
+        Path("commands") / _LIFECYCLE_EXTENSION_NAME: HarnessFileSpec(
+            content=_load_resource(_LIFECYCLE_EXTENSION_NAME), mode="0644"
+        )
+    }
+
+
 # Workspace trust (pi 0.79+ "Trust project folder?" dialog)
 
 
@@ -988,7 +1102,7 @@ def _read_resume_pointer(agent: PiCodingAgent) -> str:
 @pytest.mark.rsync
 def test_adopt_session_multiple_resumes_last(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     """``--adopt A B`` copies both sessions in and resumes the last (B)."""
-    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
+    agent = make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
     source_a = _write_pi_session(tmp_path / "src-a", "encoded-a", "sessA")
     source_b = _write_pi_session(tmp_path / "src-b", "encoded-b", "sessB")
     options = _make_options(adopt_session=(str(source_a), str(source_b)))
@@ -1006,7 +1120,7 @@ def test_adopt_session_multiple_resumes_last(local_provider: LocalProviderInstan
 @pytest.mark.rsync
 def test_adopt_session_rebinds_cwd(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     """An adopted session's embedded cwd is rebound to the new agent's work_dir."""
-    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
+    agent = make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
     source = _write_pi_session(tmp_path / "src", "encoded", "sess1", cwd="/no/longer/exists")
     options = _make_options(adopt_session=(str(source),))
 
@@ -1020,7 +1134,7 @@ def test_adopt_session_rebinds_cwd(local_provider: LocalProviderInstance, tmp_pa
 @pytest.mark.rsync
 def test_adopt_from_clone_with_explicit_resumes_clone(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     """``--adopt A --from X`` copies both, and the clone (X) is the one resumed."""
-    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
+    agent = make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
     source_a = _write_pi_session(tmp_path / "src-a", "encoded-a", "sessA")
 
     # The --from source's native pi session store, at the preserved relpath.
@@ -1043,7 +1157,7 @@ def test_adopt_from_clone_no_store_warns(
     local_provider: LocalProviderInstance, tmp_path: Path, log_warnings: list[str]
 ) -> None:
     """A ``--from`` clone whose source has no pi session store warns and resumes nothing."""
-    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
+    agent = make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
     # Source state dir exists but has no plugin/pi_coding/sessions store.
     source_state_dir = tmp_path / "source-agent-state"
     source_state_dir.mkdir()
@@ -1060,7 +1174,7 @@ def test_adopt_from_clone_empty_store_warns(
     local_provider: LocalProviderInstance, tmp_path: Path, log_warnings: list[str]
 ) -> None:
     """A ``--from`` clone whose source store has no session JSONL warns and resumes nothing."""
-    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
+    agent = make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
     source_state_dir = tmp_path / "source-agent-state"
     # The store dir exists but holds no .jsonl session.
     (source_state_dir / "plugin" / "pi_coding" / "sessions").mkdir(parents=True)
@@ -1171,30 +1285,6 @@ def test_pi_coding_config_preserves_on_destroy_by_default() -> None:
     assert PiCodingAgentConfig().preserve_on_destroy is True
 
 
-def _make_local_pi_agent(
-    local_provider: LocalProviderInstance, tmp_path: Path, agent_config: PiCodingAgentConfig
-) -> PiCodingAgent:
-    """Build a PiCodingAgent on a real local host/ctx so the preservation rsync path works.
-
-    The shared ``make_pi_agent`` fixture constructs against a FakeHost with no
-    mngr_ctx, which is insufficient for the on-destroy preservation path.
-    """
-    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
-    work_dir = tmp_path / "work"
-    work_dir.mkdir(exist_ok=True)
-    return PiCodingAgent.model_construct(
-        id=AgentId.generate(),
-        name=AgentName("test-pi"),
-        agent_type=AgentTypeName("pi-coding"),
-        work_dir=work_dir,
-        create_time=datetime.now(timezone.utc),
-        host_id=host.id,
-        mngr_ctx=local_provider.mngr_ctx,
-        agent_config=agent_config,
-        host=host,
-    )
-
-
 def _populate_pi_transcripts(agent: PiCodingAgent) -> None:
     """Write the raw/common transcripts and the session-file pointer into the state dir."""
     agent_dir = agent._get_agent_dir()
@@ -1208,7 +1298,7 @@ def _populate_pi_transcripts(agent: PiCodingAgent) -> None:
 @pytest.mark.rsync
 def test_on_destroy_preserves_transcripts(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     """on_destroy copies transcripts and the session-file pointer to the mirrored preserved layout."""
-    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig(preserve_on_destroy=True))
+    agent = make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig(preserve_on_destroy=True))
     _populate_pi_transcripts(agent)
 
     agent.on_destroy(agent.host)
@@ -1223,7 +1313,7 @@ def test_on_destroy_preserves_transcripts(local_provider: LocalProviderInstance,
 
 def test_on_destroy_skips_preservation_when_disabled(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     """on_destroy preserves nothing when preserve_on_destroy is False."""
-    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig(preserve_on_destroy=False))
+    agent = make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig(preserve_on_destroy=False))
     _populate_pi_transcripts(agent)
 
     agent.on_destroy(agent.host)
@@ -1255,7 +1345,7 @@ def test_agent_field_generators_exposes_pi_waiting_reason() -> None:
 
 def test_pi_waiting_reason_is_end_of_turn_when_idle(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     # No active marker -> the agent is idle, so the (single-value) reason is END_OF_TURN.
-    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
+    agent = make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
     agent._get_agent_dir().mkdir(parents=True, exist_ok=True)
     assert _waiting_reason(agent, agent.host) == WaitingReason.END_OF_TURN
 
@@ -1270,7 +1360,7 @@ def test_pi_waiting_reason_is_absent_for_an_agent_of_another_type(
 
 def test_pi_waiting_reason_is_none_when_active(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     # Active marker present -> the agent is running, so there is no waiting reason.
-    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
+    agent = make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
     marker = agent._get_agent_dir() / "active"
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text("1")
