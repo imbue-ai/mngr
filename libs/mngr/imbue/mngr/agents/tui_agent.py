@@ -232,7 +232,7 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
         Normal messages are confirmed strictly: if no evidence of acceptance
         appears within ``confirmation_timeout_seconds`` (with bounded,
         pane-gated Enter retries along the way), the agent's screen settles it
-        (``_settle_unconfirmed_submission``): shown taken, the send succeeds;
+        (``_settle_after_confirmation_window``): shown taken, the send succeeds;
         shown never taken, it raises ``SendMessageError`` as ``NOT_SUBMITTED``;
         otherwise as ``SUBMISSION_UNCONFIRMED``. Slash commands are relaxed: they are TUI-local
         and often leave no observable evidence, so an unconfirmed send logs a
@@ -286,7 +286,7 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
                     # best-effort Enter and there is nothing to confirm against.
                     logger.debug("Agent type supplies no submission evidence; Enter sent best-effort")
                 elif policy == SubmissionConfirmationPolicy.STRICT:
-                    self._settle_unconfirmed_submission(
+                    self._settle_after_confirmation_window(
                         target_arg, message, input_box_pane_content, outcome, timeout_seconds
                     )
                 else:
@@ -308,7 +308,7 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
             # detect such dialogs override this; the default is a no-op.
             self._run_post_submit_dialog_check(target_arg)
 
-    def _settle_unconfirmed_submission(
+    def _settle_after_confirmation_window(
         self,
         tmux_target: TmuxWindowTarget | str,
         message: str,
@@ -333,6 +333,7 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
                     "submission_confirmed_by_screen",
                     f"the screen shows the message taken, unrecorded after {timeout_seconds:.0f}s: {message!r}",
                 )
+                self._on_message_taken_before_turn()
             case UnconfirmedSubmissionReading.NOT_TAKEN:
                 raise SendMessageError(
                     str(self.name),
@@ -345,6 +346,9 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
                 )
             case _ as unreachable:
                 assert_never(unreachable)
+
+    def _on_message_taken_before_turn(self) -> None:
+        """Act on a message the screen shows taken whose turn has not started; a no-op by default."""
 
     def _settle_pasted_message_not_shown(
         self,

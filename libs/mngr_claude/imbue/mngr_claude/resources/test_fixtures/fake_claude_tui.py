@@ -7,7 +7,9 @@ input prompt, echoes what is typed or pasted after it, and on Enter appends the
 first argument), so a send confirms only if the text and the Enter genuinely
 reached the pane. Like Claude, it turns on bracketed paste, ignores Enter on an
 empty input box, and takes a lone ``?`` keystroke on an empty input box as the
-shortcuts-panel key rather than text. It draws straight to its terminal, which
+shortcuts-panel key rather than text. Given ``--hold`` as its second argument,
+it takes a submitted message off its input box without recording it, as Claude
+does while its SessionStart hooks run. It draws straight to its terminal, which
 is the whole point of it, so it is excluded from the bare-print ratchet. It
 exits when its input closes.
 """
@@ -23,8 +25,10 @@ ENABLE_BRACKETED_PASTE = "\x1b[?2004h"
 PASTE_START_MARKER = "\x1b[200~"
 PASTE_END_MARKER = "\x1b[201~"
 SHORTCUTS_PANEL_KEY = "?"
+HOLD_FLAG = "--hold"
 
 transcript_path = sys.argv[1]
+is_recording_held = sys.argv[2:] == [HOLD_FLAG]
 file_descriptor = sys.stdin.fileno()
 
 
@@ -52,7 +56,8 @@ while chunk := os.read(file_descriptor, READ_SIZE_BYTES):
         if char == "\r":
             if typed == "":
                 continue
-            append_user_record(typed)
+            if not is_recording_held:
+                append_user_record(typed)
             sys.stdout.write("\r\n")
             typed = ""
         else:

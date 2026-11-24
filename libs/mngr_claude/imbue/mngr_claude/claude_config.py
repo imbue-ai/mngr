@@ -845,6 +845,12 @@ _CLEAR_ACTIVE_MARKERS_AND_EMIT_ACTIVITY_EVENT: Final[str] = (
     + _EMIT_ACTIVITY_EVENT
 )
 
+# Shell snippet that marks the agent mid-turn (RUNNING) and emits an activity event.
+MARK_ACTIVE_AND_EMIT_ACTIVITY_EVENT: Final[str] = (
+    'touch "$MNGR_AGENT_STATE_DIR/active" && rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting" "$MNGR_AGENT_STATE_DIR/idle_since" "$MNGR_AGENT_STATE_DIR/turn_end" && '
+    + _EMIT_ACTIVITY_EVENT
+)
+
 # Shell snippet for the compaction hooks: reads the hook payload from stdin and
 # sets _MNGR_TRIGGER to its 'trigger' ("manual" or "auto"), or "unknown" when the
 # field is absent, jq is missing, or the payload is malformed. The payload goes
@@ -1085,9 +1091,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": MAIN_SESSION_ONLY_GUARD
-                            + 'touch "$MNGR_AGENT_STATE_DIR/active" && rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting" "$MNGR_AGENT_STATE_DIR/idle_since" "$MNGR_AGENT_STATE_DIR/turn_end" && '
-                            + _EMIT_ACTIVITY_EVENT,
+                            "command": MAIN_SESSION_ONLY_GUARD + MARK_ACTIVE_AND_EMIT_ACTIVITY_EVENT,
                         },
                         {
                             # FIXME: remove this hook once released senders no

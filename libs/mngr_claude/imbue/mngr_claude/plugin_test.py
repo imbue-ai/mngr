@@ -4,6 +4,7 @@ import re
 import shlex
 import shutil
 import subprocess
+from collections.abc import Callable
 from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import datetime
@@ -94,12 +95,14 @@ from imbue.mngr.providers.mock_provider_test import make_offline_host_with_volum
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import make_command_agent
+from imbue.mngr.utils.testing import make_local_host_of_class
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr.utils.testing import poll_until_file_contains
 from imbue.mngr.utils.testing import put_fake_cli_reporting_version_on_path
 from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
 from imbue.mngr_claude.claude_config import MAIN_SESSION_ONLY_GUARD
+from imbue.mngr_claude.claude_config import MARK_ACTIVE_AND_EMIT_ACTIVITY_EVENT
 from imbue.mngr_claude.claude_config import PERMISSIONS_WAITING_FILENAME
 from imbue.mngr_claude.claude_config import SESSION_GUARD
 from imbue.mngr_claude.claude_config import build_credential_sync_hooks_config
@@ -171,6 +174,7 @@ def make_claude_agent(
     agent_type: AgentTypeName | None = None,
     work_dir: Path | None = None,
     host: Host | None = None,
+    agent_class: type[ClaudeAgent] = ClaudeAgent,
 ) -> tuple[ClaudeAgent, Host]:
     """Create a ClaudeAgent on a real local host for testing (the local provider's own, unless one is given)."""
     if host is None:
@@ -185,7 +189,7 @@ def make_claude_agent(
     if agent_type is None:
         agent_type = AgentTypeName("claude")
 
-    agent = ClaudeAgent.model_construct(
+    agent = agent_class.model_construct(
         id=AgentId.generate(),
         name=AgentName("test-agent"),
         agent_type=agent_type,
@@ -2461,7 +2465,7 @@ def test_an_unconfirmed_send_is_read_off_the_input_box(
         ),
     ],
 )
-def test_the_screen_probe_confirms_a_message_claude_shows_taken(
+def test_the_screen_probe_confirms_a_message_claude_shows_taken_and_marks_the_agent_active(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
@@ -2470,6 +2474,7 @@ def test_the_screen_probe_confirms_a_message_claude_shows_taken(
     is_taken: bool,
 ) -> None:
     agent = _make_scripted_agent(local_provider, tmp_path, temp_mngr_ctx, [before])
+    agent._get_agent_dir().mkdir(parents=True)
     probe = agent._build_screen_submission_probe(_UNCONFIRMED_MESSAGE)
     assert probe is not None
     target = f"{PANE_TARGET_SHELL_VARIABLE}=%1"
@@ -2478,6 +2483,7 @@ def test_the_screen_probe_confirms_a_message_claude_shows_taken(
     current = run_bash_against_stand_in_pane(f"{target}; base={base}; {probe.poll_command}", after).stdout.strip()
 
     assert (current != "" and current != base) is is_taken
+    assert (agent._get_agent_dir() / "active").exists() is is_taken
 
 
 def test_a_message_with_no_ascii_letters_or_digits_gets_no_screen_probe(
@@ -8236,6 +8242,41 @@ def test_unrecognized_dialog_shape_log_survives_a_capture_that_loses_the_host(
     shape_logs = _unrecognized_dialog_shape_logs(log_warnings)
     assert len(shape_logs) == 1
     assert "pane could not be captured" in shape_logs[0]
+
+
+class _MarkActiveFailingHost(Host):
+    """A local Host on which the command that sets an agent's ``active`` marker fails."""
+
+    def execute_stateful_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+        on_output: Callable[[str, bool], None] | None = None,
+    ) -> CommandResult:
+        if MARK_ACTIVE_AND_EMIT_ACTIVITY_EVENT in command:
+            return CommandResult(stdout="", stderr="touch: active: Permission denied", success=False)
+        return super().execute_stateful_command(command, user, cwd, env, timeout_seconds, on_output)
+
+
+def test_a_failed_active_mark_for_a_message_taken_before_its_turn_is_recorded_as_a_message_event(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    host = make_local_host_of_class(local_provider, _MarkActiveFailingHost)
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, host=host)
+
+    agent._on_message_taken_before_turn()
+
+    events_path = agent._get_agent_dir() / "events" / "messages" / "events.jsonl"
+    events = [json.loads(line) for line in events_path.read_text().splitlines()]
+    assert [(event["type"], event["detail"]) for event in events] == [
+        (
+            "mark_active_failed",
+            "the agent holds a message it has not started, but setting its active marker failed: touch: active: Permission denied",
+        )
+    ]
 
 
 class _UnreachableFakeHost(FakeHost):

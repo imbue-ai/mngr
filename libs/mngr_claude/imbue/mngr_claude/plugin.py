@@ -130,6 +130,7 @@ from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
 from imbue.mngr_claude.claude_config import ClaudeOnboardingNotCompletedError
 from imbue.mngr_claude.claude_config import KEYBINDINGS_FILENAME
 from imbue.mngr_claude.claude_config import MANAGED_SETTINGS_RELATIVE_PATH
+from imbue.mngr_claude.claude_config import MARK_ACTIVE_AND_EMIT_ACTIVITY_EVENT
 from imbue.mngr_claude.claude_config import PERMISSIONS_WAITING_FILENAME
 from imbue.mngr_claude.claude_config import acknowledge_cost_threshold
 from imbue.mngr_claude.claude_config import add_claude_trust_for_path
@@ -2666,9 +2667,10 @@ class ClaudeAgent(
     def _build_screen_submission_probe(self, message: str) -> SubmissionEvidenceProbe | None:
         """Probe confirming when Claude's screen shows the message taken: shown submitted above an input row that no longer holds it.
 
-        Claude takes a message off its input box at once but records it only when the turn starts,
-        which waits for its SessionStart hooks, so its screen is the first witness. None for a message
-        with no ASCII letters or digits to recognize it by.
+        Claude takes a message off its input box at once but starts its turn (UserPromptSubmit, then the
+        record) only once its SessionStart hooks finish, so its screen is the first witness, and on
+        confirming the probe sets the agent's ``active`` marker as that hook does. None for a message with no ASCII
+        letters or digits to recognize it by.
         """
         message_words = "".join(char for char in message.lower() if char.isascii() and char.isalnum())
         if message_words == "":
@@ -2684,8 +2686,15 @@ class ClaudeAgent(
             baseline_command=f"{read_screen} | cut -d' ' -f1",
             poll_command=(
                 f'set -- $( {read_screen} ); [ -n "$base" ] && [ "${{2:-1}}" = 0 ] && [ "${{1:-0}}" -gt "$base" ] '
-                '&& echo "taken-$1"'
+                f'&& {{ ( {self._build_mark_active_command()} ) >/dev/null 2>&1; echo "taken-$1"; }}'
             ),
+        )
+
+    def _build_mark_active_command(self) -> str:
+        """Shell command that sets this agent's ``active`` marker, as its UserPromptSubmit hook does."""
+        return (
+            f"MNGR_AGENT_STATE_DIR={shlex.quote(str(self._get_agent_dir()))}; "
+            f"MNGR_HOST_DIR={shlex.quote(str(self.host.host_dir))}; {MARK_ACTIVE_AND_EMIT_ACTIVITY_EVENT}"
         )
 
     def _build_enter_retry_gate(self, message: str) -> EnterRetryGate | None:
@@ -2847,6 +2856,17 @@ class ClaudeAgent(
             return UnconfirmedSubmissionReading.NOT_TAKEN
         logger.warning("Agent {} still shows its untaken message in the input box after clearing it", self.name)
         return UnconfirmedSubmissionReading.UNKNOWN
+
+    def _on_message_taken_before_turn(self) -> None:
+        """Set the agent's ``active`` marker, as the screen probe does when it confirms a send."""
+        result = self.host.execute_stateful_command(
+            self._build_mark_active_command(), timeout_seconds=self.send_command_timeout_seconds
+        )
+        if not result.success:
+            self.record_message_delivery_event(
+                "mark_active_failed",
+                f"the agent holds a message it has not started, but setting its active marker failed: {result.stderr or result.stdout}",
+            )
 
     def _was_input_box_holding_a_draft(self, pre_send_pane_content: str) -> bool:
         """Whether the box held text before the send that the send did not clear, so the message was appended to it.

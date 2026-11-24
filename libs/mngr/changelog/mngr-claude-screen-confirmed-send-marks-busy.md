@@ -1,0 +1,1 @@
+`InteractiveTuiAgent` calls a new `_on_message_taken_before_turn` hook, a no-op by default, when a strict send that no evidence probe confirmed within the confirmation window is settled from the screen as taken, so an agent type can record that its TUI holds the message.
