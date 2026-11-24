@@ -43,6 +43,7 @@ WORKDIR="${MNGR_OPENCODE_WORKDIR:?MNGR_OPENCODE_WORKDIR must be set}"
 ROOT_SESSION_FILE="$STATE/opencode_root_session"
 PORT_FILE="$STATE/opencode_server_port"
 READY_SENTINEL="$STATE/opencode_ready"
+ACTIVE_MARKER="$STATE/active"
 SERVER_LOG="$STATE/logs/opencode_server.log"
 mkdir -p "$STATE/logs"
 
@@ -51,9 +52,9 @@ mkdir -p "$STATE/logs"
 # the image's noexec /tmp rejects. Ensure it exists before launching serve/attach.
 mkdir -p "${TMPDIR:-/tmp}"
 
-# Clear any stale readiness sentinel from a prior run before we (re)start, so
-# wait_for_ready_signal can't return early against an old marker.
-rm -f "$READY_SENTINEL"
+# A previous run's sentinel would end the readiness wait early, and its turn marker
+# would read RUNNING until the next turn ends.
+rm -f "$READY_SENTINEL" "$ACTIVE_MARKER"
 
 # Start the headless server. MNGR_OPENCODE_ROLE=server is scoped to this command
 # so the lifecycle plugin acts here and stays inert in the attach client below.
