@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-23
+
+`mngr upgrade` upgrades agents on Docker hosts over SSH and skips those on a stopped Docker host, with the `mngr start` command, without starting it.
+
 ## 2026-11-18
 
 A docker provider whose daemon is reached over `ssh://` now reports a failed SSH connect (a rejected handshake, a missing `ProxyCommand`, a refused connection) as `ProviderUnavailableError`. Before, paramiko's `SSHException` or `OSError` escaped docker-py unwrapped. That skipped the handlers that clean up a half-built provider, and killed the latchkey discovery worker that hit it.

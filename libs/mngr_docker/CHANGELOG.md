@@ -11,6 +11,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: The docker provider publishes ports declared with `mngr create --publish`, recording them as `host.published_endpoints` and replaying them on snapshot restore (published-ports contract).
 - Added: A provisioned host container runs the image's `/usr/local/bin/mngr-container-start-hook`, detached, after restarting sshd on every container (re)start.
 - Added: The provider's unreachable-daemon error names the fix ("start Docker", or "start Docker on <host>" for a remote daemon).
+- Added: `mngr upgrade` upgrades agents on Docker hosts over SSH, skipping those on a stopped Docker host (with the `mngr start` command) without starting it.
 
 ### Fixed
 
