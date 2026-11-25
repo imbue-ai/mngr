@@ -150,7 +150,7 @@ runcmd:
       DOCKER_APT_VERSION="5:29.6.2-1~${ID}.${VERSION_ID}~${VERSION_CODENAME}"
       CONTAINERD_APT_VERSION="2.2.6-1~${ID}.${VERSION_ID}~${VERSION_CODENAME}"
       install -m 0755 -d /etc/apt/keyrings
-      curl -fsSL https://download.docker.com/linux/${ID}/gpg -o /etc/apt/keyrings/docker.asc
+      curl -fsSL --retry 8 --retry-delay 15 --retry-all-errors --retry-connrefused https://download.docker.com/linux/${ID}/gpg -o /etc/apt/keyrings/docker.asc
       chmod a+r /etc/apt/keyrings/docker.asc
       echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/${ID} ${VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list
       apt-get update

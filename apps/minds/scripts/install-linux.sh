@@ -396,8 +396,8 @@ if [ "$IS_RASPBERRY_PI" = 1 ]; then
             (
                 set -e
                 cd \"\$tmp\"
-                curl -fsSL -o gvisor.tar.zstd \"\$url/gvisor.tar.zstd\"
-                curl -fsSL -o gvisor.tar.zstd.sha512 \"\$url/gvisor.tar.zstd.sha512\"
+                curl -fsSL --retry 8 --retry-delay 15 --retry-connrefused -o gvisor.tar.zstd \"\$url/gvisor.tar.zstd\"
+                curl -fsSL --retry 8 --retry-delay 15 --retry-connrefused -o gvisor.tar.zstd.sha512 \"\$url/gvisor.tar.zstd.sha512\"
                 sha512sum -c gvisor.tar.zstd.sha512
                 zstd -dq -o gvisor.tar gvisor.tar.zstd
                 mkdir release

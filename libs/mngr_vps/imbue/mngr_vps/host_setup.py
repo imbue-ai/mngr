@@ -183,6 +183,10 @@ export DEBIAN_FRONTEND=noninteractive
 {_APT_UPDATE_WITH_RETRIES}
 apt-get install -y curl ca-certificates gnupg rsync inotify-tools jq"""
 
+# For a curl that downloads to a file: a download host can reset a connection
+# mid-transfer (the artifact mirror has), which a plain --retry does not retry.
+CURL_DOWNLOAD_RETRY_FLAGS: Final[str] = "--retry 8 --retry-delay 15 --retry-all-errors --retry-connrefused"
+
 # Pin Docker + containerd via the official apt repo. ``--allow-downgrades`` plus
 # an exact ``=version`` pin makes the pinned versions authoritative in both
 # directions, so re-provisioning an old host upgrades (or downgrades) it to
@@ -194,7 +198,7 @@ export DEBIAN_FRONTEND=noninteractive
 DOCKER_APT_VERSION="{PINNED_DOCKER_APT_VERSION_CORE}~${{ID}}.${{VERSION_ID}}~${{VERSION_CODENAME}}"
 CONTAINERD_APT_VERSION="{PINNED_CONTAINERD_APT_VERSION_CORE}~${{ID}}.${{VERSION_ID}}~${{VERSION_CODENAME}}"
 install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/${{ID}}/gpg -o /etc/apt/keyrings/docker.asc
+curl -fsSL {CURL_DOWNLOAD_RETRY_FLAGS} https://download.docker.com/linux/${{ID}}/gpg -o /etc/apt/keyrings/docker.asc
 chmod a+r /etc/apt/keyrings/docker.asc
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
 https://download.docker.com/linux/${{ID}} ${{VERSION_CODENAME}} stable" > /etc/apt/sources.list.d/docker.list
@@ -236,8 +240,8 @@ if ! "{install_dir}/runsc" --version 2>/dev/null | grep -q '^runsc version relea
     (
         set -e
         cd "${{GVISOR_TMP}}"
-        curl -fsSL -o gvisor.tar.zstd "${{URL}}/gvisor.tar.zstd"
-        curl -fsSL -o gvisor.tar.zstd.sha512 "${{URL}}/gvisor.tar.zstd.sha512"
+        curl -fsSL {CURL_DOWNLOAD_RETRY_FLAGS} -o gvisor.tar.zstd "${{URL}}/gvisor.tar.zstd"
+        curl -fsSL {CURL_DOWNLOAD_RETRY_FLAGS} -o gvisor.tar.zstd.sha512 "${{URL}}/gvisor.tar.zstd.sha512"
         sha512sum -c gvisor.tar.zstd.sha512
         zstd -dq -o gvisor.tar gvisor.tar.zstd
         mkdir release
