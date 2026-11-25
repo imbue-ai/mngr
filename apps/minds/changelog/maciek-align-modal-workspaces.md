@@ -1,0 +1,3 @@
+A new Modal workspace keeps mngr's data at `/home/user/.mngr`, the same path as every other workspace, so its host env names the same `MNGR_HOST_DIR` as theirs: the Modal connection block now carries `host_dir`. Unlike the other providers, the home tree stays on the sandbox's own filesystem (a Modal Volume is about ten times slower for git and venv work), and only mngr's data dir, with its plain-text service logs, is on the persistent host Volume. Modal workspaces created earlier are not migrated.
+
+Restoring a backup onto a Modal workspace now restores into `/home/user`. It used to resolve the host dir's symlink first and target the host Volume, where the restore's `--delete` would remove mngr's own state.

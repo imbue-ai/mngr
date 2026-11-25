@@ -1,4 +1,5 @@
 import importlib.resources
+import posixpath
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
@@ -132,7 +133,7 @@ def build_check_and_install_packages_command(
     causes all data written to host_dir to persist on the volume. The symlink
     target is mkdir -p'd first so that a per-host subdirectory of a shared
     mounted volume (e.g. ``/mngr-vol/host_dir``) is guaranteed to exist before
-    the symlink is created.
+    the symlink is created, and so is the host directory's parent.
 
     Returns a shell command string that can be executed via sh -c.
     """
@@ -153,6 +154,8 @@ def build_check_and_install_packages_command(
         # creating the symlink. ln -sfn alone won't replace an existing directory.
         # The subshell groups the conditional removal so && chaining works correctly.
         script_lines.append(f"( [ -L {mngr_host_dir} ] || rm -rf {mngr_host_dir} )")
+        # A host dir nested in a tree the image may not have yet (e.g. /home/user/.mngr) needs its parent.
+        script_lines.append(f"mkdir -p {posixpath.dirname(mngr_host_dir)}")
         script_lines.append(f"ln -sfn {host_volume_mount_path} {mngr_host_dir}")
     else:
         script_lines.append(f"mkdir -p {mngr_host_dir}")

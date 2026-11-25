@@ -10,6 +10,7 @@ IMBUE_CLOUD_DEFAULT_START_ARGS: Final[tuple[str, ...]] = ("--workdir=/", "--secu
 
 # The user-data layout knobs written into every minds-authored vps-based provider block (imbue_cloud and the aws/gcp/azure connection instances), mirroring the default-workspace-template ``[providers.ovh]`` / ``[providers.vultr]`` settings.
 # The container's /home/user symlinks onto the unified volume's home/ subdir (the ONE persistent, backed-up tree), mngr's data dir hides inside it, and mngr's plain-text service logs stay off the volume.
+# The Modal connection block takes only the host dir: its home tree stays on the sandbox's own filesystem, only mngr's data dir is symlinked onto the host Volume, and the service logs stay with it there.
 WORKSPACE_HOST_DIR: Final[str] = "/home/user/.mngr"
 WORKSPACE_VOLUME_HOME_PATH: Final[str] = "/home/user"
 WORKSPACE_HOST_LOG_DIR: Final[str] = "/var/log/mngr"

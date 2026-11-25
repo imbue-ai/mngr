@@ -122,6 +122,19 @@ def _user_data_layout_knobs() -> dict[str, object]:
 
 
 @pure
+def _modal_layout_knobs() -> dict[str, object]:
+    """The user-data layout's host dir alone, without the home tree or the logs moved off the host Volume.
+
+    A Modal Volume is network-backed and an order of magnitude slower than the sandbox's own
+    filesystem for small-file work (git, venvs), so the home tree stays on the sandbox
+    filesystem and only mngr's data (the host dir, symlinked onto the Volume) persists there.
+    The plain-text service logs stay under the host dir too: the Volume keeps them through a hard
+    kill, which the sandbox filesystem does not, and no backup of the Volume grows with them.
+    """
+    return {"host_dir": WORKSPACE_HOST_DIR}
+
+
+@pure
 def account_provider_block(email: str, connector_url: str) -> dict[str, object]:
     """The ``[providers.imbue_cloud_<user id>]`` block for one signed-in account."""
     return {
@@ -296,6 +309,7 @@ def connection_provider_block(
                 "default_memory": MODAL_DEFAULT_MEMORY_GB,
                 "default_sandbox_timeout": MODAL_DEFAULT_SANDBOX_TIMEOUT_SECONDS,
                 "default_idle_timeout": MODAL_DEFAULT_IDLE_TIMEOUT_SECONDS,
+                **_modal_layout_knobs(),
                 **modal_keys,
             }
         case _ as unreachable:

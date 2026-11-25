@@ -174,6 +174,7 @@ default_cpu = 2.0
 default_memory = 4.0
 default_sandbox_timeout = 86310
 default_idle_timeout = 86400
+host_dir = "/home/user/.mngr"
 token_id = "ak-123"
 token_secret = "as-456"
 """)

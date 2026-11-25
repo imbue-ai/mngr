@@ -178,6 +178,12 @@ def test_build_check_command_creates_symlink_when_volume_provided() -> None:
     assert cmd.index("mkdir -p /host_volume/host_dir") < cmd.index("ln -sfn /host_volume/host_dir /mngr")
 
 
+def test_build_check_command_creates_the_parent_of_a_nested_symlinked_host_dir() -> None:
+    cmd = build_check_and_install_packages_command("/home/user/.mngr", host_volume_mount_path="/host_volume")
+    assert "mkdir -p /home/user &&" in cmd
+    assert cmd.index("mkdir -p /home/user &&") < cmd.index("ln -sfn /host_volume /home/user/.mngr")
+
+
 def test_build_check_command_creates_mkdir_when_no_volume() -> None:
     """When no host_volume_mount_path, should create directory with mkdir."""
     cmd = build_check_and_install_packages_command("/mngr")

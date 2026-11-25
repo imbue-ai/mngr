@@ -593,14 +593,21 @@ def _is_lock_write_failure(output: str) -> bool:
 
 
 def _resolve_backup_root() -> str:
-    # The restore target is the BACKUP ROOT -- the whole persistent tree the
-    # host-backup service snapshots. Current layout: /home/user, of which
-    # MNGR_HOST_DIR is the hidden .mngr child; legacy machines backed up the
-    # host dir itself, so there the target stays MNGR_HOST_DIR.
-    mngr_host_dir = os.path.realpath(os.environ.get("MNGR_HOST_DIR", "/home/user/.mngr"))
-    if os.path.basename(mngr_host_dir) == ".mngr":
-        return os.path.dirname(mngr_host_dir)
-    return mngr_host_dir
+    return backup_root_for_host_dir(os.environ.get("MNGR_HOST_DIR", "/home/user/.mngr"))
+
+
+def backup_root_for_host_dir(mngr_host_dir: str) -> str:
+    """The restore target for a host dir: the whole persistent tree the host-backup service snapshots.
+
+    Current layout: /home/user, of which the host dir is the hidden .mngr child. The name is read
+    before resolving, because the host dir may be a symlink out of that tree (a Modal workspace
+    keeps it on its host Volume). Legacy machines backed up the host dir itself, so there the
+    target stays the host dir.
+    """
+    unresolved_host_dir = os.path.normpath(mngr_host_dir)
+    if os.path.basename(unresolved_host_dir) == ".mngr":
+        return os.path.realpath(os.path.dirname(unresolved_host_dir))
+    return os.path.realpath(unresolved_host_dir)
 
 
 def _service_verify_timeout_seconds(argv: Sequence[str]) -> float:

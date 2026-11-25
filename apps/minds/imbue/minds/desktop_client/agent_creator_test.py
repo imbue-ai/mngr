@@ -144,7 +144,6 @@ from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.testing import make_full_fake_latchkey
-from imbue.mngr_modal.config import MODAL_DEFAULT_HOST_DIR
 
 # A SuperTokens user id (UUID v4) and a connection instance name, as the create path carries them.
 _USER_ID = "3f2a9c1e-5b7d-4a8e-9c0f-1d2e3f4a5b6c"
@@ -657,21 +656,18 @@ def _host_env_host_dir(command: Sequence[str]) -> str:
     return values[0]
 
 
-def test_modal_create_command_names_the_sandbox_host_dir_in_the_host_env() -> None:
-    """A Modal connection block sets no user-data layout, so the host env names the provider's own host dir."""
-    command = _build_mngr_create_command(
+def test_remote_create_commands_name_the_workspace_host_dir_in_the_host_env() -> None:
+    """Every remote provider block keeps mngr's data at the workspace layout's host dir, Modal included."""
+    for mode in (LaunchMode.DOCKER, LaunchMode.LIMA, LaunchMode.VULTR):
+        command = _build_mngr_create_command(launch_mode=mode, host_name=HostName("hello"))
+        assert _host_env_host_dir(command) == WORKSPACE_HOST_DIR, mode
+    modal_command = _build_mngr_create_command(
         launch_mode=LaunchMode.MODAL,
         host_name=HostName("hello"),
         cloud_account="modal_0123456789abcdef",
         modal_sandbox_timeout_seconds=3600,
     )
-    assert _host_env_host_dir(command) == str(MODAL_DEFAULT_HOST_DIR) == "/mngr"
-
-
-def test_layout_provider_create_commands_name_the_workspace_host_dir_in_the_host_env() -> None:
-    for mode in (LaunchMode.DOCKER, LaunchMode.LIMA, LaunchMode.VULTR):
-        command = _build_mngr_create_command(launch_mode=mode, host_name=HostName("hello"))
-        assert _host_env_host_dir(command) == WORKSPACE_HOST_DIR, mode
+    assert _host_env_host_dir(modal_command) == WORKSPACE_HOST_DIR
 
 
 def test_create_command_secrets_are_masked_for_logging() -> None:
