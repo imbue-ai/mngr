@@ -89,7 +89,7 @@ const test = base.test.extend({
     if (!fs.existsSync(execPath)) {
       throw new Error(
         `Imbue Studio.app binary not found at ${execPath}. Install it to /Applications/ or ` +
-          `set MINDS_APP_PATH to a downloaded build.`
+          `set MINDS_APP_PATH to a downloaded build inside a folder named Applications (e.g. ~/Applications).`
       );
     }
 

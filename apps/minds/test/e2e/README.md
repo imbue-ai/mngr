@@ -52,10 +52,10 @@ modules, with no backend. None of them runs in CI.
 pnpm exec playwright test --config=test/e2e/playwright.config.js link-routing.spec.js
 ```
 
-Default target is `/Applications/Imbue Studio.app/Contents/MacOS/Imbue Studio`. Override via `MINDS_APP_PATH` to point at a downloaded pre-release build:
+Default target is `/Applications/Imbue Studio.app/Contents/MacOS/Imbue Studio`. Override via `MINDS_APP_PATH` to point at a downloaded pre-release build. A packaged build runs only from inside a folder named `Applications` (see [Desktop app](../../docs/desktop-app.md#macos-runs-only-from-an-applications-folder)), so put it in `~/Applications` or another such folder:
 
 ```
-MINDS_APP_PATH="/tmp/Imbue Studio-260530xxxxx.app/Contents/MacOS/Imbue Studio \
+MINDS_APP_PATH="$HOME/Applications/Imbue Studio-260530xxxxx.app/Contents/MacOS/Imbue Studio" \
   pnpm exec playwright test --config=test/e2e/playwright.config.js macos-launch.spec.js
 ```
 

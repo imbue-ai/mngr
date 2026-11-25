@@ -100,7 +100,12 @@ _DEB_INSTALL_DIR: Final[Path] = Path("opt") / MINDS_APP_NAME
 _DEB_EXECUTABLE_NAME: Final[str] = "imbue-studio"
 _DEB_EXTRACTOR: Final[str] = "dpkg-deb"
 # What the macOS ``.zip`` holds: the signed app bundle, whose executable Playwright launches directly.
-_MACOS_BUNDLE_EXECUTABLE: Final[Path] = Path(f"{MINDS_APP_NAME}.app") / "Contents" / "MacOS" / MINDS_APP_NAME
+_MACOS_BUNDLE_SUFFIX: Final[str] = ".app"
+_MACOS_BUNDLE_EXECUTABLE: Final[Path] = (
+    Path(f"{MINDS_APP_NAME}{_MACOS_BUNDLE_SUFFIX}") / "Contents" / "MacOS" / MINDS_APP_NAME
+)
+# A packaged macOS build starts only from a path with a folder of this name in it.
+_APPLICATIONS_DIR_NAME: Final[str] = "Applications"
 # ``ditto`` keeps the bundle's symlinks, permissions and signature, which ``unzip`` need not.
 _ZIP_EXTRACTOR: Final[str] = "ditto"
 _NODE_BINARY: Final[str] = "node"
@@ -190,15 +195,32 @@ def bundled_root_name_or_none(executable: Path) -> str | None:
     return None
 
 
-def packaged_studio_binary(executable: Path, backend: SmokeBackend, *, label: str) -> StudioBinary:
-    """Describe a packaged build at ``executable``, refusing one baked for a tier other than ``backend``'s.
+@pure
+def _is_macos_bundle_outside_applications(executable: Path) -> bool:
+    """Whether ``executable`` sits in a ``.app`` bundle that Electron's ``isInApplicationsFolder`` would reject."""
+    is_in_bundle = any(part.endswith(_MACOS_BUNDLE_SUFFIX) for part in executable.parts)
+    return is_in_bundle and _APPLICATIONS_DIR_NAME not in executable.parts
 
-    The check is what keeps a run from ever creating resources on a tier it was
-    not pointed at: a production build talks to production whatever the
-    environment says.
+
+def packaged_studio_binary(executable: Path, backend: SmokeBackend, *, label: str) -> StudioBinary:
+    """Describe a packaged build at ``executable``, refusing one that cannot run as ``backend``'s tier.
+
+    A macOS build outside a folder named ``Applications`` is refused because it
+    would only offer to move itself. A build baked for a tier other than
+    ``backend``'s is refused too; that check is what keeps a run from ever
+    creating resources on a tier it was not pointed at: a production build
+    talks to production whatever the environment says.
     """
     if not executable.is_file():
         raise SmokeConfigError(f"The Imbue Studio executable {executable} does not exist.")
+    resolved_executable = executable.resolve()
+    if _is_macos_bundle_outside_applications(resolved_executable):
+        raise SmokeConfigError(
+            f"The build at {executable} resolves to {resolved_executable}, a macOS app outside any folder named "
+            f"{_APPLICATIONS_DIR_NAME!r}, and a packaged build started from there only offers to move itself "
+            f"(electron/install-location.js). Move the .app into such a folder, e.g. ~/{_APPLICATIONS_DIR_NAME}, "
+            f"and point {SMOKE_BINARY_PATH_ENV_VAR} there."
+        )
     expected_root_name = root_name_for_env_name(str(backend.env_name))
     bundled_root_name = bundled_root_name_or_none(executable)
     if bundled_root_name is not None and bundled_root_name != expected_root_name:
@@ -303,10 +325,12 @@ def published_build_cache_root(system_platform: str, home_dir: Path, xdg_cache_h
     rather than per-checkout because one build is hundreds of megabytes and this
     machine carries dozens of worktrees. The platform paths are written out
     rather than taken from ``platformdirs`` for the reason given in
-    ``imbue/minds/bootstrap.py``.
+    ``imbue/minds/bootstrap.py``. On macOS the builds sit in a folder named
+    ``Applications``, the only place a packaged build agrees to start from
+    (``electron/install-location.js``).
     """
     if system_platform == _MACOS_PLATFORM_NAME:
-        return home_dir / "Library" / "Caches" / _BUILD_CACHE_DIR_NAME / "builds"
+        return home_dir / "Library" / "Caches" / _BUILD_CACHE_DIR_NAME / _APPLICATIONS_DIR_NAME
     cache_home = xdg_cache_home if xdg_cache_home is not None else home_dir / ".cache"
     return cache_home / _BUILD_CACHE_DIR_NAME / "builds"
 

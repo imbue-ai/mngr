@@ -664,7 +664,8 @@ a run needs:
   this checkout's Electron (the laptop default, and the only mode exercised so
   far); `MINDS_SMOKE_BINARY_PATH` names an installed executable (untried on
   macOS, where an installed Imbue Studio.app holds a single-instance lock, so
-  quit the running app first); `MINDS_SMOKE_CHANNEL=alpha` downloads and unpacks
+  quit the running app first, and where a packaged build starts only from inside
+  a folder named `Applications`); `MINDS_SMOKE_CHANNEL=alpha` downloads and unpacks
   the channel's published build: the Linux `.deb` on Linux x86_64 (what CI runs;
   needs `dpkg`), or the Apple Silicon `.zip` on an arm64 Mac (unpacked with
   `ditto`; the only Mac build the feed publishes).

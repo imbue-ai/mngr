@@ -145,6 +145,36 @@ const {
 const { createExternalOpener, createLinkRouter, isCustomSchemeUrl, isExternalUrl } = require('./link-routing');
 const { createExternalLinkPermissions } = require('./external-link-permissions');
 const { clientPermissionNameOf, createClientPermissionGate, parseDecisionBody } = require('./client-permission-policy');
+const { isLaunchRefused, offerMoveToApplications } = require('./install-location');
+// Imported for ToDesktop's smoke test, which the import itself arms when
+// TODESKTOP_SMOKE_TEST is set. Never `init()`ed: that builds an updater agent
+// whose constructor sets `allowDowngrade = true` on the shared electron-updater
+// singleton, and electron/updater.js drives updates instead.
+const todesktop = require('@todesktop/runtime');
+
+// A packaged macOS app outside an Applications folder starts nothing: it only
+// offers to move itself (see install-location.js).
+if (
+  isLaunchRefused({
+    platform: process.platform,
+    isPackaged: app.isPackaged,
+    isSmokeTest: todesktop.isSmokeTestMode,
+    isInApplicationsFolder: () => app.isInApplicationsFolder(),
+  })
+) {
+  // Chromium writes its profile into userData once ready. Left at Electron's
+  // default, that is the folder holding every tier's state root, and the
+  // tier's own root is not used because the migration below has not run.
+  app.setPath('userData', path.join(app.getPath('temp'), 'imbue-studio-refused-launch'));
+  app
+    .whenReady()
+    .then(() => offerMoveToApplications({ app, dialog }))
+    .catch((err) => {
+      console.error(`[install-location] could not offer the move to Applications: ${err.stack || err}`);
+      app.exit(1);
+    });
+  return;
+}
 
 // After the single-web-context collapse each window is ONE BrowserWindow whose
 // page is the Imbue Studio SPA (titlebar + hub pages + the sandboxed workspace
@@ -273,12 +303,6 @@ if (process.env.MINDS_REMOTE_DEBUGGING_PORT) {
 // Keeps WebRTC from starting Chromium's mDNS responder, which joins the
 // multicast group that macOS gates behind its local network prompt.
 app.commandLine.appendSwitch('disable-features', 'WebRtcHideLocalIpsWithMdns');
-
-// Imported for ToDesktop's smoke test, which the import itself arms when
-// TODESKTOP_SMOKE_TEST is set. Never `init()`ed: that builds an updater agent
-// whose constructor sets `allowDowngrade = true` on the shared electron-updater
-// singleton, and electron/updater.js drives updates instead.
-require('@todesktop/runtime');
 
 // Surface the git SHA the build was cut from in the standard macOS About panel.
 if (app.isPackaged) {

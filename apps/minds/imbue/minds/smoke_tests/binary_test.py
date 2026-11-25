@@ -54,6 +54,14 @@ def _write_linux_build(build_dir: Path, bundled_root_name: str | None) -> Path:
     return executable
 
 
+def _write_macos_build(parent: Path) -> Path:
+    """Lay out ``<parent>/Imbue Studio.app/Contents/MacOS/Imbue Studio`` the way the unpacked ``.zip`` does."""
+    executable = parent / "Imbue Studio.app" / "Contents" / "MacOS" / "Imbue Studio"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("")
+    return executable
+
+
 def test_nothing_selected_names_the_three_ways_to_name_a_build() -> None:
     assert is_studio_binary_selected({"PATH": "/usr/bin"}) is False
     with pytest.raises(SmokeConfigError) as excinfo:
@@ -92,6 +100,28 @@ def test_a_packaged_build_without_a_bundled_root_name_runs_as_the_backend_s_tier
     assert str(binary.label) == "an unbundled build"
 
 
+def test_a_macos_build_is_refused_outside_a_folder_named_applications(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outside = _write_macos_build(tmp_path / "Downloads")
+    with pytest.raises(SmokeConfigError, match="outside any folder named 'Applications'"):
+        resolve_studio_binary(_staging_backend(), {SMOKE_BINARY_PATH_ENV_VAR: str(outside)})
+
+    inside = _write_macos_build(tmp_path / "Applications" / "a build")
+    assert resolve_studio_binary(_staging_backend(), {SMOKE_BINARY_PATH_ENV_VAR: str(inside)}).executable == inside
+
+    monkeypatch.chdir(inside.parents[3])
+    relative = inside.relative_to(inside.parents[3])
+    assert resolve_studio_binary(_staging_backend(), {SMOKE_BINARY_PATH_ENV_VAR: str(relative)}).executable == relative
+
+    linked_applications = tmp_path / "linked" / "Applications"
+    linked_applications.parent.mkdir()
+    linked_applications.symlink_to(outside.parents[3])
+    linked = linked_applications / outside.relative_to(outside.parents[3])
+    with pytest.raises(SmokeConfigError, match="outside any folder named 'Applications'"):
+        resolve_studio_binary(_staging_backend(), {SMOKE_BINARY_PATH_ENV_VAR: str(linked)})
+
+
 def test_a_missing_executable_is_refused_by_path(tmp_path: Path) -> None:
     with pytest.raises(SmokeConfigError, match="does not exist"):
         resolve_studio_binary(_staging_backend(), {SMOKE_BINARY_PATH_ENV_VAR: str(tmp_path / "absent")})
@@ -101,10 +131,8 @@ def test_bundled_root_name_is_read_from_the_linux_and_macos_layouts(tmp_path: Pa
     linux_executable = _write_linux_build(tmp_path / "linux", bundled_root_name="minds-staging")
     assert bundled_root_name_or_none(linux_executable) == "minds-staging"
 
-    macos_executable = tmp_path / "Imbue Studio.app" / "Contents" / "MacOS" / "Imbue Studio"
-    macos_executable.parent.mkdir(parents=True)
-    macos_executable.write_text("")
-    macos_root_name_file = tmp_path / "Imbue Studio.app" / "Contents" / "Resources" / _BUNDLED_ROOT_NAME_RELATIVE_PATH
+    macos_executable = _write_macos_build(tmp_path / "mac")
+    macos_root_name_file = macos_executable.parent.parent / "Resources" / _BUNDLED_ROOT_NAME_RELATIVE_PATH
     macos_root_name_file.parent.mkdir(parents=True)
     macos_root_name_file.write_text("minds\n")
     assert bundled_root_name_or_none(macos_executable) == "minds"
@@ -210,7 +238,7 @@ def test_the_cache_root_is_a_user_level_directory_no_temp_sweep_prunes(tmp_path:
     home = tmp_path / "home"
 
     mac = published_build_cache_root("darwin", home, xdg_cache_home=None)
-    assert mac == home / "Library" / "Caches" / "imbue-studio-smoke" / "builds"
+    assert mac == home / "Library" / "Caches" / "imbue-studio-smoke" / "Applications"
 
     linux = published_build_cache_root("linux", home, xdg_cache_home=None)
     assert linux == home / ".cache" / "imbue-studio-smoke" / "builds"
