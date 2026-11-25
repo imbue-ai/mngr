@@ -84,6 +84,7 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.mock_provider_test import make_local_volume_provider
 from imbue.mngr.providers.mock_provider_test import make_offline_host_with_volume
 from imbue.mngr.utils.plugin_testing import PLACEHOLDER_AGENT_TYPE
+from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import write_executable_script
@@ -2038,11 +2039,15 @@ def test_press_key_chord_returns_once_grok_reports_the_cancelled_turn_s_end_afte
     agent = _make_agent_with_a_turn_in_flight(local_provider, tmp_path)
     hook_delay_seconds = 0.3
     stop_cancelled_hook_run = _build_stop_cancelled_hook_run(agent).strip()
+    hook_exited_path = tmp_path / "stop_cancelled_hook_exited"
     pane_dir = _put_scripted_grok_pane_on_path(
         monkeypatch,
         tmp_path,
         (_BUSY_PANE, _IDLE_PANE),
-        on_press_scripts=(f"( sleep {hook_delay_seconds}; {stop_cancelled_hook_run} ) >/dev/null 2>&1 &\n",),
+        on_press_scripts=(
+            f"( sleep {hook_delay_seconds}; {stop_cancelled_hook_run}; "
+            f"touch {shlex.quote(str(hook_exited_path))} ) >/dev/null 2>&1 &\n",
+        ),
     )
 
     started_at = time.monotonic()
@@ -2051,10 +2056,12 @@ def test_press_key_chord_returns_once_grok_reports_the_cancelled_turn_s_end_afte
     assert hook_delay_seconds <= time.monotonic() - started_at < 1.5
     assert _read_pressed_keys(pane_dir) == ["C-c"]
     assert not _is_cancelled_turn_recorded(agent)
-    assert "event=stop_cancelled" in _read_hook_log(agent)
-    assert _TURN_DROPPED_EVENT not in _read_hook_log(agent)
     recorded_time = float((agent._get_agent_dir() / _LAST_INTERRUPT_RELATIVE_PATH).read_text())
     assert abs(recorded_time - time.time()) < 5.0
+    # press_key_chord waits for the turn's record to go, not for the hook to finish writing its log.
+    wait_for(hook_exited_path.exists, timeout=5.0, error_message="grok's StopCancelled hook run never exited")
+    assert "event=stop_cancelled" in _read_hook_log(agent)
+    assert _TURN_DROPPED_EVENT not in _read_hook_log(agent)
 
 
 @pytest.mark.parametrize(
