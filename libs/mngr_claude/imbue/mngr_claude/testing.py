@@ -101,7 +101,8 @@ RAW_TRANSCRIPT_RELPATH: Final[str] = "logs/claude_transcript/events.jsonl"
 # Claude Code's alias for the current Haiku, the cheapest tier.
 RELEASE_TEST_MODEL: Final[str] = "haiku"
 
-# Each label Claude Code gives a background task's `type`, and the kind the Stop hook records it as.
+# Each label the claude build `CLAUDE_CODE_VERSION` names gives a background task's `type`, and the kind the Stop
+# hook records it as.
 BACKGROUND_TASK_KIND_BY_CLAUDE_TASK_LABEL: Final[Mapping[str, BackgroundTaskKind]] = {
     "shell": BackgroundTaskKind.SHELL,
     "subagent": BackgroundTaskKind.SUBAGENT,
@@ -366,10 +367,15 @@ def created_agent(
                 ctx.teardown()
 
 
+def read_claude_version_output(ctx: AgentReleaseContext) -> str:
+    """What the installed claude prints for ``--version``, e.g. ``2.1.50 (Claude Code)``."""
+    result = subprocess.run(["claude", "--version"], capture_output=True, text=True, env=dict(ctx.env), timeout=60.0)
+    return result.stdout.strip()
+
+
 def drift_note(ctx: AgentReleaseContext, subject: str) -> str:
     """A failure-message suffix naming the installed claude, e.g. ``(claude version: <version>; a failure here means <subject> drifted)``."""
-    result = subprocess.run(["claude", "--version"], capture_output=True, text=True, env=dict(ctx.env), timeout=60.0)
-    claude_version = result.stdout.strip() or "unknown"
+    claude_version = read_claude_version_output(ctx) or "unknown"
     return f"(claude version: {claude_version}; a failure here means {subject} drifted)"
 
 
