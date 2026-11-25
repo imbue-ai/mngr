@@ -28,6 +28,15 @@ Each rollout item under type "response_item" maps to exactly one record:
                                     (payload.input, not .arguments)
   payload.type=="custom_tool_call_output"    -> observation record, keyed by call_id
 
+A rollout line of type "compacted" marks the point where codex replaced the
+conversation with a compacted history. It becomes a system step with message
+"Context compaction performed" and extra {"context_management": {"type":
+"compaction", "boundary": "replace"}}, the ATIF convention the Claude and Pi
+transcripts use too, so a consumer can tell where the context was compacted. When
+codex wrote a summary (payload.message; empty when the compaction ran remotely
+and the history it kept is opaque) it rides inline as the step's observation.
+Like any system step, it ends the token_count window.
+
 User-role messages that are instruction injections rather than genuine user
 turns -- the AGENTS.md context blob ("# AGENTS.md instructions for <dir>" with
 an "<INSTRUCTIONS>" envelope) and codex's own "<user_instructions>" /
@@ -35,10 +44,10 @@ an "<INSTRUCTIONS>" envelope) and codex's own "<user_instructions>" /
 their full text, so the session-configured instructions survive without being
 mistaken for user turns.
 
-Three rollout types outside "response_item" are read, because they are the only
-place codex reports which session and turn an inference belongs to, what it cost
-and which model ran it. None produces a record of its own; they only decorate
-the agent steps around them.
+Besides "compacted", three rollout types outside "response_item" are read,
+because they are the only place codex reports which session and turn an
+inference belongs to, what it cost and which model ran it. None produces a
+record of its own; they only decorate the agent steps around them.
   type "session_meta"  -> the session id (payload.session_id, or payload.id where
                           an older codex writes no session_id), stamped on every
                           later agent step as extra.harness_session_id. codex
@@ -195,6 +204,9 @@ _SCHEMA_VERSION = "ATIF-v1.7"
 # tailed from mid-turn). The result is still emitted -- the doc-builder warns on an
 # unmatched source_call_id rather than the output being lost here.
 _UNKNOWN_TOOL_NAME = "unknown"
+
+# The message of the system step a compaction becomes, the same one the Claude converter writes.
+_COMPACTION_MESSAGE = "Context compaction performed"
 
 # codex wraps its own initial-context items in these envelopes and carries them
 # as user-role messages; they are session-configured instructions, not user turns.
@@ -636,6 +648,16 @@ def _step_record(event_id: str, timestamp: str, source: str, message: str) -> di
     }
 
 
+def _compaction_step(event_id: str, timestamp: str, summary: str) -> dict[str, Any]:
+    step = _step_record(event_id, timestamp, "system", _COMPACTION_MESSAGE)
+    step["extra"] = {"context_management": {"type": "compaction", "boundary": "replace"}}
+    if summary:
+        # A system step already has its result at emission time, so the summary rides
+        # inline rather than as a separate observation record.
+        step["observation"] = {"results": [{"content": summary}]}
+    return step
+
+
 def _stamp_inference_context(
     step: dict[str, Any], model_name: str, reasoning_effort: JsonValue, session_id: str, turn_id: str
 ) -> None:
@@ -830,6 +852,19 @@ def convert(input_file: str, output_file: str, agent_id: str = "", is_input_comp
                 else:
                     # Every other event_msg is a display duplicate of a response_item.
                     continue
+                continue
+
+            if raw_type == "compacted":
+                raw_timestamp = raw.get("timestamp")
+                id_timestamp = raw_timestamp if isinstance(raw_timestamp, str) else ""
+                message = payload.get("message") if isinstance(payload, dict) else None
+                summary = message if isinstance(message, str) else ""
+                unmeasured_step_index = None
+                window_call_ids_awaiting_output.clear()
+                event_id = _make_event_id(id_timestamp, summary, "compact")
+                if _is_already_converted(existing_ids, event_id, line_index, "compact"):
+                    continue
+                records.append(_compaction_step(event_id, _iso_timestamp(raw_timestamp), summary))
                 continue
 
             if raw_type != "response_item":

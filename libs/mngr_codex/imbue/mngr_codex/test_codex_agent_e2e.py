@@ -332,6 +332,47 @@ def test_codex_agent_steps_carry_the_session_and_turn_ids_codex_reports(tmp_path
         )
 
 
+@pytest.mark.release
+@pytest.mark.harness_internals(harness="codex")
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(900)
+def test_codex_agent_compaction_reaches_the_common_transcript_as_a_system_step(tmp_path: Path) -> None:
+    """A compaction of the root thread becomes one system step marked ``context_management.type == "compaction"``.
+
+    Pins the rollout's ``compacted`` line, which is the only record of where codex replaced the conversation.
+    """
+    profile = _CodexReleaseProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+    ctx = profile.setup(tmp_path)
+    agent_name = f"codex-compaction-{get_short_random_string()}"
+    with _created_codex_agent(profile, ctx, agent_name, *profile.create_extra_args(ctx)):
+        send_expecting_success(profile, ctx, agent_name, "Reply with just OK.")
+        _wait_for_turn_end(profile, ctx, agent_name, "COMPLETED")
+        with _root_thread_client(profile, ctx) as client:
+            compaction, _ = _run_compaction(client, agent_state_dir(ctx.host_dir))
+        assert compaction.get("status") == "completed", compaction
+
+        common_records = wait_for_records(
+            ctx.host_dir,
+            profile.common_transcript_subdir,
+            lambda rs: any(_is_compaction_step(r) for r in rs),
+            timeout=180,
+            description="no compaction step reached the common transcript; the rollout's compacted line drifted "
+            "(consumer: common_transcript_convert's compacted branch)",
+        )
+    compaction_steps = [r for r in common_records if _is_compaction_step(r)]
+    assert len(compaction_steps) == 1, compaction_steps
+    assert is_step_from(compaction_steps[0], "system"), compaction_steps[0]
+
+
+def _is_compaction_step(record: Mapping[str, Any]) -> bool:
+    context_management = (record.get("extra") or {}).get("context_management") or {}
+    return record.get("type") == "step" and context_management.get("type") == "compaction"
+
+
 _TURN_END_CONSUMER: Final[str] = (
     "stream_transcript.sh's _record_turn_end, which reads the rollout's task_complete (its error's codex_error_info) "
     "and turn_aborted (its reason) records"

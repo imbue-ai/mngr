@@ -21,6 +21,7 @@ from imbue.mngr_codex.resources import common_transcript_convert
 from imbue.mngr_codex.resources.testing import DEFAULT_ROLLOUT_TIMESTAMP
 from imbue.mngr_codex.resources.testing import rollout_assistant_message as _assistant
 from imbue.mngr_codex.resources.testing import rollout_command_execution as _command_execution
+from imbue.mngr_codex.resources.testing import rollout_compacted as _compacted
 from imbue.mngr_codex.resources.testing import rollout_custom_tool_call as _custom_tool_call
 from imbue.mngr_codex.resources.testing import rollout_custom_tool_call_output as _custom_tool_call_output
 from imbue.mngr_codex.resources.testing import rollout_function_call as _function_call
@@ -550,6 +551,61 @@ def test_token_count_with_no_agent_step_in_its_window_is_dropped(tmp_path: Path)
     steps = _steps(output_file)
     assert len(steps) == 1
     assert steps[0]["metrics"]["prompt_tokens"] == 100
+
+
+def test_a_compaction_becomes_a_system_step_carrying_its_summary(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    _write(input_file, [_user("build me an app"), _assistant("done"), _compacted("We built a to-do app.")])
+    common_transcript_convert.convert(str(input_file), str(output_file), is_input_complete=True)
+
+    records = _records(output_file)
+    _assert_all_conform(records)
+    compaction = _steps(output_file)[-1]
+    assert compaction["source"] == "system"
+    assert compaction["message"] == "Context compaction performed"
+    assert compaction["extra"] == {"context_management": {"type": "compaction", "boundary": "replace"}}
+    assert compaction["observation"] == {"results": [{"content": "We built a to-do app."}]}
+
+
+def test_a_compaction_without_a_summary_carries_no_observation(tmp_path: Path) -> None:
+    # A remote compaction leaves codex's message empty; the history it kept is opaque.
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    _write(input_file, [_user("hello"), _compacted("")])
+    common_transcript_convert.convert(str(input_file), str(output_file), is_input_complete=True)
+
+    _assert_all_conform(_records(output_file))
+    compaction = _steps(output_file)[-1]
+    assert compaction["extra"]["context_management"]["type"] == "compaction"
+    assert "observation" not in compaction
+
+
+def test_a_compaction_is_written_once_across_passes(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    _write(input_file, [_user("hello"), _compacted("summary")])
+    common_transcript_convert.convert(str(input_file), str(output_file), is_input_complete=True)
+    assert common_transcript_convert.convert(str(input_file), str(output_file), is_input_complete=True) == 0
+
+    compactions = [step for step in _steps(output_file) if "context_management" in step.get("extra", {})]
+    assert len(compactions) == 1
+
+
+def test_a_token_count_after_a_compaction_does_not_measure_the_step_before_it(tmp_path: Path) -> None:
+    # The usage of the compaction's own request describes no emitted agent step.
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    _write(
+        input_file,
+        [
+            _turn_context("gpt-6.1-sol"),
+            _assistant("answer"),
+            _compacted("summary"),
+            _token_count(input_tokens=900, output_tokens=90),
+        ],
+    )
+    common_transcript_convert.convert(str(input_file), str(output_file), is_input_complete=True)
+
+    agent_steps = [step for step in _steps(output_file) if step["source"] == "agent"]
+    assert len(agent_steps) == 1
+    assert "metrics" not in agent_steps[0]
 
 
 def test_a_second_token_count_does_not_re_measure_a_closed_inference(tmp_path: Path) -> None:

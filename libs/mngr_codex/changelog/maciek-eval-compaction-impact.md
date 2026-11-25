@@ -1,0 +1,1 @@
+The codex common transcript records each context compaction as a system step, "Context compaction performed", with `extra.context_management.type` set to `compaction`, the same convention the Claude and Pi transcripts use, carrying codex's summary when it wrote one, so a trajectory built from a codex agent's transcript shows where its context was compacted.

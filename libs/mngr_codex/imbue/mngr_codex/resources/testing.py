@@ -191,6 +191,19 @@ def rollout_turn_context(model: str, effort: str | None = "medium", turn_id: str
     return rollout_line("turn_context", payload)
 
 
+def rollout_compacted(message: str = "", timestamp: str = DEFAULT_ROLLOUT_TIMESTAMP) -> dict[str, Any]:
+    """The line codex writes where it replaced the conversation with a compacted history.
+
+    ``message`` is codex's summary, which a remote compaction leaves empty; the history it kept
+    rides opaquely in ``replacement_history``.
+    """
+    return rollout_line(
+        "compacted",
+        {"message": message, "replacement_history": [{"type": "compaction", "encrypted_content": "gAAAAA-opaque"}]},
+        timestamp=timestamp,
+    )
+
+
 def rollout_token_count(
     input_tokens: int,
     output_tokens: int,
