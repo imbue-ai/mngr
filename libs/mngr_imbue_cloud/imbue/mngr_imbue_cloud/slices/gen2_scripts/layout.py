@@ -427,8 +427,7 @@ GEN2_QGROUP_LIMIT_MAX_REFERENCED_FLAG: Final[int] = 1
 # gVisor the container's own /proc/meminfo cannot see the runtime's share of
 # the limit. A workspace running under runc writes the same file for itself
 # from its own cgroup (the template's publish_cgroup_meminfo program, which
-# mirrors the formula of the VM-side publisher in ``guest.py`` and exits under
-# gVisor).
+# computes its own figure and exits under gVisor).
 GEN2_CONTAINER_HOST_MEMINFO_FILE_NAME: Final[str] = CONTAINER_HOST_MEMINFO_FILE_NAME
 # Beside it, the VM publishes the host quota's limit and usage, for the
 # workspace to read at ``/mngr-vol/.host-diskinfo``: statfs inside the

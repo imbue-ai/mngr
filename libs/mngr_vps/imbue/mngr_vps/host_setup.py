@@ -461,8 +461,8 @@ rm -rf "$MNGR_MEMORY_STAGE\""""
 # page tables and kernel objects, half a GiB on an 8 GB VM), so a guard reading
 # only the sandbox view acts once the cgroup is already at its limit. The file
 # carries the cgroup's limit as MemTotal and, as MemAvailable, the limit minus
-# the usage plus the inactive file cache: the name and format the gen-2 slice
-# VMs publish too (``imbue_common.container_meminfo_publisher``), which an earlyoom run with
+# the usage plus the file cache and reclaimable slab, less a fixed reserve: the
+# name, format and figure the gen-2 slice VMs publish too (``imbue_common.container_meminfo_publisher``), which an earlyoom run with
 # ``--host-meminfo`` already reads.
 CONTAINER_MEMINFO_UNIT_NAME: Final[str] = "mngr-vps-container-meminfo.service"
 _CONTAINER_MEMINFO_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-vps-container-meminfo.pl"

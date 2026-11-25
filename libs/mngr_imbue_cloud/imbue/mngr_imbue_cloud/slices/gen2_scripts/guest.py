@@ -262,11 +262,12 @@ def render_guest_container_meminfo_publisher_script(cgroup_parent: str, btrfs_sy
     Under gVisor the container's own /proc/meminfo cannot see the memory the
     runtime is charged, so an earlyoom inside run with ``--host-meminfo``
     reads this file too. It holds the container cgroup's limit as MemTotal
-    and, as MemAvailable, the limit minus the usage plus the inactive file
-    cache, the kubelet's eviction signal. Active file cache and reclaimable
-    slab are not counted: near the limit they are what the kernel thrashes
-    rather than frees, so counting them can hold the figure above earlyoom's
-    SIGKILL threshold while the cgroup runs out. Each rewrite goes into one of
+    and, as MemAvailable, the limit minus the usage plus what the kernel frees
+    before it kills in the cgroup (the file cache on either list and the
+    reclaimable slab), less ``CONTAINER_MEMORY_HEADROOM_RESERVE_BYTES``: the
+    part of those a workspace stalls without or the kernel never frees, which
+    would otherwise hold the figure above earlyoom's SIGKILL threshold while
+    the cgroup runs out. Each rewrite goes into one of
     two slot files beside it, alternately, and is renamed onto it: the reader
     reopens it on every poll and always sees a complete file, and gVisor, which
     keeps an entry for every distinct inode the sandbox sees for its lifetime,

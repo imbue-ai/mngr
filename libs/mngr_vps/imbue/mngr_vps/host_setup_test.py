@@ -232,7 +232,6 @@ def test_container_meminfo_publisher_script_reads_each_labelled_containers_cgrou
     assert "my $cgroup_parent = '/sys/fs/cgroup/system.slice';" in script
     assert "docker-$container_id.scope" in script
     assert 'read_first_line("$cgroup_dir/memory.max")' in script
-    assert "my $available = $limit - $usage + $inactive_file;" in script
     # The format earlyoom's --host-meminfo reads; an uncapped container gets no file.
     assert '"MemTotal: %15d kB\\nMemAvailable: %15d kB\\nTimestamp: %15d\\n"' in script
     assert "if ($limit eq 'max') {" in script

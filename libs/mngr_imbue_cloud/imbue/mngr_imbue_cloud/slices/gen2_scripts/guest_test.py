@@ -12,6 +12,7 @@ import pytest
 import yaml
 from inline_snapshot import snapshot
 
+from imbue.imbue_common.container_meminfo_publisher import CONTAINER_MEMORY_HEADROOM_RESERVE_BYTES
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.guest import GEN2_CIDATA_FILE_NAMES
@@ -487,16 +488,17 @@ esac
 
 
 _MIB = 1024 * 1024
+_RESERVE_MIB = CONTAINER_MEMORY_HEADROOM_RESERVE_BYTES // _MIB
 _GIB = 1024 * _MIB
 _CONTAINER_ID = "d0d0" * 16
 
 
-def _limited_container(tmp_path: Path, *, stat: str = "") -> tuple[Path, Path]:
-    """Write the container's cgroup (6415 MiB limit, 6000 MiB used) and make its empty volume directory; return both."""
+def _limited_container(tmp_path: Path, *, usage_mib: int = 6000, stat: str = "") -> tuple[Path, Path]:
+    """Write the container's cgroup (6415 MiB limit) and make its empty volume directory; return both."""
     cgroup_parent = tmp_path / "cgroup"
     volume_dir = tmp_path / "volume"
     volume_dir.mkdir()
-    _write_container_cgroup(cgroup_parent, limit=str(6415 * _MIB), usage=6000 * _MIB, stat=stat)
+    _write_container_cgroup(cgroup_parent, limit=str(6415 * _MIB), usage=usage_mib * _MIB, stat=stat)
     return cgroup_parent, volume_dir
 
 
@@ -587,27 +589,41 @@ def _running_publisher(
     assert exit_code is None, f"the publisher exited with {exit_code}: {stderr}"
 
 
-def test_meminfo_publisher_reports_the_cgroup_limit_and_inactive_file_headroom(tmp_path: Path) -> None:
-    # 6415 MiB limit, 6000 MiB used, of which 200 MiB is inactive file cache.
-    # Active file cache, reclaimable slab and the shmem gVisor keeps the
-    # sandbox's memory in are not counted as available.
+def test_meminfo_publisher_reports_the_cgroup_limit_and_freeable_headroom_less_the_reserve(tmp_path: Path) -> None:
+    # 6415 MiB limit, 5000 MiB used, of which the kernel can free the 600 MiB of
+    # file cache on either list and the 150 MiB of reclaimable slab. The shmem
+    # gVisor keeps the sandbox's memory in is not freeable.
     cgroup_parent, volume_dir = _limited_container(
         tmp_path,
+        usage_mib=5000,
         stat=(
-            f"anon {400 * _MIB}\nfile {5000 * _MIB}\nshmem {4700 * _MIB}\n"
-            f"active_file {100 * _MIB}\ninactive_file {200 * _MIB}\nslab_reclaimable {50 * _MIB}\n"
+            f"anon {400 * _MIB}\nfile {4300 * _MIB}\nshmem {3700 * _MIB}\n"
+            f"active_file {400 * _MIB}\ninactive_file {200 * _MIB}\nslab_reclaimable {150 * _MIB}\n"
         ),
     )
     with _running_publisher(tmp_path, cgroup_parent, volume_dir):
         before = int(time.time())
         published = _read_published(volume_dir / ".host-meminfo", _MEMINFO_KEYS, timeout_seconds=10)
         assert published["MemTotal"] == 6415 * 1024
-        assert published["MemAvailable"] == (6415 - 6000 + 200) * 1024
+        assert published["MemAvailable"] == (6415 - 5000 + 400 + 200 + 150 - _RESERVE_MIB) * 1024
         assert before - 1 <= published["Timestamp"] <= int(time.time()) + 1
 
         # Removing the limit withdraws the file rather than reporting a made-up one.
         (cgroup_parent / f"docker-{_CONTAINER_ID}.scope" / "memory.max").write_text("max\n")
         assert poll_until(lambda: not any(volume_dir.iterdir()), timeout=10, poll_interval=0.05)
+
+
+def test_meminfo_publisher_reports_no_headroom_when_less_than_the_reserve_is_freeable(tmp_path: Path) -> None:
+    # A cgroup at its limit whose file cache is nearly gone, with slab the kernel
+    # has not freed: what a sandbox held when the kernel killed it.
+    cgroup_parent, volume_dir = _limited_container(
+        tmp_path,
+        usage_mib=6415,
+        stat=f"active_file {20 * _MIB}\ninactive_file {30 * _MIB}\nslab_reclaimable {300 * _MIB}\n",
+    )
+    with _running_publisher(tmp_path, cgroup_parent, volume_dir):
+        published = _read_published(volume_dir / ".host-meminfo", _MEMINFO_KEYS, timeout_seconds=10)
+        assert published["MemAvailable"] == 0
 
 
 def test_meminfo_publisher_never_writes_through_a_symlink_the_container_planted(tmp_path: Path) -> None:
@@ -680,7 +696,7 @@ def test_meminfo_publisher_alternates_between_two_slot_files_it_rewrites_in_plac
             assert poll_until(
                 lambda: all(
                     (_parse_published(os.pread(slot_file, 4096, 0).decode(), _MEMINFO_KEYS) or {}).get("MemAvailable")
-                    == (6415 - 5000) * 1024
+                    == (6415 - 5000 - _RESERVE_MIB) * 1024
                     for slot_file in slot_files
                 ),
                 timeout=10,

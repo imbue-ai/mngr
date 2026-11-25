@@ -231,6 +231,8 @@ runcmd:
       my $interval_seconds = 0.25;
       my $rounds_per_discovery = 40;
       \n\
+      my $memory_reserve_bytes = 419430400;
+      \n\
       # docker's output, or undef if it fails. Its stderr is dropped: a container
       # that stops mid-discovery fails its inspect.
       sub docker_output {
@@ -355,14 +357,17 @@ runcmd:
           my $usage = read_first_line("$cgroup_dir/memory.current") // return;
           return unless $usage =~ /^\\d+$/;
           open(my $stat, '<', "$cgroup_dir/memory.stat") or return;
-          my $inactive_file = 0;
+          # The file cache counts whichever list it is on: with the multi-generation
+          # LRU the two lists say when the kernel last reclaimed, not what is in use.
+          my %freeable = (active_file => 0, inactive_file => 0, slab_reclaimable => 0);
           while (my $line = <$stat>) {
               my ($key, $value) = split ' ', $line;
               next unless defined $value && $value =~ /^\\d+$/;
-              $inactive_file = $value if $key eq 'inactive_file';
+              $freeable{$key} = $value if exists $freeable{$key};
           }
           close($stat);
-          my $available = $limit - $usage + $inactive_file;
+          my $available = $limit - $usage - $memory_reserve_bytes;
+          $available += $_ for values %freeable;
           $available = 0 if $available < 0;
           $available = $limit if $available > $limit;
           # Fixed-width fields, so every rewrite of a slot has the same length (see write_in_place).

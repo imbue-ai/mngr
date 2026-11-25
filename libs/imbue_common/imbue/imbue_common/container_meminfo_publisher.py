@@ -12,6 +12,7 @@ the script-level variables the subs read (``$cgroup_parent``, the docker cgroup
 parent; ``$host_id_label``, the label marking an agent host container;
 ``$volume_mount_path``, where the container mounts its volume), then
 ``MEMINFO_PUBLISHER_PERL_SUBS``, then its own main loop over ``discover()``.
+The subs declare the headroom reserve themselves: it is the same on every VM.
 """
 
 from typing import Final
@@ -27,7 +28,14 @@ use warnings;
 use Fcntl qw(O_WRONLY O_CREAT O_EXCL O_NOFOLLOW O_NONBLOCK);
 """
 
-MEMINFO_PUBLISHER_PERL_SUBS: Final[str] = r"""
+# What the published headroom holds back from what the kernel could still free.
+# A cgroup at its limit gives up its file cache and reclaimable slab before the
+# kernel kills in it, but a workspace squeezed below about 300 MiB of the two
+# stalls rereading its own files, whatever its cap, and some of the slab never
+# frees.
+CONTAINER_MEMORY_HEADROOM_RESERVE_BYTES: Final[int] = 400 * 1024 * 1024
+
+_MEMINFO_PUBLISHER_PERL_SUBS_BODY: Final[str] = r"""
 # docker's output, or undef if it fails. Its stderr is dropped: a container
 # that stops mid-discovery fails its inspect.
 sub docker_output {
@@ -152,14 +160,17 @@ sub publish_memory {
     my $usage = read_first_line("$cgroup_dir/memory.current") // return;
     return unless $usage =~ /^\d+$/;
     open(my $stat, '<', "$cgroup_dir/memory.stat") or return;
-    my $inactive_file = 0;
+    # The file cache counts whichever list it is on: with the multi-generation
+    # LRU the two lists say when the kernel last reclaimed, not what is in use.
+    my %freeable = (active_file => 0, inactive_file => 0, slab_reclaimable => 0);
     while (my $line = <$stat>) {
         my ($key, $value) = split ' ', $line;
         next unless defined $value && $value =~ /^\d+$/;
-        $inactive_file = $value if $key eq 'inactive_file';
+        $freeable{$key} = $value if exists $freeable{$key};
     }
     close($stat);
-    my $available = $limit - $usage + $inactive_file;
+    my $available = $limit - $usage - $memory_reserve_bytes;
+    $available += $_ for values %freeable;
     $available = 0 if $available < 0;
     $available = $limit if $available > $limit;
     # Fixed-width fields, so every rewrite of a slot has the same length (see write_in_place).
@@ -172,3 +183,7 @@ sub publish_memory {
     );
 }
 """
+
+MEMINFO_PUBLISHER_PERL_SUBS: Final[str] = (
+    f"\nmy $memory_reserve_bytes = {CONTAINER_MEMORY_HEADROOM_RESERVE_BYTES};\n" + _MEMINFO_PUBLISHER_PERL_SUBS_BODY
+)
