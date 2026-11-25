@@ -7,13 +7,10 @@ that no finite test can close; the tests here pin the observable core of each
 property at the HTTP boundary of the browser authorization component.
 """
 
-import time
 from pathlib import Path
 
 import pytest
 from flask.testing import FlaskClient
-from itsdangerous import TimestampSigner
-from itsdangerous import URLSafeTimedSerializer
 
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
@@ -22,11 +19,10 @@ from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import _COOKIE_MAX_AGE_SECONDS
-from imbue.minds.desktop_client.cookie_manager import _COOKIE_SALT
-from imbue.minds.desktop_client.cookie_manager import _SESSION_PAYLOAD
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.testing import make_backdated_session_cookie
+from imbue.minds.desktop_client.testing import session_cookie_morsel_from_response
 from imbue.minds.desktop_client.testing import tamper_session_cookie_signed_content
-from imbue.minds.primitives import CookieSigningKey
 from imbue.minds.primitives import OneTimeCode
 from imbue.mngr.primitives import AgentId
 
@@ -49,25 +45,6 @@ def _is_treated_as_unauthenticated(client: FlaskClient) -> bool:
     """Whether the gated SPA index turns this client away to the login page."""
     response = client.get(_GATED_ROUTE, follow_redirects=False)
     return response.status_code == 302 and response.headers["Location"] == "/login"
-
-
-def _backdated_session_cookie(signing_key: CookieSigningKey, age_seconds: int) -> str:
-    """A session cookie signed with ``signing_key`` but stamped ``age_seconds`` in the past.
-
-    itsdangerous embeds the sign time in the token, so a backdated
-    ``TimestampSigner`` mints a structurally valid cookie whose age the
-    verifier can measure against the 30-day ceiling -- the only way to witness
-    the expiry boundary without controlling the wall clock.
-    """
-
-    class _BackdatedSigner(TimestampSigner):
-        def get_timestamp(self) -> int:
-            return int(time.time()) - age_seconds
-
-    serializer = URLSafeTimedSerializer(
-        secret_key=signing_key.get_secret_value(), salt=_COOKIE_SALT, signer=_BackdatedSigner
-    )
-    return serializer.dumps(_SESSION_PAYLOAD)
 
 
 @pytest.mark.witnesses(
@@ -169,13 +146,40 @@ def test_expired_session_cookie_is_treated_as_unauthenticated(tmp_path: Path) ->
     signing_key = auth_store.get_signing_key()
 
     # Just inside the ceiling still authenticates; just past it does not.
-    fresh_cookie = _backdated_session_cookie(signing_key, age_seconds=_COOKIE_MAX_AGE_SECONDS - 3600)
+    fresh_cookie = make_backdated_session_cookie(signing_key, age_seconds=_COOKIE_MAX_AGE_SECONDS - 3600)
     client.set_cookie(SESSION_COOKIE_NAME, fresh_cookie)
     assert not _is_treated_as_unauthenticated(client)
 
-    expired_cookie = _backdated_session_cookie(signing_key, age_seconds=_COOKIE_MAX_AGE_SECONDS + 3600)
+    expired_cookie = make_backdated_session_cookie(signing_key, age_seconds=_COOKIE_MAX_AGE_SECONDS + 3600)
     client.set_cookie(SESSION_COOKIE_NAME, expired_cookie)
     assert _is_treated_as_unauthenticated(client)
+
+
+@pytest.mark.witnesses(
+    "browser-authorization.sessions-unforgeable",
+    partial="witnesses that only a valid cookie is answered with a fresh one, on one gated route",
+)
+def test_only_a_valid_session_cookie_is_answered_with_a_fresh_one(tmp_path: Path) -> None:
+    client, auth_store = _empty_client(tmp_path)
+    signing_key = auth_store.get_signing_key()
+    other_auth_store = FileAuthStore(data_directory=tmp_path / "other-installation")
+    valid_cookie = create_session_cookie(signing_key=signing_key)
+    rejected_cookie_by_reason = {
+        "expired": make_backdated_session_cookie(signing_key, age_seconds=_COOKIE_MAX_AGE_SECONDS + 3600),
+        "tampered": tamper_session_cookie_signed_content(valid_cookie),
+        "foreign": create_session_cookie(signing_key=other_auth_store.get_signing_key()),
+    }
+
+    # No cookie at all: nothing to renew.
+    assert session_cookie_morsel_from_response(client.get(_GATED_ROUTE, follow_redirects=False)) is None
+
+    # A cookie the gate rejects is never traded for one it would accept.
+    for reason, rejected_cookie in rejected_cookie_by_reason.items():
+        client.set_cookie(SESSION_COOKIE_NAME, rejected_cookie)
+        assert session_cookie_morsel_from_response(client.get(_GATED_ROUTE, follow_redirects=False)) is None, reason
+
+    client.set_cookie(SESSION_COOKIE_NAME, valid_cookie)
+    assert session_cookie_morsel_from_response(client.get(_GATED_ROUTE, follow_redirects=False)) is not None
 
 
 def _bridging_client(tmp_path: Path, is_authenticated: bool) -> FlaskClient:

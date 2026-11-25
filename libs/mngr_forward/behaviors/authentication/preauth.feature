@@ -18,6 +18,13 @@ Feature: Pre-authorized sessions for an embedding host
     When it requests a page on an agent origin
     Then the request is treated as signed in on that origin
 
+  @preauth-not-replaced
+  Scenario: The preauth value is never replaced by a signed cookie
+    Given a forward proxy started with a preauth cookie value
+    And a browser whose session cookie is exactly that value
+    When it makes a signed-in request
+    Then the response carries no session cookie
+
   @preauth-near-miss
   Scenario: Anything but the exact preauth value falls back to signature verification
     Given a forward proxy started with a preauth cookie value

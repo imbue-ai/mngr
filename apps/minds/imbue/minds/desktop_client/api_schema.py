@@ -306,7 +306,7 @@ _SECURITY_SCHEMES: Final[Mapping[str, object]] = {
         "type": "apiKey",
         "in": "cookie",
         "name": SESSION_COOKIE_NAME,
-        "description": "Desktop-client signed session cookie (used by the browser UI).",
+        "description": "Desktop-client session cookie (used by the browser UI).",
     },
 }
 

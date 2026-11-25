@@ -40,6 +40,8 @@ test.skip(() => process.platform !== 'darwin', 'the dock activate and open-url e
 const BACKEND_READY_RE = /\[startup\] Backend ready at (http:\/\/localhost:\d+)/;
 // Logged each time main computes the first-window route (computeStartupRouting).
 const STARTUP_ROUTE_LINES_RE = /\[startup\] route=/g;
+// The same line, when the app-status probe behind it was accepted as signed in.
+const STARTUP_ROUTE_AUTHENTICATED_RE = /\[startup\] route=\S+ authenticated=true/;
 
 // A reopened window navigates to its route only once its loading screen has
 // loaded; an earlier route navigation can hide the window from Playwright.
@@ -191,11 +193,12 @@ test.describe('healthy app', () => {
     await expect.poll(() => liveUrl(mainWindow)).toContain('shell.html');
     await closeAllWindows(app);
 
-    // The one-time login code sat inside a guard on that window's survival,
-    // and it is the ONLY place the code is consumed. Its absence was the
-    // whole defect, so assert the hop itself, not just the landing.
+    // Startup signs the app in whether or not its window survives, and it is
+    // the only place that happens. So assert the sign-in itself, not just the
+    // landing: main's own probe of the backend, made with the session cookie
+    // startup set, answers signed in.
     await output.waitForLine(BACKEND_READY_RE);
-    await output.waitForLine(/\[startup\] Consuming one-time code via/, { timeoutMs: 60 * 1000 });
+    await output.waitForLine(STARTUP_ROUTE_AUTHENTICATED_RE, { timeoutMs: 60 * 1000 });
 
     const reopenLoads = await recordNextWindowLoads(app);
     const reopened = await windowOpenedBy(app, () => emitActivate(app));

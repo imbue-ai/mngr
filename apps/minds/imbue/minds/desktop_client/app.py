@@ -73,9 +73,6 @@ from imbue.minds.desktop_client.connections.primitives import imbue_cloud_provid
 from imbue.minds.desktop_client.connections.primitives import is_connection_instance_name
 from imbue.minds.desktop_client.connections.primitives import provider_instance_name_for_synced_row
 from imbue.minds.desktop_client.connections.provider_settings import ProviderSettingsMaterializer
-from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
-from imbue.minds.desktop_client.cookie_manager import create_session_cookie
-from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
 from imbue.minds.desktop_client.create_attempt_rows import CreateAttemptOwner
 from imbue.minds.desktop_client.create_attempt_rows import CreateAttemptRow
 from imbue.minds.desktop_client.create_attempt_rows import derive_create_attempt_rows
@@ -143,6 +140,8 @@ from imbue.minds.desktop_client.report_collector import submit_report_with_attac
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.request_handler import find_handler_for_event
 from imbue.minds.desktop_client.request_profiling import install_request_profiling
+from imbue.minds.desktop_client.request_session import register_session_renewal
+from imbue.minds.desktop_client.request_session import set_fresh_session_cookie
 from imbue.minds.desktop_client.request_timing import install_request_timing
 from imbue.minds.desktop_client.responses import make_html_response
 from imbue.minds.desktop_client.responses import make_json_error_response
@@ -190,6 +189,7 @@ from imbue.minds.desktop_client.ui_api_inbox import primary_agent_ids_by_workspa
 from imbue.minds.desktop_client.ui_api_inbox import refusal_notice_for_request
 from imbue.minds.desktop_client.ui_api_inbox import workspace_name_for_request
 from imbue.minds.desktop_client.ui_api_updates import build_workspace_updates_message
+from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_login import handle_static_login_page
 from imbue.minds.desktop_client.ui_models import AccountPanelState
@@ -316,22 +316,6 @@ def _required_one_time_code() -> OneTimeCode:
     return OneTimeCode(raw)
 
 
-def _is_request_authenticated() -> bool:
-    """Check whether the current request carries a valid global session cookie, or came over the local socket."""
-    if os.getenv("SKIP_AUTH", "0") == "1":
-        return True
-    if is_local_trusted_environ(request.environ):
-        return True
-    signing_key = get_state().auth_store.get_signing_key()
-    cookie_value = request.cookies.get(SESSION_COOKIE_NAME)
-    if cookie_value is None:
-        return False
-    return verify_session_cookie(
-        cookie_value=cookie_value,
-        signing_key=signing_key,
-    )
-
-
 def _handle_forward_bridge() -> Response:
     """Bounce an authenticated browser into a forward-plugin session.
 
@@ -345,7 +329,7 @@ def _handle_forward_bridge() -> Response:
     token = get_state().mngr_forward_browser_bridge_token
     if token is None:
         abort(404)
-    if not _is_request_authenticated():
+    if not is_ui_request_authenticated():
         return make_response(status_code=302, headers={"Location": "/"})
     next_path = request.args.get("next", "/")
     # Only a same-origin path may ride through (the plugin re-sanitizes too);
@@ -376,23 +360,8 @@ def _handle_authenticate() -> Response:
         )
         return make_html_response(content=html, status_code=403)
 
-    # Set a host-only session cookie on the bare origin. We do NOT try to
-    # share the cookie across `<agent-id>.localhost` subdomains via
-    # ``Domain=localhost`` -- both curl and Chromium treat ``localhost`` as
-    # a public suffix and refuse to send such cookies to subdomains. Each
-    # subdomain gets its own cookie set on first visit, minted via the
-    # ``/goto/{agent_id}/`` auth-bridge redirect below.
-    signing_key = get_state().auth_store.get_signing_key()
-    cookie_value = create_session_cookie(signing_key=signing_key)
-
     response = make_response(status_code=307, headers={"Location": "/"})
-    response.set_cookie(
-        key=SESSION_COOKIE_NAME,
-        value=cookie_value,
-        path="/",
-        httponly=True,
-        samesite="lax",
-    )
+    set_fresh_session_cookie(response, get_state().auth_store.get_signing_key())
     return response
 
 
@@ -428,7 +397,7 @@ def _handle_consent_submit() -> Response:
     SPA's POST /ui/api/onboarding/consent carries the answer), then syncs the latchkey daemon's
     consent file.
     """
-    if not _is_request_authenticated():
+    if not is_ui_request_authenticated():
         return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
     minds_config: MindsConfig | None = get_state().minds_config
     if minds_config is not None:
@@ -444,7 +413,7 @@ def _handle_error_reporting_settings() -> Response:
     log/traceback attachments. Saved live and mirrored to the latchkey daemon's consent file so the
     change takes effect without an app restart.
     """
-    if not _is_request_authenticated():
+    if not is_ui_request_authenticated():
         return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
     body = request.get_json(silent=True, force=True)
     if not isinstance(body, dict) or "report_unexpected_errors" not in body:
@@ -510,7 +479,7 @@ def _handle_backup_password_change() -> Response:
     results for the Settings page to render inline. A lapsed login answers 401,
     which the Settings page reads as this window needing to reconnect.
     """
-    if not _is_request_authenticated():
+    if not is_ui_request_authenticated():
         return make_response(status_code=401, content='{"error":"Not authenticated"}', media_type="application/json")
     body = request.get_json(silent=True, force=True)
     if not isinstance(body, dict):
@@ -602,7 +571,7 @@ def _handle_sync_unlock() -> Response:
     locked, so the loop below has nothing to try -- an unlock that acted on
     nothing is reported as a failure, not a success.
     """
-    if not _is_request_authenticated():
+    if not is_ui_request_authenticated():
         return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
     body = request.get_json(silent=True, force=True)
     if not isinstance(body, dict):
@@ -676,7 +645,7 @@ def _handle_sync_initial_status() -> Response:
     record fetch is in flight, FAILED when the last pass errored (the loop
     retries), or DONE with the fetched workspace count.
     """
-    if not _is_request_authenticated():
+    if not is_ui_request_authenticated():
         return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
     scheduler = get_state().sync_scheduler
     statuses = scheduler.list_initial_sync_statuses() if scheduler is not None else []
@@ -695,7 +664,7 @@ def _handle_remove_workspace_record() -> Response:
     "recently destroyed" with its backups restorable through the retention
     window. Requires connectivity (the record lives on the connector).
     """
-    if not _is_request_authenticated():
+    if not is_ui_request_authenticated():
         return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
     body = request.get_json(silent=True, force=True)
     coordinate = str((body.get("workspace_id") or body.get("host_id") or "") if isinstance(body, dict) else "")
@@ -1174,7 +1143,7 @@ def _handle_post_login_redirect() -> Response:
     renders the create form -- so first-time users land on the new-workspace
     screen instead of on their accounts.
     """
-    if not _is_request_authenticated():
+    if not is_ui_request_authenticated():
         return make_response(status_code=302, headers={"Location": "/login"})
     # The error-reporting consent screen sits just after login. While it is unanswered, send the user
     # to "/" (the landing handler shows the consent screen there) rather than straight to the accounts or
@@ -1877,7 +1846,7 @@ _WORKSPACE_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
 
 def _handle_account_trim_backups(user_id: str) -> Response:
     """Start the over-quota backup trim flow for one account (idempotent while running)."""
-    if not _is_request_authenticated():
+    if not is_ui_request_authenticated():
         return make_response(status_code=403, content="Not authenticated")
     session_store: MultiAccountSessionStore | None = get_state().session_store
     cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
@@ -1902,7 +1871,7 @@ def _handle_account_trim_backups(user_id: str) -> Response:
 
 def _handle_account_set_plan(user_id: str) -> Response:
     """Switch an account's plan; on failure return the server's reason for the SPA to surface."""
-    if not _is_request_authenticated():
+    if not is_ui_request_authenticated():
         return make_response(status_code=403, content="Not authenticated")
     plan = str(request.form.get("plan", "")).strip()
     if not plan:
@@ -1980,7 +1949,7 @@ def _handle_mint_ai_key() -> Response:
     ``{"credentials": ...}`` (the env-var-style blob the workspace modal
     expects) on success, or ``{"error": ...}`` with a matching status code.
     """
-    if not _is_request_authenticated():
+    if not is_ui_request_authenticated():
         return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
     body = request.get_json(silent=True, force=True) or {}
     workspace_coordinate = str(body.get("workspace", "")).strip()
@@ -2040,7 +2009,7 @@ def _handle_account_logout(
     the cache would let the next ``auth list`` call resurrect the
     account because the plugin still holds the session on disk.
     """
-    if not _is_request_authenticated():
+    if not is_ui_request_authenticated():
         return make_response(status_code=403, content="Not authenticated")
     state = get_state()
     # Signing out removes the account's provider blocks, which a create still
@@ -2131,7 +2100,7 @@ def _dispatch_request_action(
     last read the machine would otherwise be erased by the push. A machine
     that cannot be read fails the grant and leaves the request pending.
     """
-    if not _is_request_authenticated():
+    if not is_ui_request_authenticated():
         return make_json_error_response(_REQUEST_ACTION_FAILED_SENTENCE, status_code=403, detail="Not authenticated")
     pending: PendingRequestsInterface | None = get_state().pending_requests
     if pending is None:
@@ -2982,6 +2951,7 @@ def create_desktop_client(
     mngr_binary: str = "mngr",
     mngr_host_dir: Path | None = None,
     minds_api_key: str | None = None,
+    session_preauth_cookie: SecretStr | None = None,
     latchkey_forward_supervisor: LatchkeyForwardSupervisor | None = None,
     machine_operator: MachineOperator | None = None,
     discovery_health_watchdog: DiscoveryHealthWatchdog | None = None,
@@ -3287,6 +3257,7 @@ def create_desktop_client(
         mngr_binary=mngr_binary,
         mngr_host_dir=resolved_mngr_host_dir,
         minds_api_key=minds_api_key,
+        session_preauth_cookie=session_preauth_cookie,
         latchkey_forward_supervisor=latchkey_forward_supervisor,
         machine_operator=machine_operator,
         device_id=device_id,
@@ -3409,6 +3380,7 @@ def create_desktop_client(
     # Every owner action naming a workspace shared with an account here is
     # refused before its handler, on every route (specs/shared-with-me, S12).
     register_shared_workspace_gate(app)
+    register_session_renewal(app)
 
     if workspace_update_service is not None:
         _wire_workspace_updates(

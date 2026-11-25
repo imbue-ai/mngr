@@ -68,8 +68,8 @@ and runs `pnpm start`, which provisions the bundled binaries (git, restic,
 lima, desync, the latchkey curl, unison and its file watcher) into a per-user
 cache, builds the UI, and
 launches Electron. The Linux launcher and the internal `just minds-start`
-recipes end in this same script. You create your first agent from the login
-URL the app prints on startup.
+recipes end in this same script. You create your first agent in the app's
+window, which opens already signed in.
 
 ## Profiling a session
 
@@ -194,8 +194,8 @@ read it directly) for the actual commands. It covers the whole loop:
   `vault login` and bootstrap + deploy your dev env
   (`minds-admin env activate --create --deploy dev-<your-user>` -> `minds-admin env deploy`).
 - **Every startup** (fresh shell) -- activate the env, then `just minds-start`,
-  which launches Electron. You create your first agent from the login URL it
-  prints. Activation is what points the app at a dev or staging env instead
+  which launches Electron. You create your first agent in the window it
+  opens. Activation is what points the app at a dev or staging env instead
   of production: it exports `MINDS_ROOT_NAME` / `MNGR_HOST_DIR` /
   `MNGR_PREFIX` / `MINDS_CLIENT_CONFIG_PATH` for that env.
 - **Iterate** against a running agent with `apps/minds/scripts/propagate_changes`.

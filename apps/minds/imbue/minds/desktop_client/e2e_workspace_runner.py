@@ -27,6 +27,7 @@ from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
+from enum import auto
 from http import HTTPMethod
 from http import HTTPStatus
 from pathlib import Path
@@ -54,6 +55,7 @@ from pydantic import Field
 from pydantic import PrivateAttr
 from pydantic import SecretStr
 
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
@@ -118,6 +120,9 @@ _ELECTRON_OUTPUT_INFO_MARKERS: Final[tuple[str, ...]] = (
 _STARTUP_OUTPUT_TAG: Final[str] = "[startup] "
 # What ``startBackendWithRetry`` in apps/minds/electron/main.js prints once the backend it spawned is serving.
 _BACKEND_READY_OUTPUT_MARKER: Final[str] = "[startup] Backend ready at"
+# What ``minds run`` logs once it has tried to start its ``mngr latchkey forward``: one line or the other.
+_LATCHKEY_FORWARD_RUNNING_OUTPUT_MARKER: Final[str] = "mngr latchkey forward supervisor running"
+_LATCHKEY_FORWARD_START_FAILED_OUTPUT_MARKER: Final[str] = "Could not start the mngr latchkey forward supervisor"
 # How much of one launch's output an attach failure quotes. The failure's text lands in a junit ``<failure>``
 # and from there in CI check-run summaries, which is why each bound is small.
 _ELECTRON_OUTPUT_MAX_LINE_LENGTH: Final[int] = 300
@@ -125,8 +130,8 @@ _ELECTRON_RECENT_OUTPUT_MAX_LINE_COUNT: Final[int] = 60
 _ELECTRON_RECENT_OUTPUT_MAX_CHARACTER_COUNT: Final[int] = 4000
 _ELECTRON_STARTUP_OUTPUT_MAX_LINE_COUNT: Final[int] = 30
 _ELECTRON_STARTUP_OUTPUT_MAX_CHARACTER_COUNT: Final[int] = 2500
-# The one-time login code in a URL the app logs: main.js's "[startup] Consuming one-time code via <url>", and the
-# login URLs the backend and ``mngr forward`` log, which a development build forwards to Electron's stderr.
+# The one-time login code in a URL the app logs: the login URL ``mngr forward`` logs, which a development build
+# forwards to Electron's stderr.
 _ONE_TIME_CODE_PATTERN: Final[re.Pattern[str]] = re.compile(r"(one_time_code=)[^\s&'\"]+")
 # The colors the backend's log lines carry, which a junit file cannot hold and renders as noise.
 _TERMINAL_STYLING_PATTERN: Final[re.Pattern[str]] = re.compile(r"\x1b\[[0-9;]*m")
@@ -393,6 +398,14 @@ def _clean_electron_output_line(line: str) -> str:
     return redacted_line[:_ELECTRON_OUTPUT_MAX_LINE_LENGTH]
 
 
+class _LatchkeyForwardStart(UpperCaseStrEnum):
+    """What a launch's backend has said about starting its ``mngr latchkey forward``."""
+
+    UNREPORTED = auto()
+    RUNNING = auto()
+    FAILED = auto()
+
+
 class _ElectronOutputReading(FrozenModel):
     """What one Electron launch had written to stdout and stderr by the time it was read."""
 
@@ -400,6 +413,9 @@ class _ElectronOutputReading(FrozenModel):
     recent_lines: tuple[str, ...] = Field(description="The newest lines of both streams, oldest first.")
     written_line_count: int = Field(description="How many lines the launch wrote, kept or not.")
     is_backend_ready_seen: bool = Field(description="Whether any line it wrote was main.js's backend-ready line.")
+    latchkey_forward_start: _LatchkeyForwardStart = Field(
+        description="The latest the backend logged about starting its mngr latchkey forward."
+    )
 
 
 class _ElectronOutputTail(MutableModel):
@@ -415,12 +431,19 @@ class _ElectronOutputTail(MutableModel):
     _recent_lines: deque[str] = PrivateAttr(default_factory=deque)
     _written_line_count: int = PrivateAttr(default=0)
     _is_backend_ready_seen: bool = PrivateAttr(default=False)
+    _latchkey_forward_start: _LatchkeyForwardStart = PrivateAttr(default=_LatchkeyForwardStart.UNREPORTED)
 
     def record(self, stream_name: str, line: str) -> None:
         kept_line = _clean_electron_output_line(f"[{stream_name}] {line}")
         with self._lock:
             self._written_line_count += 1
             self._is_backend_ready_seen = self._is_backend_ready_seen or _BACKEND_READY_OUTPUT_MARKER in line
+            if _LATCHKEY_FORWARD_RUNNING_OUTPUT_MARKER in line:
+                self._latchkey_forward_start = _LatchkeyForwardStart.RUNNING
+            elif _LATCHKEY_FORWARD_START_FAILED_OUTPUT_MARKER in line:
+                self._latchkey_forward_start = _LatchkeyForwardStart.FAILED
+            else:
+                pass
             self._keep_newest(
                 self._recent_lines,
                 kept_line,
@@ -447,6 +470,7 @@ class _ElectronOutputTail(MutableModel):
                 recent_lines=tuple(self._recent_lines),
                 written_line_count=self._written_line_count,
                 is_backend_ready_seen=self._is_backend_ready_seen,
+                latchkey_forward_start=self._latchkey_forward_start,
             )
 
 
@@ -695,7 +719,7 @@ def _wait_for_cdp(debug_port: int, timeout_seconds: int) -> None:
 
 
 class _ElectronConnectError(RuntimeError):
-    """Raised when launching Electron or attaching Playwright to its CDP endpoint fails.
+    """Raised when an Electron launch cannot be driven: attaching Playwright to it failed, or it came up unfit.
 
     Signals a wedged Electron launch (the connect-and-attach phase), which the
     caller recovers by relaunching a fresh Electron process -- as opposed to a
@@ -720,7 +744,7 @@ def _describe_spent_launch_attempts(errors: Sequence[_ElectronConnectError]) -> 
     ]
     return "\n".join(
         [
-            f"Electron CDP attach failed after {len(errors)} relaunch attempts (last error: {errors[-1].cause})",
+            f"No Electron launch could be driven after {len(errors)} attempts (last error: {errors[-1].cause})",
             *attempt_descriptions,
             _describe_electron_recent_output(errors[-1].output),
         ]
@@ -789,6 +813,38 @@ def _connect_and_pick_content_page(
                 "No backend page visible after a {}s round; reconnecting for a fresh target snapshot", round_seconds
             )
     raise TimeoutError(f"No Electron content page settled on a backend URL within {timeout_seconds}s")
+
+
+def _attach_to_drivable_launch(
+    playwright: Playwright, debug_port: int, electron_output: _ElectronOutputTail
+) -> tuple[Browser, Page]:
+    """Attach to a launch and return ``(browser, content_page)``, the browser being the caller's to close.
+
+    Raises :class:`_ElectronConnectError` for a launch to relaunch instead of drive: one Playwright could not
+    attach to, or one whose backend said it could not start its ``mngr latchkey forward``. Without the forward
+    every page that reads the gateway waits out a timeout before it answers, so nothing driven on such a
+    launch finishes in the time a healthy one takes. The backend says so before any of its pages has answered:
+    it gives the forward its time to start before a page's own wait on the gateway can run out. A launch that
+    does not forward its backend's log (a packaged build) reports nothing either way, and is driven.
+    """
+    try:
+        _wait_for_cdp(debug_port, _CDP_READY_TIMEOUT_SECONDS)
+        browser, page = _connect_and_pick_content_page(playwright, debug_port, _BACKEND_READY_TIMEOUT_SECONDS)
+    except (PlaywrightError, TimeoutError) as exc:
+        raise _ElectronConnectError(
+            f"Electron CDP attach failed on port {debug_port}: {exc}", electron_output.read()
+        ) from exc
+    output = electron_output.read()
+    match output.latchkey_forward_start:
+        case _LatchkeyForwardStart.RUNNING | _LatchkeyForwardStart.UNREPORTED:
+            return browser, page
+        case _LatchkeyForwardStart.FAILED:
+            browser.close()
+            raise _ElectronConnectError(
+                f"The backend of the launch on port {debug_port} could not start its mngr latchkey forward", output
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def backend_origin_from_page(page: Page) -> str:
@@ -1117,9 +1173,10 @@ def _attempt_create_workspace_via_electron(
 ) -> None:
     """One Electron launch + CDP attach + create-flow drive.
 
-    Raises :class:`_ElectronConnectError` if the launch/CDP-attach phase fails
-    (a wedged Electron the caller should recover by relaunching). Errors from the
-    create flow itself propagate unchanged so real test failures are not retried.
+    Raises :class:`_ElectronConnectError` for a launch that cannot be driven (see
+    :func:`_attach_to_drivable_launch`), which the caller recovers by relaunching.
+    Errors from the create flow itself propagate unchanged so real test failures
+    are not retried.
 
     ``on_workspace_ready``, if given, is called with the workspace (content-iframe)
     page once its welcome chat is seeded, its first run is behind it and its
@@ -1129,13 +1186,7 @@ def _attempt_create_workspace_via_electron(
     """
     with _launched_electron(default_workspace_template_path, debug_port, host_config_dir) as electron_output:
         with sync_playwright() as playwright:
-            try:
-                _wait_for_cdp(debug_port, _CDP_READY_TIMEOUT_SECONDS)
-                browser, page = _connect_and_pick_content_page(playwright, debug_port, _BACKEND_READY_TIMEOUT_SECONDS)
-            except (PlaywrightError, TimeoutError) as exc:
-                raise _ElectronConnectError(
-                    f"Electron CDP attach failed on port {debug_port}: {exc}", electron_output.read()
-                ) from exc
+            browser, page = _attach_to_drivable_launch(playwright, debug_port, electron_output)
             # Always disconnect the browser once it is open, regardless of which
             # phase fails: a create-flow failure is a real test failure that
             # must propagate (the attach phase above is the launch-flake part).
@@ -1172,10 +1223,10 @@ def electron_app_session(
 
     The generic sibling of :func:`create_workspace_via_electron` for flows that
     drive arbitrary app pages (sign-in, settings, the landing list) instead of
-    the create form. The launch + CDP attach is retried with a fresh Electron
-    process and port up to ``_ELECTRON_LAUNCH_ATTEMPTS`` times (the same
-    wedged-handshake flake recovery); once the session is yielded, caller
-    exceptions propagate unchanged and tear the app down.
+    the create form. A launch that cannot be driven is replaced with a fresh
+    Electron process and port, up to ``_ELECTRON_LAUNCH_ATTEMPTS`` launches in
+    all (the same recovery as that function's); once the session is yielded,
+    caller exceptions propagate unchanged and tear the app down.
 
     The same caller contract as :func:`create_workspace_via_electron` applies
     (``MINDS_ROOT_NAME`` set, ``debug_port`` free, ``host_config_dir`` for the
@@ -1198,14 +1249,8 @@ def electron_app_session(
         ) as electron_output:
             with sync_playwright() as playwright:
                 try:
-                    _wait_for_cdp(attempt_port, _CDP_READY_TIMEOUT_SECONDS)
-                    browser, page = _connect_and_pick_content_page(
-                        playwright, attempt_port, _BACKEND_READY_TIMEOUT_SECONDS
-                    )
-                except (PlaywrightError, TimeoutError) as exc:
-                    error = _ElectronConnectError(
-                        f"Electron CDP attach failed on port {attempt_port}: {exc}", electron_output.read()
-                    )
+                    browser, page = _attach_to_drivable_launch(playwright, attempt_port, electron_output)
+                except _ElectronConnectError as error:
                     errors.append(error)
                     logger.warning(
                         "Electron launch/CDP attempt {}/{} failed; relaunching: {}",
@@ -1255,10 +1300,11 @@ def create_workspace_via_electron(
     resulting mngr agent or its Docker container -- the caller decides
     whether to destroy or to capture the state.
 
-    Retries the Electron launch + CDP attach (with a fresh process + debug port)
-    up to ``_ELECTRON_LAUNCH_ATTEMPTS`` times to absorb a wedged Electron CDP
-    handshake (a known Electron-in-CI flake); the create flow itself runs once,
-    so a genuine create attempt failure fails the test immediately.
+    Relaunches Electron (with a fresh process + debug port), up to
+    ``_ELECTRON_LAUNCH_ATTEMPTS`` launches in all, when a launch cannot be driven:
+    a wedged Electron CDP handshake (a known Electron-in-CI flake), or a backend
+    that could not start its ``mngr latchkey forward``. The create flow itself
+    runs once, so a genuine create attempt failure fails the test immediately.
 
     Caller contract:
     - ``default_workspace_template_path`` must be a populated DEFAULT_WORKSPACE_TEMPLATE working tree (use

@@ -18,8 +18,7 @@ from flask import request
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.desktop_client.api_key_auth import is_request_authenticated
 from imbue.minds.desktop_client.api_transport import is_local_trusted_environ
-from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
-from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
+from imbue.minds.desktop_client.request_session import is_request_session_cookie_accepted
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
 
@@ -70,15 +69,12 @@ def handle_invalid_random_id(error: InvalidRandomIdError) -> Response:
 def _is_cookie_authenticated() -> bool:
     """Whether the request carries a valid desktop-client session cookie.
 
-    Mirrors the bare-origin app's own session check (same signing key + cookie
-    name) so the browser UI can call these routes with its session cookie.
+    Accepts the cookie the bare-origin app's own session check accepts, so the
+    browser UI can call these routes with its session cookie.
     """
     if os.getenv("SKIP_AUTH", "0") == "1":
         return True
-    cookie_value = request.cookies.get(SESSION_COOKIE_NAME)
-    if cookie_value is None:
-        return False
-    return verify_session_cookie(cookie_value=cookie_value, signing_key=get_state().auth_store.get_signing_key())
+    return is_request_session_cookie_accepted()
 
 
 def _is_bearer_authenticated() -> bool:

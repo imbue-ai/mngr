@@ -4,7 +4,8 @@ import os
 import queue
 import time
 from collections.abc import Mapping
-from http.cookies import SimpleCookie
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -13,7 +14,6 @@ import httpx2
 import pytest
 from flask import Response
 from flask.testing import FlaskClient
-from itsdangerous import TimestampSigner
 from itsdangerous import URLSafeTimedSerializer
 from pydantic import SecretStr
 from pydantic import TypeAdapter
@@ -67,7 +67,6 @@ from imbue.minds.desktop_client.console_log_staging import ELECTRON_CONSOLE_TAIL
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import _COOKIE_MAX_AGE_SECONDS
 from imbue.minds.desktop_client.cookie_manager import _COOKIE_SALT
-from imbue.minds.desktop_client.cookie_manager import _SESSION_PAYLOAD
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.create_attempt_rows import CreateAttemptOwner
 from imbue.minds.desktop_client.create_attempt_rows import CreateAttemptRow
@@ -104,8 +103,10 @@ from imbue.minds.desktop_client.testing import drain_ui_channel_frames
 from imbue.minds.desktop_client.testing import exec_json_envelope
 from imbue.minds.desktop_client.testing import host_offline_exec_result
 from imbue.minds.desktop_client.testing import install_stub_mngr_on_path
+from imbue.minds.desktop_client.testing import make_backdated_session_cookie
 from imbue.minds.desktop_client.testing import ready_machine_launch_stdout
 from imbue.minds.desktop_client.testing import record_provider_discovery_error
+from imbue.minds.desktop_client.testing import session_cookie_morsel_from_response
 from imbue.minds.desktop_client.testing import skill_chat_launch_stdout
 from imbue.minds.desktop_client.testing import tamper_session_cookie_signed_content
 from imbue.minds.desktop_client.testing import write_dead_destroy_marker
@@ -137,6 +138,7 @@ def _create_test_desktop_client(
     http_client: httpx2.Client | None,
     agent_creator: AgentCreator | None = None,
     minds_config: MindsConfig | None = None,
+    session_preauth_cookie: SecretStr | None = None,
 ) -> tuple[FlaskClient, FileAuthStore]:
     """Create a desktop client with the given backend resolver.
 
@@ -153,6 +155,7 @@ def _create_test_desktop_client(
         http_client=http_client,
         agent_creator=agent_creator,
         minds_config=minds_config,
+        session_preauth_cookie=session_preauth_cookie,
     )
     client = app.test_client()
 
@@ -283,6 +286,9 @@ def test_authenticate_code_cannot_be_reused(tmp_path: Path) -> None:
     assert first_response.status_code == 307
 
     # Presenting the same (now spent) code again is refused, with an explanation.
+    # Presented by a bearer with no session, so any cookie in the answer would
+    # be one the spent code bought.
+    client.delete_cookie(SESSION_COOKIE_NAME)
     second_response = client.get(
         "/authenticate",
         query_string={"one_time_code": str(code)},
@@ -447,32 +453,21 @@ def test_post_login_ignores_unsafe_return_to(tmp_path: Path) -> None:
 _UNAUTHENTICATED_LOCATION = "/login"
 
 
+_SECONDS_PER_DAY = 24 * 60 * 60
+
+
 def _session_cookie_from_response(response: TestResponse) -> str:
     """Extract the ``minds_session`` cookie value from a response's Set-Cookie headers."""
-    jar: SimpleCookie = SimpleCookie()
-    for header in response.headers.getlist("Set-Cookie"):
-        jar.load(header)
-    return jar[SESSION_COOKIE_NAME].value
+    morsel = session_cookie_morsel_from_response(response)
+    assert morsel is not None
+    return morsel.value
 
 
-class _ExpiredTimestampSigner(TimestampSigner):
-    """Signs exactly like the real cookie signer but stamps the token >30 days in the past.
-
-    ``verify_session_cookie`` builds its own serializer with a fixed ``max_age`` of
-    30 days, so a validly-signed cookie whose embedded timestamp is older than that
-    is the only way to exercise the expiry path. Subclassing the signer (rather than
-    patching ``time``) is the injection point itsdangerous gives for controlling the
-    stamped time.
-    """
-
-    def get_timestamp(self) -> int:
-        return int(time.time()) - _COOKIE_MAX_AGE_SECONDS - 24 * 60 * 60
-
-
-def _make_expired_session_cookie(signing_key: CookieSigningKey) -> str:
-    """Mint a validly-signed session cookie whose timestamp is older than 30 days."""
-    serializer = URLSafeTimedSerializer(secret_key=signing_key.get_secret_value(), signer=_ExpiredTimestampSigner)
-    return serializer.dumps(_SESSION_PAYLOAD, salt=_COOKIE_SALT)
+def _session_cookie_age_seconds(cookie_value: str, signing_key: CookieSigningKey) -> float:
+    """How long ago a session cookie was issued, read from the timestamp it is signed with."""
+    serializer = URLSafeTimedSerializer(secret_key=signing_key.get_secret_value())
+    _payload, issued_at = serializer.loads(cookie_value, salt=_COOKIE_SALT, return_timestamp=True)
+    return (datetime.now(timezone.utc) - issued_at).total_seconds()
 
 
 @pytest.mark.witnesses("browser-authorization.survives-restart")
@@ -578,12 +573,157 @@ def test_expired_session_cookie_is_unauthenticated(tmp_path: Path) -> None:
         tmp_path=tmp_path, backend_resolver=StaticBackendResolver(url_by_agent_and_service={}), http_client=None
     )
     # Signed with this installation's own key: only the >30-day age, not the signature, is wrong.
-    expired_cookie = _make_expired_session_cookie(signing_key=auth_store.get_signing_key())
+    expired_cookie = make_backdated_session_cookie(
+        auth_store.get_signing_key(), age_seconds=_COOKIE_MAX_AGE_SECONDS + _SECONDS_PER_DAY
+    )
     client.set_cookie(SESSION_COOKIE_NAME, expired_cookie)
 
     response = client.get("/post-login", follow_redirects=False)
     assert response.status_code == 302
     assert response.headers["location"] == _UNAUTHENTICATED_LOCATION
+
+
+@pytest.mark.witnesses("browser-authorization.renewed-in-use")
+def test_request_presenting_an_aged_session_cookie_is_answered_with_a_fresh_one(tmp_path: Path) -> None:
+    """A session used on day 20 leaves the browser holding a cookie that is good for another 30 days."""
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path, backend_resolver=StaticBackendResolver(url_by_agent_and_service={}), http_client=None
+    )
+    signing_key = auth_store.get_signing_key()
+    aged_cookie = make_backdated_session_cookie(signing_key, age_seconds=20 * _SECONDS_PER_DAY)
+    client.set_cookie(SESSION_COOKIE_NAME, aged_cookie)
+
+    response = client.get("/post-login", follow_redirects=False)
+    assert response.headers["location"] != _UNAUTHENTICATED_LOCATION
+
+    renewed = session_cookie_morsel_from_response(response)
+    assert renewed is not None
+    assert renewed.value != aged_cookie
+    assert _session_cookie_age_seconds(renewed.value, signing_key) < 60
+    # The same browser-session, host-only cookie /authenticate sets: nothing that would persist it.
+    assert renewed["path"] == "/"
+    assert renewed["httponly"] is True
+    assert renewed["samesite"].lower() == "lax"
+    assert renewed["max-age"] == ""
+    assert renewed["expires"] == ""
+    assert renewed["domain"] == ""
+
+    # The browser now holds the fresh cookie, so its next request presents that one.
+    held = client.get_cookie(SESSION_COOKIE_NAME)
+    assert held is not None
+    assert held.value == renewed.value
+
+
+@pytest.mark.witnesses("browser-authorization.expired-not-renewed")
+def test_expired_session_cookie_is_not_renewed(tmp_path: Path) -> None:
+    """A cookie past the 30-day ceiling buys no fresh one: expiry cannot be outrun by presenting it."""
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path, backend_resolver=StaticBackendResolver(url_by_agent_and_service={}), http_client=None
+    )
+    expired_cookie = make_backdated_session_cookie(
+        auth_store.get_signing_key(), age_seconds=_COOKIE_MAX_AGE_SECONDS + _SECONDS_PER_DAY
+    )
+    client.set_cookie(SESSION_COOKIE_NAME, expired_cookie)
+
+    response = client.get("/post-login", follow_redirects=False)
+
+    assert response.headers["location"] == _UNAUTHENTICATED_LOCATION
+    assert session_cookie_morsel_from_response(response) is None
+
+
+def _create_preauthorized_desktop_client(tmp_path: Path) -> tuple[FlaskClient, FileAuthStore, str]:
+    preauth_value = "preauth-{}".format(uuid4().hex)
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        http_client=None,
+        session_preauth_cookie=SecretStr(preauth_value),
+    )
+    return client, auth_store, preauth_value
+
+
+@pytest.mark.witnesses("browser-authorization.preauth-accepted")
+def test_exact_preauth_value_is_authenticated_without_spending_a_code(tmp_path: Path) -> None:
+    client, auth_store, preauth_value = _create_preauthorized_desktop_client(tmp_path)
+    unspent_code = OneTimeCode("unspent-code-{}".format(uuid4().hex))
+    auth_store.add_one_time_code(code=unspent_code)
+    client.set_cookie(SESSION_COOKIE_NAME, preauth_value)
+
+    response = client.get("/post-login", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert response.headers["location"] != _UNAUTHENTICATED_LOCATION
+    assert auth_store.validate_and_consume_code(code=unspent_code) is True
+
+
+@pytest.mark.witnesses("browser-authorization.preauth-not-replaced")
+def test_preauth_value_is_never_replaced_by_a_signed_cookie(tmp_path: Path) -> None:
+    """A signed cookie in the preauth value's place would start ageing toward the 30-day ceiling."""
+    client, _auth_store, preauth_value = _create_preauthorized_desktop_client(tmp_path)
+    client.set_cookie(SESSION_COOKIE_NAME, preauth_value)
+
+    response = client.get("/post-login", follow_redirects=False)
+
+    assert response.headers["location"] != _UNAUTHENTICATED_LOCATION
+    assert session_cookie_morsel_from_response(response) is None
+    held = client.get_cookie(SESSION_COOKIE_NAME)
+    assert held is not None
+    assert held.value == preauth_value
+
+
+@pytest.mark.witnesses("browser-authorization.preauth-near-miss")
+def test_value_differing_from_the_preauth_value_is_unauthenticated(tmp_path: Path) -> None:
+    client, _auth_store, preauth_value = _create_preauthorized_desktop_client(tmp_path)
+    client.set_cookie(SESSION_COOKIE_NAME, preauth_value + "x")
+
+    response = client.get("/post-login", follow_redirects=False)
+
+    assert response.headers["location"] == _UNAUTHENTICATED_LOCATION
+    assert session_cookie_morsel_from_response(response) is None
+
+
+@pytest.mark.witnesses(
+    "browser-authorization.preauth-near-miss", partial="covers the fall back to a signed cookie that does verify"
+)
+def test_signed_cookie_is_still_accepted_and_renewed_beside_a_preauth_value(tmp_path: Path) -> None:
+    client, auth_store, _preauth_value = _create_preauthorized_desktop_client(tmp_path)
+    signed_cookie = make_backdated_session_cookie(auth_store.get_signing_key(), age_seconds=_SECONDS_PER_DAY)
+    client.set_cookie(SESSION_COOKIE_NAME, signed_cookie)
+
+    response = client.get("/post-login", follow_redirects=False)
+
+    assert response.headers["location"] != _UNAUTHENTICATED_LOCATION
+    renewed = session_cookie_morsel_from_response(response)
+    assert renewed is not None
+    assert renewed.value != signed_cookie
+
+
+@pytest.mark.witnesses("browser-authorization.preauth-absent")
+def test_desktop_client_with_no_preauth_value_accepts_none(tmp_path: Path) -> None:
+    client, _auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path, backend_resolver=StaticBackendResolver(url_by_agent_and_service={}), http_client=None
+    )
+    client.set_cookie(SESSION_COOKIE_NAME, "preauth-{}".format(uuid4().hex))
+
+    response = client.get("/post-login", follow_redirects=False)
+
+    assert response.headers["location"] == _UNAUTHENTICATED_LOCATION
+
+
+def test_authenticating_while_already_holding_a_session_sets_one_session_cookie(tmp_path: Path) -> None:
+    """A restart's fresh code is spent by a browser still holding the last run's cookie; it gets one cookie back."""
+    client, auth_store, _ = _setup_test_server(tmp_path)
+    _authenticate_client(client=client, auth_store=auth_store)
+    second_code = OneTimeCode("second-code-{}".format(AgentId()))
+    auth_store.add_one_time_code(code=second_code)
+
+    response = client.get("/authenticate", query_string={"one_time_code": str(second_code)}, follow_redirects=False)
+
+    assert response.status_code == 307
+    session_cookie_headers = [
+        header for header in response.headers.getlist("Set-Cookie") if header.startswith(f"{SESSION_COOKIE_NAME}=")
+    ]
+    assert len(session_cookie_headers) == 1
 
 
 # Leased imbue_cloud host account-binding tests

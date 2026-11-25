@@ -36,9 +36,9 @@ function setupFailureSentence(output) {
   return TRY_AGAIN_SENTENCE;
 }
 
-// minds.log keeps the backend's login URL, one-time code and all, and a start
-// that never answered left that code unconsumed, so the takeover's copy of the
-// log drops what the loading screen's log drops.
+// minds.log keeps the forward's login URL, one-time code and all, and nothing
+// in this app spends that code, so the takeover's copy of the log drops what
+// the loading screen's log drops.
 function withoutSecretLines(logLines) {
   return (logLines || '')
     .split('\n')

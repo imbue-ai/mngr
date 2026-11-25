@@ -20,6 +20,7 @@ from flask import Flask
 from flask import current_app
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
@@ -329,6 +330,11 @@ class DesktopClientState(MutableModel):
     )
     minds_api_key: str | None = Field(
         default=None, frozen=True, description="Central Imbue Studio API key for /api/v1 + WebDAV"
+    )
+    session_preauth_cookie: SecretStr | None = Field(
+        default=None,
+        frozen=True,
+        description="Session cookie value accepted as-is from the desktop app that started this process; None outside it",
     )
     latchkey_forward_supervisor: LatchkeyForwardSupervisor | None = Field(
         default=None,

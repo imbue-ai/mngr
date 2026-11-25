@@ -10,6 +10,7 @@ import shlex
 import stat
 import subprocess
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from collections.abc import Generator
@@ -19,6 +20,8 @@ from contextlib import contextmanager
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+from http.cookies import Morsel
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler
 from http.server import HTTPServer
 from pathlib import Path
@@ -31,10 +34,13 @@ from cheroot import wsgi
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from flask import Flask
+from itsdangerous import TimestampSigner
+from itsdangerous import URLSafeTimedSerializer
 from loguru import logger as loguru_logger
 from pydantic import Field
 from pydantic import PrivateAttr
 from simple_websocket import Client as SimpleWebsocketClient
+from werkzeug.test import TestResponse
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.event_utils import ReadOnlyEvent
@@ -52,6 +58,9 @@ from imbue.minds.desktop_client.chat_app import EXIT_SENTINEL
 from imbue.minds.desktop_client.chat_app import FALLBACK_BEGIN_SENTINEL
 from imbue.minds.desktop_client.chat_app import FALLBACK_EXIT_SENTINEL
 from imbue.minds.desktop_client.connections.primitives import LOCAL_PROFILE_USER_ID
+from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
+from imbue.minds.desktop_client.cookie_manager import _COOKIE_SALT
+from imbue.minds.desktop_client.cookie_manager import _SESSION_PAYLOAD
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.discovery_health import ProducerRemediator
 from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
@@ -130,6 +139,7 @@ from imbue.minds.desktop_client.workspace_program_command import build_workspace
 from imbue.minds.desktop_client.workspace_program_command import extract_marker_json
 from imbue.minds.desktop_client.workspace_template_cache import WorkspaceTemplateCache
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
+from imbue.minds.primitives import CookieSigningKey
 from imbue.minds.primitives import DeviceId
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import TemplateReleaseTag
@@ -402,6 +412,33 @@ def workspace_options_pane_html(html: str, pane: str) -> str:
     assert start != -1, f"no {pane!r} pane in the rendered options panel"
     next_pane = html.find("data-wsopt-panel=", start + 1)
     return html[start:] if next_pane == -1 else html[start:next_pane]
+
+
+def make_backdated_session_cookie(signing_key: CookieSigningKey, age_seconds: int) -> str:
+    """A session cookie signed with ``signing_key`` but stamped ``age_seconds`` in the past.
+
+    itsdangerous embeds the sign time in the token, so a backdated
+    ``TimestampSigner`` mints a structurally valid cookie whose age the
+    verifier can measure against the 30-day ceiling -- the only way to witness
+    the expiry boundary without controlling the wall clock.
+    """
+
+    class _BackdatedSigner(TimestampSigner):
+        def get_timestamp(self) -> int:
+            return int(time.time()) - age_seconds
+
+    serializer = URLSafeTimedSerializer(
+        secret_key=signing_key.get_secret_value(), salt=_COOKIE_SALT, signer=_BackdatedSigner
+    )
+    return serializer.dumps(_SESSION_PAYLOAD)
+
+
+def session_cookie_morsel_from_response(response: TestResponse) -> Morsel[str] | None:
+    """The ``minds_session`` cookie a response sets, with its attributes, or None when it sets none."""
+    jar: SimpleCookie = SimpleCookie()
+    for header in response.headers.getlist("Set-Cookie"):
+        jar.load(header)
+    return jar.get(SESSION_COOKIE_NAME)
 
 
 def tamper_session_cookie_signed_content(cookie_value: str) -> str:

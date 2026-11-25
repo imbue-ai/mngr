@@ -28,10 +28,11 @@ Feature: Browser-authorization invariants
 
   @sessions-unforgeable
   Rule: Sessions are unforgeable, tamper-evident, and bounded
-    Only session cookies issued by this installation are accepted.
-    Any alteration of a cookie's signed content invalidates it.
+    Only a session cookie issued by this installation -- or one exactly equal to the preauth value this desktop client minted for the desktop app that started it, when one did -- is accepted.
+    Any alteration of a cookie invalidates it.
     Cookies issued by another installation (another data directory) are invalid here.
-    Cookies older than 30 days are invalid.
+    Signed cookies older than 30 days are invalid.
+    A signed session cookie is issued only by authenticating with a one-time code, or in answer to a request that presented a valid signed cookie.
 
   @signing-key-minted-once
   Rule: The signing identity is minted once and never silently replaced
@@ -54,7 +55,7 @@ Feature: Browser-authorization invariants
 
   @single-credential
   Rule: The authenticated session is the only credential for reaching your workspaces through the browser authorization component
-    Authenticating a session once, with the one-time code from the terminal, is all it takes to reach every workspace on this origin.
+    Authenticating a session once -- with the one-time code from the terminal, or in the desktop app with the preauth value it was handed -- is all it takes to reach every workspace on this origin.
     The browser authorization component never asks the user for a second credential to get there.
     Any other credential the product asks for gates an optional cloud-backed feature, never the path to a workspace; those credentials are specified elsewhere.
 

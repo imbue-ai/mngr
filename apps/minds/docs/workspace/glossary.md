@@ -66,9 +66,11 @@ Key concepts in the Imbue Studio system:
   It serves every page the browser reaches, carries the browser's session, and authenticates it.
   The desktop client's other duties (agent and workspace creation, reverse proxying to workspaces) sit outside the browser authorization component.
 
-- **session**: the authenticated state of a browser connected to the *browser authorization component*, carried by the **session cookie** -- an HTTP cookie whose value is a token signed with the *installation*'s session-signing key, so a tampered cookie, one minted under another installation, or one older than 30 days is rejected.
+- **session**: the authenticated state of a browser connected to the *browser authorization component*, carried by the **session cookie** -- an HTTP cookie whose value is a token signed with the *installation*'s session-signing key, so a tampered cookie, one minted under another installation, or one signed more than 30 days ago is rejected.
+  Every request that presents a valid signed cookie is answered with a freshly signed one, so a session lasts for as long as it is used at least once every 30 days.
   A browser authenticates a session by opening the one-time authentication URL that `minds run` prints to its terminal; the authenticated session is then the sole credential gating every page the component serves, and it covers all of the user's workspaces.
   It is scoped to a single *installation*, and is distinct from the optional imbue-cloud account sign-in (a separate credential for cloud-backed features).
+  The desktop app's windows do not authenticate that way: a desktop client the desktop app started mints no one-time code and hands the app a preauth value instead, and a session cookie exactly equal to that value is accepted, unsigned and without ageing, for as long as that desktop client process runs.
 
 - **installation**: one copy of the desktop client's local state -- a single data directory (e.g. `~/.minds`), so one installation = one data directory.
   Its one-time code, session-signing key, sessions, and error-reporting consent all live in that data directory and do not carry across to another one on the same machine; `minds run` pointed at a different data directory is a different installation.

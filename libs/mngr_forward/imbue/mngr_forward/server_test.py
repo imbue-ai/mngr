@@ -20,6 +20,8 @@ from collections.abc import Iterator
 from collections.abc import MutableMapping
 from contextlib import asynccontextmanager
 from contextlib import contextmanager
+from datetime import datetime
+from datetime import timezone
 from enum import auto
 from pathlib import Path
 from typing import Any
@@ -50,6 +52,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import HostId
 from imbue.mngr_forward.auth import FileAuthStore
+from imbue.mngr_forward.cookie import _COOKIE_MAX_AGE_SECONDS
 from imbue.mngr_forward.cookie import _COOKIE_SALT
 from imbue.mngr_forward.cookie import _SESSION_PAYLOAD
 from imbue.mngr_forward.cookie import _SUBDOMAIN_AUTH_SALT
@@ -296,7 +299,9 @@ def test_authenticate_consumes_otp_and_sets_cookie(
     assert MNGR_FORWARD_SESSION_COOKIE_NAME in response.cookies
     # Code is single-use: re-presenting the now-spent code is refused (the step
     # leaves the exact status open) and establishes no session -- the refusal
-    # must not hand out a session cookie.
+    # must not hand out a session cookie. Presented by a browser holding no
+    # session, so any cookie in the answer would be one the spent code bought.
+    client.cookies.clear()
     response2 = client.get(f"/authenticate?one_time_code={code}")
     assert response2.status_code >= 400
     assert MNGR_FORWARD_SESSION_COOKIE_NAME not in response2.cookies
@@ -495,6 +500,9 @@ def test_bad_code_refused_without_session(
         first = client.get(f"/authenticate?one_time_code={code}")
         # The code was valid exactly once.
         assert first.status_code == 307
+        # The replay comes from a browser holding no session, so any cookie in
+        # the answer would be one the spent code bought.
+        client.cookies.clear()
         one_time_code = str(code)
     response = client.get(f"/authenticate?one_time_code={one_time_code}")
     # Authentication is refused (the step leaves the exact status open) and no session is established.
@@ -549,13 +557,26 @@ def test_bare_origin_authenticated_marks_unresolved_agent(
     assert 'class="unresolved"' in response.text
 
 
-class _EpochTimestampSigner(TimestampSigner):
-    """A timestamp signer that stamps tokens at the unix epoch, so any cookie it
-    produces is decades old -- used to build an expired-but-correctly-signed
-    cookie without waiting or manipulating the clock."""
+_SECONDS_PER_DAY: Final[int] = 24 * 60 * 60
 
-    def get_timestamp(self) -> int:
-        return 0
+
+def _backdated_signed_value(signing_key: CookieSigningKey, payload: str, salt: str, age_seconds: int) -> str:
+    """``payload`` carrying this proxy's valid signature under ``salt``, stamped ``age_seconds`` in the past.
+
+    Backdating the signer's timestamp drives an expiry window without
+    controlling the wall clock or waiting.
+    """
+
+    class _BackdatedSigner(TimestampSigner):
+        def get_timestamp(self) -> int:
+            return int(time.time()) - age_seconds
+
+    serializer = URLSafeTimedSerializer(secret_key=signing_key.get_secret_value(), salt=salt, signer=_BackdatedSigner)
+    return serializer.dumps(payload)
+
+
+def _backdated_session_cookie(signing_key: CookieSigningKey, age_seconds: int) -> str:
+    return _backdated_signed_value(signing_key, _SESSION_PAYLOAD, _COOKIE_SALT, age_seconds)
 
 
 @contextmanager
@@ -651,18 +672,151 @@ def test_expired_session_cookie_rejected(tmp_path: Path) -> None:
     """A session cookie older than the 30-day window is treated as signed out,
     even though it carries this proxy's own valid signature."""
     with _make_forward_app_on(tmp_path) as (client, store):
-        signing_key = store.get_signing_key()
-        # Mint a cookie signed with this proxy's real key but stamped at the unix
-        # epoch, so its age far exceeds the 30-day max: the signature is valid, only
-        # the age disqualifies it.
-        aged_serializer = URLSafeTimedSerializer(
-            secret_key=signing_key.get_secret_value(), signer=_EpochTimestampSigner
+        # Signed with this proxy's real key: the signature is valid, only the age disqualifies it.
+        expired_cookie = _backdated_session_cookie(
+            store.get_signing_key(), age_seconds=_COOKIE_MAX_AGE_SECONDS + _SECONDS_PER_DAY
         )
-        expired_cookie = aged_serializer.dumps(_SESSION_PAYLOAD, salt=_COOKIE_SALT)
         response = client.get("/", cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: expired_cookie})
     assert response.status_code == 200
     assert "Sign in" in response.text
     assert "Discovered agents" not in response.text
+
+
+def _session_set_cookie_headers(response: httpx2.Response) -> list[str]:
+    """The ``Set-Cookie`` headers on a response that set the proxy's own session cookie."""
+    return [
+        header
+        for header in response.headers.get_list("set-cookie")
+        if header.startswith(f"{MNGR_FORWARD_SESSION_COOKIE_NAME}=")
+    ]
+
+
+def _session_cookie_age_seconds(cookie_value: str, signing_key: CookieSigningKey) -> float:
+    """How long ago a session cookie was signed, read from the timestamp it carries."""
+    serializer = URLSafeTimedSerializer(secret_key=signing_key.get_secret_value())
+    _payload, issued_at = serializer.loads(cookie_value, salt=_COOKIE_SALT, return_timestamp=True)
+    return (datetime.now(timezone.utc) - issued_at).total_seconds()
+
+
+def _backend_answering_with_its_own_cookie(request: httpx2.Request) -> httpx2.Response:
+    return httpx2.Response(200, json={"ok": True}, headers={"set-cookie": "service_state=1; Path=/"})
+
+
+@pytest.mark.witnesses(
+    "authentication.renewed-in-use",
+    partial="witnesses a background request on an agent origin; the bare origin is witnessed separately",
+)
+@pytest.mark.parametrize(
+    ("use_http2", "expected_attributes", "absent_attributes"),
+    [
+        (False, ("samesite=lax",), ("secure", "partitioned")),
+        (True, ("samesite=none", "secure", "partitioned"), ()),
+    ],
+)
+def test_aged_session_cookie_on_an_agent_origin_is_answered_with_a_fresh_one(
+    tmp_path: Path, use_http2: bool, expected_attributes: tuple[str, ...], absent_attributes: tuple[str, ...]
+) -> None:
+    """A non-HTML request 20 days into a session gets back a cookie good for another 30,
+    scoped as the bridge scopes it, and the backend's own cookie passes through untouched."""
+    app, auth_store, resolver = _make_forward_app(tmp_path, use_http2=use_http2)
+    _register_default_service(resolver, "http://stub-backend")
+    signing_key = auth_store.get_signing_key()
+    aged_cookie = _backdated_session_cookie(signing_key, age_seconds=20 * _SECONDS_PER_DAY)
+
+    origin = _agent_origin(scheme="https" if use_http2 else "http")
+    with TestClient(app, base_url=origin, follow_redirects=False) as client:
+        app.state.http_client = httpx2.AsyncClient(
+            transport=httpx2.MockTransport(_backend_answering_with_its_own_cookie), follow_redirects=False
+        )
+        response = client.get(
+            "/api/health",
+            headers={"accept": "application/json"},
+            cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: aged_cookie},
+        )
+
+    assert response.status_code == 200
+    (renewed_header,) = _session_set_cookie_headers(response)
+    renewed_value = _session_cookie_from_set_cookie(renewed_header)
+    assert renewed_value != aged_cookie
+    assert _session_cookie_age_seconds(renewed_value, signing_key) < 60
+    renewed_attributes = renewed_header.lower()
+    assert f"domain={_TEST_AGENT_ID}.localhost" in renewed_attributes
+    assert "httponly" in renewed_attributes
+    assert "max-age" not in renewed_attributes
+    assert "expires" not in renewed_attributes
+    for attribute in expected_attributes:
+        assert attribute in renewed_attributes
+    for attribute in absent_attributes:
+        assert attribute not in renewed_attributes
+    assert "service_state=1; Path=/" in response.headers.get_list("set-cookie")
+
+
+@pytest.mark.witnesses(
+    "authentication.renewed-in-use",
+    partial="witnesses the bare origin; agent origins are witnessed separately",
+)
+def test_aged_session_cookie_on_the_bare_origin_is_answered_with_a_fresh_host_only_one(tmp_path: Path) -> None:
+    with _make_forward_app_on(tmp_path) as (client, store):
+        signing_key = store.get_signing_key()
+        aged_cookie = _backdated_session_cookie(signing_key, age_seconds=20 * _SECONDS_PER_DAY)
+        response = client.get("/", cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: aged_cookie})
+
+    assert "Discovered agents" in response.text
+    (renewed_header,) = _session_set_cookie_headers(response)
+    assert _session_cookie_age_seconds(_session_cookie_from_set_cookie(renewed_header), signing_key) < 60
+    assert "domain=" not in renewed_header.lower()
+
+
+@pytest.mark.witnesses("authentication.expired-not-renewed")
+@pytest.mark.witnesses("authentication.preauth-not-replaced")
+@pytest.mark.witnesses(
+    "sessions-unforgeable",
+    partial="only the clause that a signed cookie is issued in answer to a valid signed one, on an agent origin",
+)
+def test_only_a_valid_signed_session_cookie_is_answered_with_a_fresh_one(tmp_path: Path) -> None:
+    preauth = "preauth-not-renewed"
+    app, auth_store, resolver = _make_forward_app(tmp_path, preauth_cookie_value=preauth)
+    _register_default_service(resolver, "http://stub-backend")
+    expired_cookie = _backdated_session_cookie(
+        auth_store.get_signing_key(), age_seconds=_COOKIE_MAX_AGE_SECONDS + _SECONDS_PER_DAY
+    )
+
+    def _ok(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json={"ok": True})
+
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
+        app.state.http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(_ok), follow_redirects=False)
+        json_headers = {"accept": "application/json"}
+        without_cookie = client.get("/api/health", headers=json_headers)
+        with_expired = client.get(
+            "/api/health", headers=json_headers, cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: expired_cookie}
+        )
+        with_preauth = client.get(
+            "/api/health", headers=json_headers, cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: preauth}
+        )
+
+    assert without_cookie.status_code == 403
+    assert _session_set_cookie_headers(without_cookie) == []
+    # Expiry cannot be outrun by presenting the expired cookie.
+    assert with_expired.status_code == 403
+    assert _session_set_cookie_headers(with_expired) == []
+    # The preauth value never expires, so a signed cookie in its place would be a downgrade.
+    assert with_preauth.status_code == 200
+    assert _session_set_cookie_headers(with_preauth) == []
+
+
+def test_subdomain_auth_bridge_with_a_session_already_held_sets_one_session_cookie(tmp_path: Path) -> None:
+    app, auth_store, _resolver = _make_forward_app(tmp_path)
+    signing_key = auth_store.get_signing_key()
+    token = create_subdomain_auth_token(signing_key=signing_key, origin_coordinate=_UNREGISTERED_HOST_ID)
+    with TestClient(app, follow_redirects=False) as client:
+        response = client.get(
+            f"/_subdomain_auth?token={token}&next=/",
+            headers={"host": f"{_UNREGISTERED_HOST_ID}.localhost:18421"},
+            cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: create_session_cookie(signing_key)},
+        )
+    assert response.status_code == 302
+    assert len(_session_set_cookie_headers(response)) == 1
 
 
 @pytest.mark.witnesses(
@@ -4690,20 +4844,7 @@ def _session_cookie_from_set_cookie(set_cookie_header: str) -> str:
 
 
 def _make_expired_subdomain_auth_token(signing_key: CookieSigningKey, origin_coordinate: str, age_seconds: int) -> str:
-    """Mint a subdomain-auth token stamped ``age_seconds`` in the past.
-
-    Backdating the signer's timestamp lets a test drive the token's expiry
-    window (seconds long) without controlling the wall clock or waiting.
-    """
-
-    class _BackdatedSigner(TimestampSigner):
-        def get_timestamp(self) -> int:
-            return int(time.time()) - age_seconds
-
-    serializer = URLSafeTimedSerializer(
-        secret_key=signing_key.get_secret_value(), salt=_SUBDOMAIN_AUTH_SALT, signer=_BackdatedSigner
-    )
-    return serializer.dumps(origin_coordinate)
+    return _backdated_signed_value(signing_key, origin_coordinate, _SUBDOMAIN_AUTH_SALT, age_seconds)
 
 
 @pytest.mark.witnesses("authentication.bridge-roundtrip")
@@ -4732,7 +4873,9 @@ def test_bridge_roundtrip_lands_signed_in_on_agent_origin(tmp_path: Path) -> Non
     # The user was never asked for a credential: the whole flow was automatic
     # 302 redirects driven by the pre-existing bare-origin session -- no OTP
     # was presented (neither hop returned a sign-in prompt or an auth refusal).
-    assert "set-cookie" not in hop1.headers
+    # The first hop sets nothing on the agent origin: that cookie comes only
+    # from redeeming the token.
+    assert f"domain={_TEST_AGENT_ID}" not in ", ".join(hop1.headers.get_list("set-cookie")).lower()
 
 
 @pytest.mark.witnesses(

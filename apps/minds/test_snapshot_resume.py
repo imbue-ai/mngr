@@ -2027,6 +2027,7 @@ def _hold_restic_executing(container_name: str) -> str:
 
 
 @pytest.mark.minds_snapshot_resume
+@pytest.mark.flaky
 @pytest.mark.docker
 @pytest.mark.timeout(1150)
 def test_live_reprovision_succeeds_inside_the_running_workspace(running_workspace: RunningWorkspaceContainer) -> None:

@@ -5,15 +5,17 @@ Understanding this behavior corpus calls for the behaviors skill; consult it whe
 The **browser authorization component** -- fully, the *desktop-app backend-server* browser authorization component -- is the browser-facing part of the Imbue Studio *desktop client*: the bare-origin web UI served by `minds run` (`apps/minds/imbue/minds/desktop_client/`) that serves every page the browser reaches, carries the session, and authenticates it.
 It is the gateway through which the user reaches all their workspaces.
 
-The features in this folder cover authenticating a session with a one-time code, and the session that authentication establishes.
+The features in this folder cover authenticating a session with a one-time code, the session that authentication establishes, and the pre-authorized session of the desktop app.
 The Rules in `invariants.feature` bind all of them.
 
 ## How session authentication works
 
 The desktop client keeps its local state in a data directory; one installation = one data directory.
-At server start it mints a one-time code and prints an authentication URL (`http://localhost:<port>/login?one_time_code=<code>`) to its terminal; this is the only credential a user ever types or clicks.
+At server start a desktop client that the desktop app did not start mints a one-time code and prints an authentication URL (`http://localhost:<port>/login?one_time_code=<code>`) to its terminal; this is the only credential a user ever types or clicks.
 Authenticating a session establishes it: the authenticated state of a browser, carried by a signed session cookie.
 The session is global: it is the one credential gating every page the browser authorization component serves.
+The cookie that carries it is reissued on every request that presents a valid one, so a session stays authenticated while it is in use and lapses only after 30 days without a request.
+The desktop app's windows never run that flow: the desktop client it starts mints no one-time code and hands it a preauth value instead, which its windows present as their session cookie for as long as that process lives.
 
 ## What this protects
 

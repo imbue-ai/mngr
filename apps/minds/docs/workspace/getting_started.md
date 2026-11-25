@@ -4,9 +4,8 @@
 
 In normal use, launch the Electron app -- either the packaged build or
 `just minds-start` from this repo root for development iteration.
-Electron spawns the `minds run` backend internally (default:
-`http://127.0.0.1:8420`); a one-time login URL is printed to the
-terminal and the system browser opens directly on that URL.
+Electron spawns the `minds run` backend internally, and the app's
+windows open already signed in to it: no login URL is printed.
 
 Run from source with nothing exported (`minds run`, or
 `apps/minds/scripts/start-desktop.sh`), the backend targets production:
@@ -35,9 +34,13 @@ To bypass Electron and exercise the backend on its own:
 minds run
 ```
 
+Started this way the backend serves `http://127.0.0.1:8420` by default,
+prints a one-time login URL to the terminal, and opens the system browser
+directly on that URL.
+
 ## Creating your first agent
 
-1. Open the login URL in your browser
+1. Go to the app's window (for a bare `minds run`, the login URL opened in your browser)
 2. You'll see the creation form (since no agents exist yet)
 3. Fill in:
    - **Name**: a short identifier for the agent (e.g. "selene")

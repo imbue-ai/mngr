@@ -21,7 +21,7 @@ To run it from source, follow the setup guide
 the prerequisites (Docker, uv, the pinned Node and pnpm) and launches the app;
 on macOS you install those once and run `apps/minds/scripts/start-desktop.sh`.
 Run from source, the app targets production and needs nothing exported. You
-create your first agent from the login URL the app prints on startup. The
+create your first agent in the app's window, which opens already signed in. The
 guide's Imbue-internal section covers developing against a dev env (Vault,
 Modal, GNU rsync, the `minds-dev-workflow` skill), none of which a public
 contributor needs.

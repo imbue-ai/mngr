@@ -1,6 +1,6 @@
 Feature: Session authentication with a one-time code
-  At startup the desktop client mints a fresh one-time code and prints the authentication URL to its terminal.
-  Opening that URL in a browser is the only way to authenticate a session in a browser that has none.
+  At startup a desktop client that the desktop app did not start mints a fresh one-time code and prints the authentication URL to its terminal.
+  Opening that URL in a browser is the only way a user authenticates a session in a browser that has none.
 
   Background:
     Given a running desktop client

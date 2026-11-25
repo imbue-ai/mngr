@@ -19,7 +19,7 @@
  *
  * Precedence (first match wins):
  *   1. Not authenticated to the local backend -> start. Graceful fallback;
- *      the one-time login code should already have authenticated us.
+ *      the session cookie set at startup should already have authenticated us.
  *   2. Onboarding not complete AND no workspaces exist -> start. Onboarding
  *      is complete once the install has started creating a workspace or
  *      signed in from the start flow (the backend owns the flag); an install

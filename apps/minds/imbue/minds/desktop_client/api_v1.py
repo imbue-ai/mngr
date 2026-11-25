@@ -8,7 +8,7 @@ so an agent in a workspace reaches us by hitting
 
 *Every* ``/api/v1`` route uses one auth implementation
 (:func:`require_api_or_cookie_auth`): it accepts *either* that bearer (agents,
-via the gateway) *or* the desktop client's signed session cookie, so the browser
+via the gateway) *or* the desktop client's session cookie, so the browser
 UI and in-workspace agents call the same versioned API over one HTTP surface.
 Agent reachability of any given route is decided separately, by whether a
 ``minds-workspaces-<verb>`` schema matches its path at the gateway; routes with

@@ -40,6 +40,7 @@ from typing import Final
 
 import click
 from loguru import logger
+from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.profiling import enable_writer
@@ -77,6 +78,7 @@ from imbue.minds.desktop_client.app_record import build_app_record
 from imbue.minds.desktop_client.app_record import parse_launch_command_from_environ
 from imbue.minds.desktop_client.app_record import remove_app_record
 from imbue.minds.desktop_client.app_record import write_app_record
+from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
@@ -204,6 +206,8 @@ from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 # a clean Mac (proven via Tart VM). Give it 120s to comfortably cover
 # cold-install while still surfacing a real wedge before the user gives up.
 _MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS: Final[float] = 120.0
+
+_SESSION_PREAUTH_COOKIE_LENGTH: Final[int] = 64
 
 # Env var read by the bundled ``minds-api-proxy`` gateway extension to
 # decide where to forward inbound proxy requests. Published to the
@@ -1065,13 +1069,12 @@ def run(
         output_format,
     )
 
-    # Mint a one-time code for the Imbue Studio bare-origin auth flow (the plugin
-    # uses its own ``mngr_forward_session`` cookie on the agent subdomains).
-    code = OneTimeCode(secrets.token_urlsafe(32))
-    auth_store.add_one_time_code(code=code)
-    minds_login_url = f"http://localhost:{port}/login?one_time_code={code}"
-    logger.info("Imbue Studio login URL (one-time use): {}", minds_login_url)
-    emit_event("login_url", {"login_url": minds_login_url, "message": minds_login_url}, output_format)
+    minds_login_url, session_preauth_cookie = _announce_bare_origin_sign_in(
+        auth_store=auth_store,
+        port=port,
+        is_electron=is_electron,
+        output_format=output_format,
+    )
 
     # This computer's resource warnings; the reading thread starts with the server runtime.
     device_resource_monitor = DeviceResourceMonitor(
@@ -1113,6 +1116,7 @@ def run(
         mngr_binary=MNGR_BINARY,
         mngr_host_dir=mngr_host_dir,
         minds_api_key=minds_api_key,
+        session_preauth_cookie=session_preauth_cookie,
         latchkey_forward_supervisor=latchkey_forward_supervisor,
         machine_operator=machine_operator,
         discovery_health_watchdog=discovery_health_watchdog,
@@ -1251,6 +1255,40 @@ def run(
             serve_desktop_client(app, get_state(app), host=host, port=port, api_socket_path=socket_location.path)
     finally:
         remove_app_record(record_path)
+
+
+def _announce_bare_origin_sign_in(
+    auth_store: AuthStoreInterface,
+    port: int,
+    is_electron: bool,
+    output_format: OutputFormat,
+    # The URL sign-in starts from, and the preauth session cookie (None outside the desktop app)
+) -> tuple[str, SecretStr | None]:
+    """Emit the ``login_url`` event that tells the caller how to sign in to the bare origin.
+
+    The plugin uses its own ``mngr_forward_session`` cookie on the agent subdomains.
+    """
+    # The desktop app is handed a preauth value to set as its windows' session
+    # cookie, and no one-time code is minted for it: the app would not spend
+    # one, and a code nothing spends stays good in every log that printed it.
+    if is_electron:
+        session_preauth_cookie = SecretStr(secrets.token_urlsafe(_SESSION_PREAUTH_COOKIE_LENGTH))
+        minds_login_url = f"http://localhost:{port}/"
+        logger.info("Imbue Studio serving the desktop app at {}", minds_login_url)
+        emit_event(
+            "login_url",
+            {"login_url": minds_login_url, "preauth_cookie": session_preauth_cookie.get_secret_value()},
+            output_format,
+        )
+        return minds_login_url, session_preauth_cookie
+
+    # Anything else gets the one-time login URL.
+    code = OneTimeCode(secrets.token_urlsafe(32))
+    auth_store.add_one_time_code(code=code)
+    minds_login_url = f"http://localhost:{port}/login?one_time_code={code}"
+    logger.info("Imbue Studio login URL (one-time use): {}", minds_login_url)
+    emit_event("login_url", {"login_url": minds_login_url, "message": minds_login_url}, output_format)
+    return minds_login_url, None
 
 
 def _enable_profile_writer(profile_path: Path, log_dir: Path) -> None:

@@ -346,25 +346,22 @@ function redeemFrameRefusal(details, accountsOrigin) {
 }
 
 /**
- * The backend session cookie to set in an account partition, from the cookies
- * of the session that consumed the one-time login code: the one-time code is
- * spent once, on the default session, and every partition's pages carry the
- * same cookie. Null when the jar holds none. The backend's cookie is a
- * session cookie (a fresh code is consumed per backend run), so the mirror
- * carries no expiry either.
+ * The backend session cookie to set in a cookie store: the preauth value the
+ * backend minted for this app, which it accepts as-is for as long as it runs.
+ * Null until a backend has started. Carries no expiry: the value dies with the
+ * backend process, and the next one mints another.
  *
- * @param {{name: string, value: string}[]} cookies  A `cookies.get` answer.
- * @param {string} backendBaseUrl
+ * @param {string|null} preauthCookie
+ * @param {string|null} backendBaseUrl
  * @returns {object|null}  Details for `cookies.set`.
  */
-function backendSessionCookieOf(cookies, backendBaseUrl) {
-  if (!Array.isArray(cookies) || typeof backendBaseUrl !== 'string' || !backendBaseUrl) return null;
-  const cookie = cookies.find((c) => c && c.name === BACKEND_SESSION_COOKIE_NAME && typeof c.value === 'string');
-  if (!cookie) return null;
+function backendSessionCookieFor(preauthCookie, backendBaseUrl) {
+  if (typeof preauthCookie !== 'string' || !preauthCookie) return null;
+  if (typeof backendBaseUrl !== 'string' || !backendBaseUrl) return null;
   return {
     url: backendBaseUrl,
     name: BACKEND_SESSION_COOKIE_NAME,
-    value: cookie.value,
+    value: preauthCookie,
     path: '/',
     httpOnly: true,
     sameSite: 'lax',
@@ -374,7 +371,7 @@ function backendSessionCookieOf(cookies, backendBaseUrl) {
 module.exports = {
   BACKEND_SESSION_COOKIE_NAME,
   accountIdForWindowUrl,
-  backendSessionCookieOf,
+  backendSessionCookieFor,
   headersWithoutFrameAncestors,
   isAccountsOriginFrameDocument,
   isHostUnderSharedDomain,

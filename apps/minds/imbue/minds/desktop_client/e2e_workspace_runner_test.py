@@ -35,6 +35,7 @@ from imbue.minds.desktop_client.e2e_workspace_runner import _ElectronConnectErro
 from imbue.minds.desktop_client.e2e_workspace_runner import _ElectronOutputTail
 from imbue.minds.desktop_client.e2e_workspace_runner import _LAUNCHER_INPUT_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _LAUNCHER_OVERLAY_SELECTOR
+from imbue.minds.desktop_client.e2e_workspace_runner import _LatchkeyForwardStart
 from imbue.minds.desktop_client.e2e_workspace_runner import _START_WORKSPACE_CONTROL_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _STOP_WORKSPACE_CONTROL_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _build_electron_env
@@ -781,6 +782,39 @@ def test_a_one_time_login_code_electron_writes_reaches_neither_kind_of_kept_line
     assert reading.recent_lines == (kept_line,)
 
 
+@pytest.mark.parametrize(
+    ("backend_lines", "expected_start"),
+    [
+        ((), _LatchkeyForwardStart.UNREPORTED),
+        (("mngr latchkey forward supervisor running (pid=4374)",), _LatchkeyForwardStart.RUNNING),
+        (
+            (
+                "WARNING: Could not start the mngr latchkey forward supervisor: Spawned 'mngr latchkey forward' "
+                "(pid=1474) did not take ownership of /tmp/state/latchkey within 30.0s",
+            ),
+            _LatchkeyForwardStart.FAILED,
+        ),
+        (
+            (
+                "WARNING: Could not start the mngr latchkey forward supervisor: stale owner",
+                "mngr latchkey forward supervisor running (pid=4374)",
+            ),
+            _LatchkeyForwardStart.RUNNING,
+        ),
+    ],
+)
+def test_the_output_tail_reports_the_latest_the_backend_said_about_starting_its_latchkey_forward(
+    backend_lines: tuple[str, ...], expected_start: _LatchkeyForwardStart
+) -> None:
+    output_tail = _ElectronOutputTail()
+    output_tail.record("electron-out", "[startup] Backend ready at http://localhost:41221")
+    for backend_line in backend_lines:
+        output_tail.record("electron-err", backend_line)
+    output_tail.record("electron-err", "chatter after it")
+
+    assert output_tail.read().latchkey_forward_start == expected_start
+
+
 def test_an_attach_failure_quotes_the_launch_s_output_and_says_the_backend_reported_ready() -> None:
     output_tail = _ElectronOutputTail()
     output_tail.record("electron-out", "[startup] Loading shell.html...")
@@ -842,7 +876,7 @@ def test_spent_launch_attempts_give_every_attempt_s_startup_lines_and_the_last_a
     ]
 
     assert _describe_spent_launch_attempts(errors).splitlines() == [
-        "Electron CDP attach failed after 2 relaunch attempts "
+        "No Electron launch could be driven after 2 attempts "
         "(last error: Electron CDP attach failed on port 50112: last)",
         "Attempt 1 of 2: Electron CDP attach failed on port 48653: first",
         "Backend-ready line '[startup] Backend ready at': NOT seen (this launch wrote 2 lines)",

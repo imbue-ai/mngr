@@ -665,14 +665,11 @@ def wait_backend_url(since_offset: int = 0) -> str:
     ``since_offset`` is the byte offset to start scanning from. The
     second launch (iter 9: quit + relaunch) captures the file size
     before relaunching and passes it here so we match the NEW backend's
-    login URL line, not the previous run's.
+    line, not the previous run's.
     """
 
     deadline = time.time() + LAUNCH_BACKEND_TIMEOUT
-    pattern = re.compile(
-        r"Imbue Studio login URL \(one-time use\): "
-        r"(http://(?:127\.0\.0\.1|localhost):\d+/login\?one_time_code=[A-Za-z0-9_-]+)"
-    )
+    pattern = re.compile(r"Imbue Studio serving the desktop app at (http://(?:127\.0\.0\.1|localhost):\d+)/")
     while time.time() < deadline:
         if EVENTS_LOG.exists() and EVENTS_LOG.stat().st_size > since_offset:
             with EVENTS_LOG.open("rb") as f:
@@ -682,10 +679,9 @@ def wait_backend_url(since_offset: int = 0) -> str:
             # earlier run's log would otherwise hand back that run's dead port.
             matches = [m for line in data.splitlines() if (m := pattern.search(line))]
             if matches:
-                url = matches[-1].group(1).replace("localhost", "127.0.0.1")
-                return url.split("/login")[0]
+                return matches[-1].group(1).replace("localhost", "127.0.0.1")
         time.sleep(2)
-    raise E2EFailure(f"no backend login URL after {LAUNCH_BACKEND_TIMEOUT}s (since_offset={since_offset})")
+    raise E2EFailure(f"no backend address logged after {LAUNCH_BACKEND_TIMEOUT}s (since_offset={since_offset})")
 
 
 def mint_one_time_code() -> str:

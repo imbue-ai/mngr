@@ -19,6 +19,7 @@ const {
   formatEarlyExitDetails,
   formatSpawnFailureDetails,
 } = require('./backend-exit-diagnostics');
+const { redactStdoutLineForLog } = require('./backend-stdout-redaction');
 
 // A failed write to the main process's own stdout/stderr -- EPIPE from a dev
 // launch piped through `head`, ENOSPC from stderr redirected to a file on a
@@ -106,58 +107,11 @@ function platformRootEnv() {
   };
 }
 
-// Backend stdout JSONL event fields that carry secrets and must be masked
-// before the raw line is written to minds.log (which is uploaded with bug
-// reports). Keyed by event type; each value lists the fields to redact.
-//
-//   * mngr_forward_started: the freshly-minted mngr-forward preauth cookie --
-//     a reusable, session-lifetime bearer token for the local forward. The
-//     backend never logs it through any other path, so masking it here removes
-//     it from the logs entirely.
-//
-// The ``login_url`` event's one-time login code is deliberately NOT masked: it
-// is single-use and consumed immediately at session start, so it is spent by
-// the time any log is read (it is also common to print single-use login URLs).
-// Masking it here would be a false comfort anyway -- the backend prints the
-// same URL via a stderr log line and the JSONL sink, neither of which this
-// stdout-only redaction touches.
-const SECRET_STDOUT_EVENT_FIELDS = {
-  mngr_forward_started: ['preauth_cookie'],
-};
-
-const REDACTED_PLACEHOLDER = '***';
-
 // How long a backend that died before its login URL may take to finish
 // draining its pipes before startup is failed with whatever stderr has arrived.
 // A dead process's pipes drain in milliseconds, so this only bites when a
 // grandchild inherited them.
 const STDIO_DRAIN_GRACE_MS = 500;
-
-/**
- * Return a copy of a backend stdout line safe to persist to minds.log.
- *
- * If the line is a JSON event carrying secrets (see SECRET_STDOUT_EVENT_FIELDS)
- * its secret fields are replaced with a placeholder; every other line is
- * returned unchanged. The parsed event used by the in-process handlers is
- * derived from the ORIGINAL line, so redaction never affects behavior -- only
- * what is written to disk.
- */
-function redactStdoutLineForLog(line) {
-  if (!line.trim()) return line;
-  let event;
-  try {
-    event = JSON.parse(line);
-  } catch {
-    return line;
-  }
-  const secretFields = event && typeof event === 'object' ? SECRET_STDOUT_EVENT_FIELDS[event.event] : undefined;
-  if (!secretFields) return line;
-  const redacted = { ...event };
-  for (const field of secretFields) {
-    if (field in redacted) redacted[field] = REDACTED_PLACEHOLDER;
-  }
-  return JSON.stringify(redacted);
-}
 
 /**
  * Find an available port by briefly binding to port 0.
@@ -285,8 +239,9 @@ function logBundledGitVersion(gitRoot) {
  * `profilePath` is the trace file of the opt-in profiling mode, handed to the
  * backend as MINDS_PROFILE_FILE; null when the mode is off.
  *
- * Returns a promise that resolves with { loginUrl, port } when the backend
- * is ready, or rejects if the process exits before emitting the URL.
+ * Returns a promise that resolves with { port, sessionPreauthCookie } when
+ * the backend is ready, or rejects if the process exits before emitting the
+ * URL or emits it without the preauth cookie this app's windows sign in with.
  */
 function startBackend(
   onProgress,
@@ -561,8 +516,8 @@ function startBackend(
 
         for (const line of lines) {
           // Log every complete line, but mask secret-bearing event fields
-          // (the mngr-forward preauth cookie) first: minds.log is uploaded with
-          // bug reports, so that reusable session token must never land in it.
+          // (the preauth cookies) first: minds.log is uploaded with bug
+          // reports, so those reusable session tokens must never land in it.
           // The in-process handlers below still parse the original line, so they
           // receive the real values.
           logStream.write(formatTimestampedLine(redactStdoutLineForLog(line)));
@@ -573,12 +528,19 @@ function startBackend(
             if (event.event === 'login_url' && event.login_url) {
               if (!isResolved) {
                 isResolved = true;
-                // Wait for the server to actually start listening before resolving
-                waitForPort('127.0.0.1', port).then(() => {
-                  resolve({ loginUrl: event.login_url, port });
-                }).catch((err) => {
-                  reject(new Error(`Backend emitted login URL but server never became ready: ${err.message}`));
-                });
+                const sessionPreauthCookie = event.preauth_cookie;
+                if (typeof sessionPreauthCookie !== 'string' || !sessionPreauthCookie) {
+                  // Every window would land on the sign-in page, which only a
+                  // backend that does hand one over can get past.
+                  reject(new Error('Backend emitted login URL without a session preauth cookie'));
+                } else {
+                  // Wait for the server to actually start listening before resolving
+                  waitForPort('127.0.0.1', port).then(() => {
+                    resolve({ port, sessionPreauthCookie });
+                  }).catch((err) => {
+                    reject(new Error(`Backend emitted login URL but server never became ready: ${err.message}`));
+                  });
+                }
               }
             } else if ((event.event === 'notification' || event.event === 'notification_read') && onNotification) {
               onNotification(event);

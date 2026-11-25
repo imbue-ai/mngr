@@ -4,18 +4,20 @@ Adapted from ``minds.desktop_client.cookie_manager``. Cookie name is pinned
 to ``mngr_forward_session`` so it does not collide with a host application's
 own session cookie when both bind on different ports of the same host.
 
-The ``verify_session_cookie`` helper accepts an optional opaque
+``classify_session_cookie`` accepts an optional opaque
 ``preauth_cookie_value``: if the inbound cookie matches that value exactly,
 it is accepted without verifying a signature. This lets the Electron shell
 pre-set a cookie on the bare origin before the first navigation so the
 initial OTP flow can be skipped when the host application spawns the plugin.
 """
 
+from enum import auto
 from typing import Final
 
 from itsdangerous import BadSignature
 from itsdangerous import URLSafeTimedSerializer
 
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.mngr_forward.primitives import CookieSigningKey
 
 _COOKIE_SALT: Final[str] = "mngr-forward-auth"
@@ -27,6 +29,14 @@ _COOKIE_MAX_AGE_SECONDS: Final[int] = 30 * 24 * 60 * 60
 _SUBDOMAIN_TOKEN_MAX_AGE_SECONDS: Final[int] = 30
 
 
+class SessionCookieVerdict(UpperCaseStrEnum):
+    """What a presented session cookie is worth."""
+
+    SIGNED = auto()
+    PREAUTH = auto()
+    INVALID = auto()
+
+
 def create_session_cookie(signing_key: CookieSigningKey) -> str:
     """Create a signed session cookie value for global authentication."""
     serializer = URLSafeTimedSerializer(secret_key=signing_key.get_secret_value())
@@ -36,17 +46,8 @@ def create_session_cookie(signing_key: CookieSigningKey) -> str:
 def verify_session_cookie(
     cookie_value: str,
     signing_key: CookieSigningKey,
-    preauth_cookie_value: str | None = None,
 ) -> bool:
-    """Verify a session cookie is valid and not expired.
-
-    When ``preauth_cookie_value`` is provided and equals ``cookie_value``,
-    the cookie is accepted without checking a signature. This is the
-    Electron pre-set path. Otherwise the cookie must be a signed token
-    issued by ``create_session_cookie`` and within the max-age window.
-    """
-    if preauth_cookie_value is not None and cookie_value == preauth_cookie_value:
-        return True
+    """Verify a session cookie is a signed token issued by ``create_session_cookie`` and within the max-age window."""
     serializer = URLSafeTimedSerializer(secret_key=signing_key.get_secret_value())
     try:
         payload = serializer.loads(
@@ -57,6 +58,23 @@ def verify_session_cookie(
     except BadSignature:
         return False
     return payload == _SESSION_PAYLOAD
+
+
+def classify_session_cookie(
+    cookie_value: str,
+    signing_key: CookieSigningKey,
+    preauth_cookie_value: str | None,
+) -> SessionCookieVerdict:
+    """Decide what a presented session cookie is worth.
+
+    A cookie equal to ``preauth_cookie_value`` is accepted without checking a
+    signature: the Electron pre-set path. Anything else must be a signed token.
+    """
+    if preauth_cookie_value is not None and cookie_value == preauth_cookie_value:
+        return SessionCookieVerdict.PREAUTH
+    if verify_session_cookie(cookie_value=cookie_value, signing_key=signing_key):
+        return SessionCookieVerdict.SIGNED
+    return SessionCookieVerdict.INVALID
 
 
 def create_subdomain_auth_token(signing_key: CookieSigningKey, origin_coordinate: str) -> str:

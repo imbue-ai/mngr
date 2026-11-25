@@ -38,6 +38,7 @@ Feature: Forward proxy invariants
     Any alteration of a cookie invalidates it.
     A cookie signed under a different state directory is invalid here.
     A cookie older than 30 days is invalid.
+    A signed cookie is issued only by a sign-in path, or in answer to an HTTP request that presented a valid signed cookie.
 
   @single-credential
   Rule: The session is the only credential the user ever handles

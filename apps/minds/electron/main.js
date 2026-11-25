@@ -60,7 +60,7 @@ const {
 const { findWorkspaceRow, withAccountRows, workspaceRowFromFrameEntry } = require('./workspace-lists');
 const {
   accountIdForWindowUrl,
-  backendSessionCookieOf,
+  backendSessionCookieFor,
   BACKEND_SESSION_COOKIE_NAME,
   headersWithoutFrameAncestors,
   loginPageLanding,
@@ -368,10 +368,10 @@ const preparedSessionsByPartition = new Map();
 const partitionReadyByName = new Map();
 let forwardProxyCaPath = null;
 let forwardPreauthCookie = null;
-// The backend session cookie the one-time login code bought on the default
-// session, mirrored into every partition (the pages run there, main's own
-// net.request calls on the default session).
-let backendSessionCookie = null;
+// The value the running backend accepts as this app's session cookie, set in
+// every cookie store: each partition (the pages run there) and the default
+// session (main's own net.request calls).
+let backendPreauthCookie = null;
 // The shared workspace domains every account's rows name, as the relayed
 // ``workspaces`` frames last said (account id -> domains), and their union.
 const sharedDomainsByAccount = new Map();
@@ -547,31 +547,23 @@ async function applyForwardSessionCookieTo(ses) {
 }
 
 async function applyBackendSessionCookieTo(ses) {
-  if (!backendSessionCookie) return;
+  const cookie = backendSessionCookieFor(backendPreauthCookie, backendBaseUrl);
+  if (!cookie) return;
   try {
-    await ses.cookies.set(backendSessionCookie);
+    await ses.cookies.set(cookie);
   } catch (err) {
-    console.warn(`[startup] Failed to set the ${BACKEND_SESSION_COOKIE_NAME} cookie in a partition:`, err);
+    console.warn(`[startup] Failed to set the ${BACKEND_SESSION_COOKIE_NAME} cookie in a cookie store:`, err);
   }
 }
 
-// Carry the backend session the one-time code bought into every prepared
-// partition; a partition prepared later picks it up in preparePartition.
-async function mirrorBackendSessionIntoPartitions() {
-  if (!backendBaseUrl) return;
-  let cookies;
-  try {
-    cookies = await session.defaultSession.cookies.get({ url: backendBaseUrl, name: BACKEND_SESSION_COOKIE_NAME });
-  } catch (err) {
-    console.warn(`[startup] Failed to read the ${BACKEND_SESSION_COOKIE_NAME} cookie off the default session:`, err);
-    return;
+// Every backend run mints its own preauth value, so each start sets it in
+// every cookie store that exists; a partition prepared later picks it up in
+// preparePartition.
+async function presetBackendSessionCookie(preauthCookie) {
+  backendPreauthCookie = preauthCookie;
+  for (const ses of [session.defaultSession, ...preparedSessionsByPartition.values()]) {
+    await applyBackendSessionCookieTo(ses);
   }
-  backendSessionCookie = backendSessionCookieOf(cookies, backendBaseUrl);
-  if (!backendSessionCookie) {
-    console.warn(`[startup] The default session holds no ${BACKEND_SESSION_COOKIE_NAME} cookie; windows will land on /login`);
-    return;
-  }
-  for (const ses of preparedSessionsByPartition.values()) await applyBackendSessionCookieTo(ses);
 }
 
 /** The session of `partition`, prepared on first use; the same object afterwards. */
@@ -1866,8 +1858,8 @@ function openStartupRoutedWindow() {
   // The launch is already computing that route and lands it on the most recent
   // window, which is this one. Computing a second here would apply two routes
   // to it -- duplicating every window of a multi-window session restore -- off
-  // an app-status read before the one-time login code is consumed, which
-  // answers "signed out".
+  // an app-status read before the session cookie is set, which answers
+  // "signed out".
   if (isStartupRoutingBeingComputed) return bundle;
   Promise.all([computeStartupRouting(), bundle.loadingDocumentLoaded])
     .then(([routing]) => {
@@ -2890,7 +2882,7 @@ async function onReady() {
   });
 
   // A background start opens no window: the startup sequence runs without
-  // one, the one-time code is still consumed, and the first-window route is
+  // one, the session cookie is still set, and the first-window route is
   // held for whichever window is asked for first (see startBackendWithRetry).
   initialBundle = isBackgroundStart ? null : createBundle({ accountId: savedLaunchAccountId() });
   if (initialBundle !== null) sizeFromSavedSession(initialBundle);
@@ -3156,7 +3148,7 @@ async function runStartupSequence(bundle) {
       console.log('[startup] shell.html loaded');
     } catch (err) {
       // Closing the window mid-load rejects the load. This sequence owns the
-      // backend start and the one-time code, so it runs on without a window.
+      // backend start and the session cookie, so it runs on without a window.
       console.warn('[startup] shell.html load did not finish:', err.message);
     }
   }
@@ -3207,33 +3199,11 @@ function sendLatestLoadingStatusOnLoad(wc) {
 }
 
 // One line of startup console output for the loading document's "Show
-// details" log. Lines carrying a credential the app consumes itself (the
-// one-time login code, the forward tokens) never reach the page.
+// details" log. Lines carrying a credential (a one-time login code, the
+// forward tokens) never reach the page.
 function broadcastStartupLogLine(line) {
   if (isSecretStartupLogLine(line)) return;
   sendToLoadingWindows('status-log-line', line);
-}
-
-// Consume the backend's one-time login code so the default session -- used by
-// main's own net.request calls -- gets the minds_session cookie, which
-// mirrorBackendSessionIntoPartitions then carries to the windows' partitions
-// (every window's SPA page, its /ui/ws channel included, runs in one).
-function consumeOneTimeLoginCode(loginUrl) {
-  return new Promise((resolve) => {
-    const authenticateUrl = loginUrl.replace('/login?', '/authenticate?');
-    console.log('[startup] Consuming one-time code via', authenticateUrl);
-    const req = net.request({ url: authenticateUrl, method: 'GET', useSessionCookies: true });
-    req.on('response', (resp) => {
-      console.log('[startup] /authenticate response status:', resp.statusCode);
-      resp.on('data', () => {});
-      resp.on('end', () => resolve());
-    });
-    req.on('error', (err) => {
-      console.warn('[startup] /authenticate request failed:', err);
-      resolve();
-    });
-    req.end();
-  });
 }
 
 // Where the app's first window -- or a reopen with no window open -- should
@@ -3346,7 +3316,7 @@ async function startBackendWithRetry() {
   broadcastStatusToLoadingWindows(`Starting ${PRODUCT_DISPLAY_NAME}...`);
 
   try {
-    const { loginUrl, port } = await startBackend(
+    const { port, sessionPreauthCookie } = await startBackend(
       (status) => broadcastStatusToLoadingWindows(status),
       (event) => (event.event === 'notification_read' ? handleNotificationRead(event) : handleNotification(event)),
       (event) => handleAuthEvent(event),
@@ -3367,7 +3337,7 @@ async function startBackendWithRetry() {
     const isFirstStart = !hasCompletedInitialStart;
     hasCompletedInitialStart = true;
 
-    // Attached before the routing waits below (the one-time code, the app
+    // Attached before the routing waits below (the session cookie, the app
     // status probe, and on a first launch the loading document's intro), so a
     // backend that dies during any of them is reported rather than missed.
     const proc = getBackendProcess();
@@ -3403,11 +3373,10 @@ async function startBackendWithRetry() {
       let routing;
       try {
         // Unconditional, and deliberately NOT inside the window guard below:
-        // this is the only place the one-time code is consumed and a fresh one
-        // is minted per backend run, so skipping it because the startup window
-        // was closed strands the app on /login for the rest of the run.
-        await consumeOneTimeLoginCode(loginUrl);
-        await mirrorBackendSessionIntoPartitions();
+        // every window this backend run serves presents this cookie, so
+        // skipping it because the startup window was closed strands the app
+        // on /login for the rest of the run.
+        await presetBackendSessionCookie(sessionPreauthCookie);
         routing = await computeStartupRouting();
       } finally {
         isStartupRoutingBeingComputed = false;
@@ -3451,7 +3420,12 @@ async function startBackendWithRetry() {
         console.log('[startup] no window survived startup; holding the route for the next one');
       }
     } else {
-      reloadAllWindowsAfterRetry();
+      await presetBackendSessionCookie(sessionPreauthCookie);
+      if (lastErrorTakeover) {
+        console.log('[startup] the backend failed before the windows reloaded; leaving the error takeover up');
+      } else {
+        reloadAllWindowsAfterRetry();
+      }
     }
 
     flushPendingDeeplink();

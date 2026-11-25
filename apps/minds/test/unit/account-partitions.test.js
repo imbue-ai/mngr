@@ -7,7 +7,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   accountIdForWindowUrl,
-  backendSessionCookieOf,
+  backendSessionCookieFor,
   headersWithoutFrameAncestors,
   loginPageLanding,
   isAccountsOriginFrameDocument,
@@ -229,24 +229,19 @@ test("the frame policy covers the accounts origin's frame documents, and only in
   assert.equal(isNestedFrame(disposed), false);
 });
 
-test('the backend session cookie is mirrored into a partition from the default session, and nothing is set without one', () => {
+test('the backend session cookie carries the preauth value, and nothing is set before a backend has handed one over', () => {
   const backendBaseUrl = 'http://localhost:8420';
-  const jar = [
-    { name: 'other', value: 'x' },
-    { name: 'minds_session', value: 's3ss10n', path: '/', httpOnly: true, secure: false, session: true },
-  ];
-  assert.deepEqual(backendSessionCookieOf(jar, backendBaseUrl), {
+  assert.deepEqual(backendSessionCookieFor('pr3auth', backendBaseUrl), {
     url: backendBaseUrl,
     name: 'minds_session',
-    value: 's3ss10n',
+    value: 'pr3auth',
     path: '/',
     httpOnly: true,
     sameSite: 'lax',
   });
-  assert.equal(backendSessionCookieOf([{ name: 'other', value: 'x' }], backendBaseUrl), null);
-  assert.equal(backendSessionCookieOf([], backendBaseUrl), null);
-  assert.equal(backendSessionCookieOf(jar, null), null);
-  assert.equal(backendSessionCookieOf(undefined, backendBaseUrl), null);
+  assert.equal(backendSessionCookieFor(null, backendBaseUrl), null);
+  assert.equal(backendSessionCookieFor('', backendBaseUrl), null);
+  assert.equal(backendSessionCookieFor('pr3auth', null), null);
 });
 
 test('a pasted link\'s route alias is told apart from a workspace coordinate', () => {

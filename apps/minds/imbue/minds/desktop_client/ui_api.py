@@ -2,8 +2,8 @@
 
 This is the SPA's private backend, distinct from the agent-facing `/api/v1`
 surface (latchkey-gated at the gateway) which stays untouched. Everything
-here authenticates with the same signed session cookie the rest of the
-desktop client uses.
+here authenticates with the same session cookie the rest of the desktop
+client uses.
 
 - ``GET /ui/`` serves the SPA index page: hashed asset tags read from the
   Vite manifest plus the inlined ``window.__MINDS_BOOTSTRAP__`` document (the

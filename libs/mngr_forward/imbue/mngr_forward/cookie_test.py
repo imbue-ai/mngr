@@ -5,9 +5,11 @@ from itsdangerous import TimestampSigner
 from itsdangerous import URLSafeTimedSerializer
 
 from imbue.mngr_forward.auth import FileAuthStore
+from imbue.mngr_forward.cookie import SessionCookieVerdict
 from imbue.mngr_forward.cookie import _COOKIE_MAX_AGE_SECONDS
 from imbue.mngr_forward.cookie import _COOKIE_SALT
 from imbue.mngr_forward.cookie import _SESSION_PAYLOAD
+from imbue.mngr_forward.cookie import classify_session_cookie
 from imbue.mngr_forward.cookie import create_session_cookie
 from imbue.mngr_forward.cookie import create_subdomain_auth_token
 from imbue.mngr_forward.cookie import verify_session_cookie
@@ -87,25 +89,26 @@ def test_session_cookie_tampered_payload_fails() -> None:
 )
 def test_session_cookie_preauth_short_circuit() -> None:
     key = CookieSigningKey("test-key")
-    assert (
-        verify_session_cookie(
-            cookie_value="opaque-token",
-            signing_key=key,
-            preauth_cookie_value="opaque-token",
-        )
-        is True
+    verdict = classify_session_cookie(
+        cookie_value="opaque-token", signing_key=key, preauth_cookie_value="opaque-token"
     )
+    assert verdict == SessionCookieVerdict.PREAUTH
 
 
 def test_session_cookie_preauth_mismatch_falls_back_to_signature() -> None:
     key = CookieSigningKey("test-key")
+    signed_cookie = create_session_cookie(key)
     assert (
-        verify_session_cookie(
-            cookie_value="not-the-preauth",
-            signing_key=key,
-            preauth_cookie_value="opaque-token",
-        )
-        is False
+        classify_session_cookie(cookie_value="not-the-preauth", signing_key=key, preauth_cookie_value="opaque-token")
+        == SessionCookieVerdict.INVALID
+    )
+    assert (
+        classify_session_cookie(cookie_value=signed_cookie, signing_key=key, preauth_cookie_value="opaque-token")
+        == SessionCookieVerdict.SIGNED
+    )
+    assert (
+        classify_session_cookie(cookie_value="opaque-token", signing_key=key, preauth_cookie_value=None)
+        == SessionCookieVerdict.INVALID
     )
 
 

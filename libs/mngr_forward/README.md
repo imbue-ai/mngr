@@ -39,6 +39,15 @@ that host's resolved `system_interface` URL through an SSH tunnel, and
 One session cookie (set with `Domain=agent-<hex>.localhost` by the `/goto/`
 bridge) covers the whole workspace-origin family.
 
+A signed session cookie is accepted for 30 days from when it was signed. Every
+HTTP response to a request that presented a valid signed cookie carries a
+freshly signed one with the same scope, so a session lasts for as long as it
+is used at least once every 30 days. WebSocket handshakes do not renew, and a
+preauth cookie value (see below) is never replaced. On a proxied response the
+renewal is one added `Set-Cookie` header; like the `frame-ancestors` header
+described under Embedding, it leaves the body and the service's own headers
+untouched.
+
 ## Reverse tunnels
 
 `--reverse <remote-port>:<local-port>` (repeatable) auto-sets up reverse SSH

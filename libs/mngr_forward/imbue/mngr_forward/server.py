@@ -38,6 +38,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 from typing import Final
+from typing import assert_never
 from urllib.parse import quote
 from urllib.parse import urlsplit
 
@@ -67,9 +68,10 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr_forward.auth import AuthStoreInterface
+from imbue.mngr_forward.cookie import SessionCookieVerdict
+from imbue.mngr_forward.cookie import classify_session_cookie
 from imbue.mngr_forward.cookie import create_session_cookie
 from imbue.mngr_forward.cookie import create_subdomain_auth_token
-from imbue.mngr_forward.cookie import verify_session_cookie
 from imbue.mngr_forward.cookie import verify_subdomain_auth_token
 from imbue.mngr_forward.data_types import ProxyAnswerReason
 from imbue.mngr_forward.data_types import SystemInterfaceBackendAnsweredPayload
@@ -347,21 +349,61 @@ def _set_forward_session_cookie(
         )
 
 
-def _is_authenticated(
+def _classify_presented_session_cookie(
     cookies: Mapping[str, str],
     auth_store: AuthStoreInterface,
     preauth_cookie_value: str | None,
-) -> bool:
-    """Check whether the user has a valid global session cookie."""
+) -> SessionCookieVerdict:
     cookie_value = cookies.get(MNGR_FORWARD_SESSION_COOKIE_NAME)
     if cookie_value is None:
-        return False
-    signing_key = auth_store.get_signing_key()
-    return verify_session_cookie(
+        return SessionCookieVerdict.INVALID
+    return classify_session_cookie(
         cookie_value=cookie_value,
-        signing_key=signing_key,
+        signing_key=auth_store.get_signing_key(),
         preauth_cookie_value=preauth_cookie_value,
     )
+
+
+def _is_request_signed_in(request: Request) -> bool:
+    """Whether the routing middleware, which every HTTP request passes through, accepted the request's session cookie."""
+    return request.state.session_cookie_verdict != SessionCookieVerdict.INVALID
+
+
+def _is_session_cookie_set_on(response: Response) -> bool:
+    cookie_prefix = f"{MNGR_FORWARD_SESSION_COOKIE_NAME}=".encode()
+    return any(key == b"set-cookie" and value.startswith(cookie_prefix) for key, value in response.raw_headers)
+
+
+def _renew_signed_session_cookie(
+    response: Response,
+    session_cookie_verdict: SessionCookieVerdict,
+    auth_store: AuthStoreInterface,
+    use_http2: bool,
+    # The domain the presented cookie is scoped to: the agent's origin family on
+    # an agent origin, None (host-only) on the bare origin.
+    domain: str | None,
+) -> None:
+    """Answer a request that presented a valid signed session cookie with a newly signed one.
+
+    A signed cookie stops being accepted a fixed time after it was signed, so a
+    session outlives that only by being re-signed while it is in use. A page
+    left open never passes through the bridge again, and its background
+    requests are refused rather than redirected once the cookie lapses. The
+    preauth value is not signed and does not expire, so it is left in place.
+    """
+    match session_cookie_verdict:
+        case SessionCookieVerdict.SIGNED:
+            if not _is_session_cookie_set_on(response):
+                _set_forward_session_cookie(
+                    response,
+                    cookie_value=create_session_cookie(signing_key=auth_store.get_signing_key()),
+                    use_http2=use_http2,
+                    domain=domain,
+                )
+        case SessionCookieVerdict.PREAUTH | SessionCookieVerdict.INVALID:
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _unauthenticated_subdomain_response(
@@ -1382,7 +1424,6 @@ async def _handle_workspace_forward_http(
     http_client: httpx2.AsyncClient,
     ssh_http_clients: dict[str, httpx2.AsyncClient],
     ssh_http_clients_lock: threading.Lock,
-    preauth_cookie_value: str | None,
     listen_port: int,
     allow_host_loopback: bool,
     envelope_writer: EnvelopeWriter,
@@ -1397,11 +1438,7 @@ async def _handle_workspace_forward_http(
     if request.url.path == _SUBDOMAIN_AUTH_PATH:
         return _handle_subdomain_auth_bridge(request, host_info, auth_store, use_http2)
 
-    if not _is_authenticated(
-        cookies=request.cookies,
-        auth_store=auth_store,
-        preauth_cookie_value=preauth_cookie_value,
-    ):
+    if not _is_request_signed_in(request):
         return _unauthenticated_subdomain_response(request, listen_port, use_http2, host_info)
 
     instance_key = resolver.resolve_instance_for_coordinate(str(host_info.coordinate))
@@ -1577,11 +1614,12 @@ async def _handle_workspace_forward_websocket(
     request_headers_reader: RequestHeadersFileReader | None,
     stream_manager: ForwardStreamManager | None,
 ) -> None:
-    if not _is_authenticated(
+    session_cookie_verdict = _classify_presented_session_cookie(
         cookies=websocket.cookies,
         auth_store=auth_store,
         preauth_cookie_value=preauth_cookie_value,
-    ):
+    )
+    if session_cookie_verdict == SessionCookieVerdict.INVALID:
         await websocket.close(code=4003, reason="Not authenticated")
         return
 
@@ -1765,15 +1803,9 @@ async def _handle_workspace_forward_websocket(
 def _handle_login(
     one_time_code: str,
     request: Request,
-    auth_store: AuthStoreInterface,
     env: Environment,
-    preauth_cookie_value: str | None,
 ) -> Response:
-    if _is_authenticated(
-        cookies=request.cookies,
-        auth_store=auth_store,
-        preauth_cookie_value=preauth_cookie_value,
-    ):
+    if _is_request_signed_in(request):
         return Response(status_code=307, headers={"Location": "/"})
     if not one_time_code or not one_time_code.strip():
         html = _render_auth_error_page(env, message="This login code is invalid or has already been used.")
@@ -1836,17 +1868,11 @@ def _handle_browser_bridge(
 
 def _handle_debug_index(
     request: Request,
-    auth_store: AuthStoreInterface,
     resolver: ForwardResolver,
     env: Environment,
-    preauth_cookie_value: str | None,
     listen_port: int,
 ) -> Response:
-    if not _is_authenticated(
-        cookies=request.cookies,
-        auth_store=auth_store,
-        preauth_cookie_value=preauth_cookie_value,
-    ):
+    if not _is_request_signed_in(request):
         html = _render_login_page(env)
         return HTMLResponse(content=html)
     agents = []
@@ -1873,16 +1899,11 @@ def _handle_goto_workspace(
     coordinate: str,
     request: Request,
     auth_store: AuthStoreInterface,
-    preauth_cookie_value: str | None,
     listen_port: int,
     use_http2: bool,
     resolver: ForwardResolver,
 ) -> Response:
-    if not _is_authenticated(
-        cookies=request.cookies,
-        auth_store=auth_store,
-        preauth_cookie_value=preauth_cookie_value,
-    ):
+    if not _is_request_signed_in(request):
         return Response(status_code=302, headers={"Location": "/"})
     # Typed ids alone are too lax for a value interpolated into the redirect
     # hostname (``int(hex, 16)`` accepts newlines / underscores / ``0x`` and
@@ -2045,10 +2066,20 @@ def create_forward_app(
 
     @app.middleware("http")
     async def _subdomain_routing_middleware(request: Request, call_next: Any) -> Response:
+        session_cookie_verdict = _classify_presented_session_cookie(
+            cookies=request.cookies,
+            auth_store=auth_store,
+            preauth_cookie_value=preauth_cookie_value,
+        )
+        request.state.session_cookie_verdict = session_cookie_verdict
         host_header = request.headers.get("host", "")
         host_info = parse_forward_host(host_header)
         if host_info is None:
-            return await call_next(request)
+            bare_origin_response = await call_next(request)
+            _renew_signed_session_cookie(
+                bare_origin_response, session_cookie_verdict, auth_store, use_http2, domain=None
+            )
+            return bare_origin_response
         response = await _handle_workspace_forward_http(
             request=request,
             host_info=host_info,
@@ -2058,7 +2089,6 @@ def create_forward_app(
             http_client=app.state.http_client,
             ssh_http_clients=app.state.ssh_http_clients,
             ssh_http_clients_lock=app.state.ssh_http_clients_lock,
-            preauth_cookie_value=preauth_cookie_value,
             listen_port=listen_port,
             allow_host_loopback=allow_host_loopback,
             envelope_writer=envelope_writer,
@@ -2070,10 +2100,13 @@ def create_forward_app(
             request_headers_reader=request_headers_reader,
             stream_manager=stream_manager,
         )
+        _renew_signed_session_cookie(
+            response, session_cookie_verdict, auth_store, use_http2, domain=str(host_info.workspace_domain)
+        )
         # The proxy owns embedding policy for every workspace origin: APPEND a
         # frame-ancestors CSP header (never modify what the service sent --
-        # multiple CSP headers compose by intersection). This is the one
-        # narrowly-blessed deviation from pure byte-forwarding.
+        # multiple CSP headers compose by intersection). Like the session
+        # renewal above, this only adds a response header.
         response.headers.append(
             "content-security-policy",
             build_frame_ancestors_policy(
@@ -2090,9 +2123,7 @@ def create_forward_app(
         return _handle_login(
             one_time_code=one_time_code,
             request=request,
-            auth_store=auth_store,
             env=env,
-            preauth_cookie_value=preauth_cookie_value,
         )
 
     @app.get("/authenticate")
@@ -2108,10 +2139,8 @@ def create_forward_app(
     def _index(request: Request) -> Response:
         return _handle_debug_index(
             request=request,
-            auth_store=auth_store,
             resolver=resolver,
             env=env,
-            preauth_cookie_value=preauth_cookie_value,
             listen_port=listen_port,
         )
 
@@ -2131,7 +2160,6 @@ def create_forward_app(
             coordinate=coordinate,
             request=request,
             auth_store=auth_store,
-            preauth_cookie_value=preauth_cookie_value,
             listen_port=listen_port,
             use_http2=use_http2,
             resolver=resolver,

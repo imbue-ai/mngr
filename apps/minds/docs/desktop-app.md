@@ -8,7 +8,7 @@ The Electron shell is deliberately thin. It handles four things:
 
 1. **Environment setup**: Runs `uv sync` on launch to install/update the Python environment
 2. **Backend lifecycle**: Spawns and monitors the `minds run` process
-3. **Auth handshake**: Parses the login URL from stdout and navigates to it
+3. **Auth handshake**: Reads the preauth value the backend hands it on stdout at every backend start, and sets it as the session cookie in each window's cookie store
 4. **Window management**: Displays the backend's web UI in a native window
 
 Everything else -- agent creation, discovery, proxying, authentication, the web UI -- remains in the Python backend, unchanged. See [overview.md](./overview.md) for details on the desktop client architecture.
