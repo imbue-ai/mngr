@@ -4,6 +4,16 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-24
+
+`test_press_key_chord_returns_once_grok_reports_the_cancelled_turn_s_end_after_going_idle` no longer fails intermittently with `assert 'event=stop_cancelled' in ...`. Its scripted pane runs grok's StopCancelled hook in the background, and `press_key_chord` correctly returns once that hook removes the cancelled turn's record. The hook writes its log line only after that, so the test could read the log first. The test now waits for the background hook run to exit before it reads the hook log. Test-only change; the grok agent behaves as before.
+
+`mngr upgrade` covers grok agents. It rewrites mngr's `commands/` scripts and shared shell libraries, and mngr's hooks file (`hooks/mngr.json`) and hook handler in the agent's grok home; the common-transcript scripts are rewritten only where the agent has them. `config.toml`, the launch settings, the role, the session and every other file stay as they are. An idle agent restarts and resumes its session.
+
+- An agent whose launch command does not run `commands/grok_launch.sh` is skipped as unsupported until `mngr create NAME --reuse --update` re-creates it.
+
+- The upgrade is `ready` once grok's SessionStart hook runs in the restarted agent; otherwise it fails at `ready`, naming the screen grok shows instead (login, consent notice, folder trust, paywall) when there is one.
+
 ## 2026-11-19
 
 grok agents record how each root turn ended, which mngr publishes as `turn_end`: `COMPLETED` (`end_turn`) at the turn's `turn_completed{end_turn}`, `FAILED` at `StopFailure` with the payload's `error`, and `INTERRUPTED` at `StopCancelled` with its `reason` (`user_interrupt` for a Ctrl+C, including one during a stop hook). Each writes only when its `promptId` is the agent's latest root prompt, the last line of `plugin/grok/submissions.log`, so a late report for an older turn records nothing, and neither does a bash-mode `!` command, interrupted or not. A new root prompt removes `turn_end`. The transcript streamer now passes the turn's stop reason to `grok_hook.py --turn-completed`, and the hook log notes each write as `turn_end:<KIND>` and each skip as `turn_end:skipped-not-latest-prompt`. A root prompt's `submissions.log` line no longer runs onto a last line that an interrupted write left unfinished.

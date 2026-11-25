@@ -10,6 +10,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Added: An antigravity agent whose turn ended while agy still runs a background task or subagent reads `RUNNING_BACKGROUND`, from records its statusLine command writes (`agy-task-<n>`, `agy-subagent-<n>`); existing agents need `mngr c <name> --reuse --update`.
 - Added: antigravity agents record `turn_end` from agy's `terminationReason` (`COMPLETED`, `FAILED`, `INTERRUPTED`) via a new `turn_end_hook.sh`; existing agents need `mngr c <name> --reuse --update`.
+- Added: `mngr upgrade` support: rewrites mngr's `commands/` scripts, shell libraries and its entries in agy's `settings.json` and `hooks.json`, then restarts an idle agent and resumes its conversation; agents with older launch commands are skipped until `mngr create NAME --reuse --update`.
 
 ### Fixed
 

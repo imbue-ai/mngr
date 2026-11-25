@@ -4,6 +4,20 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-24
+
+Docker-marked snapshot-resume tests that never call docker themselves, such as `test_workspace_docker_container_is_present_and_stopped` and `test_cloud_connection_added_on_one_device_reaches_the_app_on_another`, no longer fail the resource guard's "marked with @pytest.mark.docker but never invoked docker" check when another test in the same batch runs first. The session fixture `snapshot_sandbox_dockerd`, which runs `docker info` and records the snapshot's container states, now declares its docker use with `@fixture_uses_resources("docker")`, so the guard counts that call for every test that reaches the fixture instead of only the test that happened to set it up.
+
+An Electron end-to-end test that fails to attach to the app (`Electron CDP attach failed after 3 relaunch attempts`) now says in the failure itself what each launch wrote: whether `main.js` printed its `[startup] Backend ready at` line, its `[startup]` lines for every attempt, and the last lines of the final attempt's stdout and stderr. One-time login codes in that output are masked.
+
+The app logs two more `[startup]` lines on a first launch: one when the first window's route is resolved and it starts waiting for the loading document's intro, and one when the loading document reports the intro finished.
+
+`test_create_workspace_and_sign_in_via_modal_then_chat_via_electron` carries the flaky mark: it fails intermittently in CI on that attach failure, as `test_legacy_association_files_migrate_into_synced_records` already does.
+
+Alpha moves to Imbue Studio 0.10.7 on mac, Linux and the web: `[channels.alpha]` points at build `2611246zqo9smci` (version 0.10.7, `fallback_branch` `minds-v0.10.7`, 100%, mac gated at `minimumSystemVersion` 22.0.0) and `[web_channels.alpha]` at `minds-v0.10.7`. 0.10.7 carries 0.10.6's new first run, chat suggestions, redesigned home page, one Settings and Shared with me, plus one creation page for every workspace create, sign-in only for a verified email, and a first run that decides at once whether the account gets a first workspace. Beta and stable stay on 0.10.5.
+
+The smoke journey's check before it launches the app also reads the persistent account's workspace records (`GET /sync/records`), the rows the app's first run counts, and fails naming each active one (workspace id, display name, provider) instead of launching into a first run that lands on the home page. Until now it read pool leases only, so the record of a workspace no lease backs, such as one created on someone's own machine while signed in as the account, went unseen. `just minds-smoke-teardown` clears it: after releasing an account's leases it retires every workspace record the account still has active, reports them in the step's detail, and fails the step with the connector's reason when one cannot be retired. `apps/minds/docs/testing-overview.md` section 1.10 describes both.
+
 ## 2026-11-23
 
 The workspace programs README (`imbue/minds/workspace_programs/README.md`) matches the package. Its entry for `program_support.py` describes the helpers the module holds; the paragraph about an `AGENT_LIFECYCLE_STATES` mirror and the `workspace_program_agent_states_test.py` that pinned it is gone, since neither exists. Its list of backup programs includes `backup_verification_flag.py`.

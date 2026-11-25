@@ -1,1 +1,0 @@
-An opencode agent stopped or crashed mid-turn reads WAITING, not RUNNING, after its next start: the launch script clears a stale `active` turn marker before opencode starts. An agent already stuck on RUNNING clears once it is restarted on the new launch script, for example with `mngr upgrade --force NAME`.

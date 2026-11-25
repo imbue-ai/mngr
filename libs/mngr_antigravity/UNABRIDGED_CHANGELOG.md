@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-24
+
+`mngr upgrade` covers antigravity agents. It rewrites mngr's `commands/` scripts and shared shell libraries, and mngr's entries in the agent's agy `settings.json` (the `statusLine`) and `hooks.json` (the `mngr` hook), keeping every other key and hook; the common-transcript scripts are rewritten only where the agent has them. `GEMINI.md` and every other file stay as they are. An idle agent restarts and resumes its conversation.
+
+- An agent whose launch command does not start mngr's background tasks and run agy under the agent's own home is skipped as unsupported until `mngr create NAME --reuse --update` re-creates it.
+
+- The upgrade is `ready` once the restarted agy reports a state past initializing and authenticating to mngr's statusLine; otherwise it fails at `ready`.
+
 ## 2026-11-19
 
 An antigravity agent whose turn ended while agy still holds a background task or a running subagent now reads `RUNNING_BACKGROUND` instead of `WAITING`. Its statusLine command writes one record per task in agy's `task_count` (`agy-task-<n>`, kind `SHELL`, native type `task_count`) and one per `subagents` entry whose status is `running` (`agy-subagent-<n>`, kind `SUBAGENT`, native type `subagents`), rewriting the set on each payload, so a finished task's record goes when agy stops counting it and a restart clears the set. The records are written before `active` is removed and after it is created, so the wake turn a finished task starts never reads `WAITING` first. An existing agent gets this once its `commands/` scripts are refreshed, by `mngr c <name> --reuse --update`.

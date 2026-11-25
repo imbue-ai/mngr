@@ -9,6 +9,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Added
 
 - Added: opencode agents record `turn_end`: `COMPLETED` on a final reply, `FAILED` on an opencode error, `INTERRUPTED` on an abort or a declined permission/question; existing agents need `mngr c <name> --reuse --update`.
+- Added: `mngr upgrade` support: rewrites `commands/opencode_launch.sh` and `mngr_opencode_plugin.ts`, then restarts an idle agent and resumes its session; agents not launched via `commands/opencode_launch.sh` are skipped until `mngr create NAME --reuse --update`.
+
+### Fixed
+
+- Fixed: An opencode agent stopped or crashed mid-turn reads `WAITING` instead of `RUNNING` after its next start; already-stuck agents clear once restarted on the new launch script (e.g. `mngr upgrade --force NAME`).
 
 ## [v0.3.1] - 2026-10-28
 

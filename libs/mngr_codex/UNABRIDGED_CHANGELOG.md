@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-24
+
+`mngr upgrade` covers codex agents. It rewrites the agent's `commands/` scripts and mngr's entries in its `hooks.json`, keeping every other hook and its `config.toml` (options and hook trust); the common-transcript scripts are rewritten only where the agent has them. An idle agent restarts and resumes its conversation. The upgrade fails at `ready` when the restarted agent's launch does not trust its hooks, or when, on a local host, its TUI does not open its conversation in time.
+
+- Every codex launch, on any host, trusts the hooks codex lists as new or changed in the work dir before codex's TUI starts, with the app-server calls of its review's "Trust all and continue", so codex no longer shows "Hooks need review" after a restart. This covers the repo's `.codex/hooks.json` too, which the agent already ran unreviewed. A create on a local host no longer picks that option on codex's screen; it fails when this step does not trust the hooks.
+
+- An agent whose launch command does not do that, which is every codex agent created before this change, is skipped until `mngr create NAME --reuse --update` re-creates it.
+
 ## 2026-11-20
 
 codex agents read `RUNNING_BACKGROUND` while codex's app-server lists work left running after the turn: a background terminal (kind `SHELL`, native type `backgroundTerminals`) or a subagent thread still working, also while it waits on an approval or a question (kind `SUBAGENT`, native type its `threadSource`, e.g. `subagent`). Before, such an agent read `WAITING`. codex's `Stop` and `Interrupt` hooks rewrite the records from the app-server on the agent's own host before the turn ends, and the agent's background supervisor, which now wakes every 5 seconds instead of 15, rewrites them on every pass, so work that ends while the agent is idle drops off up to 5 seconds late. The supervisor clears the records at each launch. The writer needs `python3` on the agent's host. An existing agent gets the records after `mngr create <name> --reuse --update`.

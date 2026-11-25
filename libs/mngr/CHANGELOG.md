@@ -33,6 +33,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: An SSH connect that fails because the process ran out of file descriptors raises `LocalFileDescriptorsExhaustedError` at once instead of being retried.
 - Changed: `mngr observe`'s per-poll log lines are TRACE instead of DEBUG, so `logs/mngr/events.jsonl` no longer grows ~24 MB a day on an idle workspace.
 - Changed: The log line naming the client keys a host admits is worded so Sentry's default scrubber no longer blanks it; adds `is_per_host_key_path`.
+- Changed: mngr caches pyinfra's connector lookup for the life of the process instead of rescanning installed packages per host, speeding up commands that build several hosts; a missing connector raises `PyinfraConnectorUnavailableError` from every provider.
+- Changed: The agent capability matrix lists antigravity, codex, grok, opencode and pi-coding agents as supporting `mngr upgrade`.
 
 ### Fixed
 
@@ -44,6 +46,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: A local host command that cannot start raises `CommandStartError` (a `MngrError`) instead of `ProcessSetupError`, so `mngr message` with `ErrorBehavior.CONTINUE` records the agent as failed rather than aborting.
 - Fixed: Outer-host SSH connections through a `ProxyCommand` from `~/.ssh/config` no longer leak the proxy process and its pipes, which exhausted file descriptors in long-running processes like `mngr latchkey forward`.
 - Fixed: On macOS, an agent no longer loses its background-task supervisor (or leaks a `ttyd`) after `mngr create --reuse --update` on a stopped agent or two concurrent restarts; `mngr stop`/`start`/`destroy` now also kill the agent's reparented helpers whose arguments name its `commands/` directory.
+- Fixed: Long-running processes (e.g. the latchkey forward service) no longer fail with `KeyError: 'ssh'` after their venv is rewritten (#2310).
 
 ### Security
 

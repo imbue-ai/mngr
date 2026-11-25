@@ -4,6 +4,16 @@ Full, unedited changelog entries for the `mngr_opencode` project, consolidated n
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-24
+
+An opencode agent stopped or crashed mid-turn reads WAITING, not RUNNING, after its next start: the launch script clears a stale `active` turn marker before opencode starts. An agent already stuck on RUNNING clears once it is restarted on the new launch script, for example with `mngr upgrade --force NAME`.
+
+`mngr upgrade` covers opencode agents. It rewrites the launch script (`commands/opencode_launch.sh`) and the lifecycle plugin (`mngr_opencode_plugin.ts`); `opencode.json`, `AGENTS.md`, other plugins in the agent's `plugin/` dir and every other file stay as they are. An idle agent restarts and resumes its session.
+
+- An agent whose launch command does not run `commands/opencode_launch.sh` is skipped as unsupported until `mngr create NAME --reuse --update` re-creates it.
+
+- The upgrade is `ready` once the restarted launch script writes `opencode_ready`, after opencode's server is up and the agent's session exists; otherwise it fails at `ready`.
+
 ## 2026-11-20
 
 The async/await ratchet now reads the Python syntax tree instead of matching the keyword with a regex, so JavaScript held in this project's test strings no longer counts as async code. The recorded count drops to 0.

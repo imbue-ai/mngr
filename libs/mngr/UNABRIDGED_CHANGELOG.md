@@ -4,6 +4,26 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-24
+
+Building a host no longer rescans every installed package for pyinfra's connectors. pyinfra rediscovers them on every inventory by reading a metadata file from each installed distribution, and mngr builds an inventory per host; mngr now keeps the first lookup that finds them for the life of the process.
+
+- Commands that build several hosts no longer pay for a scan each. On a slow disk the scans had stretched host construction into tens of seconds.
+
+- A long-running process, such as the desktop latchkey forward service, no longer fails with `KeyError: 'ssh'` after its venv is rewritten under it (#2310).
+
+- The local and SSH providers and both outer-host builders report a missing connector as `PyinfraConnectorUnavailableError`, a mngr error, as the SSH helper already did.
+
+The agent capability matrix lists antigravity agents as supporting `mngr upgrade`.
+
+The agent capability matrix lists codex agents as supporting `mngr upgrade`.
+
+The agent capability matrix lists grok agents as supporting `mngr upgrade`.
+
+The agent capability matrix lists opencode agents as supporting `mngr upgrade`.
+
+The agent capability matrix lists pi-coding agents as supporting `mngr upgrade`.
+
 ## 2026-11-23
 
 `mngr upgrade` upgrades agents on remote hosts too, reaching them over SSH as `mngr start` does, and never starts a host. A line, and the `mngr start` or `mngr create` command it gives, names a remote agent by its address (`NAME@HOST.PROVIDER`); every JSON entry gives the agent's `host` (`id`, `name`, `provider_name`).
