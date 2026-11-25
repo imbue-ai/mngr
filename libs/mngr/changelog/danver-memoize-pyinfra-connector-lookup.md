@@ -1,0 +1,1 @@
+mngr keeps the first pyinfra connector lookup a process makes, even one that finds nothing. A process whose first host build runs while pyinfra's metadata is missing or mid-rewrite now keeps failing its later host builds with `PyinfraConnectorUnavailableError` until it restarts; before, the next build looked again.
