@@ -14,7 +14,6 @@ and restores.
 """
 
 import hashlib
-import os
 import re
 from datetime import datetime
 from datetime import timezone
@@ -29,6 +28,7 @@ from imbue.imbue_common.pure import pure
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.errors import BackupProvisioningError
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.utils.file_utils import atomic_write
 
 _BACKUP_ENV_DIRNAME = "backup_envs"
 # Timestamp format for archived canonical envs (and the workspace-side
@@ -83,16 +83,13 @@ def write_canonical_env(paths: InstallationPaths, agent_id: AgentId, content: st
     path = canonical_env_path(paths, agent_id)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Write atomically with tight perms: write to a 0600 temp file then
-        # rename over the target so a reader never sees a partial or
-        # world-readable secret.
-        tmp_path = path.with_suffix(".tmp")
-        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            os.write(fd, content.encode("utf-8"))
-        finally:
-            os.close(fd)
-        tmp_path.rename(path)
+        # atomic_write goes through a uniquely named 0600 temp file in the
+        # same directory, so concurrent writers of one workspace's env (request
+        # threads and the sync scheduler both materialize it) never share a
+        # temp file, and a reader never sees a partial secret. It keeps an
+        # existing file's mode, so pin 0600 explicitly.
+        atomic_write(path, content)
+        path.chmod(0o600)
     except OSError as e:
         raise BackupProvisioningError(f"Could not write canonical restic.env at {path}: {e}") from e
 

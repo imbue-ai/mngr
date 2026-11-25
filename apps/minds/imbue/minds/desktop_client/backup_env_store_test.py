@@ -1,6 +1,8 @@
 """Unit tests for the canonical per-workspace restic env store."""
 
 import stat
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -226,3 +228,29 @@ def test_archived_password_for_repository_reads_the_newest_matching_archive(tmp_
 
 def test_archive_canonical_env_returns_none_when_absent(tmp_path: Path) -> None:
     assert archive_canonical_env(_paths(tmp_path), AgentId.generate(), now=datetime.now(timezone.utc)) is None
+
+
+def test_concurrent_writes_for_one_workspace_do_not_collide(tmp_path: Path) -> None:
+    # Request threads and the sync scheduler all materialize a missing env at
+    # once on a fresh or recovered install, so every writer must survive the
+    # others renaming over the same target.
+    paths = _paths(tmp_path)
+    agent_id = AgentId(_WORKSPACE_ID)
+    thread_count = 8
+    rounds = 25
+    payloads = [f"RESTIC_PASSWORD=writer-{index}\n" for index in range(thread_count)]
+
+    def write_after_barrier(barrier: threading.Barrier, payload: str) -> None:
+        barrier.wait()
+        write_canonical_env(paths, agent_id, payload)
+
+    for _ in range(rounds):
+        barrier = threading.Barrier(thread_count)
+        with ThreadPoolExecutor(max_workers=thread_count) as executor:
+            list(executor.map(write_after_barrier, [barrier] * thread_count, payloads))
+
+        assert read_canonical_env(paths, agent_id) in payloads
+        env_path = canonical_env_path(paths, agent_id)
+        assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
+        # Every writer cleans up after itself: only the canonical env remains.
+        assert [path.name for path in env_path.parent.iterdir()] == [env_path.name]
