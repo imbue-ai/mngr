@@ -5,7 +5,7 @@ import {
   backoffDelayMs,
 } from "./backoff";
 import { parseServerMessage } from "./messages";
-import type { UiNotificationsMessage } from "./messages";
+import type { UiClientMessage, UiNotificationsMessage } from "./messages";
 import {
   SCHEMA_RELOAD_GUARD_KEY_FOR_TESTS,
   UiChannelClient,
@@ -33,6 +33,10 @@ class FakeSocket implements ChannelSocketLike {
   receive(frame: object): void {
     this.onmessage?.({ data: JSON.stringify(frame) });
   }
+}
+
+function sentFrames(socket: FakeSocket): UiClientMessage[] {
+  return socket.sent.map((raw) => JSON.parse(raw) as UiClientMessage);
 }
 
 afterEach(() => {
@@ -140,9 +144,7 @@ describe("UiChannelClient", () => {
     client.start();
     sockets[0].open();
     client.setClientState("/settings", null, "local");
-    const frames = sockets[0].sent.map(
-      (raw) => JSON.parse(raw) as { type: string; route: string },
-    );
+    const frames = sentFrames(sockets[0]);
     expect(frames.every((frame) => frame.type === "client_state")).toBe(true);
     expect(frames.at(-1)?.route).toBe("/settings");
   });
@@ -165,10 +167,7 @@ describe("UiChannelClient", () => {
     // The account alone changing is a change the server has to hear: it scopes the frames to it.
     client.setClientState("/workspace/agent-1", "agent-1", "user-1");
     expect(sockets[0].sent.length).toBe(framesAfterOpen + 3);
-    expect(
-      (JSON.parse(sockets[0].sent.at(-1) ?? "{}") as { account_id: string })
-        .account_id,
-    ).toBe("user-1");
+    expect(sentFrames(sockets[0]).at(-1)?.account_id).toBe("user-1");
   });
 
   it("reports the window's live focus state on client_state frames", () => {
@@ -178,17 +177,11 @@ describe("UiChannelClient", () => {
     });
     client.start();
     sockets[0].open();
-    const opened = JSON.parse(sockets[0].sent.at(-1) ?? "{}") as {
-      has_focus: boolean;
-    };
-    expect(opened.has_focus).toBe(true);
+    expect(sentFrames(sockets[0]).at(-1)?.has_focus).toBe(true);
 
     hasFocus = false;
     client.setClientState("/settings", null, "local");
-    const afterBlur = JSON.parse(sockets[0].sent.at(-1) ?? "{}") as {
-      has_focus: boolean;
-    };
-    expect(afterBlur.has_focus).toBe(false);
+    expect(sentFrames(sockets[0]).at(-1)?.has_focus).toBe(false);
   });
 
   it("reports whether the window is a main window or a popout, and the screen lock", () => {
@@ -196,8 +189,7 @@ describe("UiChannelClient", () => {
     const { client, sockets } = makeClient({ isScreenLocked: () => isLocked });
     client.start();
     sockets[0].open();
-    type Frame = { window_kind: string; is_screen_locked: boolean };
-    const lastFrame = (): Frame => JSON.parse(sockets[0].sent.at(-1) ?? "{}") as Frame;
+    const lastFrame = () => sentFrames(sockets[0]).at(-1);
 
     client.setClientState("/workspace/agent-1", "agent-1", "local");
     expect(lastFrame()).toMatchObject({
@@ -206,14 +198,14 @@ describe("UiChannelClient", () => {
     });
 
     client.setClientState("/popout/agent-1/win-1", "agent-1", "local");
-    expect(lastFrame().window_kind).toBe("popout");
+    expect(lastFrame()?.window_kind).toBe("popout");
 
     // The lock changes nothing the route dedup sees, so it is resent explicitly.
     isLocked = true;
     const framesBeforeLock = sockets[0].sent.length;
     client.resendClientState();
     expect(sockets[0].sent.length).toBe(framesBeforeLock + 1);
-    expect(lastFrame().is_screen_locked).toBe(true);
+    expect(lastFrame()?.is_screen_locked).toBe(true);
   });
 
   it("resendClientState resends client_state even with route and workspace unchanged", () => {
@@ -232,10 +224,7 @@ describe("UiChannelClient", () => {
     client.resendClientState();
 
     expect(sockets[0].sent.length).toBe(framesAfterOpen + 1);
-    const frame = JSON.parse(sockets[0].sent.at(-1) ?? "{}") as {
-      has_focus: boolean;
-    };
-    expect(frame.has_focus).toBe(false);
+    expect(sentFrames(sockets[0]).at(-1)?.has_focus).toBe(false);
   });
 
   it("dispatches workspaces frames into the store", () => {

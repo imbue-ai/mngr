@@ -943,7 +943,13 @@ class UiWindowKind(LowerCaseStrEnum):
 
 
 class UiClientStateMessage(FrozenModel):
-    """Client -> server registration: which window this is and what it is viewing."""
+    """Client -> server registration: which window this is and what it is viewing.
+
+    The SPA sends every field on every frame; its type for this frame
+    (``UiClientMessage`` in ``frontend/src/channel/messages.ts``) makes leaving
+    one out a compile error. The defaults are for a sender that cannot do that,
+    such as a window from a build older than a field.
+    """
 
     type: Literal["client_state"] = "client_state"
     client_id: str = Field(description="Stable per-window id chosen by the client")

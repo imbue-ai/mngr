@@ -9,6 +9,7 @@
 import m from "mithril";
 import type {
   UiBringAppToFrontMessage,
+  UiClientMessage,
   UiHealthMessage,
   UiNotificationsMessage,
   UiOpenHelpMessage,
@@ -206,7 +207,7 @@ export class UiChannelClient {
         // The account this window shows: the server answers a change of it with
         // that account's snapshot, and scopes every later frame to it.
         account_id: this.currentAccountId,
-      }),
+      } satisfies UiClientMessage),
     );
   }
 

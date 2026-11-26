@@ -3,8 +3,8 @@
 // json-schema-to-typescript emits structurally-duplicated `Foo1` interfaces
 // where a model is referenced from several parents; this module re-exports
 // the canonical names once and defines the discriminated server-message
-// union the channel dispatches on. The generated file remains the source of
-// truth for shapes; nothing here adds or changes fields.
+// union the channel dispatches on and the frame it sends. The generated file
+// remains the source of truth for shapes; nothing here adds or changes fields.
 
 import type {
   NotificationDestination,
@@ -12,6 +12,7 @@ import type {
   UiAccountsMessage,
   UiBootstrap,
   UiBringAppToFrontMessage,
+  UiClientStateMessage,
   UiDeviceResourcesMessage,
   UiDiscoveryHealthMessage,
   UiEnvironmentMessage,
@@ -99,15 +100,9 @@ export type UiServerMessage =
   | Framed<UiReloadMessage, "reload_ui">
   | Framed<UiBringAppToFrontMessage, "bring_app_to_front">;
 
-export interface UiClientState {
-  type: "client_state";
-  client_id: string;
-  route: string;
-  workspace_agent_id: string | null;
-  has_focus: boolean;
-  /** The account this window shows; the server scopes its frames to it. */
-  account_id: string;
-}
+// pydantic emits defaulted fields as optional, but the client always sends
+// every field of this frame; requiring them makes dropping one a compile error.
+export type UiClientMessage = Required<UiClientStateMessage>;
 
 /** Parse one channel frame; null for frames that are not a known server message. */
 export function parseServerMessage(raw: string): UiServerMessage | null {
