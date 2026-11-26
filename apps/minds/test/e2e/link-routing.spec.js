@@ -11,6 +11,7 @@ const os = require('os');
 const fs = require('fs');
 const { _electron } = require('playwright');
 const { test, expect } = require('@playwright/test');
+const { waitFor } = require('./wait-for');
 
 const REPO_ROOT = path.resolve(__dirname, '../../../..');
 const ELECTRON_BIN = path.join(REPO_ROOT, 'apps/minds/node_modules/.bin/electron');
@@ -18,17 +19,6 @@ const APP_JS = path.join(__dirname, 'link-routing-app.js');
 
 async function harness(electronApp) {
   return electronApp.evaluate(() => globalThis.__linkRoutingHarness);
-}
-
-async function waitFor(read, isDone, what, timeoutMs = 10_000) {
-  const deadline = Date.now() + timeoutMs;
-  let last;
-  while (Date.now() < deadline) {
-    last = await read();
-    if (isDone(last)) return last;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  throw new Error(`${what} not seen within ${timeoutMs}ms; last: ${JSON.stringify(last)}`);
 }
 
 const windowCount = (electronApp) =>

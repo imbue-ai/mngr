@@ -1,270 +1,296 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-// The backend page can finish loading before its async bootstrap registers
-// the notification action. Keep clicks until that handler is installed.
-let notificationListener = null;
-const pendingNotifications = [];
-ipcRenderer.on('open-notification', (_event, entry) => {
-  if (notificationListener) notificationListener(entry);
-  else pendingNotifications.push(entry);
-});
+// With nodeIntegrationInSubFrames on (main.js, buildBundleWindowOptions) this
+// preload runs in every frame of a window, the workspace's own pages and the
+// pages they frame included. Only the window's own page, the Imbue Studio
+// page, gets the native bridge; a frame gets nothing but its shell client id.
+if (window === window.top) exposeStudioBridge();
+else seedShellClientId();
 
-// The slim native bridge. The window's page is the Mithril SPA served by the
-// app server; it owns navigation, modals, and all content handling in-page
-// (frontend/src/electron-bridge.ts is the typed facade over this object).
-// Only genuinely native affordances remain here: window controls, native
-// dialogs, the renderer-to-main shell-event relay, the release-channel and
-// update-status calls (there is no binary to update in a browser), and the
-// startup/error/quitting shell.html channels.
-// Main resolves which window controls the bar draws (window-controls.js) and
-// passes it as a switch; a sandboxed preload can neither require that module
-// nor read main's environment.
-const WINDOW_CONTROLS_SWITCH_PREFIX = '--minds-window-controls=';
-const windowControlsArgument = process.argv.find((argument) => argument.startsWith(WINDOW_CONTROLS_SWITCH_PREFIX));
-const windowControls = windowControlsArgument
-  ? windowControlsArgument.slice(WINDOW_CONTROLS_SWITCH_PREFIX.length)
-  : null;
+// The workspace shell, framed directly by the Imbue Studio page, reads its
+// client id from its localStorage as it boots; main keeps the id per shell
+// hostname (shell-client-ids.js) so every partition's frame of a workspace
+// is the same client. Main answers null for any frame that is not a shell's.
+function seedShellClientId() {
+  if (window.parent !== window.top) return;
+  const CLIENT_ID_STORAGE_KEY = 'si-client-id';
+  let storage;
+  try {
+    storage = window.localStorage;
+  } catch {
+    return;
+  }
+  const clientId = ipcRenderer.sendSync('shell-client-id', storage.getItem(CLIENT_ID_STORAGE_KEY));
+  if (typeof clientId === 'string' && clientId) storage.setItem(CLIENT_ID_STORAGE_KEY, clientId);
+}
 
-contextBridge.exposeInMainWorld('mindsNative', {
-  platform: process.platform,
-  // A window-controls.js value; null when main did not say, which the SPA
-  // reads as the platform's own controls.
-  windowControls,
-  // This renderer's process id: the SPA sends it with its profiling spans, so
-  // its lane and Chromium's lane for the same renderer are matched by eye.
-  rendererPid: process.pid,
+function exposeStudioBridge() {
+  // The backend page can finish loading before its async bootstrap registers
+  // the notification action. Keep clicks until that handler is installed.
+  let notificationListener = null;
+  const pendingNotifications = [];
+  ipcRenderer.on('open-notification', (_event, entry) => {
+    if (notificationListener) notificationListener(entry);
+    else pendingNotifications.push(entry);
+  });
 
-  // Startup / error / quitting screens (shell.html).
-  onStatusUpdate: (callback) => {
-    ipcRenderer.on('status-update', (_event, message) => callback(message));
-  },
-  // One line of startup console output for the loading document's log.
-  onStatusLogLine: (callback) => {
-    ipcRenderer.on('status-log-line', (_event, line) => callback(line));
-  },
-  onErrorDetails: (callback) => {
-    ipcRenderer.on('error-details', (_event, details) => callback(details));
-  },
-  retry: () => ipcRenderer.send('retry'),
-  // Resolves { ok, path }: whether the OS could open the log, and where it is.
-  openLogFile: () => ipcRenderer.invoke('open-log-file'),
-  // Quit the whole app (the backend and every window), through the same quit
-  // sequence the tray's Quit runs. The page offers it where a desktop has no
-  // tray to offer it from.
-  quitApp: () => ipcRenderer.send('quit-app'),
-  // Quit the same way, then start the app again (macOS only): what a Full
-  // Disk Access grant needs before it applies.
-  relaunchApp: () => ipcRenderer.send('relaunch-app'),
-  // The app is up and the first route decided. The loading document's intro
-  // holds on a settled mark until this arrives, and takes it as its cue to
-  // leave -- so the lockup's travel to the titlebar always means the same
-  // thing.
-  onStartupReady: (callback) => {
-    ipcRenderer.on('startup-ready', (_event, detail) => callback(detail || {}));
-  },
-  // The loading document's intro is over (played out, skipped, or never
-  // shown), so main may land the first route on this window.
-  introFinished: () => ipcRenderer.send('intro-finished'),
-  // One-shot bug report from the full-app error takeover, via the
-  // main-process Sentry (the backend and its /help flow may be down).
-  reportError: () => ipcRenderer.invoke('report-error'),
-  // Reload after the window's renderer showed the crash strip.
-  reloadChrome: () => ipcRenderer.send('reload-chrome'),
+  // The slim native bridge. The window's page is the Mithril SPA served by the
+  // app server; it owns navigation, modals, and all content handling in-page
+  // (frontend/src/electron-bridge.ts is the typed facade over this object).
+  // Only genuinely native affordances remain here: window controls, native
+  // dialogs, the renderer-to-main shell-event relay, the release-channel and
+  // update-status calls (there is no binary to update in a browser), and the
+  // startup/error/quitting shell.html channels.
+  // Main resolves which window controls the bar draws (window-controls.js) and
+  // passes it as a switch; a sandboxed preload can neither require that module
+  // nor read main's environment.
+  const WINDOW_CONTROLS_SWITCH_PREFIX = '--minds-window-controls=';
+  const windowControlsArgument = process.argv.find((argument) => argument.startsWith(WINDOW_CONTROLS_SWITCH_PREFIX));
+  const windowControls = windowControlsArgument
+    ? windowControlsArgument.slice(WINDOW_CONTROLS_SWITCH_PREFIX.length)
+    : null;
 
-  // Window controls (the bar's own buttons or drawn traffic lights, off macOS).
-  minimize: () => ipcRenderer.send('window-minimize'),
-  maximize: () => ipcRenderer.send('window-maximize'),
-  close: () => ipcRenderer.send('window-close'),
+  contextBridge.exposeInMainWorld('mindsNative', {
+    platform: process.platform,
+    // A window-controls.js value; null when main did not say, which the SPA
+    // reads as the platform's own controls.
+    windowControls,
+    // This renderer's process id: the SPA sends it with its profiling spans, so
+    // its lane and Chromium's lane for the same renderer are matched by eye.
+    rendererPid: process.pid,
 
-  // Native file/directory picker (the file-sharing permission dialog).
-  showFilePicker: (options) => ipcRenderer.invoke('show-file-picker', options),
+    // Startup / error / quitting screens (shell.html).
+    onStatusUpdate: (callback) => {
+      ipcRenderer.on('status-update', (_event, message) => callback(message));
+    },
+    // One line of startup console output for the loading document's log.
+    onStatusLogLine: (callback) => {
+      ipcRenderer.on('status-log-line', (_event, line) => callback(line));
+    },
+    onErrorDetails: (callback) => {
+      ipcRenderer.on('error-details', (_event, details) => callback(details));
+    },
+    retry: () => ipcRenderer.send('retry'),
+    // Resolves { ok, path }: whether the OS could open the log, and where it is.
+    openLogFile: () => ipcRenderer.invoke('open-log-file'),
+    // Quit the whole app (the backend and every window), through the same quit
+    // sequence the tray's Quit runs. The page offers it where a desktop has no
+    // tray to offer it from.
+    quitApp: () => ipcRenderer.send('quit-app'),
+    // Quit the same way, then start the app again (macOS only): what a Full
+    // Disk Access grant needs before it applies.
+    relaunchApp: () => ipcRenderer.send('relaunch-app'),
+    // The app is up and the first route decided. The loading document's intro
+    // holds on a settled mark until this arrives, and takes it as its cue to
+    // leave -- so the lockup's travel to the titlebar always means the same
+    // thing.
+    onStartupReady: (callback) => {
+      ipcRenderer.on('startup-ready', (_event, detail) => callback(detail || {}));
+    },
+    // The loading document's intro is over (played out, skipped, or never
+    // shown), so main may land the first route on this window.
+    introFinished: () => ipcRenderer.send('intro-finished'),
+    // One-shot bug report from the full-app error takeover, via the
+    // main-process Sentry (the backend and its /help flow may be down).
+    reportError: () => ipcRenderer.invoke('report-error'),
+    // Reload after the window's renderer showed the crash strip.
+    reloadChrome: () => ipcRenderer.send('reload-chrome'),
 
-  // Open the OS's own notification-settings pane (no app can force a
-  // re-prompt once declined -- the reader has to flip it back on there).
-  openNotificationSettings: () => ipcRenderer.invoke('open-notification-settings'),
-  // Open macOS's Full Disk Access list, which the browser-cookie import needs
-  // the app on (macOS 27 and later); resolves false where there is no such list.
-  openFullDiskAccessSettings: () => ipcRenderer.invoke('open-full-disk-access-settings'),
+    // Window controls (the bar's own buttons or drawn traffic lights, off macOS).
+    minimize: () => ipcRenderer.send('window-minimize'),
+    maximize: () => ipcRenderer.send('window-maximize'),
+    close: () => ipcRenderer.send('window-close'),
 
-  // Bring the app back in front after an external-browser OAuth hop.
-  bringAppToFront: () => ipcRenderer.send('bring-app-to-front'),
+    // Native file/directory picker (the file-sharing permission dialog).
+    showFilePicker: (options) => ipcRenderer.invoke('show-file-picker', options),
 
-  // Multi-window (desktop-only concept). A workspace has one main window: a
-  // window asks before it navigates onto a workspace, and main answers
-  // { opened_elsewhere: true } when it raised the workspace's own window instead.
-  openWorkspaceInNewWindow: (agentId) => ipcRenderer.send('open-workspace-in-new-window', agentId),
-  claimWorkspaceWindow: (workspaceId, route) => ipcRenderer.invoke('claim-workspace-window', workspaceId, route),
+    // Open the OS's own notification-settings pane (no app can force a
+    // re-prompt once declined -- the reader has to flip it back on there).
+    openNotificationSettings: () => ipcRenderer.invoke('open-notification-settings'),
+    // Open macOS's Full Disk Access list, which the browser-cookie import needs
+    // the app on (macOS 27 and later); resolves false where there is no such list.
+    openFullDiskAccessSettings: () => ipcRenderer.invoke('open-full-disk-access-settings'),
 
-  // Pulled-out workspace windows (the pull-out-window spec). The workspace
-  // shell asks for one through the embed contract; the SPA relays the ask
-  // here with the workspace's id. A popout window's own page uses its bar's
-  // drag, its title, and the reattach ask main sends it when no desktop
-  // window can take the window back; a main window hears when a popout's
-  // window is to return to its desktop (a popout's close), and reports once
-  // its desktop has it back.
-  openPopoutWindow: (request) => ipcRenderer.send('open-popout-window', request),
-  beginWorkspaceWindowDrag: (request) => ipcRenderer.send('begin-workspace-window-drag', request),
-  endWorkspaceWindowDrag: (workspaceId, windowId, isDetached, isCancelled) =>
-    ipcRenderer.send('end-workspace-window-drag', { workspaceId, windowId, isDetached, isCancelled }),
-  onTearOut: (callback) => {
-    ipcRenderer.on('tear-out', (_event, report) => callback(report));
-  },
-  beginPopoutDrag: (grab) => ipcRenderer.send('begin-popout-drag', grab),
-  endPopoutBarDrag: () => ipcRenderer.send('end-popout-bar-drag'),
-  closePopout: () => ipcRenderer.send('close-popout'),
-  popoutReattached: () => ipcRenderer.send('popout-reattached'),
-  setPopoutTitle: (title) => ipcRenderer.send('set-popout-title', title),
-  onPopoutReattachRequest: (callback) => {
-    ipcRenderer.on('popout-reattach-request', () => callback());
-  },
-  onReattachPopoutWindow: (callback) => {
-    ipcRenderer.on('reattach-popout-window', (_event, ask) => callback(ask));
-  },
-  popoutWindowReturned: (workspaceId, windowId) =>
-    ipcRenderer.send('popout-window-returned', { workspaceId, windowId }),
+    // Bring the app back in front after an external-browser OAuth hop.
+    bringAppToFront: () => ipcRenderer.send('bring-app-to-front'),
 
-  // Immersive mode (the Screen integration spec): while the workspace frame is
-  // fullscreen with the keyboard locked, this window's application-menu
-  // accelerators go off and main's key relays (escape-pressed,
-  // close-active-tab) pause, so every key reaches the frame.
-  setImmersive: (on) => ipcRenderer.send('set-immersive', Boolean(on)),
+    // Multi-window (desktop-only concept). A workspace has one main window: a
+    // window asks before it navigates onto a workspace, and main answers
+    // { opened_elsewhere: true } when it raised the workspace's own window instead.
+    openWorkspaceInNewWindow: (agentId) => ipcRenderer.send('open-workspace-in-new-window', agentId),
+    claimWorkspaceWindow: (workspaceId, route) => ipcRenderer.invoke('claim-workspace-window', workspaceId, route),
 
-  // Shared workspaces (specs/shared-with-me, 4.7 and 4.8). The page navigates
-  // the workspace frame to the reverse handoff's redeem URL, which signs this
-  // window's session partition in on the accounts origin and sends the frame
-  // on to the share. Main reports what the frame's document answered
-  // (admitted / refused / misconfigured / offline) for the tile, how the
-  // redeem page refused the frame when it did (a partition signed in as
-  // another account, which main has signed out, or any other refusal), and
-  // when the frame landed on the accounts login page instead, so the page can
-  // open the workspace again or show the open as failed.
-  onSharedFrameVerdict: (callback) => {
-    ipcRenderer.on('shared-frame-verdict', (_event, report) => {
-      if (!report || typeof report.hostname !== 'string' || typeof report.verdict !== 'string') return;
-      callback({ hostname: report.hostname, verdict: report.verdict });
-    });
-  },
-  onSharedFrameRedeemRefused: (callback) => {
-    ipcRenderer.on('shared-frame-redeem-refused', (_event, report) => {
-      if (!report || typeof report.refusal !== 'string') return;
-      callback({ refusal: report.refusal });
-    });
-  },
-  onSharedFrameLoginNeeded: (callback) => {
-    ipcRenderer.on('shared-frame-login-needed', (_event, report) => {
-      if (!report || typeof report.hostname !== 'string') return;
-      callback({ hostname: report.hostname, isSignInFailed: report.isSignInFailed === true });
-    });
-  },
+    // Pulled-out workspace windows (the pull-out-window spec). The workspace
+    // shell asks for one through the embed contract; the SPA relays the ask
+    // here with the workspace's id. A popout window's own page uses its bar's
+    // drag, its title, and the reattach ask main sends it when no desktop
+    // window can take the window back; a main window hears when a popout's
+    // window is to return to its desktop (a popout's close), and reports once
+    // its desktop has it back.
+    openPopoutWindow: (request) => ipcRenderer.send('open-popout-window', request),
+    beginWorkspaceWindowDrag: (request) => ipcRenderer.send('begin-workspace-window-drag', request),
+    endWorkspaceWindowDrag: (workspaceId, windowId, isDetached, isCancelled) =>
+      ipcRenderer.send('end-workspace-window-drag', { workspaceId, windowId, isDetached, isCancelled }),
+    onTearOut: (callback) => {
+      ipcRenderer.on('tear-out', (_event, report) => callback(report));
+    },
+    beginPopoutDrag: (grab) => ipcRenderer.send('begin-popout-drag', grab),
+    endPopoutBarDrag: () => ipcRenderer.send('end-popout-bar-drag'),
+    closePopout: () => ipcRenderer.send('close-popout'),
+    popoutReattached: () => ipcRenderer.send('popout-reattached'),
+    setPopoutTitle: (title) => ipcRenderer.send('set-popout-title', title),
+    onPopoutReattachRequest: (callback) => {
+      ipcRenderer.on('popout-reattach-request', () => callback());
+    },
+    onReattachPopoutWindow: (callback) => {
+      ipcRenderer.on('reattach-popout-window', (_event, ask) => callback(ask));
+    },
+    popoutWindowReturned: (workspaceId, windowId) =>
+      ipcRenderer.send('popout-window-returned', { workspaceId, windowId }),
 
-  // Link routing (electron/link-routing.js).
-  reportWorkspaceLinkHandling: (report) => ipcRenderer.send('workspace-link-handling', report),
-  openExternalLink: (url) => ipcRenderer.send('open-external-link', url),
-  onOpenLink: (callback) => {
-    ipcRenderer.on('open-link', (_event, url) => {
-      if (typeof url === 'string') callback(url);
-    });
-  },
+    // Immersive mode (the Screen integration spec): while the workspace frame is
+    // fullscreen with the keyboard locked, this window's application-menu
+    // accelerators go off and main's key relays (escape-pressed,
+    // close-active-tab) pause, so every key reaches the frame.
+    setImmersive: (on) => ipcRenderer.send('set-immersive', Boolean(on)),
 
-  // Client permissions (electron/client-permission-policy.js): main asks the
-  // window's page to draw the prompt, and the page answers it.
-  onClientPermissionPrompt: (callback) => {
-    ipcRenderer.on('client-permission-prompt', (_event, prompt) => callback(prompt));
-  },
-  answerClientPermission: (answer) => ipcRenderer.send('client-permission-answer', answer),
-
-  openNotificationInExistingWindow: (route, entry) => ipcRenderer.invoke('open-notification-in-existing-window', route, entry),
-  onOpenNotification: (callback) => {
-    notificationListener = callback;
-    for (const entry of pendingNotifications.splice(0)) callback(entry);
-    ipcRenderer.send('notification-listener-ready');
-  },
-
-  // Display zoom (Settings > Display). Desktop-only: only the shell can scale
-  // a window, so the browser build leaves this to the browser's own zoom.
-  getDisplayZoom: () => ipcRenderer.invoke('get-display-zoom'),
-  setDisplayZoom: (percent) => ipcRenderer.invoke('set-display-zoom', percent),
-
-  // Keyboard shortcuts (Settings > Studio > Keyboard shortcuts). Desktop-only:
-  // main sees the chord wherever focus is, the workspace iframe included, and
-  // records a new one by taking the window's next key-down itself.
-  getKeyboardShortcuts: () => ipcRenderer.invoke('get-keyboard-shortcuts'),
-  setWorkspaceSwitcherShortcut: (value) => ipcRenderer.invoke('set-workspace-switcher-shortcut', value),
-  captureShortcutChord: () => ipcRenderer.invoke('capture-shortcut-chord'),
-  cancelShortcutCapture: () => ipcRenderer.invoke('cancel-shortcut-capture'),
-
-  // Whether this is the first launch into a new app version (the auto-update
-  // prompt's first trigger); recorded by main once at startup.
-  getLaunchVersionChange: () => ipcRenderer.invoke('get-launch-version-change'),
-
-  // Release channels. Desktop-only: the web UI has no binary to update, so the
-  // Settings section that uses these renders only when mindsNative is present.
-  getUpdateState: () => ipcRenderer.invoke('get-update-state'),
-  peekUpdateChannels: () => ipcRenderer.invoke('peek-update-channels'),
-  setUpdateChannel: (channel) => ipcRenderer.invoke('set-update-channel', channel),
-  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
-  installUpdate: () => ipcRenderer.invoke('install-update'),
-  onUpdateStatus: (callback) => {
-    ipcRenderer.on('update-status', (_event, status) => callback(status));
-  },
-
-  // The renderer owns the /ui/ws channel; the few events main still acts on
-  // (workspaces summaries for OS titles + destroyed-window detach,
-  // system-interface health, workspace_stopped, open_help routing, the
-  // notification feed's unresolved count for the dock/taskbar badge) are
-  // relayed up through this one channel.
-  sendShellEvent: (event) => ipcRenderer.send('shell-event', event),
-
-  // Main-process asks (notifications, deeplinks, main-driven routing).
-  onNavigate: (callback) => {
-    ipcRenderer.on('shell-navigate', (_event, url) => callback(url));
-  },
-  onOpenOverlay: (callback) => {
-    ipcRenderer.on('open-overlay', (_event, cmd) => callback(cmd));
-  },
-  // Cmd/Ctrl+W while the workspace iframe has focus: seen by main's
-  // before-input-event, relayed into the workspace via the embed contract.
-  onCloseActiveTab: (callback) => {
-    ipcRenderer.on('close-active-tab', () => callback());
-  },
-  // Escape backstop: keydowns inside the workspace iframe don't reach the
-  // chrome page's own listeners.
-  onEscapePressed: (callback) => {
-    ipcRenderer.on('escape-pressed', () => callback());
-  },
-  // The workspace switcher's shortcut was pressed in this window.
-  onToggleWorkspaceSwitcher: (callback) => {
-    ipcRenderer.on('toggle-workspace-switcher', () => callback());
-  },
-  // The shortcut was changed, in this window or another.
-  onKeyboardShortcutsChanged: (callback) => {
-    ipcRenderer.on('keyboard-shortcuts-changed', (_event, shortcuts) => callback(shortcuts));
-  },
-  // This window's own focus and blur, as main sees them: the page cannot see
-  // them itself while keyboard focus sits inside the workspace iframe.
-  onWindowFocusChanged: (callback) => {
-    ipcRenderer.on('window-focus-changed', (_event, isFocused) => callback(Boolean(isFocused)));
-  },
-  // The OS locked or unlocked the screen (macOS and Windows only).
-  onScreenLockChanged: (callback) => {
-    ipcRenderer.on('screen-lock-changed', (_event, isLocked) => callback(Boolean(isLocked)));
-  },
-  // A one-off in-app toast main wants shown here, with its link to a
-  // workspace's Client permissions section when it has one.
-  onToast: (callback) => {
-    ipcRenderer.on('show-toast', (_event, toast) => {
-      if (!toast || typeof toast.title !== 'string' || typeof toast.body !== 'string') return;
-      const { link } = toast;
-      const isClientPermissionsLink =
-        Boolean(link) &&
-        link.kind === 'client-permissions' &&
-        typeof link.workspaceId === 'string' &&
-        typeof link.text === 'string';
-      callback({
-        title: toast.title,
-        body: toast.body,
-        link: isClientPermissionsLink ? { kind: link.kind, workspaceId: link.workspaceId, text: link.text } : null,
+    // Shared workspaces (specs/shared-with-me, 4.7 and 4.8). The page navigates
+    // the workspace frame to the reverse handoff's redeem URL, which signs this
+    // window's session partition in on the accounts origin and sends the frame
+    // on to the share. Main reports what the frame's document answered
+    // (admitted / refused / misconfigured / offline) for the tile, how the
+    // redeem page refused the frame when it did (a partition signed in as
+    // another account, which main has signed out, or any other refusal), and
+    // when the frame landed on the accounts login page instead, so the page can
+    // open the workspace again or show the open as failed.
+    onSharedFrameVerdict: (callback) => {
+      ipcRenderer.on('shared-frame-verdict', (_event, report) => {
+        if (!report || typeof report.hostname !== 'string' || typeof report.verdict !== 'string') return;
+        callback({ hostname: report.hostname, verdict: report.verdict });
       });
-    });
-  },
-});
+    },
+    onSharedFrameRedeemRefused: (callback) => {
+      ipcRenderer.on('shared-frame-redeem-refused', (_event, report) => {
+        if (!report || typeof report.refusal !== 'string') return;
+        callback({ refusal: report.refusal });
+      });
+    },
+    onSharedFrameLoginNeeded: (callback) => {
+      ipcRenderer.on('shared-frame-login-needed', (_event, report) => {
+        if (!report || typeof report.hostname !== 'string') return;
+        callback({ hostname: report.hostname, isSignInFailed: report.isSignInFailed === true });
+      });
+    },
+
+    // Link routing (electron/link-routing.js).
+    reportWorkspaceLinkHandling: (report) => ipcRenderer.send('workspace-link-handling', report),
+    openExternalLink: (url) => ipcRenderer.send('open-external-link', url),
+    onOpenLink: (callback) => {
+      ipcRenderer.on('open-link', (_event, url) => {
+        if (typeof url === 'string') callback(url);
+      });
+    },
+
+    // Client permissions (electron/client-permission-policy.js): main asks the
+    // window's page to draw the prompt, and the page answers it.
+    onClientPermissionPrompt: (callback) => {
+      ipcRenderer.on('client-permission-prompt', (_event, prompt) => callback(prompt));
+    },
+    answerClientPermission: (answer) => ipcRenderer.send('client-permission-answer', answer),
+
+    openNotificationInExistingWindow: (route, entry) => ipcRenderer.invoke('open-notification-in-existing-window', route, entry),
+    onOpenNotification: (callback) => {
+      notificationListener = callback;
+      for (const entry of pendingNotifications.splice(0)) callback(entry);
+      ipcRenderer.send('notification-listener-ready');
+    },
+
+    // Display zoom (Settings > Display). Desktop-only: only the shell can scale
+    // a window, so the browser build leaves this to the browser's own zoom.
+    getDisplayZoom: () => ipcRenderer.invoke('get-display-zoom'),
+    setDisplayZoom: (percent) => ipcRenderer.invoke('set-display-zoom', percent),
+
+    // Keyboard shortcuts (Settings > Studio > Keyboard shortcuts). Desktop-only:
+    // main sees the chord wherever focus is, the workspace iframe included, and
+    // records a new one by taking the window's next key-down itself.
+    getKeyboardShortcuts: () => ipcRenderer.invoke('get-keyboard-shortcuts'),
+    setWorkspaceSwitcherShortcut: (value) => ipcRenderer.invoke('set-workspace-switcher-shortcut', value),
+    captureShortcutChord: () => ipcRenderer.invoke('capture-shortcut-chord'),
+    cancelShortcutCapture: () => ipcRenderer.invoke('cancel-shortcut-capture'),
+
+    // Whether this is the first launch into a new app version (the auto-update
+    // prompt's first trigger); recorded by main once at startup.
+    getLaunchVersionChange: () => ipcRenderer.invoke('get-launch-version-change'),
+
+    // Release channels. Desktop-only: the web UI has no binary to update, so the
+    // Settings section that uses these renders only when mindsNative is present.
+    getUpdateState: () => ipcRenderer.invoke('get-update-state'),
+    peekUpdateChannels: () => ipcRenderer.invoke('peek-update-channels'),
+    setUpdateChannel: (channel) => ipcRenderer.invoke('set-update-channel', channel),
+    checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+    installUpdate: () => ipcRenderer.invoke('install-update'),
+    onUpdateStatus: (callback) => {
+      ipcRenderer.on('update-status', (_event, status) => callback(status));
+    },
+
+    // The renderer owns the /ui/ws channel; the few events main still acts on
+    // (workspaces summaries for OS titles + destroyed-window detach,
+    // system-interface health, workspace_stopped, open_help routing, the
+    // notification feed's unresolved count for the dock/taskbar badge) are
+    // relayed up through this one channel.
+    sendShellEvent: (event) => ipcRenderer.send('shell-event', event),
+
+    // Main-process asks (notifications, deeplinks, main-driven routing).
+    onNavigate: (callback) => {
+      ipcRenderer.on('shell-navigate', (_event, url) => callback(url));
+    },
+    onOpenOverlay: (callback) => {
+      ipcRenderer.on('open-overlay', (_event, cmd) => callback(cmd));
+    },
+    // Cmd/Ctrl+W while the workspace iframe has focus: seen by main's
+    // before-input-event, relayed into the workspace via the embed contract.
+    onCloseActiveTab: (callback) => {
+      ipcRenderer.on('close-active-tab', () => callback());
+    },
+    // Escape backstop: keydowns inside the workspace iframe don't reach the
+    // chrome page's own listeners.
+    onEscapePressed: (callback) => {
+      ipcRenderer.on('escape-pressed', () => callback());
+    },
+    // The workspace switcher's shortcut was pressed in this window.
+    onToggleWorkspaceSwitcher: (callback) => {
+      ipcRenderer.on('toggle-workspace-switcher', () => callback());
+    },
+    // The shortcut was changed, in this window or another.
+    onKeyboardShortcutsChanged: (callback) => {
+      ipcRenderer.on('keyboard-shortcuts-changed', (_event, shortcuts) => callback(shortcuts));
+    },
+    // This window's own focus and blur, as main sees them: the page cannot see
+    // them itself while keyboard focus sits inside the workspace iframe.
+    onWindowFocusChanged: (callback) => {
+      ipcRenderer.on('window-focus-changed', (_event, isFocused) => callback(Boolean(isFocused)));
+    },
+    // The OS locked or unlocked the screen (macOS and Windows only).
+    onScreenLockChanged: (callback) => {
+      ipcRenderer.on('screen-lock-changed', (_event, isLocked) => callback(Boolean(isLocked)));
+    },
+    // A one-off in-app toast main wants shown here, with its link to a
+    // workspace's Client permissions section when it has one.
+    onToast: (callback) => {
+      ipcRenderer.on('show-toast', (_event, toast) => {
+        if (!toast || typeof toast.title !== 'string' || typeof toast.body !== 'string') return;
+        const { link } = toast;
+        const isClientPermissionsLink =
+          Boolean(link) &&
+          link.kind === 'client-permissions' &&
+          typeof link.workspaceId === 'string' &&
+          typeof link.text === 'string';
+        callback({
+          title: toast.title,
+          body: toast.body,
+          link: isClientPermissionsLink ? { kind: link.kind, workspaceId: link.workspaceId, text: link.text } : null,
+        });
+      });
+    },
+  });
+}

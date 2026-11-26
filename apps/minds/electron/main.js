@@ -144,6 +144,9 @@ const {
 } = require('./activation-diagnostics');
 const { createExternalOpener, createLinkRouter, isCustomSchemeUrl, isExternalUrl } = require('./link-routing');
 const { createExternalLinkPermissions } = require('./external-link-permissions');
+const { askingShellHostname, createShellClientIds } = require('./shell-client-ids');
+const { runLegacyShellClientIdImport } = require('./legacy-shell-client-id-import');
+const { readLegacyShellClientIds } = require('./legacy-shell-client-ids');
 const { clientPermissionNameOf, createClientPermissionGate, parseDecisionBody } = require('./client-permission-policy');
 const { isLaunchRefused, offerMoveToApplications } = require('./install-location');
 // Imported for ToDesktop's smoke test, which the import itself arms when
@@ -1041,6 +1044,10 @@ function buildBundleWindowOptions(kind, bounds, partition) {
       nodeIntegration: false,
       // The window's account's session partition (specs/shared-with-me, S10).
       partition,
+      // Runs the preload in the window's frames too, so the workspace shell's
+      // frame gets its client id from main before it boots; the preload gives
+      // a frame nothing else (preload.js).
+      nodeIntegrationInSubFrames: true,
       // The preload cannot see main's environment, so the window controls the
       // bar should draw travel to it as a switch.
       additionalArguments: [windowControlsSwitch(windowControls)],
@@ -2382,6 +2389,62 @@ function trustedShellEventSenderBundle(event) {
   }
 }
 
+// The workspace shell's client id, one per shell hostname whichever window,
+// popout or partition shows it (shell-client-ids.js), asked synchronously by
+// the preload of the shell's frame.
+const shellClientIds = createShellClientIds(paths.getStateDir(), {
+  mintClientId: () => crypto.randomUUID(),
+  warn: (message) => console.warn(message),
+});
+
+function shellClientIdForSender(event, reportedId) {
+  const isTrustedPage = (page) => trustedShellEventSenderBundle({ sender: event.sender, senderFrame: page }) !== null;
+  const hostname = askingShellHostname(event.senderFrame, event.sender.mainFrame, isTrustedPage);
+  return hostname === null ? null : shellClientIds.clientIdFor(hostname, reportedId);
+}
+
+ipcMain.on('shell-client-id', (event, reportedId) => {
+  // The asking frame is blocked until a value is returned, so every path sets one.
+  let clientId = null;
+  try {
+    clientId = shellClientIdForSender(event, reportedId);
+  } catch (err) {
+    console.warn('[shell-client-id] could not answer a frame:', err);
+  } finally {
+    event.returnValue = clientId;
+  }
+});
+
+// CLEANUP: remove with legacy-shell-client-ids.js (see its header).
+// Read once, before the first route lands any workspace frame.
+const LEGACY_SHELL_CLIENT_ID_IMPORT_TIMEOUT_MS = 15000;
+let legacyShellClientIdImport = null;
+
+function importLegacyShellClientIds() {
+  if (legacyShellClientIdImport === null) {
+    legacyShellClientIdImport = runLegacyShellClientIdImportOnce().catch((err) => {
+      console.warn('[shell-client-id] could not import the default session\'s client ids, and will not try again:', err);
+    });
+  }
+  return legacyShellClientIdImport;
+}
+
+async function runLegacyShellClientIdImportOnce() {
+  // Here rather than at load: main.js loads in a second launch too, before it
+  // finds the single-instance lock taken, and the running app's copy is open.
+  const stateDir = paths.getStateDir();
+  const result = await runLegacyShellClientIdImport({
+    store: shellClientIds,
+    stateDir,
+    serviceMapPath: path.join(paths.getMngrHostDir(), 'plugin', 'forward', 'service_map.json'),
+    forwardPort: mngrForwardBaseUrl ? Number(new URL(mngrForwardBaseUrl).port) : null,
+    readLegacyShellClientIds: (origins) => readLegacyShellClientIds({ stateDir, origins, timeoutMs: LEGACY_SHELL_CLIENT_ID_IMPORT_TIMEOUT_MS }),
+  });
+  if (result === null) return;
+  const { importedIdsByHostname, originCount } = result;
+  console.log(`[shell-client-id] imported ${importedIdsByHostname.size} shell client ids from the default session (${originCount} candidate origins)`);
+}
+
 ipcMain.on('shell-event', (event, evt) => {
   try {
     const senderBundle = trustedShellEventSenderBundle(event);
@@ -3213,6 +3276,7 @@ function broadcastStartupLogLine(line) {
 // session restored well after launch reflects the workspaces that exist then
 // rather than a snapshot from startup.
 async function computeStartupRouting() {
+  await importLegacyShellClientIds();
   const savedState = loadSessionState();
   const appStatus = await fetchAppStatus();
   const authenticated = appStatus && appStatus.authenticated;

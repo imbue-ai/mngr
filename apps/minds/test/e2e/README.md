@@ -41,12 +41,14 @@ by the vitest suites in `frontend/src/**/*.test.ts`). Set
 
 `link-routing.spec.js` (popups, in-place frame navigations and server
 redirects), `context-menu.spec.js`, `client-permission.spec.js` (the
-microphone gate, on Chromium's fake audio device) and `intro.spec.js` (the
-loading document's intro handshake, visible and hidden) need no installed app:
+microphone gate, on Chromium's fake audio device), `intro.spec.js` (the
+loading document's intro handshake, visible and hidden) and
+`shell-client-id.spec.js` (the workspace shell's client id across partitions,
+and its one-time import from the default session) need no installed app:
 each launches this checkout's own Electron (`node_modules/.bin/electron`) on a
 small harness entry (`link-routing-app.js`, `context-menu-app.js`,
-`client-permission-app.js`, `intro-app.js`) that wires the shipped `electron/`
-modules, with no backend. None of them runs in CI.
+`client-permission-app.js`, `intro-app.js`, `shell-client-id-app.js`) that
+wires the shipped `electron/` modules, with no backend. None of them runs in CI.
 
 ```
 pnpm exec playwright test --config=test/e2e/playwright.config.js link-routing.spec.js

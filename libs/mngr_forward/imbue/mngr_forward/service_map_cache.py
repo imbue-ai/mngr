@@ -35,6 +35,10 @@ older bare-agent-id format are dropped at seed time (see
 The file lives under the caller-chosen path (the plugin points it at
 ``$MNGR_HOST_DIR/plugin/forward/``), so staging / production / local minds keep
 independent caches automatically.
+
+Programs other than ``mngr forward`` may read the file too, relying on the
+version-2 ``label_to_name_by_instance`` map and treating any other
+``format_version`` as unreadable.
 """
 
 import json
