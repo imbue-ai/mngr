@@ -1,6 +1,3 @@
-# Transitive deps of latchkey / @todesktop/cli whose install scripts the app
-# does not need; listing them silences pnpm's "Ignored build scripts / run
-# pnpm approve-builds" warning, which reads like a failed install.
 # Supply-chain hardening: refuse to install any version published less than
 # 14 days ago (20160 minutes), including transitive dependencies. A
 # freshly-compromised release therefore cannot be pulled in until it has had
@@ -47,6 +44,11 @@ supportedArchitectures:
   os: [current, darwin, linux, win32]
   cpu: [current, x64, arm64]
   libc: [current, glibc, musl]
+# Transitive deps of latchkey / @todesktop/cli that carry install scripts.
+# `true` lets each one's script run at install. A package with an install
+# script that is not listed here has it skipped, with pnpm's "Ignored build
+# scripts / run pnpm approve-builds" warning, which reads like a failed
+# install.
 allowBuilds:
   '@firebase/util': true
   dtrace-provider: true
