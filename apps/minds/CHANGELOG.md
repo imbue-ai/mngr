@@ -6,6 +6,19 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: On macOS, Imbue Studio runs only from an Applications folder; opened from its disk image or a translocated copy, it offers to move itself to Applications or quit, since such installs could never update.
+- Changed: New Modal workspaces keep mngr's data at `/home/user/.mngr` like every other provider, with only that dir on the persistent host Volume; existing Modal workspaces are not migrated.
+- Changed: The bundled latchkey moves to 3.26.0 (fixes Dropbox sign-in; Google sign-in can pick among accounts).
+- Changed: `install-linux.sh` retries its gVisor downloads on timeouts, refused connections and server errors.
+
+### Fixed
+
+- Fixed: Imbue Studio no longer signs itself out after 30 days of running (its windows use a session value from the backend it starts instead of the one-time login code), and "Restart Imbue Studio" on the sign-in page signs the app back in; in a plain browser a session lasts as long as it is used at least once every 30 days.
+- Fixed: Workspaces no longer reopen with every window minimized after the 0.10.6 per-account partitions: the app keeps one client id per workspace shell (`shell-client-ids.json`) and recovers layouts saved on 0.10.5 and earlier.
+- Fixed: Intermittent 500s from the backup history and backup check routes right after unlocking, caused by concurrent `restic.env` writes sharing one temp file name.
+
 ## [minds-v0.10.7] - 2026-11-23
 
 A patch release over 0.10.6, pinning workspace template `minds-v0.10.7`. Every workspace create now shows one creation page and opens on the workspace's AI-provider page and first conversation, an Imbue account is signed in only once its email is verified, the first run decides at once whether a new account gets a first workspace, Report a bug opened from an error keeps the workspace on screen and can be sent without a description, and a new Modal workspace uses one host directory for every caller.

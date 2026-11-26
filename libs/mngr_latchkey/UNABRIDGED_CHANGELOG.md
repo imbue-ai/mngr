@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-25
+
+- The latchkey version installed on remote hosts, and the minimum version a local CLI must have (`LATCHKEY_MIN_VERSION`), both move to 3.26.0. The minimum only keeps the pins in lockstep: nothing here depends on 3.26.0.
+
 ## 2026-11-22
 
 - A provisioning pass no longer installs an owner-exec daemon on a remote host's machine, and removes the one an earlier build left there: the `owner-exec-vm` unit, the binary and version stamp under `/usr/local/bin`, and `/etc/owner-exec/`. The daemon ran any command for whoever held the owner's key, and nothing called it. The removal runs from the bootstrap script on every pass and never fails one. `owner_exec_vm.py` and its version pin are gone.

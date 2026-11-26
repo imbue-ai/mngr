@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-25
+
+- Fixed: The memory headroom a VPS host publishes into its container (`/mngr-vol/.host-meminfo`) now counts the file cache on both LRU lists and the reclaimable slab, less a fixed 400 MiB reserve, in place of the inactive file cache alone, so an in-container earlyoom no longer acts on file cache the kernel would have freed. A host picks the new script up when its host setup next runs. The reserve is a fixed amount, measured under 4096 MiB and 6415 MiB caps, so it is a large share of a much smaller cap.
+
+The gVisor install script retries its two downloads (the release tarball and its sha512) on any error, connection resets included, eight times at 15-second intervals. A reset mid-transfer no longer fails VPS host setup, `minds-admin install-runsc`, or a bare-metal box's guest image customization. The Docker apt key download in VPS host setup retries the same way.
+
 ## 2026-11-19
 
 Agent listings publish `turn_end`, how and when the agent's last turn ended, read in the same listing command as the state.

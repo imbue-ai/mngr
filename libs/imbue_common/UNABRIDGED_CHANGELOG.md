@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-25
+
+- Changed: The shared VM-side memory headroom publisher (`container_meminfo_publisher`) now publishes the cgroup limit minus usage plus the file cache on both LRU lists and the reclaimable slab, less a fixed 400 MiB reserve (`CONTAINER_MEMORY_HEADROOM_RESERVE_BYTES`). It counted only the inactive file cache, which on a kernel with the multi-generation LRU records when the kernel last reclaimed, not what is in use.
+
 ## 2026-11-20
 
 The async/await ratchet (`check_async_await`) now counts the lines that hold an `async def` or an `await` in the Python syntax tree, rather than matching the keyword with a regex. Prose naming the word ("then await recovery") and JavaScript held in a Python string are no longer counted, and nothing new is counted: across every project, the new count only drops sites the regex misread. `find_async_await_usages` is the new finder behind it. imbue_common's own count drops from 2 to 0.

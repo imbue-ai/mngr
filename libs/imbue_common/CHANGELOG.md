@@ -10,7 +10,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Added: `testing.assert_model_is_frozen`, which asserts a pydantic model is declared frozen.
 - Added: `imbue.imbue_common.profiling`, a Chrome JSON trace tracer (W3C `traceparent` propagation, cross-process flow links, file-writer and in-memory collector modes, no-op until enabled) behind Imbue Studio's profiling mode; `log_span`, `info_span`, `trace_span` and `log_call` now also open tracer spans.
-- Added: `imbue.imbue_common.container_meminfo_publisher`, the shared Perl that publishes each container's cgroup memory headroom as `.host-meminfo`.
+- Added: `imbue.imbue_common.container_meminfo_publisher`, the shared Perl that publishes each container's cgroup memory headroom as `.host-meminfo`: limit minus usage plus file cache on both LRU lists and reclaimable slab, less a 400 MiB reserve (`CONTAINER_MEMORY_HEADROOM_RESERVE_BYTES`).
 - Added: Shared pytest markers `ratchet_scan(source_dir)` (preloads a ratchet test's file scan during setup, via new `preload_text_scan`, `preload_python_ast_scan` and `preload_ratchet_scan_for_test`) and `harness_internals(harness)`.
 - Added: `imbue_common.public_email_domains.PUBLIC_EMAIL_DOMAINS`, the shared list of public mail providers that the desktop and connector use to refuse whole-domain share grants.
 - Added: `find_sentry_scrubbed_substrings` in `imbue_common.sentry.testing`, for checking that a log line survives Sentry's default scrubber.

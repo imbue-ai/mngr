@@ -33,8 +33,9 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: An SSH connect that fails because the process ran out of file descriptors raises `LocalFileDescriptorsExhaustedError` at once instead of being retried.
 - Changed: `mngr observe`'s per-poll log lines are TRACE instead of DEBUG, so `logs/mngr/events.jsonl` no longer grows ~24 MB a day on an idle workspace.
 - Changed: The log line naming the client keys a host admits is worded so Sentry's default scrubber no longer blanks it; adds `is_per_host_key_path`.
-- Changed: mngr caches pyinfra's connector lookup for the life of the process instead of rescanning installed packages per host, speeding up commands that build several hosts; a missing connector raises `PyinfraConnectorUnavailableError` from every provider.
+- Changed: mngr caches pyinfra's connector lookup for the life of the process instead of rescanning installed packages per host, speeding up commands that build several hosts; a missing connector raises `PyinfraConnectorUnavailableError` from every provider, and since an empty first lookup is cached too, a process that first looks while pyinfra's metadata is missing keeps raising it until restarted.
 - Changed: The agent capability matrix lists antigravity, codex, grok, opencode and pi-coding agents as supporting `mngr upgrade`.
+- Changed: Host setup creates the parent directory of a host dir symlinked onto a host volume (e.g. `/home/user/.mngr` on a bare image).
 
 ### Fixed
 

@@ -1,1 +1,0 @@
-- Added: `docs/deploy/history/rollouts/memory-headroom-formula.md` records why cloud workspaces shed chats with half their memory cap free, the measurements behind the new published headroom figure, and the plan for installing it on existing slice VMs, which `docs/deploy/next_deploy.md` queues for the next deployment.

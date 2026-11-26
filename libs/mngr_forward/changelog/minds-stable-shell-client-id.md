@@ -1,1 +1,0 @@
-The service map cache's documentation (`service_map_cache.py`) now records that callers outside `mngr forward` may read `service_map.json`, relying on the version-2 label map and treating any other format version as unreadable. No behavior change.

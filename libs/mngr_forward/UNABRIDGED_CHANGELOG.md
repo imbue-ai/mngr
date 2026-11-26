@@ -4,6 +4,16 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-25
+
+A session with `mngr forward` no longer ends 30 days after sign-in while it is still in use.
+
+Before, a signed session cookie was accepted for 30 days from when it was signed and was only re-issued by a page navigation through the `/goto/` bridge. A page left open on an agent origin for longer than that had its background requests refused with 403 and its WebSockets closed, until it was reloaded.
+
+Every HTTP response to a request that presented a valid signed session cookie now carries a freshly signed one with the same scope and attributes. An expired or altered cookie is never renewed, a preauth cookie value is left in place, and WebSocket handshakes do not renew.
+
+The service map cache's documentation (`service_map_cache.py`) now records that callers outside `mngr forward` may read `service_map.json`, relying on the version-2 label map and treating any other format version as unreadable. No behavior change.
+
 ## 2026-11-20
 
 The reverse-tunnel warning for an SSH login the host refuses now reaches Sentry readable instead of `[Filtered]`: it is worded without the substrings Sentry's default scrubber blanks, and says whether the offered key is a per-host or provider-wide key. When the user's own SSH setup was offered instead, it counts the agent keys and lists the default `~/.ssh/id_*` files paramiko tried.

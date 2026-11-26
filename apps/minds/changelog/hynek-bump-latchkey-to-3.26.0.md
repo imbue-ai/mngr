@@ -1,1 +1,0 @@
-- The bundled latchkey moves to 3.26.0, which fixes the Dropbox sign-in and lets a Google sign-in pick among several accounts.

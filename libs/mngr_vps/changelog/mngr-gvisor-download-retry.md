@@ -1,1 +1,0 @@
-The gVisor install script retries its two downloads (the release tarball and its sha512) on any error, connection resets included, eight times at 15-second intervals. A reset mid-transfer no longer fails VPS host setup, `minds-admin install-runsc`, or a bare-metal box's guest image customization. The Docker apt key download in VPS host setup retries the same way.

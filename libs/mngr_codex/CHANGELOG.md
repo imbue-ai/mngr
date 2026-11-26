@@ -12,6 +12,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: codex agents record `turn_end` from the rollout: `COMPLETED`/`FAILED` at `task_complete`, `INTERRUPTED` at `turn_aborted`; existing agents need `mngr c <name> --reuse --update`.
 - Added: codex agents report `RUNNING_BACKGROUND` while background terminals (`SHELL`) or working subagent threads (`SUBAGENT`) outlive the turn, recorded from the app-server by codex's `Stop`/`Interrupt` hooks and the background supervisor (now every 5 s, was 15 s); needs `python3` on the agent's host.
 - Added: `mngr upgrade` support: rewrites the agent's `commands/` scripts and mngr's `hooks.json` entries, keeping `config.toml`, then restarts an idle agent and resumes its conversation; agents created before this change are skipped until `mngr create NAME --reuse --update`.
+- Added: The codex common transcript records each context compaction as a "Context compaction performed" system step (`extra.context_management.type` = `compaction`) carrying codex's summary, matching the Claude and Pi transcripts.
 
 ### Changed
 

@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-25
+
+mngr keeps the first pyinfra connector lookup a process makes, even one that finds nothing. A process whose first host build runs while pyinfra's metadata is missing or mid-rewrite now keeps failing its later host builds with `PyinfraConnectorUnavailableError` until it restarts; before, the next build looked again.
+
+A host dir symlinked onto a host volume can now sit in a directory the image does not have yet (for example `/home/user/.mngr` on a bare image): host setup creates its parent before linking it.
+
 ## 2026-11-24
 
 Building a host no longer rescans every installed package for pyinfra's connectors. pyinfra rediscovers them on every inventory by reading a metadata file from each installed distribution, and mngr builds an inventory per host; mngr now keeps the first lookup that finds them for the life of the process.

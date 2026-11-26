@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-25
+
+The codex common transcript records each context compaction as a system step, "Context compaction performed", with `extra.context_management.type` set to `compaction`, the same convention the Claude and Pi transcripts use, carrying codex's summary when it wrote one, so a trajectory built from a codex agent's transcript shows where its context was compacted.
+
 ## 2026-11-24
 
 `mngr upgrade` covers codex agents. It rewrites the agent's `commands/` scripts and mngr's entries in its `hooks.json`, keeping every other hook and its `config.toml` (options and hook trust); the common-transcript scripts are rewritten only where the agent has them. An idle agent restarts and resumes its conversation. The upgrade fails at `ready` when the restarted agent's launch does not trust its hooks, or when, on a local host, its TUI does not open its conversation in time.

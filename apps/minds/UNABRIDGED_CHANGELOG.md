@@ -4,6 +4,52 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-25
+
+The smoke journey can grant its workspace. With `MINDS_SMOKE_SHARE_GRANTEE_EMAIL` set to an address, a new step 5b opens the workspace's Sharing page once the share has served the app, grants the whole workspace to that address, and waits for the grant's card to say what became of the invitation the grant sends, so a run recorded as a profile (`MINDS_SMOKE_PROFILE_FILE`) holds a grant to measure. An entry the page refuses, or a grant it cannot save, fails the step with the page's own sentence; an invitation the tier refused or could not send does not. Granting emails the address a real invitation, so it has to be a mailbox the run owns. Unset, as CI's run after a deploy leaves it, the journey grants nobody, lists the step as skipped in its report, and counts the same results as before. `docs/testing-overview.md` section 1.10 describes the step.
+
+The frontend's typecheck covers the `client_state` frame, the one WebSocket frame the SPA sends. The frame is checked against the TypeScript type generated from the server's `UiClientStateMessage` model, so `pnpm run check` fails on a field renamed or removed in Python, a key the model lacks, an invalid `window_kind`, or a field the client stops sending. Before, the server rejected the first three at runtime, and filled in its default for a dropped field without complaint. No change to what the app sends.
+
+`next_deploy.md` gains the step to record the production data-start floors of the analytics machine-load feeds and `gold.resource_daily` once production collects them.
+
+Imbue Studio no longer signs itself out after 30 days of running.
+
+Before, the app got one session cookie when it started, and the backend stopped accepting that cookie 30 days later. A desktop app left running that long showed "Reconnecting…" indefinitely, and reopening a window landed on a sign-in page that only a full quit and relaunch could get past.
+
+- The desktop app no longer signs in with the one-time login code. The backend it starts hands it a value that the app sets as each window's session cookie; the backend accepts exactly that value for as long as it runs, so the app's session cannot lapse. A backend started by the app mints no one-time code at all.
+
+- "Restart Imbue Studio" on the sign-in page now signs the app back in. It restarted the backend without giving the windows a session the new backend accepts, and returned to the same page.
+
+- In a plain browser, the backend now answers every request that presents a valid signed session cookie with a freshly signed one, so a session lasts for as long as it is used at least once every 30 days. An expired, altered or foreign cookie is never renewed.
+
+- A backend started by the app logs the address it serves the app at, where it logged the one-time login URL. The launch-to-message harness (`scripts/launch_to_msg_e2e.py`) finds the backend from that line.
+
+- The Electron end-to-end harness (`e2e_workspace_runner.py`) relaunches a launch whose backend says it could not start its `mngr latchkey forward`. It relaunched such a launch before only because no backend page appeared in time, and the app's windows now reach the backend sooner.
+
+- Added: `docs/deploy/history/rollouts/memory-headroom-formula.md` records why cloud workspaces shed chats with half their memory cap free, the measurements behind the new published headroom figure, and the plan for installing it on existing slice VMs, which `docs/deploy/next_deploy.md` queues for the next deployment.
+
+On macOS, Imbue Studio now runs only from an Applications folder. Opened from its disk image, or from a copy macOS has quietly moved to a hidden read-only location (which happens when a downloaded app is opened before it is moved), it starts nothing and offers to move itself to Applications and reopen from there, or to quit. Such installs could never update: one user stayed on 0.8.5 for over a month while every update failed with "Cannot update while running on a read-only volume", with nothing on screen to say so.
+
+The smoke suite now unpacks a channel's published macOS build under `~/Library/Caches/imbue-studio-smoke/Applications`, so the build passes the same check, and refuses a macOS build named by `MINDS_SMOKE_BINARY_PATH` that sits outside such a folder before launching it; builds cached under the old `builds` directory are fetched again once and the old directory can be deleted.
+
+- The bundled latchkey moves to 3.26.0, which fixes the Dropbox sign-in and lets a Google sign-in pick among several accounts.
+
+A new Modal workspace keeps mngr's data at `/home/user/.mngr`, the same path as every other workspace, so its host env names the same `MNGR_HOST_DIR` as theirs: the Modal connection block now carries `host_dir`. Unlike the other providers, the home tree stays on the sandbox's own filesystem (a Modal Volume is about ten times slower for git and venv work), and only mngr's data dir, with its plain-text service logs, is on the persistent host Volume. Modal workspaces created earlier are not migrated.
+
+Restoring a backup onto a Modal workspace now restores into `/home/user`. It used to resolve the host dir's symlink first and target the host Volume, where the restore's `--delete` would remove mngr's own state.
+
+Imbue Studio no longer reopens a workspace with every window on every desktop minimized. Since the per-account session partitions (0.10.6), the workspace shell read its client id from the partition's own empty storage, so the first launch after updating from 0.10.5, a window opened from a different account's page, or a pulled-out window could register as a new client with no saved layout. The desktop app now keeps one client id per workspace shell (`shell-client-ids.json` in the state directory) and hands it to the shell's frame before it boots, so every window, popout and partition of a workspace is the same client across relaunches. On the first launch with this change, the ids from before the partitions are read back from the default session's storage, so layouts arranged on 0.10.5 and earlier come back. The app's preload now runs in every frame of a window, but only the window's own page gets the `mindsNative` bridge.
+
+`install-linux.sh` retries its gVisor release downloads on a timeout, a refused connection or a server error.
+
+The deploy docs gain the minds-v0.10.7 history entry: cut, tagged and built, deployed, baked and rehearsed on staging with the full smoke suite, deployed and baked on production (10 rows per region), and promoted to alpha on mac, Linux and the web, with both production smoke runs after the promotion failing. It also records the follow-up work of the same day: the unused 0.10.6 rows retired, every ready box on both tiers re-prepped onto the current guest image, the guest units installed on the leased VMs (their kernel reboots left for a downtime window), two activity signals recomputed by hand in the production lake, and the four boxes stuck at `installing` traced to a closed OVH ticket. The next-deploy checklist is cut from 46 items to 13 by the deploying user's decisions and its reset stamp moves to this release: the items that stay carry what was found on production, and each one that waits on a fix links the issue that says to delete it. The entry also records the follow-ups of 2026-11-25: the OVH ticket for the four `installing` boxes reopened with the diagnostics OVH had asked for, the record-id repair run on both tiers, and the analytics collector fix deployed to staging and then production.
+
+The comment in `pnpm-workspace.yaml` about `allowBuilds` says what the block does: the listed packages' install scripts run.
+
+The release runbook lands the version bump first and runs launch-to-msg and both release suites on that commit before tagging it, names the release suites as a gate, has a failed attempt take the next patch number, and puts a release branch under a `main` that moved by a merge instead of a rebase.
+
+Fixed intermittent 500s from the workspace backup routes (backup history, backup check) right after unlocking on a fresh or recovered install. Several threads materializing the same workspace's canonical `restic.env` at once shared one fixed temp-file name, so a losing writer's rename failed with "No such file or directory". Each write now goes through its own uniquely named 0600 temp file.
+
 ## 2026-11-24
 
 Docker-marked snapshot-resume tests that never call docker themselves, such as `test_workspace_docker_container_is_present_and_stopped` and `test_cloud_connection_added_on_one_device_reaches_the_app_on_another`, no longer fail the resource guard's "marked with @pytest.mark.docker but never invoked docker" check when another test in the same batch runs first. The session fixture `snapshot_sandbox_dockerd`, which runs `docker info` and records the snapshot's container states, now declares its docker use with `@fixture_uses_resources("docker")`, so the guard counts that call for every test that reaches the fixture instead of only the test that happened to set it up.

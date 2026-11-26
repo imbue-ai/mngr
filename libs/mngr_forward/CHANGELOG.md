@@ -23,6 +23,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: An SSH host that closes the connection during the handshake or while a reverse tunnel is being set up now surfaces as an `SSHTunnelError` (`HOST_CONNECT`) instead of a bare paramiko `EOFError` that used to kill the reverse-tunnel health-check thread and abort the latchkey discovery cycle.
 - Fixed: Removing a reverse tunnel and `SSHTunnelManager.cleanup()` no longer raise when the host hangs up during the best-effort remote port-forward cancel.
 - Fixed: SSH tunnel setup reports the real authentication failure instead of `encountered RSA key, expected OPENSSH key`, authenticates a host with its own key alone, and closes connections that fail key or host-key checks instead of leaking one per retry.
+- Fixed: `mngr forward` sessions no longer end 30 days after sign-in while in use: every HTTP response to a request with a valid signed session cookie re-issues a fresh one (WebSocket handshakes, expired or altered cookies and preauth values are not renewed).
 
 ## [v0.2.1] - 2026-10-28
 

@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-25
+
+- Fixed: A gen-2 workspace's earlyoom no longer sheds chats and backups while most of its memory cap is reclaimable file cache. The slice VM's published headroom (`/mngr-vol/.host-meminfo`) now counts the file cache on both LRU lists and the reclaimable slab, less a fixed 400 MiB reserve, in place of the inactive file cache alone. Existing slice VMs keep the old script until `minds-admin install-vm-guest-units --apply` replaces it.
+
 ## 2026-11-23
 
 An account is now signed in only once its email is verified: no `mngr imbue_cloud auth` command saves a session for an unverified account.

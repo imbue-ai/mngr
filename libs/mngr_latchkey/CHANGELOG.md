@@ -21,7 +21,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
-- Changed: Bumped Latchkey to 3.25.0, which is also the remote-host version and the new minimum locally-installed version (`LATCHKEY_MIN_VERSION`); the bundled service catalog now includes Asana.
+- Changed: Bumped Latchkey to 3.26.0, which is also the remote-host version and the new minimum locally-installed version (`LATCHKEY_MIN_VERSION`); the bundled service catalog now includes Asana.
 - Changed: Custom services belong to their machine (each machine store has its own `config.json`, migrated from the old symlink) and are deregistered with their last account; adds `Latchkey.deregister_custom_service` and `ServicesCatalog(is_including_every_machine=True)`.
 - Changed: The services catalog marks protocol-handshake permissions `is_implicit`; `ServicePermissionInfo` lists them under `implicit_permission_schemas` and `with_implicit_permissions` adds them to any non-empty grant.
 - Changed: `Latchkey.auth_browser` pins Imbue Studio's redirect URI before every MCP OAuth sign-in that registers a client (builtin `*-mcp` and custom `mcp` flow, per new `is_mcp_oauth_service`); `MINDS_OAUTH_REDIRECT_URI` replaces `MINDS_OAUTH_REDIRECT_URI_BY_SERVICE`.

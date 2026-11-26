@@ -9,7 +9,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Added
 
 - Added: The VPS providers publish ports declared with `mngr create --publish` (recorded as `published_endpoints`); cloud VPS providers gain a `firewall_published_ports` config key their `prepare` opens (published-ports contract).
-- Added: VPS hosts run an every-boot `mngr-vps-container-meminfo.service` publishing each container's cgroup memory headroom to `/mngr-vol/.host-meminfo` for in-container earlyoom under gVisor.
+- Added: VPS hosts run an every-boot `mngr-vps-container-meminfo.service` publishing each container's cgroup memory headroom (limit minus usage plus file cache on both LRU lists and reclaimable slab, less a 400 MiB reserve) to `/mngr-vol/.host-meminfo` for in-container earlyoom under gVisor.
 - Added: `ParsedVpsBuildOptions.root_disk_gb` and the shared `extract_root_disk_gb` parser behind `--<prefix>-root-disk-gb=N`.
 - Added: Agent listings publish `turn_end`, read in the same listing command as the state.
 
@@ -22,6 +22,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Fixed
 
 - Fixed: The new gVisor release stops a sandbox's memory growing for as long as it runs (gofer inode-number map, google/gvisor#16197) and the 32 MiB fd table leaked per tmux client call (google/gvisor#15989).
+- Fixed: The gVisor install script and the Docker apt key download retry on any error, including mid-transfer connection resets, instead of failing VPS host setup, `minds-admin install-runsc` or guest image customization.
 
 ## [v0.1.11] - 2026-10-28
 
