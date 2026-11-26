@@ -30,6 +30,7 @@ from loguru import logger
 from playwright.sync_api import Browser
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Frame
+from playwright.sync_api import Locator
 from playwright.sync_api import Page
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
@@ -89,7 +90,32 @@ _PUBLISH_SWITCH: Final[str] = "#ws-share-publish-switch"
 # it is busy while the publish or unpublish it started is still settling.
 _PUBLISH_SWITCH_ON: Final[str] = f'{_PUBLISH_SWITCH}[aria-checked="true"]'
 _PUBLISH_SWITCH_SETTLED_OFF: Final[str] = f'{_PUBLISH_SWITCH}[aria-checked="false"]:not([aria-busy])'
+# The page draws the switch only once Imbue Cloud has confirmed what a first, local read said, and the
+# switch is busy through a fresh read too: on and at rest, the page has settled on a shared workspace.
+_PUBLISH_SWITCH_SETTLED_ON: Final[str] = f"{_PUBLISH_SWITCH_ON}:not([aria-busy])"
 _SHARE_LINK: Final[str] = "#ws-share-link"
+# The notices the page draws when something stands in the way of a grant or its invitation.
+_SHARE_NOTICES: Final[tuple[str, ...]] = (
+    "#ws-share-off-notice",
+    "#ws-share-load-error",
+    "#ws-share-publish-error",
+    "#ws-share-sync-notice",
+)
+# The add row. Its controls are marked off until the page knows the workspace is shared and has read who
+# it admits, and pressing Add does nothing until then.
+_GRANT_ADD_VALUE: Final[str] = "#ws-share-add-value"
+_GRANT_ADD_BUTTON: Final[str] = "#ws-share-add-btn"
+_GRANT_ADD_BUTTON_ONCE_SETTLED: Final[str] = (
+    f"body:has({_PUBLISH_SWITCH_SETTLED_ON}) {_GRANT_ADD_BUTTON}:not([aria-disabled])"
+)
+_GRANT_ADD_REFUSAL: Final[str] = "#ws-share-refusal"
+# A grant's card in the list of who has access. A failed save is marked on it, with its sentence in the
+# mark's tooltip. The card's invitation slot reads "Inviting" while the invitation is out; an invitation
+# that was refused gets a line of its own instead.
+_GRANT_CARD: Final[str] = "#ws-share-grants [data-grant-row]"
+_GRANT_SAVE_FAILURE: Final[str] = "[data-grant-failure]"
+_TOOLTIP_ATTRIBUTE: Final[str] = "data-tooltip"
+_GRANT_INVITATION_ANSWER: Final[str] = '[data-slot="invitation"]:not(:has-text("Inviting")), [data-invite-refusal]'
 _DESTROY_BUTTON: Final[str] = "#destroy-btn"
 _DESTROY_CONFIRM: Final[str] = "#destroy-confirm-btn"
 # The app's own routes the journey reads to confirm what the UI did.
@@ -124,6 +150,11 @@ _MAIN_CHAT_TIMEOUT_SECONDS: Final[float] = 120.0
 # The launcher's text reaches the main chat through the chat app's intake, which the chat's page then sends.
 _PROMPT_SHOWN_TIMEOUT_SECONDS: Final[float] = 120.0
 _UNPUBLISH_TIMEOUT_MS: Final[float] = 300_000.0
+# The read that settles the Sharing page asks Imbue Cloud about the share and execs into the workspace.
+_SHARE_PAGE_SETTLE_TIMEOUT_MS: Final[float] = 60_000.0
+# A grant is written into the workspace and pushed to Imbue Cloud, a second time when its address turns
+# out to be an account's, before the invitation is asked for.
+_GRANT_TIMEOUT_MS: Final[float] = 120_000.0
 _POLL_SECONDS: Final[float] = 2.0
 
 # The transcript only auto-scrolls when it was already at its tail and virtualizes
@@ -475,6 +506,72 @@ def stop_workspace_from_account_home(
     account_id = _require_signed_in_account_id(session, account_email)
     open_account_home_page(session.page, str(session.backend_origin), account_id)
     stop_workspace_from_home_page(session.page, agent_id, timeout_seconds)
+
+
+def _shown_text(locator: Locator) -> str:
+    """What the elements of ``locator`` read, on one line; empty when the page shows none of them."""
+    return " ".join(" ".join(locator.all_inner_texts()).split())
+
+
+def _share_notices_clause(page: Page) -> str:
+    """What the Sharing page says stands in the way, as the closing clause of a failure's message."""
+    notices = _shown_text(page.locator(", ".join(_SHARE_NOTICES)))
+    return f"the page says {notices!r}" if notices else "the page shows no notice of why"
+
+
+def grant_share_from_panel(session: StudioAppSession, agent_id: str, grantee_email: str) -> str:
+    """Grant the whole workspace to ``grantee_email`` from Settings' Sharing page; return what the grant's
+    card says became of the invitation the grant sends.
+
+    An invitation the tier refused or could not send is an answer like any other: the grant is saved by
+    then. An entry the page will not take, or a grant it cannot save, raises with the page's own sentence.
+    """
+    page = session.page
+    page.goto(f"{session.backend_origin}{_SHARE_TAB_PATH.format(agent_id=agent_id)}", wait_until="domcontentloaded")
+
+    # The add row is live from the page's first draw, while the read that settles the page is still out, and
+    # a grant made then is saved alongside that read.
+    try:
+        page.wait_for_selector(_GRANT_ADD_BUTTON_ONCE_SETTLED, state="visible", timeout=_SHARE_PAGE_SETTLE_TIMEOUT_MS)
+    except PlaywrightTimeoutError as exc:
+        raise SmokeAppError(
+            f"The Sharing page at {page.url} did not settle on a shared workspace that takes grants within "
+            f"{_SHARE_PAGE_SETTLE_TIMEOUT_MS / 1000:.0f}s; {_share_notices_clause(page)}"
+        ) from exc
+
+    # The page answers Add at once: the address joins the list as a card, or the row says why it cannot.
+    card = page.locator(_GRANT_CARD, has_text=grantee_email)
+    refusal = page.locator(_GRANT_ADD_REFUSAL)
+    try:
+        page.fill(_GRANT_ADD_VALUE, grantee_email)
+        page.click(_GRANT_ADD_BUTTON)
+        card.or_(refusal).first.wait_for(state="visible", timeout=_PAGE_TIMEOUT_MS)
+    except PlaywrightTimeoutError as exc:
+        raise SmokeAppError(
+            f"Adding {grantee_email} on the Sharing page got neither a card nor a refusal; "
+            f"{_share_notices_clause(page)}"
+        ) from exc
+    if refusal.count() > 0:
+        raise SmokeAppError(f"The Sharing page would not grant {agent_id} to {grantee_email}: {_shown_text(refusal)}")
+
+    # The card saves the grant, and a saved grant asks for its invitation.
+    save_failure = card.locator(_GRANT_SAVE_FAILURE)
+    invitation_answer = card.locator(_GRANT_INVITATION_ANSWER)
+    try:
+        save_failure.or_(invitation_answer).first.wait_for(state="visible", timeout=_GRANT_TIMEOUT_MS)
+    except PlaywrightTimeoutError as exc:
+        raise SmokeAppError(
+            f"The grant of {agent_id} to {grantee_email} did not say what became of its invitation within "
+            f"{_GRANT_TIMEOUT_MS / 1000:.0f}s; its card reads {_shown_text(card)!r}, and {_share_notices_clause(page)}"
+        ) from exc
+    if save_failure.count() > 0:
+        raise SmokeAppError(
+            f"The Sharing page could not save the grant of {agent_id} to {grantee_email}: "
+            f"{save_failure.first.get_attribute(_TOOLTIP_ATTRIBUTE) or _shown_text(card)}"
+        )
+    invitation = _shown_text(invitation_answer)
+    logger.info("Workspace {} is granted to {}, whose card reads {!r}", agent_id, grantee_email, _shown_text(card))
+    return invitation
 
 
 def unpublish_share_from_panel(session: StudioAppSession, agent_id: str) -> None:

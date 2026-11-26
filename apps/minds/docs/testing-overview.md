@@ -301,7 +301,9 @@ with a route that answers 200, registered as a workspace app; the prompt is
 optimized to be minimally expensive while still building that server); stop the
 workspace from the home page and start it again (see "Stopping and starting the
 workspace" below); open the app's route through the share the create turned
-on, and assert the 200 (the visitor is the owner -- grants are a later
+on, and assert the 200 (the visitor is the owner); when the run names an
+address, grant the workspace to it from the Sharing page (see "Granting the
+workspace" below -- opening the share as a granted visitor is a later
 scenario); turn sharing off from within the app as the original user; destroy
 the workspace.
 
@@ -519,6 +521,42 @@ workspace:
 The same controls are driven per PR against a local Docker workspace by
 `test_workspace_stops_and_starts_from_the_home_page_via_electron` (1.2).
 
+**Granting the workspace.** Step 5b, opt-in, after the share has served the
+app and before sharing is turned off. The journey otherwise opens its own
+share and turns it off, and admits nobody; the grant is there so that a run
+recorded as a profile has one to measure. With
+`MINDS_SMOKE_SHARE_GRANTEE_EMAIL=<address>` set, the journey opens the
+workspace's Sharing page in Settings, adds the address to the whole workspace
+from the page's add row, and waits for the grant's card to say what became of
+the invitation the grant sends:
+
+- Granting makes the tier email a real invitation to the address, so it has to
+  be a mailbox the run owns, such as its throwaway account's
+  (`MINDS_SMOKE_THROWAWAY_EMAIL` in the handoff file `just minds-smoke-setup`
+  writes). The workspace belongs to the persistent account, whose own address
+  the page refuses. CI's run after a deploy leaves the variable unset: the
+  journey then grants nobody, and its report's step table lists step 5b as
+  skipped.
+
+- The page draws from a local read before the read that confirms the share
+  with Imbue Cloud has answered, and its add row is live from that first draw.
+  The journey waits for the page to settle, with the publish switch on and at
+  rest, before it presses Add, so the grant is not saved alongside that read.
+
+- The step is done when the card says where the invitation stands ("Invited
+  just now", "Could not invite") or shows the sentence it was refused with. An
+  invitation the tier refused, for the allowance or the cooldown, or could not
+  send is an answer rather than a failure: the grant is saved by then. An entry
+  the page will not take, or a grant it cannot save, fails the step with the
+  page's own sentence.
+
+- A profiled run (`MINDS_SMOKE_PROFILE_FILE`, below) then holds the grant in
+  the backend's lane: `POST /ui/api/users/resolve`, the page's account lookup
+  for the address; `PUT /api/v1/workspace-sharing/<workspace_id>/grants` with
+  `sharing.save_grants` under it; and
+  `POST /api/v1/workspace-sharing/<workspace_id>/invitations` with
+  `sharing.invite` under it.
+
 **The template's CI suites in the workspace.** default-workspace-template's CI
 runs its three pytest roots (the repo root, `system/apps/chat` and
 `system/apps/system_interface`) through offload, in Modal sandboxes built from
@@ -660,6 +698,10 @@ a run needs:
   its `mngr` processes and the page record the whole journey as one Perfetto trace
   (`apps/minds/docs/dev-setup.md`, "Profiling a session"). Keep the path outside the
   run's data home; the file is complete once the app has quit.
+- A grant, when `MINDS_SMOKE_SHARE_GRANTEE_EMAIL=<address>` is set: the journey
+  grants its workspace to that address, which the tier then emails a real
+  invitation, so name a mailbox the run owns ("Granting the workspace" above).
+  Unset, the journey grants nobody.
 - The build under test, named by one env var: `MINDS_SMOKE_DEV_CHECKOUT=1` runs
   this checkout's Electron (the laptop default, and the only mode exercised so
   far); `MINDS_SMOKE_BINARY_PATH` names an installed executable (untried on

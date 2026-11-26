@@ -61,6 +61,7 @@ from imbue.minds.smoke_tests.primitives import SMOKE_EXPECTED_TEMPLATE_REF_ENV_V
 from imbue.minds.smoke_tests.primitives import SMOKE_HANDOFF_FILE_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_RESTORE_FROM_STORAGE_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_RUN_ID_ENV_VAR
+from imbue.minds.smoke_tests.primitives import SMOKE_SHARE_GRANTEE_EMAIL_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_TIER_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SmokeConfigError
 from imbue.minds.smoke_tests.primitives import SmokeRunId
@@ -142,6 +143,12 @@ def storage_restore_wait_seconds(backend: SmokeBackend) -> float | None:
 def expected_template_ref() -> str | None:
     """The template tag the journey's workspace must lease a row baked at (``MINDS_SMOKE_EXPECTED_TEMPLATE_REF``), or None."""
     return os.environ.get(SMOKE_EXPECTED_TEMPLATE_REF_ENV_VAR, "").strip() or None
+
+
+@pytest.fixture(scope="session")
+def share_grantee_email() -> str | None:
+    """The address the journey grants its workspace to (``MINDS_SMOKE_SHARE_GRANTEE_EMAIL``), or None to grant nobody."""
+    return os.environ.get(SMOKE_SHARE_GRANTEE_EMAIL_ENV_VAR, "").strip() or None
 
 
 @pytest.fixture(scope="session")

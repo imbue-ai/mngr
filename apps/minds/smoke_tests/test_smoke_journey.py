@@ -8,8 +8,9 @@ page and press Next; run default-workspace-template's CI test suites and its
 OOM drill inside the workspace; have its agent build and register a hello-world
 web app; stop the workspace from the home page, start it again, and have the
 agent bring the app back; open the app's route through the share the create
-turned on, as the owner; turn sharing off from its Sharing page in Settings;
-destroy the workspace.
+turned on, as the owner; when the run names an address, grant the workspace to
+it from its Sharing page in Settings and wait for what became of the
+invitation; turn sharing off from that page; destroy the workspace.
 Every resource created on the way is recorded in the run manifest, so the
 teardown job releases it however this test ends.
 
@@ -52,6 +53,7 @@ from imbue.minds.smoke_tests.app_flows import adopt_imbue_credentials
 from imbue.minds.smoke_tests.app_flows import agent_id_of_workspace_frame
 from imbue.minds.smoke_tests.app_flows import continue_to_provider_page
 from imbue.minds.smoke_tests.app_flows import destroy_workspace_from_settings
+from imbue.minds.smoke_tests.app_flows import grant_share_from_panel
 from imbue.minds.smoke_tests.app_flows import is_workspace_gone
 from imbue.minds.smoke_tests.app_flows import list_workspaces
 from imbue.minds.smoke_tests.app_flows import mint_workspace_llm_credentials
@@ -94,6 +96,7 @@ from imbue.minds.smoke_tests.oom_drill import OOM_DRILL_WORKSPACE_RESULTS_ROOT
 from imbue.minds.smoke_tests.oom_drill import oom_drill_markdown
 from imbue.minds.smoke_tests.oom_drill import run_oom_drill_in_workspace
 from imbue.minds.smoke_tests.primitives import SMOKE_EXPECTED_TEMPLATE_REF_ENV_VAR
+from imbue.minds.smoke_tests.primitives import SMOKE_SHARE_GRANTEE_EMAIL_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_SKIP_DWT_TESTS_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SmokeRunId
 from imbue.minds.smoke_tests.steps import record_skipped_step
@@ -125,6 +128,7 @@ _OOM_DRILL_STEP_LABEL: Final[str] = "Step 3c: run default-workspace-template's O
 _BUILD_STEP_LABEL: Final[str] = "Step 4: have the workspace's agent build and register the hello app"
 _STOP_START_STEP_LABEL: Final[str] = "Step 4b: stop and start the workspace from the home page"
 _SHARE_STEP_LABEL: Final[str] = "Step 5: open the app through the share the create turned on"
+_GRANT_STEP_LABEL: Final[str] = "Step 5b: grant the workspace to an address from its Sharing page"
 _UNSHARE_STEP_LABEL: Final[str] = "Step 6: turn sharing off"
 _DESTROY_STEP_LABEL: Final[str] = "Step 7: destroy the workspace"
 _DWT_RESULTS_DIR_NAME: Final[str] = "dwt"
@@ -465,6 +469,7 @@ def test_the_build_signs_in_creates_builds_stops_starts_shares_and_destroys_a_wo
     is_dwt_tests_skipped: bool,
     storage_restore_wait_seconds: float | None,
     expected_template_ref: str | None,
+    share_grantee_email: str | None,
     backend: SmokeBackend,
     first_run_account: SmokeAccountCredentials,
     first_workspace_name: str,
@@ -604,6 +609,16 @@ def test_the_build_signs_in_creates_builds_stops_starts_shares_and_destroys_a_wo
             screenshot_every_page(studio_app.browser, smoke_output_dir, "06-shared")
             _open_share_as_owner(visitor, share_url, first_run_account, _HELLO_BODY_TEMPLATE.format(nonce=nonce))
             logger.info("Step 5: the share link {} served the hello app", share_url)
+
+        if share_grantee_email is None:
+            record_skipped_step(
+                smoke_steps_path, _GRANT_STEP_LABEL, f"{SMOKE_SHARE_GRANTEE_EMAIL_ENV_VAR} names no address"
+            )
+        else:
+            with recorded_step(smoke_steps_path, _GRANT_STEP_LABEL):
+                invitation = grant_share_from_panel(studio_app, agent_id, share_grantee_email)
+                logger.info("Step 5b: granted the workspace to {} ({})", share_grantee_email, invitation)
+                screenshot_every_page(studio_app.browser, smoke_output_dir, "06b-granted")
 
         with recorded_step(smoke_steps_path, _UNSHARE_STEP_LABEL):
             unpublish_share_from_panel(studio_app, agent_id)

@@ -58,6 +58,7 @@ from imbue.minds.smoke_tests.primitives import SMOKE_PROFILE_FILE_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_RESTORE_FROM_STORAGE_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_RUN_ID_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_SENTRY_ORG_ENV_VAR
+from imbue.minds.smoke_tests.primitives import SMOKE_SHARE_GRANTEE_EMAIL_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_SKIP_DWT_TESTS_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_THROWAWAY_EMAIL_ENV_VAR
 from imbue.minds.smoke_tests.primitives import SMOKE_TIER_ENV_VAR
@@ -109,6 +110,11 @@ SMOKE_RUN_PARAMETER_SPECS: Final[tuple[SmokeRunParameterSpec, ...]] = (
     _parameter_spec(
         SMOKE_RESTORE_FROM_STORAGE_ENV_VAR,
         "1 has step 4b wait until the stopped workspace has left its server, so the start restores it from storage.",
+        is_value_hidden=False,
+    ),
+    _parameter_spec(
+        SMOKE_SHARE_GRANTEE_EMAIL_ENV_VAR,
+        "The address step 5b grants the journey's workspace to, which the tier emails an invitation.",
         is_value_hidden=False,
     ),
     _parameter_spec(
