@@ -14,8 +14,9 @@ import type { ShellState } from "./shell-state";
 export const ACCOUNT_BUTTON_ID = "account-switcher-btn";
 export const WORKSPACE_BUTTON_ID = "workspace-switcher-btn";
 
-/** The trail's buttons: 10px each side, as much before their content as after the chevron. */
-export const TRAIL_BUTTON_INSET = "gap-1.5 min-w-0 !px-2.5";
+/** The trail's buttons, each ending in its menu's chevron: 10px before the content, 6px after the chevron, whose
+ * glyph carries air of its own, and 4px between the parts. */
+export const TRAIL_BUTTON_INSET = "pl-2.5 pr-1.5 py-1 gap-1 min-w-0";
 
 /** What the bar says where no workspace is open, on the button that opens the switcher. */
 export const OPEN_WORKSPACE_LABEL = "Open workspace";

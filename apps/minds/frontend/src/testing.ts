@@ -753,6 +753,16 @@ export function mountInBody(view: () => m.Children): HTMLElement {
   return root;
 }
 
+/** Press, release and click on the backdrop of the Modal drawn under `root`, the
+ * way a mouse click on it arrives; throws when no Modal is drawn. */
+export function clickModalBackdrop(root: ParentNode): void {
+  const viewport = root.querySelector<HTMLElement>(".modal-viewport");
+  if (viewport === null) throw new Error("no modal backdrop");
+  for (const type of ["mousedown", "mouseup", "click"]) {
+    viewport.dispatchEvent(new MouseEvent(type, { bubbles: true }));
+  }
+}
+
 /** The button under `root` whose text is exactly `label`; throws when there is
  * none. */
 export function buttonLabelled(

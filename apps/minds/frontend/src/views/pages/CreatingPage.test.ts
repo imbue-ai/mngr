@@ -271,7 +271,7 @@ describe("CreatingPage", () => {
     expect(allText(byId(building, "creating-welcome"))).toBe("Welcome, Gleb!");
     expect(allText(byId(building, "creating-setting-up"))).toBe(SETTING_UP_LINE);
     expect(byId(building, "creating-welcome-bar")).toBeDefined();
-    // Nothing to pick and no Continue while it builds: the one control is the log's toggle.
+    // Nothing to pick while it builds: the one control is the log's toggle.
     const buttons = collectVnodes(building).filter((node) => node.tag === "button");
     expect(buttons.map((button) => allText(button))).toEqual(["Show details"]);
     expect(collectVnodes(building).filter((node) => node.tag === "input")).toEqual([]);
@@ -305,15 +305,14 @@ describe("CreatingPage", () => {
     (second.page.onremove as () => void).call(second.page);
   });
 
-  it("enters under the cover only once the workspace has its seed, and offers Continue when its chat is on screen", async () => {
-    const { page, render, entered, focusRequests, landings, seedPosts, settleSeed } = mountLiveAttempt(
+  it("enters under the cover only once the workspace has its seed, and says it is ready when its chat is on screen", async () => {
+    const { page, entered, focusRequests, landings, seedPosts, settleSeed } = mountLiveAttempt(
       "create-attempt-d",
       "DONE",
     );
     // Asked once the page knew the attempt was live, and again once it was done.
     await vi.waitFor(() => expect(seedPosts).toHaveLength(2));
     await vi.advanceTimersByTimeAsync(5_000);
-    expect(byId(renderDeep(render()), "creating-continue")).toBeUndefined();
     expect(entered).toEqual([]);
     expect(firstRunCover.state).toBeNull();
 
@@ -339,7 +338,7 @@ describe("CreatingPage", () => {
     expect(landings).toEqual([{ landing: "ON_SCREEN", waited_ms: expect.any(Number) }]);
   });
 
-  it("offers Continue at once when the seed definitively fails, and records why", async () => {
+  it("says it is ready at once when the seed definitively fails, and records why", async () => {
     const { page, entered, focusRequests, landings, seedPosts, failSeed } = mountLiveAttempt(
       "create-attempt-s",
       "DONE",
@@ -355,7 +354,7 @@ describe("CreatingPage", () => {
     (page.onremove as () => void).call(page);
   });
 
-  it("offers Continue once the provider chooser is on screen", async () => {
+  it("says it is ready once the provider chooser is on screen", async () => {
     const mounted = mountLiveAttempt("create-attempt-p", "DONE");
     await runToEntry(mounted);
     expect(firstRunCover.state?.isReady).toBe(false);
@@ -366,7 +365,7 @@ describe("CreatingPage", () => {
     expect(mounted.landings).toEqual([{ landing: "PROVIDER_CHOOSER_ON_SCREEN", waited_ms: expect.any(Number) }]);
   });
 
-  it("offers Continue at the bound when the chat never shows, so the user is not stranded", async () => {
+  it("says it is ready at the bound when the chat never shows, so the user is not stranded", async () => {
     const mounted = mountLiveAttempt("create-attempt-t", "DONE");
     await runToEntry(mounted);
 

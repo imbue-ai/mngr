@@ -72,12 +72,12 @@ export const OPEN_SHARE_SETTINGS = "minds:open-share-settings";
 export const WORKSPACE_READY = "minds:workspace-ready";
 // Workspace -> embedder: this chat's transcript is drawn in a window the user
 // can see. Payload: { chatId } (the chat's id, which is its first agent's id).
-// The chrome's cover over a new workspace offers Continue once the welcome
-// chat says this.
+// The chrome's cover over a new workspace says it is ready and lowers once the
+// welcome chat says this.
 export const CHAT_ON_SCREEN = "minds:chat-on-screen";
 // workspace -> embedder: the AI-provider chooser is drawn in a window the user
 // can see. Payload: {}. Sent once per chat root page load. The chrome's
-// cover over a new workspace offers Continue on this as well as on the welcome
+// cover over a new workspace says it is ready and lowers on this as well as on the welcome
 // chat's CHAT_ON_SCREEN, since the user's next step is to pick a provider
 // whichever chat is behind it.
 export const PROVIDER_CHOOSER_ON_SCREEN = "minds:provider-chooser-on-screen";

@@ -1,12 +1,14 @@
 import m from "mithril";
 import { splitAttrs } from "./attrs";
 
-export type TitlebarButtonVariant = "nav" | "crumb" | "control";
+export type TitlebarButtonVariant = "nav" | "crumb" | "trail" | "control";
 export type TitlebarButtonTone = "default" | "muted" | "danger";
 
 const VARIANTS: Record<TitlebarButtonVariant, string> = {
   nav: "p-1.5 rounded-md",
   crumb: "px-1.5 py-1 rounded-md",
+  // The account and workspace buttons: their padding is the trail's own (views/shell/trail.ts, TRAIL_BUTTON_INSET).
+  trail: "rounded-md",
   control: "w-9 h-(--titlebar-height) rounded-none",
 };
 

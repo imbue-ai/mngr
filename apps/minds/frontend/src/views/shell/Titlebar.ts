@@ -189,7 +189,8 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
             m("span", {
               role: "img",
               "aria-label": "Imbue Studio",
-              class: "block h-[18px] w-[64px] bg-current text-primary",
+              // 1px up within the button; the button keeps its own box.
+              class: "block h-[18px] w-[64px] -translate-y-px bg-current text-primary",
               style:
                 `mask: url("${lockupUrl}") no-repeat center / contain;` +
                 ` -webkit-mask: url("${lockupUrl}") no-repeat center / contain;`,
@@ -204,7 +205,7 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
               "aria-haspopup": "menu",
               "aria-expanded": isAccountMenuOpen ? "true" : "false",
               "data-account-id": shell.accountId,
-              variant: "crumb",
+              variant: "trail",
               extra: trailButtonExtra(isAccountMenuOpen, popupHiddenClass),
               onclick: () => (isAccountMenuOpen ? shell.closeAccountSwitcher() : shell.openAccountSwitcher()),
             },
@@ -224,7 +225,7 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                       "data-tooltip": isWorkspace ? "Switch workspace" : "Open a workspace",
                       "aria-haspopup": "menu",
                       "aria-expanded": isWorkspaceMenuOpen ? "true" : "false",
-                      variant: "crumb",
+                      variant: "trail",
                       extra: trailButtonExtra(
                         isWorkspaceMenuOpen,
                         popupHiddenClass + chromeAnchorRingClass(shell, "workspace-switcher"),

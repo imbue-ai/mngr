@@ -10,7 +10,7 @@
 // The page asks the desktop client to seed the new workspace's first chat as soon as it knows the attempt is
 // live, so the workspace is seeded even if the page is left before it is ready. When the attempt is done the
 // workspace loads under the shell's cover (models/firstRunCover.ts), which carries this page's heading on and
-// offers Continue once the workspace has its provider page, or its chat, on screen.
+// says the workspace is ready, then lowers, once the workspace has its provider page, or its chat, on screen.
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
@@ -166,8 +166,8 @@ export const CreatingPage: m.ClosureComponent = () => {
 
   /**
    * The create is done: once the workspace has its seed (which is what tells it to play its arrival), load the
-   * workspace under the shell's cover, which carries this page's heading on and offers Continue only when the
-   * workspace has its provider page, or its chat, on screen.
+   * workspace under the shell's cover, which carries this page's heading on and says it is ready, then lowers, only
+   * when the workspace has its provider page, or its chat, on screen.
    */
   function beginEntry(redirectUrl: string): void {
     const own = state;

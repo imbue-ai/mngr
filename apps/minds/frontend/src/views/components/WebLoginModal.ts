@@ -123,13 +123,15 @@ export function WebLoginModal(): m.Component<WebLoginModalAttrs> {
       const isDone = webLogin.state === "done";
       return m(
         Modal,
-        // lg, not the default sm: the sign-in URL is long.
+        // lg, not the default sm: the sign-in URL is long. The user comes back to this window from the browser mid
+        // sign-in, and the click that does it must not cancel the sign-in, so only Escape and the buttons close it.
         {
           isOpen: true,
           size: "lg",
           onClose: () => webLogin.dismiss(),
+          isBackdropDismissable: false,
           backdrop: vnode.attrs.backdrop,
-          // Over a first-run page the sign-in is part of the first run, so it wears its cream.
+          // Over a first-run page the sign-in is part of the first run, so it wears the first run's white card.
           card: vnode.attrs.backdrop === "wash" ? "first-run" : "surface",
         },
         m("h2", { class: "type-heading mb-2" }, isDone ? "You're signed in" : "Sign in to Imbue"),

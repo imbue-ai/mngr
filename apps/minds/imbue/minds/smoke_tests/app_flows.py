@@ -1,8 +1,7 @@
 """The journey's steps inside the launched Imbue Studio app, driven through its own UI.
 
 Every control here is the one a user presses on a fresh install: the first-run
-page's error-reporting checkbox and its Sign in, the Continue on the cover over
-the workspace the app then creates by itself, the Next on the workspace's
+page's error-reporting checkbox and its Sign in, the Next on the workspace's
 provider page, the desktop's launcher field, the home page's Stop and Start,
 Settings' Sharing page, and its General page's destroy.
 What the UI did is then confirmed by reading the app's own routes,
@@ -40,7 +39,6 @@ from imbue.minds.desktop_client.e2e_workspace_runner import FIRST_RUN_PROVIDERS_
 from imbue.minds.desktop_client.e2e_workspace_runner import PageFetchAnswer
 from imbue.minds.desktop_client.e2e_workspace_runner import USER_TURN_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import chat_frame
-from imbue.minds.desktop_client.e2e_workspace_runner import continue_from_first_run_cover
 from imbue.minds.desktop_client.e2e_workspace_runner import fetch_from_page
 from imbue.minds.desktop_client.e2e_workspace_runner import find_chat_frame
 from imbue.minds.desktop_client.e2e_workspace_runner import first_run_providers_frame
@@ -49,6 +47,7 @@ from imbue.minds.desktop_client.e2e_workspace_runner import request_chat_api
 from imbue.minds.desktop_client.e2e_workspace_runner import send_to_main_chat_from_launcher
 from imbue.minds.desktop_client.e2e_workspace_runner import stop_workspace_from_home_page
 from imbue.minds.desktop_client.e2e_workspace_runner import wait_for_workspace_ready_or_failure
+from imbue.minds.desktop_client.e2e_workspace_runner import wait_out_first_run_cover
 from imbue.minds.desktop_client.e2e_workspace_runner import workspace_coordinate_from_subdomain
 from imbue.minds.smoke_tests.data_types import StudioAppSession
 from imbue.minds.smoke_tests.primitives import SmokeAppError
@@ -344,9 +343,9 @@ def wait_for_first_workspace(session: StudioAppSession) -> Frame:
     return workspace_frame
 
 
-def continue_to_provider_page(session: StudioAppSession, workspace_frame: Frame) -> Frame:
-    """Press Continue on the cover over the new workspace; return the frame of the provider page it reveals."""
-    continue_from_first_run_cover(session.page)
+def reach_provider_page(session: StudioAppSession, workspace_frame: Frame) -> Frame:
+    """Wait for the cover over the new workspace to lower itself; return the frame of the provider page it reveals."""
+    wait_out_first_run_cover(session.page)
     return first_run_providers_frame(workspace_frame, FIRST_RUN_PROVIDERS_TIMEOUT_SECONDS)
 
 

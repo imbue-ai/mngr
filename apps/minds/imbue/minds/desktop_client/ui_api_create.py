@@ -356,7 +356,7 @@ class WelcomeChatResponse(FrozenModel):
 
 
 class WelcomeChatLanding(UpperCaseStrEnum):
-    """How the cover over a new workspace came to offer Continue."""
+    """How the cover over a new workspace came to say it is ready."""
 
     ON_SCREEN = auto()
     PROVIDER_CHOOSER_ON_SCREEN = auto()
@@ -368,9 +368,9 @@ class WelcomeChatLanding(UpperCaseStrEnum):
 class WelcomeChatLandingRequest(FrozenModel):
     """Body of POST /ui/api/create/attempts/<id>/welcome-chat/landing."""
 
-    landing: WelcomeChatLanding = Field(description="How the cover came to offer Continue")
+    landing: WelcomeChatLanding = Field(description="How the cover came to say it is ready")
     waited_ms: NonNegativeInt = Field(
-        description="From the page seeing the attempt done to the cover offering Continue"
+        description="From the page seeing the attempt done to the cover saying it is ready"
     )
 
 

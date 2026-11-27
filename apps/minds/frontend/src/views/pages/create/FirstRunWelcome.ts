@@ -1,11 +1,11 @@
 // The creation page's one layout (specs/onboarding-tweaks): its heading and whatever stands under it (the build's
-// progress or its failure, then Continue). Drawn by the creation page while the workspace is built, and by the
-// shell's cover over the workspace while it loads (views/shell/FirstRunCover.ts), so the two read as one screen.
+// progress or its failure, then that the workspace is ready). Drawn by the creation page while the workspace is
+// built, and by the shell's cover over the workspace while it loads (views/shell/FirstRunCover.ts), so the two read
+// as one screen.
 
 import m from "mithril";
 
 export const WORKSPACE_READY_LINE = "Your workspace is ready!";
-export const CONTINUE_LABEL = "Continue";
 
 export interface FirstRunWelcomeAttrs {
   /** The element's id: the creation page's is `creating`. */
@@ -36,7 +36,7 @@ export function firstRunWelcome(attrs: FirstRunWelcomeAttrs): m.Children {
         { key: "heading", id: "creating-welcome", class: "first-run-headline text-center text-[40px]" },
         attrs.heading,
       ),
-      // One height for whatever stands here (progress, opening, Continue), so the heading above it never moves
+      // One height for whatever stands here (progress, opening, ready), so the heading above it never moves
       // as one gives way to the next.
       m("div", { key: "status", class: "flex min-h-[120px] w-full flex-col items-center" }, attrs.status),
       ...(attrs.overlays ?? []),
@@ -64,19 +64,9 @@ export function settingUpStatus(line: string, percent: number, extra: m.Children
   ]);
 }
 
-/** "Your workspace is ready!" and Continue. */
-export function readyStatus(onContinue: () => void): m.Children {
-  return m("div", { class: "mt-10 flex flex-col items-center gap-4" }, [
-    m("p", { id: "creating-ready", class: "text-[18px]" }, WORKSPACE_READY_LINE),
-    m(
-      "button",
-      {
-        id: "creating-continue",
-        type: "button",
-        class: "first-run-button type-heading",
-        onclick: onContinue,
-      },
-      CONTINUE_LABEL,
-    ),
+/** "Your workspace is ready!", standing for a beat before the welcome gives way to the workspace. */
+export function readyStatus(): m.Children {
+  return m("div", { class: "mt-10 flex flex-col items-center" }, [
+    m("p", { id: "creating-ready", class: "text-lg" }, WORKSPACE_READY_LINE),
   ]);
 }

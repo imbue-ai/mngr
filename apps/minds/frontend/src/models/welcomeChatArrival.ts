@@ -1,5 +1,5 @@
 // Knowing when a new workspace's welcome chat, or the AI-provider chooser, is
-// really on screen, so the cover over the workspace offers Continue only then.
+// really on screen, so the cover over the workspace says it is ready and lowers only then.
 // Outlives the creation page, like the cover it readies: the page is gone once
 // the workspace is mounted, and the answer only comes from the workspace's
 // frame after that.

@@ -2,9 +2,9 @@
 
 Launch the app and reach its first-run sign-in page; sign in to Imbue Cloud
 from that page, completing the hosted page in the suite's browser; let the app
-create the account's first Imbue Cloud workspace by itself, and press Continue
-when it is ready; connect the account's AI provider on the workspace's provider
-page and press Next; run default-workspace-template's CI test suites and its
+create the account's first Imbue Cloud workspace by itself, and wait for the
+cover over it to lower itself; connect the account's AI provider on the
+workspace's provider page and press Next; run default-workspace-template's CI test suites and its
 OOM drill inside the workspace; have its agent build and register a hello-world
 web app; stop the workspace from the home page, start it again, and have the
 agent bring the app back; open the app's route through the share the create
@@ -51,13 +51,13 @@ from imbue.minds.smoke_tests.accounts import sign_in
 from imbue.minds.smoke_tests.accounts import wait_for_workspace
 from imbue.minds.smoke_tests.app_flows import adopt_imbue_credentials
 from imbue.minds.smoke_tests.app_flows import agent_id_of_workspace_frame
-from imbue.minds.smoke_tests.app_flows import continue_to_provider_page
 from imbue.minds.smoke_tests.app_flows import destroy_workspace_from_settings
 from imbue.minds.smoke_tests.app_flows import grant_share_from_panel
 from imbue.minds.smoke_tests.app_flows import is_workspace_gone
 from imbue.minds.smoke_tests.app_flows import list_workspaces
 from imbue.minds.smoke_tests.app_flows import mint_workspace_llm_credentials
 from imbue.minds.smoke_tests.app_flows import open_welcome_chat
+from imbue.minds.smoke_tests.app_flows import reach_provider_page
 from imbue.minds.smoke_tests.app_flows import read_sharing_status
 from imbue.minds.smoke_tests.app_flows import screenshot_every_page
 from imbue.minds.smoke_tests.app_flows import send_prompt_to_known_main_chat
@@ -121,7 +121,7 @@ _OOM_DRILL_STEP_OVERHEAD_SECONDS: Final[int] = 3 * 60
 # The journey's steps, as its run report's step table names them.
 _LAUNCH_STEP_LABEL: Final[str] = "Step 1: launch the app and reach its first-run sign-in page"
 _SIGN_IN_STEP_LABEL: Final[str] = "Step 2: sign in to Imbue Cloud from the sign-in page"
-_CREATE_STEP_LABEL: Final[str] = "Step 3: let the app create the account's first workspace, and press Continue"
+_CREATE_STEP_LABEL: Final[str] = "Step 3: let the app create the account's first workspace, and wait out its cover"
 _PROVIDER_STEP_LABEL: Final[str] = "Step 3a: connect the account's AI provider on the workspace's provider page"
 _DWT_STEP_LABEL: Final[str] = "Step 3b: run default-workspace-template's CI suites in the workspace"
 _OOM_DRILL_STEP_LABEL: Final[str] = "Step 3c: run default-workspace-template's OOM drill in the workspace"
@@ -521,7 +521,7 @@ def test_the_build_signs_in_creates_builds_stops_starts_shares_and_destroys_a_wo
             )
             if expected_template_ref is not None:
                 _assert_workspace_is_at_expected_template(expected_template_ref, leased_template_ref, host_db_id)
-            providers_page = continue_to_provider_page(studio_app, workspace_frame)
+            providers_page = reach_provider_page(studio_app, workspace_frame)
             screenshot_every_page(studio_app.browser, smoke_output_dir, "04-workspace-ready")
             sharing = wait_for_sharing_enabled(studio_app, agent_id, _SHARE_ENABLED_TIMEOUT_SECONDS)
             record_created_resource(

@@ -5,14 +5,14 @@
   <title>Imbue Studio</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    /* Loading / quitting / error takeover screen: a white page carrying the
+    /* Loading / quitting / error takeover screen: a cream page carrying the
        lockup. On an installation's first launch (loaded with the #intro hash)
        the page plays the intro on the brand's brown instead, in two halves.
        The letters pop in one after the next (intro-pop.js), and once they have
        settled the loader fades in under them; the page holds there for as long
        as starting up takes. When main says the app is ready the loader goes,
        the lockup travels up to where the start route will hold it, and the
-       page settles -- the brown goes white and the mark goes brown with it,
+       page settles -- the brown goes cream and the mark goes brown with it,
        arriving at the state every later launch opens on at once. The route
        lands at the end of that, so the travel always means the same thing:
        the app is ready. */
@@ -21,11 +21,11 @@
          plays on and the cream drawn on it. The mark settles to
          --intro-surface, so it ends the colour the page began. */
       --intro-surface: #492222;
-      --intro-ink: #e9ecd9;
+      --intro-ink: #fff8e9;
       --ink: #000000;
       --ink-secondary: rgb(0 0 0 / 0.65);
       --ink-tertiary: rgb(0 0 0 / 0.45);
-      --surface: #ffffff;
+      --surface: #fff8e9;
       --fill-subtle: rgb(0 0 0 / 0.04);
       --fill-hover: rgb(0 0 0 / 0.06);
       --border-default: rgb(0 0 0 / 0.17);
@@ -90,8 +90,8 @@
     }
     /* The page is the brand's, whatever it is doing -- starting, quitting or
        reporting a failure. Only the hand-off to the start flow takes it to
-       white, and only because the mark is going to the titlebar of a white
-       page. The stack carries the colour so it goes white under the mark at the
+       cream, and only because the mark is going to the titlebar of a cream
+       page. The stack carries the colour so it goes cream under the mark at the
        settle without a second layer to keep in step. */
     #stack { background-color: var(--intro-surface); }
     body.settling #stack { background-color: var(--surface); }
@@ -165,7 +165,7 @@
       transition: none;
     }
     /* Everything in the stack keeps its shapes on the brand's page but not its
-       ink, which is the near-black of a white one. Re-inking the stack's own
+       ink, which is the near-black of a cream one. Re-inking the stack's own
        vars is what carries that: the bar, the phase line, the log, the error
        heading and its buttons all read their colour from these, so none of
        their rules is restated here. */
@@ -179,7 +179,7 @@
       /* What reads ON the ink, for the one control that is a filled block of
          it. NOT --surface: the settle sets the stack's background to --surface,
          so redefining that here would paint the page brown at the moment it is
-         supposed to be going white. */
+         supposed to be going cream. */
       --ink-inverse: var(--intro-surface);
     }
     body.error #status-block { display: none; }

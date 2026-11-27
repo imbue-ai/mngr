@@ -642,7 +642,7 @@ def test_create_workspace_and_sign_in_via_modal_then_chat_via_electron(
 
     The product-level first-boot round-trip: the create flow injects no AI
     credentials, so the workspace boots unauthenticated, under the app's cover
-    and then its own provider page; the test presses Continue, opens the
+    and then its own provider page; the test waits out the cover, opens the
     chooser from the page's Anthropic tile and fills its API-key path in the
     real UI (which mints a provider account holding the key), and presses Next,
     which starts the agent of the chat the desktop opens on. It then picks the

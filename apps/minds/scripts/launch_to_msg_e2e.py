@@ -1132,7 +1132,7 @@ def _create_workspace_and_first_message(
 
     Steps: navigate to /create, fill the form for `host_name`, submit,
     poll /api/v1/workspaces/operations/create/<id> until DONE, go through the
-    first run the workspace opens on (the cover's Continue, then the
+    first run the workspace opens on (the cover lowering itself, then the
     workspace's provider page: signed in from its Anthropic tile in API_KEY
     mode, since the create flow injects no AI credentials and the workspace
     boots unauthenticated; left with Next in SUBSCRIPTION mode), send
@@ -1539,7 +1539,7 @@ def run_e2e() -> int:
 
         # 4-6. Create agent via UI click and drive to first message. Mirrors
         # what a user does (Configure panel, launch_mode field, host_name fill,
-        # submit, poll until DONE, press Continue on the cover, sign in on the
+        # submit, poll until DONE, wait out the cover, sign in on the
         # workspace's provider page in API_KEY mode, send FIRST_PROMPT in the chat
         # the workspace shows, wait for >=2 occurrences of FIRST_EXPECT in body).
         # See _create_workspace_and_first_message for the exact step list.

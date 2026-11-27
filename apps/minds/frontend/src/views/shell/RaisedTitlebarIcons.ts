@@ -229,7 +229,7 @@ export function RaisedTitlebarIcons(): m.Component<RaisedTitlebarIconsAttrs> {
                 },
                 class:
                   RAISED_BASE +
-                  (isTrail ? `px-1.5 py-1 ${TRAIL_BUTTON_INSET} ` : "p-1.5 ") +
+                  (isTrail ? `${TRAIL_BUTTON_INSET} ` : "p-1.5 ") +
                   (isSelected
                     ? RAISED_SELECTED
                     : RAISED_UNSELECTED + (isTrail ? " text-primary" : " text-secondary")),

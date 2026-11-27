@@ -66,10 +66,11 @@
      bar and the home page; the first run's cream in light mode */
   --c-surface-app: var(--first-run-ground);
 }
-/* A white surface in light mode (cards, modals, menus, tooltips) is drawn in black ink. Two kinds keep their own
+/* A white surface in light mode (cards, modals, menus) is drawn in black ink, and so is a tooltip, which wears the
+   ink as its ground: black, not the page's brown. Two kinds keep their own
    tokens: a surface a component draws dark on purpose (`dark` on the element or an ancestor),
    and one that takes its contrast from its own color (`titlebar-surface`: the workspace cards, status chips). */
-:root:not(.dark) :is(.bg-surface-primary, .bg-white, .minds-card):not(.dark, .dark *, .titlebar-surface) {
+:root:not(.dark) :is(.bg-surface-primary, .bg-white, .minds-card, .minds-tooltip):not(.dark, .dark *, .titlebar-surface) {
   --c-ink: #000000;
   --c-ink-secondary-alpha: 0.65;
   --c-ink-tertiary-alpha: 0.45;
@@ -79,7 +80,7 @@
    changes the ink re-derives them from its own. */
 :root,
 .light,
-:root:not(.dark) :is(.bg-surface-primary, .bg-white, .minds-card):not(.dark, .dark *, .titlebar-surface) {
+:root:not(.dark) :is(.bg-surface-primary, .bg-white, .minds-card, .minds-tooltip):not(.dark, .dark *, .titlebar-surface) {
   /* regular text (on the surface) -- the ink at three alpha steps */
   --c-text-primary: var(--c-ink);
   --c-text-secondary: rgb(from var(--c-ink) r g b / var(--c-ink-secondary-alpha));
@@ -1222,7 +1223,7 @@ body.first-run-chrome #minds-titlebar {
   line-height: 1.15;
 }
 .first-run-button {
-  padding: 16px 28px;
+  padding: 12px 20px;
   border-radius: 9999px;
   background: var(--first-run-ink);
   color: var(--first-run-ground);
@@ -1285,15 +1286,15 @@ body.first-run-chrome #minds-titlebar {
 .modal-backdrop-wash {
   background-color: rgb(from var(--first-run-ground) r g b / 0.9);
 }
-/* A modal card that belongs to the first run (the sign-in's): the pages' cream and brown ink in place of the app's
-   white card, in either theme. The ink-drawn tokens are declared again here because they resolve where they are
-   declared. */
+/* A modal card that belongs to the first run (the sign-in's): white in black ink, like the start page's tooltips, in
+   either theme, since the first-run page under it stays cream in dark mode too. The ink-drawn tokens are declared
+   again here because they resolve where they are declared. */
 .first-run-card {
-  --c-ink: var(--first-run-ink);
+  --c-ink: #000000;
   --c-text-primary: var(--c-ink);
-  --c-text-secondary: rgb(from var(--c-ink) r g b / 0.8);
-  --c-text-tertiary: rgb(from var(--c-ink) r g b / 0.65);
-  --c-text-inverse-primary: var(--first-run-ground);
+  --c-text-secondary: rgb(from var(--c-ink) r g b / 0.65);
+  --c-text-tertiary: rgb(from var(--c-ink) r g b / 0.45);
+  --c-text-inverse-primary: #ffffff;
   --c-border-subtle: rgb(from var(--c-ink) r g b / 0.1);
   --c-border-default: rgb(from var(--c-ink) r g b / 0.17);
   --c-border-strong: rgb(from var(--c-ink) r g b / 0.25);
@@ -1302,8 +1303,7 @@ body.first-run-chrome #minds-titlebar {
   --c-fill-subtle: rgb(from var(--c-ink) r g b / 0.04);
   --c-fill-hover: rgb(from var(--c-ink) r g b / 0.06);
   --c-fill-active: rgb(from var(--c-ink) r g b / 0.1);
-  border: 1px solid var(--first-run-line);
-  background: var(--first-run-ground);
+  background: #ffffff;
   color: var(--c-ink);
 }
 .first-run-bar {

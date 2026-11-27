@@ -1518,10 +1518,9 @@ def _describe_chat_frame(chat: Frame) -> str:
 
 
 # The cover the Studio shell keeps over a workspace it has just created (``views/shell/FirstRunCover.ts``), in the
-# chrome page, and the Continue it offers once the workspace reports its provider page on screen, or once the
-# shell has waited long enough for that report.
+# chrome page. It says the workspace is ready and lowers by itself once the workspace reports its provider page on
+# screen, or once the shell has waited long enough for that report.
 _STUDIO_COVER_SELECTOR: Final[str] = "#first-run-cover"
-_STUDIO_COVER_CONTINUE_SELECTOR: Final[str] = "#creating-continue"
 # The template's own cover over the new workspace's desktop, in the workspace's frame: a frame of the chat app's
 # provider page (``FirstRunProvidersPage.ts``), which the system interface gives the same id the Studio cover has.
 _WORKSPACE_COVER_SELECTOR: Final[str] = "iframe#first-run-cover"
@@ -1536,11 +1535,11 @@ _FIRST_RUN_ANY_ACCOUNT_SELECTOR: Final[str] = "[data-first-run-account]"
 # The chooser a tile opens, drawn in the provider page's own frame, on the tile's lane.
 _PROVIDER_CHOOSER_SELECTOR: Final[str] = "[data-e2e=provider-chooser]"
 _ACCOUNTS_API_PATH: Final[str] = "/api/accounts"
-# Well past the bound after which the shell offers Continue without the workspace's report
-# (``WELCOME_CHAT_WAIT_BOUND_MS`` in ``welcomeChatArrival.ts``).
-_STUDIO_COVER_CONTINUE_TIMEOUT_SECONDS: Final[float] = 120.0
-_STUDIO_COVER_DOWN_TIMEOUT_MS: Final[float] = 30_000.0
-# A Continue the shell offered because it stopped waiting lands on a workspace still booting its apps, so the
+# Well past the bound after which the shell lowers the cover without the workspace's report
+# (``WELCOME_CHAT_WAIT_BOUND_MS`` in ``welcomeChatArrival.ts``), with its hold on "Your workspace is ready!"
+# (``READY_HOLD_MS`` in ``firstRunCover.ts``) and its fade on top.
+_STUDIO_COVER_DOWN_TIMEOUT_SECONDS: Final[float] = 150.0
+# A cover the shell lowered because it stopped waiting lands on a workspace still booting its apps, so the
 # provider page gets the budget a fresh workspace's first chat page does.
 FIRST_RUN_PROVIDERS_TIMEOUT_SECONDS: Final[float] = 240.0
 _FIRST_RUN_CONTROL_TIMEOUT_MS: Final[float] = 60_000.0
@@ -1549,14 +1548,10 @@ _FIRST_RUN_CONTROL_TIMEOUT_MS: Final[float] = 60_000.0
 _FIRST_RUN_COVER_DOWN_TIMEOUT_MS: Final[float] = 60_000.0
 
 
-def continue_from_first_run_cover(page: Page) -> None:
-    """Press Continue on the cover the app keeps over a workspace it has just created, once the cover offers it."""
-    page.wait_for_selector(
-        _STUDIO_COVER_CONTINUE_SELECTOR, state="visible", timeout=_STUDIO_COVER_CONTINUE_TIMEOUT_SECONDS * 1000
-    )
-    page.click(_STUDIO_COVER_CONTINUE_SELECTOR)
-    page.wait_for_selector(_STUDIO_COVER_SELECTOR, state="detached", timeout=_STUDIO_COVER_DOWN_TIMEOUT_MS)
-    logger.info("Pressed Continue on the cover over the new workspace")
+def wait_out_first_run_cover(page: Page) -> None:
+    """Wait for the cover the app keeps over a workspace it has just created to lower itself."""
+    page.wait_for_selector(_STUDIO_COVER_SELECTOR, state="detached", timeout=_STUDIO_COVER_DOWN_TIMEOUT_SECONDS * 1000)
+    logger.info("The cover over the new workspace lowered itself")
 
 
 def _find_workspace_cover_frame(workspace: Frame) -> Frame | None:
@@ -1690,13 +1685,13 @@ def _sign_in_from_first_run_tile(providers: Frame, api_key: SecretStr, *, label:
 def complete_first_run(page: Page, workspace: Frame, provider_choice: FirstRunProviderChoice, *, label: str) -> None:
     """Go through the first run a just-created workspace opens on; return once its desktop has rendered.
 
-    Every create that goes through the creation page loads its workspace under the app's cover, which offers
-    Continue; the workspace under it is itself covered by its provider page until its owner presses Skip, or
+    Every create that goes through the creation page loads its workspace under the app's cover, which lowers
+    itself; the workspace under it is itself covered by its provider page until its owner presses Skip, or
     connects a provider and presses Next. ``page`` is the chrome page the cover is on, and ``workspace`` the
     frame ``wait_for_workspace_ready_or_failure`` returned. Signing in here starts the main chat's agent as
     the page is left, so the chat the desktop opens on can be messaged at once.
     """
-    continue_from_first_run_cover(page)
+    wait_out_first_run_cover(page)
     providers = first_run_providers_frame(workspace, FIRST_RUN_PROVIDERS_TIMEOUT_SECONDS)
     match provider_choice:
         case LeaveFirstRunProviderPageSignedOut():

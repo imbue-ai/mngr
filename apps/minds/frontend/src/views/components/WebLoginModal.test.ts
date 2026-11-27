@@ -2,8 +2,8 @@
 import m from "mithril";
 import { afterEach, describe, expect, it } from "vitest";
 import { webLogin } from "../../models/webLogin";
-import { mountInBody } from "../../testing";
-import type { ModalBackdrop } from "./Modal";
+import { clickModalBackdrop, mountInBody } from "../../testing";
+import { type ModalBackdrop, dismissTopmostModal } from "./Modal";
 import { WebLoginModal } from "./WebLoginModal";
 
 afterEach(() => {
@@ -22,7 +22,7 @@ function cardOver(backdrop: ModalBackdrop): HTMLElement {
 }
 
 describe("WebLoginModal", () => {
-  it("wears the first run's cream card over a first-run page", () => {
+  it("wears the first run's white card over a first-run page", () => {
     const card = cardOver("wash");
 
     expect(card.classList.contains("first-run-card")).toBe(true);
@@ -34,5 +34,21 @@ describe("WebLoginModal", () => {
 
     expect(card.classList.contains("bg-surface-primary")).toBe(true);
     expect(card.classList.contains("first-run-card")).toBe(false);
+  });
+
+  it("keeps the sign-in going through a click on its backdrop", () => {
+    cardOver("wash");
+
+    clickModalBackdrop(document);
+
+    expect(webLogin.state).toBe("waiting");
+  });
+
+  it("cancels the sign-in on Escape", () => {
+    cardOver("wash");
+
+    dismissTopmostModal();
+
+    expect(webLogin.state).toBe("idle");
   });
 });

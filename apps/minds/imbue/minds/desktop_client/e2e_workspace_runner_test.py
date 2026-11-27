@@ -45,7 +45,6 @@ from imbue.minds.desktop_client.e2e_workspace_runner import _drain_byte_stream_t
 from imbue.minds.desktop_client.e2e_workspace_runner import _read_failure_message
 from imbue.minds.desktop_client.e2e_workspace_runner import chat_frame
 from imbue.minds.desktop_client.e2e_workspace_runner import complete_first_run
-from imbue.minds.desktop_client.e2e_workspace_runner import continue_from_first_run_cover
 from imbue.minds.desktop_client.e2e_workspace_runner import enter_workspace_from_home_page
 from imbue.minds.desktop_client.e2e_workspace_runner import find_chat_frame
 from imbue.minds.desktop_client.e2e_workspace_runner import first_run_providers_frame
@@ -60,6 +59,7 @@ from imbue.minds.desktop_client.e2e_workspace_runner import start_workspace_from
 from imbue.minds.desktop_client.e2e_workspace_runner import stop_workspace_from_home_page
 from imbue.minds.desktop_client.e2e_workspace_runner import switch_chat_to_cheapest_model
 from imbue.minds.desktop_client.e2e_workspace_runner import wait_for_workspace_ready_or_failure
+from imbue.minds.desktop_client.e2e_workspace_runner import wait_out_first_run_cover
 
 # A workspace-ready URL (matches the agent-subdomain pattern) and a still-pending
 # backend URL (does not), used to drive the waiter's success/failure branches.
@@ -495,14 +495,10 @@ class _FakeFirstRunWorkspace:
         self.wait_for_timeout_calls += 1
 
 
-def test_continuing_from_the_cover_presses_continue_once_offered_and_waits_for_the_cover_to_go() -> None:
+def test_waiting_out_the_cover_presses_nothing_and_waits_for_the_cover_to_go() -> None:
     page = _FakeCoveredChromePage()
-    continue_from_first_run_cover(cast(Page, page))
-    assert page.actions == [
-        ("wait", "#creating-continue", "visible"),
-        ("click", "#creating-continue"),
-        ("wait", _STUDIO_COVER, "detached"),
-    ]
+    wait_out_first_run_cover(cast(Page, page))
+    assert page.actions == [("wait", _STUDIO_COVER, "detached")]
 
 
 def test_the_provider_page_s_frame_is_the_one_the_workspace_s_cover_holds() -> None:
@@ -539,7 +535,7 @@ def test_the_first_run_is_left_with_skip_on_a_workspace_that_holds_no_account() 
 
     complete_first_run(cast(Page, page), cast(Frame, workspace), LeaveFirstRunProviderPageSignedOut(), label="test")
 
-    assert ("click", "#creating-continue") in page.actions
+    assert page.actions[0] == ("wait", _STUDIO_COVER, "detached")
     assert providers.actions == [("click", "#first-run-skip")]
     assert workspace.waits == [(_WORKSPACE_COVER, "detached"), (DESKTOP_BACKDROP_SELECTOR, "visible")]
 

@@ -5,6 +5,7 @@
 // lifecycle says.
 import m from "mithril";
 import { afterEach, describe, expect, it } from "vitest";
+import { clickModalBackdrop } from "../../testing";
 import { Modal, dismissTopmostModal, isAnyModalOpen } from "./Modal";
 
 let root: HTMLElement | null = null;
@@ -217,5 +218,27 @@ describe("a Modal raised from inside another", () => {
     expect(isAnyModalOpen()).toBe(false);
     expect(dismissTopmostModal()).toBe(false);
     expect(closed).toEqual([]);
+  });
+});
+
+describe("Modal backdrop", () => {
+  it("asks the Modal to close on a click", () => {
+    let closes = 0;
+    draw(m(Modal, { isOpen: true, onClose: () => (closes += 1) }, "body"));
+
+    clickModalBackdrop(document);
+
+    expect(closes).toBe(1);
+  });
+
+  it("leaves a Modal that opts out to its own controls, while Escape still closes it", () => {
+    let closes = 0;
+    draw(m(Modal, { isOpen: true, onClose: () => (closes += 1), isBackdropDismissable: false }, "body"));
+
+    clickModalBackdrop(document);
+    expect(closes).toBe(0);
+
+    dismissTopmostModal();
+    expect(closes).toBe(1);
   });
 });

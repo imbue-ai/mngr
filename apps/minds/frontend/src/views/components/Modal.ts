@@ -7,7 +7,7 @@ export type ModalSize = "sm" | "md" | "lg" | "xl";
 /** What the modal does to the page behind it: ``dim`` darkens it; ``wash`` fades it into the first run's cream. */
 export type ModalBackdrop = "dim" | "wash";
 
-/** What the card is drawn as: ``surface`` is the app's white card; ``first-run`` is the first run's cream and brown ink. */
+/** What the card is drawn as: ``surface`` is the app's white card; ``first-run`` is white in black ink in either theme. */
 export type ModalCard = "surface" | "first-run";
 
 // The card's ONLY max-w-* class, picked here rather than passed in cardExtra:
@@ -24,6 +24,8 @@ const MODAL_SIZES: Record<ModalSize, string> = {
 interface ModalAttrs extends m.Attributes {
   isOpen: boolean;
   onClose?: () => void;
+  /** Whether a click on the backdrop invokes onClose; Escape (dismissTopmostModal) does either way. */
+  isBackdropDismissable?: boolean;
   size?: ModalSize;
   cardExtra?: string;
   backdrop?: ModalBackdrop;
@@ -82,6 +84,7 @@ export function Modal(): m.Component<ModalAttrs> {
       const {
         isOpen,
         onClose,
+        isBackdropDismissable = true,
         size = "sm",
         cardExtra = "",
         backdrop = "dim",
@@ -112,13 +115,14 @@ export function Modal(): m.Component<ModalAttrs> {
               event.target === event.currentTarget;
             isPressStartedOnBackdrop = false;
             isPressEndedOnBackdrop = false;
-            if (onClose !== undefined && isBackdropClick) {
+            if (onClose !== undefined && isBackdropDismissable && isBackdropClick) {
               onClose();
             }
           },
           ...splitAttrs(vnode.attrs, [
             "isOpen",
             "onClose",
+            "isBackdropDismissable",
             "size",
             "cardExtra",
             "backdrop",
