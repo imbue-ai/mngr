@@ -16,22 +16,29 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
 ]
 dependencies = [
-    "argon2-cffi>=23.1",
-    "boto3>=1.34",
     "click>=8.0",
-    "cryptography>=42.0",
     "cowsay-python>=1.0.2",
-    "httpx2>=2.13.1",
     "loguru>=0.7",
     "pydantic>=2.0",
-    "sentry-sdk>=2.63.0",
     "tenacity>=8.0",
-    "traceback-with-variables>=2.0",
-    "urllib3>=2.0",
 ]
 
 [project.optional-dependencies]
 dev = ["inline-snapshot>=0.13"]
+# What imbue.imbue_common.sentry imports. A project that imports that package declares this extra.
+sentry = [
+    "boto3>=1.34",
+    "sentry-sdk>=2.63.0",
+    "traceback-with-variables>=2.0",
+    "urllib3>=2.0",
+]
+# What imbue.imbue_common.secret_wrapping and imbue.imbue_common.owner_exec_client import. A project
+# that imports either module declares this extra.
+crypto = [
+    "argon2-cffi>=23.1",
+    "cryptography>=42.0",
+    "httpx2>=2.13.1",
+]
 # What a downstream test suite needs to use the test library this wheel ships
 # (imbue.imbue_common.ratchet_testing, imbue.imbue_common.pytest_utils).
 testing = [

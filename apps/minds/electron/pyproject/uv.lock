@@ -1091,40 +1091,46 @@ name = "imbue-common"
 version = "0.1.22"
 source = { editable = "../../../../libs/imbue_common" }
 dependencies = [
-    { name = "argon2-cffi" },
-    { name = "boto3" },
     { name = "click" },
     { name = "cowsay-python" },
-    { name = "cryptography" },
-    { name = "httpx2" },
     { name = "loguru" },
     { name = "pydantic" },
-    { name = "sentry-sdk" },
     { name = "tenacity" },
+]
+
+[package.optional-dependencies]
+crypto = [
+    { name = "argon2-cffi" },
+    { name = "cryptography" },
+    { name = "httpx2" },
+]
+sentry = [
+    { name = "boto3" },
+    { name = "sentry-sdk" },
     { name = "traceback-with-variables" },
     { name = "urllib3" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "argon2-cffi", specifier = ">=23.1" },
-    { name = "boto3", specifier = ">=1.34" },
+    { name = "argon2-cffi", marker = "extra == 'crypto'", specifier = ">=23.1" },
+    { name = "boto3", marker = "extra == 'sentry'", specifier = ">=1.34" },
     { name = "click", specifier = ">=8.0" },
     { name = "cowsay-python", specifier = ">=1.0.2" },
-    { name = "cryptography", specifier = ">=42.0" },
-    { name = "httpx2", specifier = ">=2.13.1" },
+    { name = "cryptography", marker = "extra == 'crypto'", specifier = ">=42.0" },
+    { name = "httpx2", marker = "extra == 'crypto'", specifier = ">=2.13.1" },
     { name = "import-linter", marker = "extra == 'testing'", specifier = ">=2.0" },
     { name = "inline-snapshot", marker = "extra == 'dev'", specifier = ">=0.13" },
     { name = "inline-snapshot", marker = "extra == 'testing'", specifier = ">=0.13" },
     { name = "loguru", specifier = ">=0.7" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pytest", marker = "extra == 'testing'", specifier = ">=9.0" },
-    { name = "sentry-sdk", specifier = ">=2.63.0" },
+    { name = "sentry-sdk", marker = "extra == 'sentry'", specifier = ">=2.63.0" },
     { name = "tenacity", specifier = ">=8.0" },
-    { name = "traceback-with-variables", specifier = ">=2.0" },
-    { name = "urllib3", specifier = ">=2.0" },
+    { name = "traceback-with-variables", marker = "extra == 'sentry'", specifier = ">=2.0" },
+    { name = "urllib3", marker = "extra == 'sentry'", specifier = ">=2.0" },
 ]
-provides-extras = ["dev", "testing"]
+provides-extras = ["dev", "sentry", "crypto", "testing"]
 
 [[package]]
 name = "imbue-mngr"
@@ -1311,6 +1317,7 @@ source = { editable = "../../../../libs/mngr_docker" }
 dependencies = [
     { name = "docker" },
     { name = "imbue-mngr" },
+    { name = "paramiko" },
     { name = "pydantic" },
     { name = "pyinfra" },
     { name = "requests" },
@@ -1321,6 +1328,7 @@ dependencies = [
 requires-dist = [
     { name = "docker", specifier = "==7.1.0" },
     { name = "imbue-mngr", editable = "../../../../libs/mngr" },
+    { name = "paramiko", specifier = ">=3.0" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pyinfra", specifier = ">=3.0" },
     { name = "requests", specifier = ">=2.26" },
@@ -1462,7 +1470,8 @@ dependencies = [
     { name = "click" },
     { name = "concurrency-group" },
     { name = "filelock" },
-    { name = "imbue-common" },
+    { name = "httpx2" },
+    { name = "imbue-common", extra = ["sentry"] },
     { name = "imbue-mngr" },
     { name = "imbue-mngr-forward" },
     { name = "jinja2" },
@@ -1478,7 +1487,8 @@ requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "concurrency-group", editable = "../../../../libs/concurrency_group" },
     { name = "filelock", specifier = ">=4.2.1" },
-    { name = "imbue-common", editable = "../../../../libs/imbue_common" },
+    { name = "httpx2", specifier = ">=2.13.1" },
+    { name = "imbue-common", extras = ["sentry"], editable = "../../../../libs/imbue_common" },
     { name = "imbue-mngr", editable = "../../../../libs/mngr" },
     { name = "imbue-mngr-forward", editable = "../../../../libs/mngr_forward" },
     { name = "jinja2", specifier = ">=3.1" },
@@ -1784,7 +1794,7 @@ dependencies = [
     { name = "cryptography" },
     { name = "flask" },
     { name = "httpx2" },
-    { name = "imbue-common" },
+    { name = "imbue-common", extra = ["crypto", "sentry"] },
     { name = "imbue-mngr" },
     { name = "imbue-mngr-antigravity" },
     { name = "imbue-mngr-autocompact" },
@@ -1805,6 +1815,7 @@ dependencies = [
     { name = "imbue-mngr-pi-coding" },
     { name = "imbue-mngr-vps" },
     { name = "itsdangerous" },
+    { name = "jinja2" },
     { name = "loguru" },
     { name = "modal" },
     { name = "paramiko" },
@@ -1835,7 +1846,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=42.0" },
     { name = "flask", specifier = ">=3.0" },
     { name = "httpx2", specifier = ">=2.13.1" },
-    { name = "imbue-common", editable = "../../../../libs/imbue_common" },
+    { name = "imbue-common", extras = ["crypto", "sentry"], editable = "../../../../libs/imbue_common" },
     { name = "imbue-mngr", editable = "../../../../libs/mngr" },
     { name = "imbue-mngr-antigravity", editable = "../../../../libs/mngr_antigravity" },
     { name = "imbue-mngr-autocompact", editable = "../../../../libs/mngr_autocompact" },
@@ -1856,6 +1867,7 @@ requires-dist = [
     { name = "imbue-mngr-pi-coding", editable = "../../../../libs/mngr_pi_coding" },
     { name = "imbue-mngr-vps", editable = "../../../../libs/mngr_vps" },
     { name = "itsdangerous", specifier = ">=2.2.0" },
+    { name = "jinja2", specifier = ">=3.1" },
     { name = "loguru" },
     { name = "modal", specifier = ">=1.4.3" },
     { name = "paramiko", specifier = ">=3.0" },
