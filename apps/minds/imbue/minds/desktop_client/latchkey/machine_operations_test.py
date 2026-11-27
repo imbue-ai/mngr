@@ -1,4 +1,6 @@
+from collections.abc import Callable
 from collections.abc import Generator
+from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import cast
@@ -14,6 +16,7 @@ from imbue.minds.desktop_client.latchkey.machine_access import MachineAccess
 from imbue.minds.desktop_client.latchkey.machine_access import MachineUnreachableError
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
+from imbue.minds.desktop_client.latchkey.machine_operations import MachinePolicyChangedOperationError
 from imbue.minds.desktop_client.latchkey.machine_operations import PERMISSIONS_FORMAT_NEWER_FAILURE
 from imbue.minds.desktop_client.latchkey.machine_operations import describe_machine_failure
 from imbue.minds.desktop_client.latchkey.testing import FakeAccountsLatchkey
@@ -25,11 +28,15 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.migrations.interface import PermissionsFormatNewerError
 from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationContext
+from imbue.mngr_latchkey.primitives import MachinePolicyFingerprint
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
+from imbue.mngr_latchkey.remote._mirror import record_machine_as_newer
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.remote.credentials import FetchedMachineState
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
+from imbue.mngr_latchkey.remote.credentials import _write_machine_policy_record
 from imbue.mngr_latchkey.remote.errors import MachineNewerError
+from imbue.mngr_latchkey.remote.errors import MachinePolicyChangedError
 from imbue.mngr_latchkey.remote.errors import MachineTransferError
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.remote.errors import SentToMachine
@@ -39,7 +46,10 @@ from imbue.mngr_latchkey.store import permissions_path_for_host
 
 _EMPTY_POLICY = '{"rules": []}'
 _SLACK_POLICY = '{"rules": [{"slack-api:a@example.com": ["slack-read-all"]}]}'
+_SLACK_WRITE_POLICY = '{"rules": [{"slack-api:a@example.com": ["slack-read-all", "slack-write"]}]}'
 _SLACK_DESKTOP_EGRESS_RULES = '{"slack": ["device-1"]}'
+_MACHINE_FINGERPRINT = MachinePolicyFingerprint("fingerprint-3307")
+_READ_AS_THIS_INSTALL = f"refresh as {device_id_for_test('machine-operations')}"
 
 
 class _RecordingMachine(MachineCredentials):
@@ -55,14 +65,27 @@ class _RecordingMachine(MachineCredentials):
     raised: SkipValidation[Exception | None] = Field(
         default=None, description="When set, the error every exchange raises, as it reaches the operator."
     )
+    changes_from_another_computer: list[str] = Field(
+        default_factory=list,
+        description="Each one has the next push find the machine holding another policy than it was made from.",
+    )
+    policy_adopted_on_refresh: str | None = Field(
+        default=None,
+        description="When set, the policy a read puts over this computer's copy, as adopting the machine's does.",
+    )
 
     def refresh(self, migration_context: PermissionsMigrationContext) -> FetchedMachineState:
         self._note(f"refresh as {migration_context.device_id}")
+        data_dir = self.latchkey.plugin_data_dir
+        if self.policy_adopted_on_refresh is not None:
+            permissions_path_for_host(data_dir, self.host_id).write_text(self.policy_adopted_on_refresh)
+        _write_machine_policy_record(data_dir, self.host_id, _MACHINE_FINGERPRINT)
         return FetchedMachineState(
             credentials=None,
             permissions_json=None,
             desktop_egress_rules_json=None,
             permissions_format_version=PermissionsFormatVersion(0),
+            policy_fingerprint=_MACHINE_FINGERPRINT,
             custom_service_registrations={},
         )
 
@@ -73,7 +96,11 @@ class _RecordingMachine(MachineCredentials):
         self._note(f"disconnect {service_name} {account}" + (" and deregister" if is_service_deregistered else ""))
 
     def set_permissions(self, permissions_json: str) -> None:
+        if self.changes_from_another_computer:
+            self.changes_from_another_computer.pop(0)
+            raise MachinePolicyChangedError(self.host_id, "VPS vps-test holds another policy")
         self._note(f"set_permissions {permissions_json}")
+        _write_machine_policy_record(self.latchkey.plugin_data_dir, self.host_id, _MACHINE_FINGERPRINT)
 
     def set_permissions_and_desktop_egress_rules(self, permissions_json: str, desktop_egress_rules_json: str) -> None:
         self._note(f"set_permissions_and_desktop_egress_rules {permissions_json} {desktop_egress_rules_json}")
@@ -133,6 +160,8 @@ def _operator(
     store_failure: str = "",
     opening_refusal: str = "",
     raised: Exception | None = None,
+    changes_from_another_computer: Sequence[str] = (),
+    policy_adopted_on_refresh: str | None = None,
 ) -> tuple[MachineOperator, _RecordingMachine, str]:
     """An operator over one workspace, and the machine (if any) that workspace resolves to."""
     latchkey_directory = tmp_path / "latchkey"
@@ -157,6 +186,8 @@ def _operator(
         refusal=refusal,
         store_failure=store_failure,
         raised=raised,
+        changes_from_another_computer=list(changes_from_another_computer),
+        policy_adopted_on_refresh=policy_adopted_on_refresh,
     )
     access = _RecordedAccess(
         latchkey=latchkey,
@@ -246,6 +277,147 @@ def test_a_machine_that_refuses_a_desktop_egress_edit_fails_the_call_that_asked_
 
     with pytest.raises(MachineOperationError, match="the VPS said no"):
         operator.push_permissions_and_desktop_egress_rules(agent_id)
+
+
+def _edit_making_the_policy(
+    operator: MachineOperator,
+    machine: _RecordingMachine,
+    agent_id: str,
+    policy: str,
+    # Gains what the copy here said each time the edit ran.
+    copies_edited_out: list[str],
+) -> Callable[[], None]:
+    """An edit that makes this computer's copy say ``policy`` and pushes it."""
+    permissions_path = permissions_path_for_host(machine.latchkey.plugin_data_dir, machine.host_id)
+
+    def edit() -> None:
+        copies_edited_out.append(permissions_path.read_text())
+        permissions_path.write_text(policy)
+        operator.push_permissions(agent_id)
+
+    return edit
+
+
+def test_an_edit_of_the_policy_just_read_costs_the_one_exchange_of_its_push(tmp_path: Path) -> None:
+    """The read the Permissions tab opened with is the read the edit is made on, and each push stands in for the next."""
+    operator, machine, agent_id = _operator(tmp_path, is_machine_of_its_own=True, policy=_SLACK_POLICY)
+    copies_edited: list[str] = []
+    operator.refresh(agent_id)
+
+    operator.carry_policy_edit(
+        agent_id, _edit_making_the_policy(operator, machine, agent_id, _SLACK_WRITE_POLICY, copies_edited)
+    )
+    operator.carry_policy_edit(
+        agent_id, _edit_making_the_policy(operator, machine, agent_id, _EMPTY_POLICY, copies_edited)
+    )
+
+    assert machine.calls == [
+        _READ_AS_THIS_INSTALL,
+        f"set_permissions {_SLACK_WRITE_POLICY}",
+        f"set_permissions {_EMPTY_POLICY}",
+    ]
+    assert copies_edited == [_SLACK_POLICY, _SLACK_WRITE_POLICY]
+
+
+def test_an_edit_of_a_policy_never_read_from_the_machine_is_made_on_a_fresh_read(tmp_path: Path) -> None:
+    """Nothing says the copy here is the machine's, so it is not edited as it stands."""
+    operator, machine, agent_id = _operator(
+        tmp_path, is_machine_of_its_own=True, policy=_EMPTY_POLICY, policy_adopted_on_refresh=_SLACK_POLICY
+    )
+    copies_edited: list[str] = []
+
+    operator.carry_policy_edit(
+        agent_id, _edit_making_the_policy(operator, machine, agent_id, _SLACK_WRITE_POLICY, copies_edited)
+    )
+
+    assert machine.calls == [_READ_AS_THIS_INSTALL, f"set_permissions {_SLACK_WRITE_POLICY}"]
+    assert copies_edited == [_SLACK_POLICY]
+
+
+def test_an_edit_the_machine_has_moved_on_from_is_made_again_on_the_policy_it_holds(tmp_path: Path) -> None:
+    """A grant made from another computer since the last read refuses the push, is read, and survives the edit."""
+    operator, machine, agent_id = _operator(
+        tmp_path,
+        is_machine_of_its_own=True,
+        policy=_SLACK_POLICY,
+        changes_from_another_computer=("a grant",),
+    )
+    copies_edited: list[str] = []
+    operator.refresh(agent_id)
+    machine_calls_before_the_edit = list(machine.calls)
+    permissions_path = permissions_path_for_host(machine.latchkey.plugin_data_dir, machine.host_id)
+
+    def adopt_the_other_computers_grant_then_edit() -> None:
+        # The second run follows a read, which this machine answers by leaving the other computer's grant here.
+        if copies_edited:
+            permissions_path.write_text(_SLACK_WRITE_POLICY)
+        _edit_making_the_policy(operator, machine, agent_id, _EMPTY_POLICY, copies_edited)()
+
+    operator.carry_policy_edit(agent_id, adopt_the_other_computers_grant_then_edit)
+
+    assert machine.calls == [*machine_calls_before_the_edit, _READ_AS_THIS_INSTALL, f"set_permissions {_EMPTY_POLICY}"]
+    assert copies_edited == [_SLACK_POLICY, _SLACK_WRITE_POLICY]
+
+
+def test_a_push_the_machine_refuses_as_made_from_another_policy_says_so(tmp_path: Path) -> None:
+    """Told apart from every other failure, so a caller can read the machine and make its edit again."""
+    operator, machine, agent_id = _operator(
+        tmp_path, is_machine_of_its_own=True, policy=_SLACK_POLICY, changes_from_another_computer=("a grant",)
+    )
+
+    with pytest.raises(MachinePolicyChangedOperationError, match="holds another policy") as failure:
+        operator.push_permissions(agent_id)
+
+    assert failure.value.explained_failure is None
+    assert machine.calls == []
+
+
+def test_an_edit_is_not_made_on_top_of_one_the_machine_never_took(tmp_path: Path) -> None:
+    """A failed push leaves its edit in the copy here, which the machine never held: the next edit reads first."""
+    operator, machine, agent_id = _operator(tmp_path, is_machine_of_its_own=True, policy=_SLACK_POLICY)
+    operator.refresh(agent_id)
+    permissions_path_for_host(machine.latchkey.plugin_data_dir, machine.host_id).write_text(_SLACK_WRITE_POLICY)
+
+    operator.carry_policy_edit(agent_id, _edit_making_the_policy(operator, machine, agent_id, _EMPTY_POLICY, []))
+
+    assert machine.calls == [_READ_AS_THIS_INSTALL, _READ_AS_THIS_INSTALL, f"set_permissions {_EMPTY_POLICY}"]
+
+
+def test_an_edit_that_finds_nothing_to_change_exchanges_nothing(tmp_path: Path) -> None:
+    operator, machine, agent_id = _operator(tmp_path, is_machine_of_its_own=True, policy=_SLACK_POLICY)
+    operator.refresh(agent_id)
+
+    operator.carry_policy_edit(agent_id, lambda: None)
+
+    assert machine.calls == [_READ_AS_THIS_INSTALL]
+
+
+def test_an_edit_of_a_local_workspaces_policy_is_the_whole_change(tmp_path: Path) -> None:
+    operator, machine, agent_id = _operator(tmp_path, is_machine_of_its_own=False, policy=_SLACK_POLICY)
+    copies_edited: list[str] = []
+
+    operator.carry_policy_edit(
+        agent_id, _edit_making_the_policy(operator, machine, agent_id, _SLACK_WRITE_POLICY, copies_edited)
+    )
+
+    assert machine.calls == []
+    assert copies_edited == [_SLACK_POLICY]
+
+
+def test_an_edit_is_not_made_for_a_machine_this_build_leaves_alone(tmp_path: Path) -> None:
+    """Found out before anything is edited, so the copy here is not left saying what the machine never will."""
+    operator, machine, agent_id = _operator(tmp_path, is_machine_of_its_own=True, policy=_SLACK_POLICY)
+    record_machine_as_newer(machine.latchkey.plugin_data_dir, machine.host_id)
+    copies_edited: list[str] = []
+
+    with pytest.raises(MachineOperationError) as failure:
+        operator.carry_policy_edit(
+            agent_id, _edit_making_the_policy(operator, machine, agent_id, _SLACK_WRITE_POLICY, copies_edited)
+        )
+
+    assert failure.value.explained_failure == MACHINE_NEWER_FAILURE
+    assert copies_edited == []
+    assert machine.calls == []
 
 
 def test_a_grant_carries_the_account_and_the_policy_that_grants_it_together(tmp_path: Path) -> None:

@@ -565,7 +565,8 @@ invocations its scripts make, only the service and account names travel in
 - `read-state` prints prefixed base64 answers: the secrets the gateway runs
   under, whether the machine has a credential store, its config, its policy,
   its desktop egress rules, the [format version](#data-format-changes) the
-  policy is written in, whether it holds a reverse tunnel's keypair, when
+  policy is written in, a fingerprint of those three (one SHA-256 over the
+  files as they are on disk), whether it holds a reverse tunnel's keypair, when
   the document carries `container_host_id` the `--add-host` mappings that
   host's container was created with, and, when it carries
   `include_credential_store`, its credential store as it holds it, still
@@ -573,7 +574,12 @@ invocations its scripts make, only the service and account names travel in
   asking computer re-encrypts it for itself, so no key of that computer's
   reaches the machine.
 - `apply-state` applies whichever entries the document carries, in a fixed
-  order under one `set -e`: the machine's own key and listen password
+  order under one `set -e`, and answers with the fingerprint of the policy
+  the machine holds afterwards. A document carrying
+  `expected_policy_fingerprint` is applied only while the machine's own
+  fingerprint is still that one; otherwise nothing is applied and the last
+  line says the policy changed. The entries: the machine's own key and listen
+  password
   (adopted, refused if the machine already runs under different ones), the
   config, a credential bundle to merge or an account to clear, the desktop
   egress rules, the policy, the format version the policy and the rules are
@@ -802,9 +808,9 @@ gets this desktop's copy, which is how a freshly provisioned gateway stops
 permitting everything.
 
 What keeps that safe is that the copy here is never edited *without* being
-pushed, and never pushed without having been read first. Every writer of
-`latchkey_permissions.json` -- a UI toggle, a grant, an agent registration, a
-recovery repair -- reads the machine's policy back (adopting it over the copy
+pushed, and never pushed on trust that it is still the machine's. A writer of
+`latchkey_permissions.json` -- a grant, an agent registration, a recovery
+repair -- reads the machine's policy back (adopting it over the copy
 here) at the start of the same operation, makes its edit on that fresh copy,
 and pushes the result to the machine in the same breath. A push that fails is
 reported (to the user when there is one to report to, to the log otherwise)
@@ -813,6 +819,30 @@ discard; a read that fails stops the push, since a snapshot of a copy that may
 lag the machine would replace whatever the machine gained since -- a grant
 made from another of the user's computers, say -- with this computer's stale
 idea of it.
+
+Every push of the policy is conditional, so nothing is ever pushed on trust.
+The machine's `read-state` and `apply-state` both answer with its fingerprint
+of the policy it holds, computed on the machine. A read and every push leave it
+in `<latchkey_directory>/mngr_latchkey/hosts/<host_id>/machine-policy-record.json`,
+beside the copies it is about, and `set_permissions`,
+`set_permissions_and_desktop_egress_rules` and the two grant pushes hand it
+back: the machine's `apply-state` compares it with what it holds and, when they
+differ, installs nothing and the push raises `MachinePolicyChangedError`. So
+does a push with nothing on record to hand back, which is not sent at all. The
+writer then reads the machine and makes its edit again. Callers never see a
+fingerprint.
+
+What stays the writer's is knowing that the copy it edits is the one the
+record is about. Reading first always makes it so. A writer that would rather
+skip the read asks `can_edit_host_policy_without_reading`, which is true while
+the copies are still as they stood when the machine gave the fingerprint on
+record, and reads when it is false -- after a push that failed and left its
+edit behind, say. The Imbue Studio desktop app carries a Permissions tab toggle
+this way, so the click costs one round trip instead of two.
+
+A machine whose package answers with no fingerprint checks none either. A read
+of one leaves a record that covers exactly one push, so its writers keep
+reading before every write, as they always did.
 
 The one write `refresh` makes after adopting is the migration: a machine whose
 policy is in a format older than this build writes has it brought up to date here

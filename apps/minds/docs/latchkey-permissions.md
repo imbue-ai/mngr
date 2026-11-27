@@ -1254,18 +1254,43 @@ one granted every time the tab was opened. The machine's answer is therefore
 adopted here as well, and the copy here is a cache -- which is also what walks
 back an edit whose push failed, with no separate error reconcile. That is only
 safe because the copy here is never edited *without* being pushed in the same
-breath, and never pushed without having been read from the machine first in
-that same breath: the UI's edits while the user waits (every write route
-reads the machine before it edits), the request grants (the grant dispatch
-reads it before the handler runs), and the discovery-driven ones (an agent
-registration, the baseline reconciliation that rides along with it) from a
-background thread, coalesced per host, since the resolver callback they run
-in must not block -- that thread reads the machine, pins the registered
-agents again on what it read, and pushes the result. An edit that could not
-be pushed is discarded by the next read rather than carried over later, so a
-writer that cannot push has to say so; a machine that cannot be read fails
-the edit before anything is pushed, since a snapshot of a copy that may lag
-the machine would erase what another of the user's computers granted since.
+breath, and never pushed on trust that it is still the machine's: a push the
+machine finds was made from another policy than it holds is refused whole, and
+fails the action that asked for it. Most writers make that a formality by
+reading the machine first in that same breath: the tab's writes that are more
+than one edit of the policy (connecting or signing out of a service, sharing a
+path), the request grants (the grant dispatch reads it before the handler
+runs), and the discovery-driven ones (an agent registration, the baseline
+reconciliation that rides along with it) from a background thread, coalesced
+per host, since the resolver callback they run in must not block -- that thread
+reads the machine, pins the registered agents again on what it read, and pushes
+the result. An edit that could not be pushed is discarded by the next read
+rather than carried over later, so a writer that cannot push has to say so; a
+machine that cannot be read fails the edit before anything is pushed, since a
+snapshot of a copy that may lag the machine would erase what another of the
+user's computers granted since.
+
+**A click in the tab does not pay for a second read.** The tab read the
+machine when it opened, so a write that is one edit of the policy -- a
+permission toggle, a Local files or Other workspaces toggle, a route, a
+revoke -- is made on the copy as it stands and pushed *on a condition*
+(`MachineOperator.carry_policy_edit`). Every push of a policy is conditional,
+whoever makes it: it hands back the fingerprint the machine gave of its policy
+when this computer last read it or pushed to it. The fingerprint is the
+machine's own -- one SHA-256 over its policy file, its desktop egress rules
+file and the policy's format stamp, computed there and answered by every read
+and every push -- and `mngr_latchkey` keeps it in a record beside this
+computer's copies, so nothing in the app handles one. The machine compares it
+with what it holds before it installs anything. One round trip instead of two.
+A machine that holds anything else -- another of the user's computers pushed a
+grant since -- installs nothing; it is then read, which puts its policy over
+the copy here, and the edit is made again on what was read and pushed. The
+read is only skipped while the copy here is still what it was when the machine
+gave that fingerprint: a copy the machine was never read for, that carries an
+edit whose push failed, or that anything else wrote since, is read first like
+everyone else's. So is the copy of a machine whose installed package gives no
+fingerprint, until a provisioning pass from this build has replaced that
+package.
 
 The one write that read makes *toward* the machine is the seed: a machine with
 no policy at all permits everything, so it is handed this computer's copy
@@ -1557,8 +1582,12 @@ A change posts `{ "service_name", "route" }` to
    never edited by themselves.
 2. It writes those routes to this computer's copy of the rules file.
 3. It pushes the permissions file and the rules file to the machine in one
-   round trip (`MachineOperator.push_permissions_and_desktop_egress_rules`).
-   The response is the refreshed view, as for every other write in this tab.
+   round trip, on the condition that the machine still holds the policy and
+   rules this computer last saw it hold (`MachineOperator.carry_policy_edit`;
+   see [Per-machine credentials](#per-machine-credentials)). A machine that
+   holds anything else installs nothing: it is read, and steps 1 to 3 run
+   again on what was read. The response is the refreshed view, as for every
+   other write in this tab.
 
 The change is refused before any of this when this computer's copy of the
 rules file is there but cannot be read or parsed, because the other services'

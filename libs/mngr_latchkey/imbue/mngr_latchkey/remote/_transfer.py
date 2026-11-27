@@ -22,6 +22,14 @@ command, and reading a machine back (:func:`fetch_machine_state`) is one
 is, and opening a host's Permissions tab costs one rather than one per
 file.
 
+A push of the policy replaces the machine's whole, so it has to have been
+edited from the policy the machine holds. A read, and every push, answers with
+the machine's fingerprint of that policy; a push that hands the fingerprint
+back is installed only while the machine still holds the same, and raises
+:class:`~imbue.mngr_latchkey.remote.errors.MachinePolicyChangedError` when it
+does not, so an edit made on a copy the machine has moved on from costs a
+refusal rather than what the machine gained.
+
 A push that brings credential material carries the key this computer recorded
 for the machine, and the machine refuses it if it is running under another one
 (re-keyed from another computer), rather than being handed a store its gateway
@@ -53,6 +61,7 @@ from imbue.mngr_latchkey.desktop_egress import DesktopEgressError
 from imbue.mngr_latchkey.desktop_egress import parse_desktop_egress_rules
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
+from imbue.mngr_latchkey.primitives import MachinePolicyFingerprint
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.remote._machine import RemoteCredentialClear
 from imbue.mngr_latchkey.remote._machine import RemoteCredentialMerge
@@ -91,6 +100,12 @@ class FetchedMachineState(FrozenModel):
     )
     permissions_format_version: PermissionsFormatVersion = Field(
         description="The format the machine's policy is written in; 0 when never stamped."
+    )
+    policy_fingerprint: MachinePolicyFingerprint | None = Field(
+        description=(
+            "What the machine says identifies the policy, the rules and the format it holds, for a push made "
+            "from them to hand back; ``None`` when its package does not say."
+        ),
     )
     custom_service_registrations: Mapping[str, JsonValue] = Field(
         description=(
@@ -135,6 +150,7 @@ def fetch_machine_state(host: OuterHostInterface, latchkey: Latchkey, host_id: H
         permissions_json=state.permissions_json,
         desktop_egress_rules_json=state.desktop_egress_rules_json,
         permissions_format_version=state.permissions_format_version,
+        policy_fingerprint=state.policy_fingerprint,
         custom_service_registrations=custom_service_registrations_of_config(state.config_json, host_id),
     )
 
@@ -403,8 +419,11 @@ def push_credentials_with_permissions(
     permissions_format_version: PermissionsFormatVersion,
     # The rules of a grant that also changes a route; ``None`` leaves the machine's rules as they are.
     desktop_egress_rules_json: str | None,
+    # As for :func:`push_permissions_snapshot`.
+    expected_policy_fingerprint: MachinePolicyFingerprint | None,
     config_json: str | None = None,
-) -> None:
+    # the machine's fingerprint of the policy it holds afterwards, or ``None`` when its package gives none
+) -> MachinePolicyFingerprint | None:
     """Add one account to the machine's store and make ``permissions_json`` its policy, in one round trip.
 
     What a permission grant asks for: both halves land under one ``set -e``,
@@ -415,8 +434,12 @@ def push_credentials_with_permissions(
     after the policy (see :func:`push_permissions_snapshot`).
     ``desktop_egress_rules_json`` lands between the credential and the policy
     (see :func:`push_permissions_and_desktop_egress_rules`).
+    ``expected_policy_fingerprint`` makes the whole grant conditional, the
+    credential included.
 
     Raises:
+        MachinePolicyChangedError: when the machine's policy no longer has
+            ``expected_policy_fingerprint``. Neither half was applied.
         RemoteGatewayError: when a snapshot is not one this build can read,
             the bundle cannot be built, or the machine refuses or fails the
             update.
@@ -430,7 +453,7 @@ def push_credentials_with_permissions(
         host_id,
         host.get_name(),
     ):
-        apply_remote_state(
+        return apply_remote_state(
             host,
             RemoteStateUpdate(
                 encryption_key=machine_key,
@@ -439,6 +462,7 @@ def push_credentials_with_permissions(
                 desktop_egress_rules_json=desktop_egress_rules_json,
                 permissions_json=permissions_json,
                 permissions_format_version=permissions_format_version,
+                expected_policy_fingerprint=expected_policy_fingerprint,
             ),
             host_id,
         )
@@ -488,7 +512,11 @@ def push_permissions_snapshot(
     host_id: HostId,
     permissions_json: str,
     permissions_format_version: PermissionsFormatVersion,
-) -> None:
+    # The machine's fingerprint of the policy the snapshot was edited from; ``None`` installs it over whatever
+    # the machine holds.
+    expected_policy_fingerprint: MachinePolicyFingerprint | None,
+    # the machine's fingerprint of the policy it holds afterwards, or ``None`` when its package gives none
+) -> MachinePolicyFingerprint | None:
     """Make ``permissions_json`` the policy ``host_id``'s machine enforces, in one round trip.
 
     How a permissions edit made on this computer reaches the machine: as a full
@@ -505,16 +533,25 @@ def push_permissions_snapshot(
     It carries no key: a policy is not encrypted, so it is applied to a
     machine whatever key that machine is running under.
 
+    A snapshot replaces the machine's policy whole, so it must have been
+    edited from the policy the machine holds. ``expected_policy_fingerprint``
+    has the machine check that in the same command, in place of a read before
+    the edit: a machine holding another policy installs nothing.
+
     Raises:
+        MachinePolicyChangedError: when the machine's policy no longer has
+            ``expected_policy_fingerprint``. Nothing was installed.
         RemoteGatewayError: when the snapshot is not a policy this build can
             read, or the machine refuses or fails the update.
     """
     _validate_permissions_snapshot(host_id, permissions_json)
     with log_span("Applying a permissions snapshot for host {} to VPS {}", host_id, host.get_name()):
-        apply_remote_state(
+        return apply_remote_state(
             host,
             RemoteStateUpdate(
-                permissions_json=permissions_json, permissions_format_version=permissions_format_version
+                permissions_json=permissions_json,
+                permissions_format_version=permissions_format_version,
+                expected_policy_fingerprint=expected_policy_fingerprint,
             ),
             host_id,
         )
@@ -526,7 +563,10 @@ def push_permissions_and_desktop_egress_rules(
     permissions_json: str,
     desktop_egress_rules_json: str,
     permissions_format_version: PermissionsFormatVersion,
-) -> None:
+    # As for :func:`push_permissions_snapshot`.
+    expected_policy_fingerprint: MachinePolicyFingerprint | None,
+    # the machine's fingerprint of the policy it holds afterwards, or ``None`` when its package gives none
+) -> MachinePolicyFingerprint | None:
     """Make both snapshots what ``host_id``'s machine holds -- its policy and its desktop egress rules -- in one round trip.
 
     How turning desktop egress on or off for a service reaches the machine: the
@@ -535,9 +575,12 @@ def push_permissions_and_desktop_egress_rules(
     each is installed atomically, with ``permissions_format_version`` -- the
     format the policy is written in -- after them. Like
     :func:`push_permissions_snapshot`, this carries no key, because neither
-    file is encrypted.
+    file is encrypted, and ``expected_policy_fingerprint`` makes it conditional
+    the same way.
 
     Raises:
+        MachinePolicyChangedError: when the machine's policy no longer has
+            ``expected_policy_fingerprint``. Nothing was installed.
         RemoteGatewayError: when either snapshot is not one this build can
             read, or the machine refuses or fails the update.
     """
@@ -546,12 +589,13 @@ def push_permissions_and_desktop_egress_rules(
     with log_span(
         "Applying a permissions snapshot and desktop egress rules for host {} to VPS {}", host_id, host.get_name()
     ):
-        apply_remote_state(
+        return apply_remote_state(
             host,
             RemoteStateUpdate(
                 permissions_json=permissions_json,
                 desktop_egress_rules_json=desktop_egress_rules_json,
                 permissions_format_version=permissions_format_version,
+                expected_policy_fingerprint=expected_policy_fingerprint,
             ),
             host_id,
         )

@@ -593,6 +593,12 @@ class FakeVps(MutableModel):
             script = bin_dir / name
             script.write_text(source)
             script.chmod(0o755)
+        # The machine is Debian, whose coreutils the package's scripts digest with; a host whose userland has no
+        # ``sha256sum`` (macOS) gets one for the fake machine.
+        if shutil.which("sha256sum") is None:
+            script = bin_dir / "sha256sum"
+            script.write_text(_FAKE_SHA256SUM_SOURCE)
+            script.chmod(0o755)
 
 
 def fake_vps(
@@ -1038,6 +1044,9 @@ _FAKE_STAT_SOURCE = (
     "fi\n"
     'exec REAL_STAT "$@"\n'
 )
+
+
+_FAKE_SHA256SUM_SOURCE = '#!/bin/sh\nexec shasum -a 256 "$@"\n'
 
 
 def fake_latchkey_binary(tmp_path: Path) -> Path:

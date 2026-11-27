@@ -1371,24 +1371,112 @@ def test_connector_toggle_reports_a_gateway_failure_as_502(tmp_path: Path) -> No
     assert response.status_code == 502
 
 
-def test_connector_toggle_reads_the_machine_before_the_edit_and_pushes_the_result(tmp_path: Path) -> None:
-    """A write is pushed to the machine whole, so the copy here is made to say what the machine holds first.
+def _operator_placing_the_workspace_on_its_machine(
+    latchkey: Latchkey, agent_id: AgentId, host_id: HostId, refresh_refusal: str = ""
+) -> RecordingMachineOperator:
+    """A recording operator that knows ``agent_id`` runs on ``host_id``, so a write is carried as to a real machine."""
+    return build_recording_machine_operator(
+        latchkey,
+        refresh_refusal=refresh_refusal,
+        backend_resolver=FixedHostBackendResolver(
+            url_by_agent_and_service={}, fixed_host_id=host_id, known_agent_ids=(agent_id,)
+        ),
+    )
 
-    A grant another of the user's computers made since this pane was opened
-    would otherwise be erased by the push.
-    """
-    agent_id, host_id = AgentId(), HostId()
-    latchkey = _remote_slack_latchkey(tmp_path, host_id)
-    operator = build_recording_machine_operator(latchkey)
-    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
 
-    response = client.post(
+def _post_slack_write_toggle(client: FlaskClient, agent_id: AgentId) -> Any:
+    return client.post(
         f"/ui/api/workspaces/{agent_id}/permissions/connector-toggle",
         json={"scope": "slack-api", "account": _ACCOUNT, "permission": "slack-chat-write", "enabled": True},
     )
 
+
+def test_connector_toggle_in_a_pane_just_read_pushes_on_that_read_without_reading_the_machine_again(
+    tmp_path: Path,
+) -> None:
+    """Opening the pane read the machine, so the click that follows costs the one round trip of its push."""
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _remote_slack_latchkey(tmp_path, host_id)
+    operator = _operator_placing_the_workspace_on_its_machine(latchkey, agent_id, host_id)
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
+    client.get(f"/ui/api/workspaces/{agent_id}/permissions")
+
+    first_response = _post_slack_write_toggle(client, agent_id)
+    second_response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/connector-toggle",
+        json={"scope": "slack-api", "account": _ACCOUNT, "permission": "slack-chat-read", "enabled": False},
+    )
+
+    assert (first_response.status_code, second_response.status_code) == (200, 200)
+    assert operator.refreshed_agent_ids == [str(agent_id)]
+    assert operator.pushed_agent_ids == [str(agent_id), str(agent_id)]
+    config = load_permissions(permissions_path_for_host(latchkey.plugin_data_dir, host_id))
+    assert config.rules == ({account_scope_key("slack-api", _ACCOUNT): ["slack-chat-write"]},)
+
+
+@pytest.mark.parametrize(
+    "path,body",
+    [
+        ("self-toggle", {"permission": _SHARED_PATH_PERMISSION, "enabled": False}),
+        ("desktop-egress-route", {"service_name": "slack", "route": [_DEVICE_ID]}),
+        ("connector-revoke-all", {"service_name": "slack", "account": _ACCOUNT}),
+    ],
+)
+def test_every_other_single_edit_write_in_a_pane_just_read_pushes_without_reading_the_machine_again(
+    tmp_path: Path, path: str, body: dict[str, object]
+) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _remote_slack_latchkey(tmp_path, host_id)
+    permissions_path = permissions_path_for_host(latchkey.plugin_data_dir, host_id)
+    build_fake_gateway_client().set_permission_rule(
+        permissions_path, SELF_SCOPE, [_SHARED_PATH_PERMISSION], {_SHARED_PATH_PERMISSION: {"type": "object"}}
+    )
+    operator = _operator_placing_the_workspace_on_its_machine(latchkey, agent_id, host_id)
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
+    client.get(f"/ui/api/workspaces/{agent_id}/permissions")
+    policy_read = permissions_path.read_text()
+
+    response = client.post(f"/ui/api/workspaces/{agent_id}/permissions/{path}", json=body)
+
+    assert response.status_code == 200
+    assert permissions_path.read_text() != policy_read
+    assert operator.refreshed_agent_ids == [str(agent_id)]
+    assert [*operator.pushed_agent_ids, *operator.pushed_with_desktop_egress_rules_agent_ids] == [str(agent_id)]
+
+
+def test_connector_toggle_reads_the_machine_before_the_edit_when_it_was_never_read(tmp_path: Path) -> None:
+    """A write is pushed to the machine whole, so a copy nothing vouches for is made to say what the machine holds first.
+
+    A grant another of the user's computers made would otherwise be erased by the push.
+    """
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _remote_slack_latchkey(tmp_path, host_id)
+    operator = _operator_placing_the_workspace_on_its_machine(latchkey, agent_id, host_id)
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
+
+    response = _post_slack_write_toggle(client, agent_id)
+
     assert response.status_code == 200
     assert operator.refreshed_agent_ids == [str(agent_id)]
+    assert operator.pushed_agent_ids == [str(agent_id)]
+    config = load_permissions(permissions_path_for_host(latchkey.plugin_data_dir, host_id))
+    assert config.rules == ({account_scope_key("slack-api", _ACCOUNT): ["slack-chat-read", "slack-chat-write"]},)
+
+
+def test_connector_toggle_is_made_again_on_a_fresh_read_when_the_machine_has_moved_on(tmp_path: Path) -> None:
+    """The machine refuses a push made from a policy it no longer holds, so the click reads it and is applied to that."""
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _remote_slack_latchkey(tmp_path, host_id)
+    operator = _operator_placing_the_workspace_on_its_machine(latchkey, agent_id, host_id)
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
+    client.get(f"/ui/api/workspaces/{agent_id}/permissions")
+    operator.is_machine_changed_since_last_read = True
+    operator.policy_adopted_on_refresh = permissions_path_for_host(latchkey.plugin_data_dir, host_id).read_text()
+
+    response = _post_slack_write_toggle(client, agent_id)
+
+    assert response.status_code == 200
+    assert operator.refreshed_agent_ids == [str(agent_id), str(agent_id)]
     assert operator.pushed_agent_ids == [str(agent_id)]
     config = load_permissions(permissions_path_for_host(latchkey.plugin_data_dir, host_id))
     assert config.rules == ({account_scope_key("slack-api", _ACCOUNT): ["slack-chat-read", "slack-chat-write"]},)
@@ -1398,15 +1486,12 @@ def test_connector_toggle_reports_a_machine_that_cannot_be_read_as_502_and_chang
     """A copy that may lag the machine must not be pushed over it, so an unreadable machine fails the write."""
     agent_id, host_id = AgentId(), HostId()
     latchkey = _remote_slack_latchkey(tmp_path, host_id)
-    operator = build_recording_machine_operator(
-        latchkey, refresh_refusal="Could not reach that workspace: it is asleep"
+    operator = _operator_placing_the_workspace_on_its_machine(
+        latchkey, agent_id, host_id, refresh_refusal="Could not reach that workspace: it is asleep"
     )
     client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
 
-    response = client.post(
-        f"/ui/api/workspaces/{agent_id}/permissions/connector-toggle",
-        json={"scope": "slack-api", "account": _ACCOUNT, "permission": "slack-chat-write", "enabled": True},
-    )
+    response = _post_slack_write_toggle(client, agent_id)
 
     assert response.status_code == 502
     # The user reads our sentence; the machine's own words go behind See details.
@@ -1416,6 +1501,59 @@ def test_connector_toggle_reports_a_machine_that_cannot_be_read_as_502_and_chang
     assert operator.pushed_agent_ids == []
     config = load_permissions(permissions_path_for_host(latchkey.plugin_data_dir, host_id))
     assert config.rules == ({account_scope_key("slack-api", _ACCOUNT): ["slack-chat-read"]},)
+
+
+def test_a_write_that_is_more_than_one_edit_of_the_policy_still_reads_the_machine_first(tmp_path: Path) -> None:
+    """Sharing a path edits the policy in steps, so it starts from a fresh read however lately the pane read."""
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _remote_slack_latchkey(tmp_path, host_id)
+    operator = _operator_placing_the_workspace_on_its_machine(latchkey, agent_id, host_id)
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
+    client.get(f"/ui/api/workspaces/{agent_id}/permissions")
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/shared-path",
+        json={"path": str(tmp_path / "shared"), "access": "WRITE"},
+    )
+
+    assert response.status_code == 200
+    assert operator.refreshed_agent_ids == [str(agent_id), str(agent_id)]
+    assert operator.pushed_agent_ids == [str(agent_id)]
+
+
+@pytest.mark.parametrize(
+    "route,body,accesses_left",
+    [
+        ("shared-path", {"access": "READ"}, ("read",)),
+        ("shared-path-remove", {}, ()),
+    ],
+)
+def test_a_shared_path_write_of_several_edits_reaches_the_machine_in_one_push(
+    tmp_path: Path, route: str, body: dict[str, str], accesses_left: tuple[str, ...]
+) -> None:
+    """One read of the machine covers one push to it: a machine whose package gives no fingerprint refuses a second."""
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _remote_slack_latchkey(tmp_path, host_id)
+    permissions_path = permissions_path_for_host(latchkey.plugin_data_dir, host_id)
+    shared = tmp_path / "notes"
+    shared.mkdir()
+    name_by_access = {access: f"minds-file-server-{access}-{_DEVICE_ID}:{shared}" for access in ("read", "write")}
+    build_fake_gateway_client().set_permission_rule(
+        permissions_path,
+        SELF_SCOPE,
+        list(name_by_access.values()),
+        {name: {"type": "object"} for name in name_by_access.values()},
+    )
+    operator = _operator_placing_the_workspace_on_its_machine(latchkey, agent_id, host_id)
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
+
+    response = client.post(f"/ui/api/workspaces/{agent_id}/permissions/{route}", json={"path": str(shared), **body})
+
+    assert response.status_code == 200
+    assert operator.refreshed_agent_ids == [str(agent_id)]
+    assert operator.pushed_agent_ids == [str(agent_id)]
+    granted = [name for rule in load_permissions(permissions_path).rules for name in rule.get(SELF_SCOPE, [])]
+    assert granted == [name_by_access[access] for access in accesses_left]
 
 
 def _client_over_a_machine_recorded_as_newer(

@@ -34,6 +34,7 @@ LK_DEVICES_DIR="$LK_RUNTIME_DIR/{{ devices_dir_name }}"
 LK_GATEWAY_PROGRAM='{{ gateway_program_name }}'
 LK_TUNNEL_PROGRAM='{{ tunnel_program_name }}'
 LK_OUTCOME_DONE='{{ outcome_done_marker }}'
+LK_OUTCOME_POLICY_CHANGED='{{ outcome_policy_changed_marker }}'
 LK_ANSWER_PREFIX='{{ answer_prefix }}'
 
 lk_fail() {
@@ -107,6 +108,21 @@ lk_answer_flag() {
   else
     printf '0' | lk_answer "$_lk_flag_name"
   fi
+}
+
+# What identifies the policy this machine holds: one digest over the policy
+# file, the desktop egress rules file and the policy's format stamp, each as
+# it is on disk (or as absent). The user's computer is handed this by a read
+# and by an apply, and hands it back with an update made from that policy, so
+# apply-state can refuse an update made from any other.
+lk_policy_fingerprint() {
+  for _lk_policy_file in "$LK_PERMISSIONS_FILE" "$LK_DESKTOP_EGRESS_RULES_FILE" "$LK_PERMISSIONS_FORMAT_STAMP"; do
+    if [ -f "$_lk_policy_file" ]; then
+      sha256sum < "$_lk_policy_file"
+    else
+      printf 'absent\n'
+    fi
+  done | sha256sum | cut -d ' ' -f 1
 }
 
 # A secret file holds one token; surrounding whitespace is never part of it.

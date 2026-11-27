@@ -37,6 +37,21 @@ def is_caused_by_newer_machine(error: BaseException) -> bool:
     return False
 
 
+class MachinePolicyChangedError(RemoteGatewayError):
+    """Raised when a push of a host's policy cannot be shown to have been made from the policy its machine holds.
+
+    Either the machine holds another policy than the push named, or this
+    computer has nothing to name: it has not read the machine since something
+    last invalidated what it knew. The machine applied nothing either way. Its
+    policy has to be read back before the change can be made again: whatever
+    it holds now was never part of the copy the push was made from.
+    """
+
+    def __init__(self, host_id: HostId, reason: str) -> None:
+        self.host_id = host_id
+        super().__init__(f"The policy of host {host_id} was not pushed to its machine: {reason}")
+
+
 class SentToMachine(UpperCaseStrEnum):
     """A part of what one machine command hands the machine to hold or act on."""
 
@@ -49,6 +64,7 @@ class SentToMachine(UpperCaseStrEnum):
     DESKTOP_EGRESS_RULES = auto()
     PERMISSIONS = auto()
     PERMISSIONS_FORMAT_VERSION = auto()
+    EXPECTED_POLICY_FINGERPRINT = auto()
     GATEWAY_LISTEN_HOST = auto()
     TUNNEL = auto()
     GATEWAY_RESTART = auto()

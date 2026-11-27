@@ -47,6 +47,7 @@ from imbue.mngr_latchkey.cli import ENV_LATCHKEY_DIRECTORY
 from imbue.mngr_latchkey.cli import _DEFAULT_LATCHKEY_DIRECTORY
 from imbue.mngr_latchkey.cli import _ignore_sighup_until_handlers_installed
 from imbue.mngr_latchkey.cli import _migrate_hosts_without_a_machine
+from imbue.mngr_latchkey.cli import _push_host_permissions
 from imbue.mngr_latchkey.cli import _resolve_device_identity
 from imbue.mngr_latchkey.cli import _resolve_latchkey_settings
 from imbue.mngr_latchkey.cli import _run_forward_with_error_reporting
@@ -59,16 +60,24 @@ from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.discovery_stream import DiscoveryStreamConsumer
 from imbue.mngr_latchkey.migrations.runner import CURRENT_PERMISSIONS_FORMAT_VERSION
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
+from imbue.mngr_latchkey.remote._machine_policy import project_policy_for_machine
 from imbue.mngr_latchkey.remote._mirror import generate_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import machine_key_path
 from imbue.mngr_latchkey.remote._mirror import record_machine_as_newer
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
+from imbue.mngr_latchkey.remote.credentials import MachineCredentials
+from imbue.mngr_latchkey.remote.mock_outer_host_test import SLACK_GRANTED
+from imbue.mngr_latchkey.remote.mock_outer_host_test import as_vps
+from imbue.mngr_latchkey.remote.mock_outer_host_test import desktop_latchkey
+from imbue.mngr_latchkey.remote.mock_outer_host_test import fake_vps
+from imbue.mngr_latchkey.remote.mock_outer_host_test import grant_host_permissions
 from imbue.mngr_latchkey.store import LatchkeyForwardOwner
 from imbue.mngr_latchkey.store import acquire_forward_lock
 from imbue.mngr_latchkey.store import forward_lock_path
 from imbue.mngr_latchkey.store import forward_owner_path
 from imbue.mngr_latchkey.store import hosts_dir
 from imbue.mngr_latchkey.store import load_permissions
+from imbue.mngr_latchkey.store import machine_policy_record_path
 from imbue.mngr_latchkey.store import permissions_format_version_path
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
@@ -737,6 +746,42 @@ def test_register_agent_writes_the_local_file_for_a_host_with_no_machine_of_its_
 
     assert result.exit_code == 0, result.output
     assert _registered_agent_ids(latchkey_root, _HOST_ID_ONE) == {str(agent_id)}
+
+
+def test_the_policy_register_agent_edited_after_reading_the_machine_is_the_one_the_machine_takes(
+    tmp_path: Path,
+) -> None:
+    """The registration reads the machine before it edits, which is what its push is then made on."""
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path, machine_permissions='{"rules": [{"github-api": ["any"]}]}')
+    desktop = desktop_latchkey(tmp_path, host_id=host_id)
+    machine = MachineCredentials(host=outer, latchkey=desktop, host_id=host_id)
+    machine.refresh(MIGRATION_CONTEXT)
+    grant_host_permissions(desktop, host_id, SLACK_GRANTED)
+
+    _push_host_permissions(desktop, machine)
+
+    assert as_vps(outer).machine_permissions() == project_policy_for_machine(SLACK_GRANTED)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root is not held to file permissions")
+def test_a_record_of_the_machines_policy_that_cannot_be_read_leaves_the_registration_local_and_says_so(
+    tmp_path: Path,
+) -> None:
+    """The push is made on that record, so without it nothing is sent, and the exit is the command's own sentence."""
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path, machine_permissions='{"rules": [{"github-api": ["any"]}]}')
+    desktop = desktop_latchkey(tmp_path, host_id=host_id)
+    machine = MachineCredentials(host=outer, latchkey=desktop, host_id=host_id)
+    machine.refresh(MIGRATION_CONTEXT)
+    command_count_after_the_read = len(as_vps(outer).recorded)
+    grant_host_permissions(desktop, host_id, SLACK_GRANTED)
+    machine_policy_record_path(plugin_data_dir(desktop.latchkey_directory), host_id).chmod(0)
+
+    with pytest.raises(click.ClickException, match="Registered locally, but what this computer keeps on record"):
+        _push_host_permissions(desktop, machine)
+
+    assert len(as_vps(outer).recorded) == command_count_after_the_read
 
 
 def test_register_agent_fails_loudly_when_the_host_has_a_machine_it_cannot_reach(

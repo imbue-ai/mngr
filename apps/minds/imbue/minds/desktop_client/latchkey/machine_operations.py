@@ -27,12 +27,23 @@ click is waiting on it, to the log when nothing is. An edit left behind here
 unpushed is not merely late: the next refresh adopts the machine's policy over
 it and it is gone.
 
-And why the read is not optional either. A push carries this computer's copy
-whole, so an edit is made on a copy that was read back from the machine first,
-in the same operation: every writer refreshes, then edits, then pushes. A copy
+And why a push never goes out on trust. A push carries this computer's copy
+whole, so the copy the edit was made on has to be the machine's own. A copy
 that lagged the machine -- by a grant made from another of the user's
 computers, or by anything this computer has not read since -- pushed as it
-stood would erase on the machine whatever it never knew about.
+stood would erase on the machine whatever it never knew about. So every push
+is conditional: it hands back the fingerprint the machine last gave of its
+policy, and a machine that has moved on since applies none of it
+(:class:`MachinePolicyChangedOperationError`). All of that is kept by
+:mod:`imbue.mngr_latchkey.remote.credentials`; what is decided here is only
+when the machine is read:
+
+* Most writers read first: refresh, then edit, then push. Two round trips.
+* A write that is one edit of the policy (:meth:`MachineOperator.carry_policy_edit`)
+  is made on the copy as it stands, for as long as that copy is still what the
+  machine last answered for, and is read only when it is not or when the
+  machine refuses the push. One round trip, which is what a click in the
+  Permissions tab pays: the tab read the machine moments ago.
 
 A local workspace has no machine of its own -- its agents run here, on the
 credentials and the permissions file this computer keeps -- so for those every
@@ -45,6 +56,7 @@ at once and without a remote command when the machine is recorded as newer,
 and from the machine's own answer when it is not recorded yet.
 """
 
+from collections.abc import Callable
 from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Final
@@ -66,9 +78,11 @@ from imbue.mngr_latchkey.devices import DesktopDeviceId
 from imbue.mngr_latchkey.migrations.interface import PermissionsFormatNewerError
 from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationContext
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
+from imbue.mngr_latchkey.remote.credentials import can_edit_host_policy_without_reading
 from imbue.mngr_latchkey.remote.credentials import read_host_desktop_egress_rules
 from imbue.mngr_latchkey.remote.credentials import read_host_permissions
 from imbue.mngr_latchkey.remote.errors import MachineNewerError
+from imbue.mngr_latchkey.remote.errors import MachinePolicyChangedError
 from imbue.mngr_latchkey.remote.errors import MachineTransferError
 from imbue.mngr_latchkey.remote.errors import is_caused_by_newer_machine
 from imbue.mngr_latchkey.store import LatchkeyStoreError
@@ -110,6 +124,15 @@ class MachineOperationError(Exception):
                 return link
             link = link.__cause__
         return None
+
+
+class MachinePolicyChangedOperationError(MachineOperationError):
+    """Raised when a push was not made from the policy the machine holds, so the machine applied none of it.
+
+    Nothing is wrong with the machine: its policy was changed from somewhere
+    else since this computer's copy was taken, so the edit has to be made
+    again on a copy read back from it.
+    """
 
 
 def _explained_failure(cause: Exception) -> UserFacingFailure | None:
@@ -159,9 +182,10 @@ class MachineOperator(MutableModel):
         Run before the Permissions tab is built, so what it shows is the
         machine's own credentials and policy -- including anything another of
         the user's computers granted -- rather than whatever was left here by
-        the last change; and before every edit that is then pushed whole, so
-        the push carries those grants rather than this computer's stale copy
-        (see the module docstring). One round trip for both halves.
+        the last change; and before an edit of copies that are not known to be
+        the machine's, so the push carries those grants rather than this
+        computer's stale copy (see the module docstring). One round trip for
+        both halves.
 
         Raises:
             MachineOperationError: when the machine cannot be read. The caller
@@ -264,10 +288,13 @@ class MachineOperator(MutableModel):
         what travels is a snapshot of that file: a whole policy rather than a
         delta, so what lands is exactly what the edit left behind. The edit
         has to have been made on a copy :meth:`refresh` brought up to date in
-        the same operation, or the snapshot erases what the machine holds and
-        this computer never read.
+        the same operation, or one :meth:`carry_policy_edit` found still
+        current: the machine takes the snapshot only while it holds the policy
+        that copy was.
 
         Raises:
+            MachinePolicyChangedOperationError: when the machine holds another
+                policy by now. Nothing was applied.
             MachineOperationError: when the snapshot cannot be read, or the
                 machine does not take it.
         """
@@ -300,6 +327,54 @@ class MachineOperator(MutableModel):
                 return
             desktop_egress_rules_json = self._host_desktop_egress_rules(machine.host_id)
             machine.set_permissions_and_desktop_egress_rules(permissions_json, desktop_egress_rules_json)
+
+    def carry_policy_edit(self, workspace_agent_id: str, edit: Callable[[], object]) -> None:
+        """Make an edit to a workspace's policy and carry it to its machine, reading the machine only when that is needed.
+
+        ``edit`` changes this computer's copies and pushes them, or finds
+        nothing to change and pushes nothing. It runs on the copies as they
+        stand while they are still what the machine last answered for, which
+        costs the one round trip of its push. Copies that are anything else --
+        never read, left edited by a push that failed, written by another
+        process -- are read from the machine first. A machine that has moved
+        on refuses the push; it is then read, which puts its policy over the
+        copies here, and ``edit`` runs a second time on what was read. So
+        ``edit`` has to be safe to run twice.
+
+        Raises:
+            MachineOperationError: when the machine has to be read and cannot
+                be, or does not take the edit.
+        """
+        if not self._is_policy_edit_possible_without_reading(workspace_agent_id):
+            self.refresh(workspace_agent_id)
+        try:
+            edit()
+        except MachinePolicyChangedOperationError as e:
+            logger.debug(
+                "Reading the machine of workspace {} to make the edit again on the policy it holds: {}",
+                workspace_agent_id,
+                e,
+            )
+        else:
+            return
+        self.refresh(workspace_agent_id)
+        edit()
+
+    def _is_policy_edit_possible_without_reading(self, workspace_agent_id: str) -> bool:
+        """Whether the workspace's policy can be edited here as it stands; true as well when it has no machine to read.
+
+        Raises:
+            MachineOperationError: when it is unknown whether the workspace
+                has a machine, its machine is one this build leaves alone, or
+                what is on record of it cannot be read.
+        """
+        with self._reporting_exchange_failures(workspace_agent_id):
+            host_id = self.access.machine_host_for(workspace_agent_id)
+            if host_id is None:
+                return True
+            if self.access.is_machine_recorded_as_newer(host_id):
+                raise MachineRecordedAsNewerError(host_id)
+            return can_edit_host_policy_without_reading(self.access.latchkey.plugin_data_dir, host_id)
 
     def _host_permissions(self, host_id: HostId) -> str | None:
         try:
@@ -338,7 +413,7 @@ class MachineOperator(MutableModel):
             MachineOperationError: when there is a machine and the exchange
                 against it did not succeed.
         """
-        try:
+        with self._reporting_exchange_failures(workspace_agent_id):
             host_id = self.access.machine_host_for(workspace_agent_id)
             if host_id is None:
                 logger.debug("Workspace {} has no machine of its own; nothing to carry", workspace_agent_id)
@@ -346,6 +421,20 @@ class MachineOperator(MutableModel):
                 return
             with self.access.open_machine(workspace_agent_id, host_id) as machine:
                 yield machine
+
+    @contextmanager
+    def _reporting_exchange_failures(self, workspace_agent_id: str) -> Generator[None, None, None]:
+        """Turn whatever an exchange with the workspace's machine fails with into the one error callers handle.
+
+        Raises:
+            MachineOperationError: for every failure of the exchange.
+        """
+        try:
+            yield
+        except MachinePolicyChangedError as e:
+            # Nothing went wrong: the machine was changed from somewhere else, and the caller makes its edit again.
+            logger.debug("Left the policy of workspace {} as its machine holds it: {}", workspace_agent_id, e)
+            raise MachinePolicyChangedOperationError(str(e), None) from e
         except MACHINE_EXCHANGE_FAILURES as e:
             if is_caused_by_newer_machine(e) or isinstance(e, MachineRecordedAsNewerError):
                 # Nothing went wrong: this build leaves that machine alone, and the caller says so.

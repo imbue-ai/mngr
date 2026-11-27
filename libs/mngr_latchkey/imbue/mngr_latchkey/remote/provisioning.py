@@ -89,6 +89,7 @@ from imbue.mngr_latchkey.migrations.interface import PermissionsFormatNewerError
 from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationContext
 from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationError
 from imbue.mngr_latchkey.migrations.runner import CURRENT_PERMISSIONS_FORMAT_VERSION
+from imbue.mngr_latchkey.primitives import MachinePolicyFingerprint
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 
 # Re-exported (the redundant alias marks it as such): the desktop app's host
@@ -285,20 +286,27 @@ def provision_remote_gateway(
         gateway_listen_host=listen_host,
         tunnel=tunnel,
         is_gateway_restarted=True,
+        # A seed replaces the machine's policy, so it lands only on the policy that was just read.
+        expected_policy_fingerprint=state.policy_fingerprint if seed is not None else None,
     )
     with log_span("Applying the latchkey gateway state of host {} to VPS {}", host_id, host.get_name()):
-        apply_remote_state(host, update, host_id)
+        policy_fingerprint = apply_remote_state(host, update, host_id)
     if key_decision.is_decided_here:
         _record_machine_encryption_key(latchkey_directory, host_id, key_decision.key)
     adopt_machine_custom_services(latchkey, host_id, custom_service_registrations_of_config(config_json, host_id))
     if seed is None and state.permissions_json is not None:
         adopt_machine_permissions(latchkey_directory, host_id, state.permissions_json)
         adopt_machine_permissions_format_version(latchkey_directory, host_id, state.permissions_format_version)
-    _migrate_adopted_permissions_and_push(host, latchkey, host_id, migration_context)
+    _migrate_adopted_permissions_and_push(host, latchkey, host_id, migration_context, policy_fingerprint)
 
 
 def _migrate_adopted_permissions_and_push(
-    host: OuterHostInterface, latchkey: Latchkey, host_id: HostId, migration_context: PermissionsMigrationContext
+    host: OuterHostInterface,
+    latchkey: Latchkey,
+    host_id: HostId,
+    migration_context: PermissionsMigrationContext,
+    # The machine's fingerprint of the policy just adopted from it; ``None`` when its package gave none.
+    policy_fingerprint: MachinePolicyFingerprint | None,
 ) -> None:
     """Bring the policy just adopted from the machine to the format this build reads, and hand it back.
 
@@ -313,7 +321,7 @@ def _migrate_adopted_permissions_and_push(
             copy here cannot be read back, or the machine does not take it.
     """
     try:
-        migrate_permissions_and_push(host, latchkey, host_id, migration_context)
+        migrate_permissions_and_push(host, latchkey, host_id, migration_context, policy_fingerprint)
     except PermissionsFormatNewerError as e:
         logger.warning(
             "Leaving the permissions of host {} as its machine holds them; this build cannot migrate them: {}",

@@ -39,8 +39,25 @@ custom service, a disconnect of one's last account -- reads the machine's config
 first, so the snapshot it installs keeps what another computer registered there
 (:meth:`MachineCredentials._config_registering`,
 :meth:`MachineCredentials._config_deregistering`).
+
+A push of the policy replaces the machine's whole, so the copy it is taken
+from has to be the machine's own with the edit on top. So every push is
+conditional. A read and every push are answered with the machine's fingerprint
+of the policy it then holds, which is kept in a record beside the copies here
+(:func:`can_edit_host_policy_without_reading`), and the next push hands it
+back: the machine installs the snapshot only while it still holds that policy,
+and the push raises
+:class:`~imbue.mngr_latchkey.remote.errors.MachinePolicyChangedError` when it
+does not, or when there is no record to push on. The caller then reads the
+machine and makes its edit again. What stays the caller's is knowing that the
+copies it edits are the ones the record is about: it either reads the machine
+first, or asks :func:`can_edit_host_policy_without_reading` and reads when
+the answer is no.
 """
 
+import hashlib
+import json
+from collections.abc import Callable
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -49,11 +66,13 @@ from pydantic import Field
 from pydantic import JsonValue
 from pydantic import SecretStr
 from pydantic import SkipValidation
+from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
+from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import build_config_with_custom_services
@@ -65,6 +84,7 @@ from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationContext
 from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationError
 from imbue.mngr_latchkey.migrations.runner import PERMISSIONS_MIGRATIONS
 from imbue.mngr_latchkey.migrations.runner import migrate_permissions
+from imbue.mngr_latchkey.primitives import MachinePolicyFingerprint
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.remote._machine import forget_permission_request
 from imbue.mngr_latchkey.remote._machine import read_filed_permission_requests
@@ -94,9 +114,11 @@ from imbue.mngr_latchkey.remote._transfer import push_credentials
 from imbue.mngr_latchkey.remote._transfer import push_credentials_with_permissions
 from imbue.mngr_latchkey.remote._transfer import push_permissions_and_desktop_egress_rules
 from imbue.mngr_latchkey.remote._transfer import push_permissions_snapshot
+from imbue.mngr_latchkey.remote.errors import MachinePolicyChangedError
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
+from imbue.mngr_latchkey.store import machine_policy_record_path
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 from imbue.mngr_latchkey.store import read_permissions_format_version
@@ -113,6 +135,23 @@ class SeededPolicy(FrozenModel):
     permissions_format_version: PermissionsFormatVersion = Field(description="The format that copy is stamped with.")
     desktop_egress_rules_json: str | None = Field(
         description="The desktop egress rules pushed with it, or ``None`` when this computer had no copy to push."
+    )
+    policy_fingerprint: MachinePolicyFingerprint | None = Field(
+        description="The machine's fingerprint of what it holds now, or ``None`` when its package gives none."
+    )
+
+
+class _MachinePolicyRecord(FrozenModel):
+    """What this computer last learned of the policy a host's machine holds, as kept beside its copies of it."""
+
+    fingerprint: MachinePolicyFingerprint | None = Field(
+        description=(
+            "The machine's fingerprint of that policy, which the next push hands back. ``None`` when the machine's "
+            "package gave none: the record then stands for one read, and covers the single push that follows it."
+        )
+    )
+    copies_sha256: str = Field(
+        description="A digest of this computer's copies of the policy as they stood when the machine held it."
     )
 
 
@@ -177,6 +216,11 @@ class MachineCredentials(FrozenModel):
         config registers is adopted into the machine store here (see
         :func:`~imbue.mngr_latchkey.remote._transfer.adopt_machine_custom_services`).
 
+        The **fingerprint** is the machine's, of the policy it holds once all
+        of that is done -- after the seed or the migration, when either ran --
+        which is the policy the copies here now are. It is recorded beside
+        them, for the next push to hand back (see :meth:`set_permissions`).
+
         Raises:
             PermissionsMigrationError: when the machine's policy is in a format
                 newer than this build knows, or cannot be migrated to the one it
@@ -192,7 +236,9 @@ class MachineCredentials(FrozenModel):
         fetched = fetch_machine_state(self.host, self.latchkey, self.host_id)
         adopt_machine_credentials(self.latchkey, self.host_id, fetched)
         adopt_machine_custom_services(self.latchkey, self.host_id, fetched.custom_service_registrations)
-        seeded = self._reconcile_permissions(fetched.permissions_json, fetched.permissions_format_version)
+        seeded = self._reconcile_permissions(
+            fetched.permissions_json, fetched.permissions_format_version, fetched.policy_fingerprint
+        )
         if seeded is None or seeded.desktop_egress_rules_json is None:
             adopt_machine_desktop_egress_rules(
                 self.latchkey.latchkey_directory, self.host_id, fetched.desktop_egress_rules_json
@@ -207,19 +253,31 @@ class MachineCredentials(FrozenModel):
                     if seeded.desktop_egress_rules_json is None
                     else seeded.desktop_egress_rules_json,
                 ),
+                to_update(fetched.field_ref().policy_fingerprint, seeded.policy_fingerprint),
             )
-        migrated = migrate_permissions_and_push(self.host, self.latchkey, self.host_id, migration_context)
-        if migrated is None:
-            return fetched
-        return fetched.model_copy_update(
-            to_update(fetched.field_ref().permissions_json, migrated.permissions_json),
-            to_update(fetched.field_ref().permissions_format_version, migrated.permissions_format_version),
+        migrated = migrate_permissions_and_push(
+            self.host, self.latchkey, self.host_id, migration_context, fetched.policy_fingerprint
         )
+        refreshed = (
+            fetched
+            if migrated is None
+            else fetched.model_copy_update(
+                to_update(fetched.field_ref().permissions_json, migrated.permissions_json),
+                to_update(fetched.field_ref().permissions_format_version, migrated.permissions_format_version),
+                to_update(fetched.field_ref().policy_fingerprint, migrated.policy_fingerprint),
+            )
+        )
+        _write_machine_policy_record(
+            plugin_data_dir(self.latchkey.latchkey_directory), self.host_id, refreshed.policy_fingerprint
+        )
+        return refreshed
 
     def _reconcile_permissions(
         self,
         machine_permissions_json: str | None,
         machine_permissions_format_version: PermissionsFormatVersion,
+        # The machine's fingerprint of that policy, which a seed hands back; ``None`` when its package gave none.
+        machine_policy_fingerprint: MachinePolicyFingerprint | None,
         # what the machine was seeded with from here, or ``None`` when its own policy was adopted (or it has
         # none and neither does this computer)
     ) -> SeededPolicy | None:
@@ -257,14 +315,26 @@ class MachineCredentials(FrozenModel):
             "The machine of host {} holds no provisioned permissions; seeding it with this computer's copy",
             self.host_id,
         )
-        if local_desktop_egress_rules_json is None:
-            self.set_permissions(local_permissions_json)
-        else:
-            self.set_permissions_and_desktop_egress_rules(local_permissions_json, local_desktop_egress_rules_json)
+        permissions_format_version = self._permissions_format_version()
+        policy_fingerprint = (
+            push_permissions_snapshot(
+                self.host, self.host_id, local_permissions_json, permissions_format_version, machine_policy_fingerprint
+            )
+            if local_desktop_egress_rules_json is None
+            else push_permissions_and_desktop_egress_rules(
+                self.host,
+                self.host_id,
+                local_permissions_json,
+                local_desktop_egress_rules_json,
+                permissions_format_version,
+                machine_policy_fingerprint,
+            )
+        )
         return SeededPolicy(
             permissions_json=local_permissions_json,
-            permissions_format_version=self._permissions_format_version(),
+            permissions_format_version=permissions_format_version,
             desktop_egress_rules_json=local_desktop_egress_rules_json,
+            policy_fingerprint=policy_fingerprint,
         )
 
     def connect_service(self, service_name: str, account: str) -> None:
@@ -299,7 +369,9 @@ class MachineCredentials(FrozenModel):
         the machine, credential first (see
         :func:`~imbue.mngr_latchkey.remote._transfer.push_credentials_with_permissions`),
         so a grant costs one round trip and neither half can be reported done
-        without the other.
+        without the other. The policy travels on the condition
+        :meth:`set_permissions` describes, and a machine that has moved on
+        takes neither half.
         """
         self._push_grant(service_name, account, permissions_json, desktop_egress_rules_json=None)
 
@@ -319,43 +391,115 @@ class MachineCredentials(FrozenModel):
     def _push_grant(
         self, service_name: str, account: str, permissions_json: str, desktop_egress_rules_json: str | None
     ) -> None:
-        push_credentials_with_permissions(
-            self.host,
-            self._machine_latchkey(),
-            self.host_id,
-            service_name,
-            account,
-            self._machine_key(),
-            permissions_json,
-            self._permissions_format_version(),
-            desktop_egress_rules_json,
-            config_json=self._config_registering(service_name),
+        machine_latchkey = self._machine_latchkey()
+        machine_key = self._machine_key()
+        permissions_format_version = self._permissions_format_version()
+        config_json = self._config_registering(service_name)
+        self._push_policy(
+            lambda expected_policy_fingerprint: push_credentials_with_permissions(
+                self.host,
+                machine_latchkey,
+                self.host_id,
+                service_name,
+                account,
+                machine_key,
+                permissions_json,
+                permissions_format_version,
+                desktop_egress_rules_json,
+                expected_policy_fingerprint,
+                config_json=config_json,
+            )
         )
 
     def set_permissions(self, permissions_json: str) -> None:
-        """Make ``permissions_json`` the policy the machine's gateway enforces.
+        """Make ``permissions_json`` the policy the machine's gateway enforces, if it was edited from the one it holds.
 
         The one operation that needs no credential material, and so no key:
         a policy is not encrypted (see
         :func:`~imbue.mngr_latchkey.remote._transfer.push_permissions_snapshot`).
         The snapshot is of this computer's copy, so it travels with that
         copy's format stamp.
+
+        It travels on a condition: the fingerprint the machine last gave of
+        its policy, as recorded here, is handed back, and a machine holding
+        any other policy by now installs nothing. A machine whose package
+        gives no fingerprint cannot be asked that, so a push to one is made
+        only straight after a read of it, once. Either way a push with no
+        record to go on is not sent at all.
+
+        Raises:
+            MachinePolicyChangedError: when the machine no longer holds the
+                policy the record names, or this computer has no record to
+                push on. The machine's policy is left as it was.
         """
-        push_permissions_snapshot(self.host, self.host_id, permissions_json, self._permissions_format_version())
+        permissions_format_version = self._permissions_format_version()
+        self._push_policy(
+            lambda expected_policy_fingerprint: push_permissions_snapshot(
+                self.host, self.host_id, permissions_json, permissions_format_version, expected_policy_fingerprint
+            )
+        )
 
     def set_permissions_and_desktop_egress_rules(self, permissions_json: str, desktop_egress_rules_json: str) -> None:
         """Make both snapshots what the machine holds: the policy its gateway enforces and the rules its router reads.
 
-        A pure push, under the contract :meth:`set_permissions` has: the caller
-        edits this computer's copies first and hands over snapshots of them
-        (:func:`read_host_permissions`, :func:`read_host_desktop_egress_rules`),
-        and nothing here writes those copies. Both land in one remote command,
-        with the copies' format stamp, and neither needs a key (see
+        A push under the contract :meth:`set_permissions` has, its condition
+        included: the caller edits this computer's copies first and hands over
+        snapshots of them (:func:`read_host_permissions`,
+        :func:`read_host_desktop_egress_rules`), and nothing here writes those
+        copies. Both land in one remote command, with the copies' format stamp,
+        and neither needs a key (see
         :func:`~imbue.mngr_latchkey.remote._transfer.push_permissions_and_desktop_egress_rules`).
+
+        Raises:
+            MachinePolicyChangedError: as :meth:`set_permissions`. The
+                machine's policy and rules are left as they were.
         """
-        push_permissions_and_desktop_egress_rules(
-            self.host, self.host_id, permissions_json, desktop_egress_rules_json, self._permissions_format_version()
+        permissions_format_version = self._permissions_format_version()
+        self._push_policy(
+            lambda expected_policy_fingerprint: push_permissions_and_desktop_egress_rules(
+                self.host,
+                self.host_id,
+                permissions_json,
+                desktop_egress_rules_json,
+                permissions_format_version,
+                expected_policy_fingerprint,
+            )
         )
+
+    def _push_policy(
+        self,
+        # Sends the push with the fingerprint it is given as its condition (``None`` for none), and returns the
+        # fingerprint the machine answers with.
+        push: Callable[[MachinePolicyFingerprint | None], MachinePolicyFingerprint | None],
+    ) -> None:
+        """Send a push of the policy on the condition the record allows, and leave the record saying what the machine then holds.
+
+        Raises:
+            MachinePolicyChangedError: when there is no record to push on, or
+                the machine holds another policy than the record names.
+            RemoteGatewayError: when the machine refuses or fails the push.
+            LatchkeyStoreError: when the record cannot be read or written.
+        """
+        data_dir = plugin_data_dir(self.latchkey.latchkey_directory)
+        record = _read_machine_policy_record(data_dir, self.host_id)
+        if record is None:
+            raise MachinePolicyChangedError(
+                self.host_id, "this computer has not read the machine since it last knew what policy it holds"
+            )
+        try:
+            fingerprint = push(record.fingerprint)
+        except MachinePolicyChangedError:
+            _forget_machine_policy_record(data_dir, self.host_id)
+            raise
+        except RemoteGatewayError:
+            # Without a fingerprint the machine checked nothing, and may or may not have taken the push.
+            if record.fingerprint is None:
+                _forget_machine_policy_record(data_dir, self.host_id)
+            raise
+        if fingerprint is None:
+            _forget_machine_policy_record(data_dir, self.host_id)
+        else:
+            _write_machine_policy_record(data_dir, self.host_id, fingerprint)
 
     def disconnect_account(self, service_name: str, account: str, is_service_deregistered: bool) -> None:
         """Clear one account from the machine's own store, and deregister its service when asked to.
@@ -531,6 +675,9 @@ class MigratedPermissions(FrozenModel):
 
     permissions_json: str = Field(description="The host's policy, in the format the migrations end in.")
     permissions_format_version: PermissionsFormatVersion = Field(description="The format it is now stamped with.")
+    policy_fingerprint: MachinePolicyFingerprint | None = Field(
+        description="The machine's fingerprint of what it holds now, or ``None`` when its package gives none."
+    )
 
 
 def migrate_permissions_and_push(
@@ -538,6 +685,9 @@ def migrate_permissions_and_push(
     latchkey: Latchkey,
     host_id: HostId,
     migration_context: PermissionsMigrationContext,
+    # The machine's fingerprint of the policy just adopted from it, which the push of the migrated one hands
+    # back; ``None`` when its package gave none.
+    expected_policy_fingerprint: MachinePolicyFingerprint | None,
     migrations: Sequence[PermissionsMigration] = PERMISSIONS_MIGRATIONS,
     # what was migrated and pushed back, or ``None`` when the policy was already in this build's format
 ) -> MigratedPermissions | None:
@@ -552,6 +702,8 @@ def migrate_permissions_and_push(
         PermissionsMigrationError: when the policy is in a format newer than
             ``migrations`` know, or cannot be brought to the one they end in.
         LatchkeyStoreError: when the migrated copy cannot be read back.
+        MachinePolicyChangedError: when the machine no longer holds the
+            policy that was adopted from it.
         RemoteGatewayError: when the machine does not take it.
     """
     data_dir = plugin_data_dir(latchkey.latchkey_directory)
@@ -562,17 +714,19 @@ def migrate_permissions_and_push(
         raise PermissionsMigrationError(
             f"Migrated the permissions of host {host_id}, but there is no policy left to push"
         )
-    migrated = MigratedPermissions(
-        permissions_json=permissions_json,
-        permissions_format_version=read_permissions_format_version(data_dir, host_id),
-    )
+    permissions_format_version = read_permissions_format_version(data_dir, host_id)
     logger.info(
         "Migrated the permissions of host {} to format version {}; handing them back to the machine",
         host_id,
-        migrated.permissions_format_version,
+        permissions_format_version,
     )
-    push_permissions_snapshot(host, host_id, migrated.permissions_json, migrated.permissions_format_version)
-    return migrated
+    return MigratedPermissions(
+        permissions_json=permissions_json,
+        permissions_format_version=permissions_format_version,
+        policy_fingerprint=push_permissions_snapshot(
+            host, host_id, permissions_json, permissions_format_version, expected_policy_fingerprint
+        ),
+    )
 
 
 def _recorded_machine_key(latchkey: Latchkey, host_id: HostId) -> SecretStr:
@@ -606,13 +760,15 @@ def read_host_permissions(data_dir: Path, host_id: HostId) -> str | None:
     one is always right regardless of what came before it.
 
     Every writer of this file must push what it wrote, in the same operation,
-    and must have read the machine (:meth:`MachineCredentials.refresh`) in that
-    same operation before writing. The machine owns the policy, so an edit that
-    is not pushed is not merely late -- it is discarded by the next refresh,
-    silently -- and a snapshot taken from a copy that was not read first
-    carries this computer's stale idea of the policy over whatever the machine
-    gained since, a grant from another of the user's computers included. A
-    writer that cannot read or push must at least say so.
+    and the copy it wrote on must be the one the record beside it is about:
+    either it read the machine (:meth:`MachineCredentials.refresh`) in that
+    same operation before writing, or :func:`can_edit_host_policy_without_reading`
+    said the copy was still what the machine last answered for. The machine
+    owns the policy, so an edit that is not pushed is not merely late -- it is
+    discarded by the next refresh, silently -- and an edit made on a copy the
+    record is not about would ride to the machine on a fingerprint that never
+    described it, carrying along whatever else that copy held. A writer that
+    cannot read or push must at least say so.
 
     Raises:
         LatchkeyStoreError: when the file exists but cannot be read.
@@ -646,6 +802,94 @@ def read_host_desktop_egress_rules(data_dir: Path, host_id: HostId) -> str | Non
         raise LatchkeyStoreError(
             f"Failed to read the desktop egress rules of host {host_id} at {rules_path}: {e}"
         ) from e
+
+
+def can_edit_host_policy_without_reading(data_dir: Path, host_id: HostId) -> bool:
+    """Whether an edit of this computer's copies of ``host_id``'s policy can be pushed without reading the machine first.
+
+    True while the machine's fingerprint of its policy is on record here and
+    the copies are still as they stood when it gave it: the push of an edit
+    made now hands that fingerprint back, and the machine itself refuses it
+    if it has moved on. False when there is nothing on record, when the
+    machine's package gives no fingerprint to check, and when the copies have
+    been changed since -- by an edit whose push failed, or by anything else --
+    because an edit made on top of that would be pushed along with it.
+
+    Raises:
+        LatchkeyStoreError: when the record or a copy exists but cannot be read.
+    """
+    record = _read_machine_policy_record(data_dir, host_id)
+    return (
+        record is not None
+        and record.fingerprint is not None
+        and record.copies_sha256 == _digest_host_policy_copies(data_dir, host_id)
+    )
+
+
+def _digest_host_policy_copies(data_dir: Path, host_id: HostId) -> str:
+    """A digest of this computer's copies of everything that makes up ``host_id``'s policy, as they stand.
+
+    Raises:
+        LatchkeyStoreError: when a copy exists but cannot be read.
+    """
+    copies = (
+        read_host_permissions(data_dir, host_id),
+        read_host_desktop_egress_rules(data_dir, host_id),
+        int(read_permissions_format_version(data_dir, host_id)),
+    )
+    return hashlib.sha256(json.dumps(copies).encode("utf-8")).hexdigest()
+
+
+def _read_machine_policy_record(data_dir: Path, host_id: HostId) -> _MachinePolicyRecord | None:
+    """What is on record of the policy ``host_id``'s machine holds, or ``None`` when nothing usable is.
+
+    Raises:
+        LatchkeyStoreError: when the record exists but cannot be read.
+    """
+    record_path = machine_policy_record_path(data_dir, host_id)
+    if not record_path.is_file():
+        return None
+    try:
+        record_json = record_path.read_text()
+    except OSError as e:
+        raise LatchkeyStoreError(f"Failed to read the machine policy record of host {host_id}: {e}") from e
+    try:
+        return _MachinePolicyRecord.model_validate_json(record_json)
+    except ValidationError as e:
+        # Having no record only costs the next push a read of the machine.
+        logger.warning("Ignored the machine policy record of host {} at {}: {}", host_id, record_path, e)
+        return None
+
+
+def _write_machine_policy_record(
+    data_dir: Path,
+    host_id: HostId,
+    # ``None`` when the machine's package gave none.
+    fingerprint: MachinePolicyFingerprint | None,
+) -> None:
+    """Record that ``host_id``'s machine holds this computer's copies as they stand, under ``fingerprint``.
+
+    Raises:
+        LatchkeyStoreError: when a copy cannot be read or the record cannot be written.
+    """
+    record = _MachinePolicyRecord(fingerprint=fingerprint, copies_sha256=_digest_host_policy_copies(data_dir, host_id))
+    record_path = machine_policy_record_path(data_dir, host_id)
+    try:
+        atomic_write(record_path, record.model_dump_json())
+    except OSError as e:
+        raise LatchkeyStoreError(f"Failed to write the machine policy record of host {host_id}: {e}") from e
+
+
+def _forget_machine_policy_record(data_dir: Path, host_id: HostId) -> None:
+    """Drop what is on record of the policy ``host_id``'s machine holds, so the next push waits for a read.
+
+    Raises:
+        LatchkeyStoreError: when the record cannot be removed.
+    """
+    try:
+        machine_policy_record_path(data_dir, host_id).unlink(missing_ok=True)
+    except OSError as e:
+        raise LatchkeyStoreError(f"Failed to remove the machine policy record of host {host_id}: {e}") from e
 
 
 def has_machine_of_its_own(data_dir: Path, host_id: HostId) -> bool:

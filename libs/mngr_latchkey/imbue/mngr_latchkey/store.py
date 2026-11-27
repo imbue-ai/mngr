@@ -395,6 +395,16 @@ def desktop_egress_rules_path_for_host(data_dir: Path, host_id: HostId) -> Path:
     return data_dir / _HOSTS_DIR_NAME / str(host_id) / DESKTOP_EGRESS_RULES_FILENAME
 
 
+# What this computer last learned of the policy a host's machine holds (see
+# :mod:`imbue.mngr_latchkey.remote.credentials`), kept beside its copies of it.
+MACHINE_POLICY_RECORD_FILENAME: Final[str] = "machine-policy-record.json"
+
+
+def machine_policy_record_path(data_dir: Path, host_id: HostId) -> Path:
+    """Return the path to the record of what ``host_id``'s machine last said of the policy it holds."""
+    return data_dir / _HOSTS_DIR_NAME / str(host_id) / MACHINE_POLICY_RECORD_FILENAME
+
+
 # The stamp the migrations in :mod:`imbue.mngr_latchkey.migrations.runner` keep
 # in a host's directory. Named apart from upstream's ``data-format-version``,
 # which sits in the same directory (a machine store is a latchkey directory)

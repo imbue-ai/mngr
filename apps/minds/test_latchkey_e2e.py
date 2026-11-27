@@ -1107,9 +1107,12 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             )
 
             # Grant slack the way the desktop client's permission dialog does:
-            # the rule is written into the canonical file, the sign-in lands in
-            # the host's machine store, and the two are pushed to the machine as
+            # the machine is read, which is what the push is then made on, the
+            # rule is written into the canonical file, the sign-in lands in the
+            # host's machine store, and the two are pushed to the machine as
             # one blocking change.
+            with _machine_of(env, latchkey_directory, latchkey_binary, host_id) as machine:
+                machine.refresh(MIGRATION_CONTEXT)
             _grant_scope_in_host_permissions(latchkey_directory, host_id)
             _seed_machine_store_slack_credentials(latchkey_binary, latchkey_directory, host_id)
             granted_policy = permissions_path_for_host(

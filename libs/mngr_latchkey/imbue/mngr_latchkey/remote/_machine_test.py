@@ -15,10 +15,12 @@ from imbue.mngr_latchkey.baseline_permissions import AGENT_BASELINE_PERMISSIONS
 from imbue.mngr_latchkey.devices import DesktopDeviceId
 from imbue.mngr_latchkey.devices import DeviceRecord
 from imbue.mngr_latchkey.discovery import is_transient_remote_wiring_error
+from imbue.mngr_latchkey.primitives import MachinePolicyFingerprint
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.remote._machine import MACHINE_GENERATION_FILE
 from imbue.mngr_latchkey.remote._machine import OUTCOME_DONE_MARKER
 from imbue.mngr_latchkey.remote._machine import OUTCOME_MACHINE_NEWER_MARKER
+from imbue.mngr_latchkey.remote._machine import OUTCOME_POLICY_CHANGED_MARKER
 from imbue.mngr_latchkey.remote._machine import RemoteCredentialClear
 from imbue.mngr_latchkey.remote._machine import RemoteCredentialMerge
 from imbue.mngr_latchkey.remote._machine import RemoteStateRequest
@@ -36,6 +38,7 @@ from imbue.mngr_latchkey.remote._machine import read_filed_permission_requests
 from imbue.mngr_latchkey.remote._machine import read_remote_state
 from imbue.mngr_latchkey.remote._machine_policy import project_policy_for_machine
 from imbue.mngr_latchkey.remote.errors import MachineNewerError
+from imbue.mngr_latchkey.remote.errors import MachinePolicyChangedError
 from imbue.mngr_latchkey.remote.errors import MachineTransferError
 from imbue.mngr_latchkey.remote.errors import ReceivedFromMachine
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
@@ -382,6 +385,7 @@ def test_every_entry_an_update_can_send_belongs_to_a_named_part(tmp_path: Path) 
         tunnel=RemoteTunnelTarget(host_id=HostId.generate(), ssh_user="root", ssh_port=2222),
         is_credential_store_abandoned=True,
         is_gateway_restarted=True,
+        expected_policy_fingerprint=MachinePolicyFingerprint("fingerprint-4416"),
     )
 
     with pytest.raises(MachineTransferError) as raised:
@@ -528,6 +532,50 @@ def test_every_machine_command_carries_the_generation_check_ahead_of_it(subcomma
     check = machine_generation_check(MACHINE_GENERATION_FILE, None)
     assert command.startswith(check + "\n")
     assert command.index(check) < command.index(f"mngr-latchkey {subcommand}")
+
+
+def test_an_update_hands_the_machine_the_fingerprint_of_the_policy_it_was_made_from() -> None:
+    document = _update_document(
+        RemoteStateUpdate(
+            permissions_json='{"rules": []}', expected_policy_fingerprint=MachinePolicyFingerprint("fingerprint-7719")
+        )
+    )
+
+    assert document["expected_policy_fingerprint"] == b"fingerprint-7719"
+    assert "expected_policy_fingerprint" not in _update_document(RemoteStateUpdate(permissions_json='{"rules": []}'))
+
+
+def test_an_update_raises_policy_changed_when_the_machine_reports_it_holds_another_policy(tmp_path: Path) -> None:
+    outer = _answering(tmp_path, f"{OUTCOME_POLICY_CHANGED_MARKER}\n")
+
+    with pytest.raises(MachinePolicyChangedError, match="holds another policy") as raised:
+        apply_remote_state(
+            outer,
+            RemoteStateUpdate(
+                permissions_json='{"rules": []}',
+                expected_policy_fingerprint=MachinePolicyFingerprint("fingerprint-7719"),
+            ),
+            _HOST_ID,
+        )
+
+    assert raised.value.host_id == _HOST_ID
+
+
+def test_an_update_answers_with_the_fingerprint_of_the_policy_the_machine_then_holds(tmp_path: Path) -> None:
+    outer = _answering(tmp_path, "\n".join((_answer("POLICY_FINGERPRINT", b"fingerprint-2208"), OUTCOME_DONE_MARKER)))
+
+    fingerprint = apply_remote_state(outer, RemoteStateUpdate(permissions_json='{"rules": []}'), _HOST_ID)
+
+    assert fingerprint == MachinePolicyFingerprint("fingerprint-2208")
+
+
+def test_a_machine_whose_package_gives_no_fingerprint_is_read_and_updated_without_one(tmp_path: Path) -> None:
+    """Such a package would not check a fingerprint either, so there is none to hand back to it."""
+    updated = _answering(tmp_path, f"{OUTCOME_DONE_MARKER}\n")
+    read = _answering(tmp_path, _read_stdout())
+
+    assert apply_remote_state(updated, RemoteStateUpdate(permissions_json='{"rules": []}'), _HOST_ID) is None
+    assert read_remote_state(read, RemoteStateRequest(), _HOST_ID).policy_fingerprint is None
 
 
 def test_a_machine_command_raises_machine_newer_when_the_machine_reports_a_newer_generation(tmp_path: Path) -> None:

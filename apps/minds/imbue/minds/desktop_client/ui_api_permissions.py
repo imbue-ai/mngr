@@ -341,10 +341,10 @@ def _read_machine_state(agent_id: str) -> None:
     The pane shows what the workspace's own machine holds -- which accounts it
     is connected to and what its agents may do with them -- so it is read from
     the machine every time it is opened, in one round trip, rather than from
-    whatever this computer last wrote. A write is pushed to the machine whole,
-    so it is made on the same fresh copy (see :func:`_write_prelude`). A local
-    workspace has nothing to read: its agents run here, on the copies this
-    computer keeps.
+    whatever this computer last wrote. A write that is more than one edit of
+    the policy is made on the same fresh copy (see
+    :func:`_read_first_write_prelude`). A local workspace has nothing to read:
+    its agents run here, on the copies this computer keeps.
 
     Raises:
         MachineOperationError: when the machine cannot be reached, which the
@@ -576,16 +576,16 @@ def build_permissions_payload(agent_id: str) -> UiWorkspacePermissions:
 
 
 def _write_prelude(agent_id: str) -> Response | tuple[dict[str, Any], LatchkeyPermissionGrantHandler]:
-    """Auth + agent-id + JSON-body + handler lookup + machine read shared by every write route.
+    """Auth + agent-id + JSON-body + handler lookup shared by every write route.
 
-    Every write edits this computer's copies and pushes them to the
-    workspace's machine whole, so the copies are first made to say what the
-    machine holds: a pane opened a while ago, or a change another of the
-    user's computers made since, would otherwise be erased by the push.
+    Reads nothing from the workspace's machine: a route whose whole write is
+    one edit of the policy carries it with :func:`_carry_edit_and_refresh`,
+    which reads the machine only when it has to, and every other route starts
+    from :func:`_read_first_write_prelude`.
 
     Returns an error :class:`Response` (401 unauthenticated, 404 malformed
-    workspace id, 400 invalid body, 503 with no permission handler wired, 502
-    when the machine cannot be read), or ``(body, handler)`` on success.
+    workspace id, 400 invalid body, 503 with no permission handler wired), or
+    ``(body, handler)`` on success.
     """
     if not is_ui_request_authenticated():
         return make_json_error_response(_CHANGE_NOT_SAVED_SENTENCE, 401, detail="Not authenticated")
@@ -599,13 +599,46 @@ def _write_prelude(agent_id: str) -> Response | tuple[dict[str, Any], LatchkeyPe
     handler = _find_permission_grant_handler()
     if handler is None:
         return make_json_error_response(_CHANGE_NOT_SAVED_SENTENCE, 503, detail="Permission management is unavailable")
+    return body, handler
+
+
+def _read_first_write_prelude(agent_id: str) -> Response | tuple[dict[str, Any], LatchkeyPermissionGrantHandler]:
+    """:func:`_write_prelude`, then a read of the workspace's machine, for a write made in more than one step.
+
+    Such a write edits this computer's copies and pushes them to the
+    workspace's machine whole, so the copies are first made to say what the
+    machine holds: a pane opened a while ago, or a change another of the
+    user's computers made since, would otherwise have the machine refuse the
+    push part-way through the write.
+
+    Returns what :func:`_write_prelude` does, and a 502 :class:`Response` when
+    the machine cannot be read.
+    """
+    prelude = _write_prelude(agent_id)
+    if isinstance(prelude, Response):
+        return prelude
     try:
         _read_machine_state(agent_id)
     except MachineOperationError as e:
         if e.explained_failure != MACHINE_NEWER_FAILURE:
             logger.warning("Could not read the machine of workspace {} before a permission change: {}", agent_id, e)
         return _change_failure_response(agent_id, e)
-    return body, handler
+    return prelude
+
+
+def _carry_edit_and_refresh(agent_id: str, edit: Callable[[], object]) -> Response:
+    """Run one edit of the workspace's policy, carry it to its machine, and answer as :func:`_apply_and_refresh` does.
+
+    The edit is not preceded by a read of the machine unless one is needed,
+    and is made again on a fresh read when the machine has moved on (see
+    :meth:`MachineOperator.carry_policy_edit`), so ``edit`` must be safe to
+    run twice. An app built without an operator can reach no machine, so the
+    edit made here is the whole change.
+    """
+    operator = get_state().machine_operator
+    if operator is None:
+        return _apply_and_refresh(agent_id, edit)
+    return _apply_and_refresh(agent_id, lambda: operator.carry_policy_edit(agent_id, edit))
 
 
 def _apply_and_refresh(agent_id: str, apply_toggle: Callable[[], object]) -> Response:
@@ -722,7 +755,7 @@ def _handle_connector_toggle(agent_id: str) -> Response:
         return make_json_error_response(
             _CHANGE_NOT_SAVED_SENTENCE, 400, detail="scope, account, permission and enabled are required."
         )
-    return _apply_and_refresh(
+    return _carry_edit_and_refresh(
         agent_id,
         lambda: apply_connector_toggle(
             backend_resolver=get_state().backend_resolver,
@@ -758,7 +791,7 @@ def _handle_self_toggle(agent_id: str) -> Response:
             400,
             detail=f"'{grant.path}' is shared from device {grant.device_id}; only that desktop can change its access.",
         )
-    return _apply_and_refresh(
+    return _carry_edit_and_refresh(
         agent_id,
         lambda: apply_self_toggle(
             backend_resolver=get_state().backend_resolver,
@@ -787,7 +820,7 @@ def _handle_desktop_egress_route(agent_id: str) -> Response:
         route = build_desktop_egress_route(route_request.route)
     except DesktopEgressError as e:
         return make_json_error_response(_CHANGE_NOT_SAVED_SENTENCE, 400, detail=str(e))
-    return _apply_and_refresh(
+    return _carry_edit_and_refresh(
         agent_id,
         lambda: apply_desktop_egress_route(
             backend_resolver=get_state().backend_resolver,
@@ -813,7 +846,7 @@ def _handle_connect_credentials(agent_id: str) -> Response:
     permissions, exactly as a completed sign-in does, and the refreshed view is
     the answer either way.
     """
-    prelude = _write_prelude(agent_id)
+    prelude = _read_first_write_prelude(agent_id)
     if isinstance(prelude, Response):
         return prelude
     body, handler = prelude
@@ -870,7 +903,7 @@ def _handle_connector_revoke_all(agent_id: str) -> Response:
         return make_json_error_response(
             _CHANGE_NOT_SAVED_SENTENCE, 400, detail="service_name and account are required."
         )
-    return _apply_and_refresh(
+    return _carry_edit_and_refresh(
         agent_id,
         lambda: revoke_service_account_for_workspace(
             backend_resolver=get_state().backend_resolver,
@@ -918,7 +951,7 @@ def _handle_connector_disconnect(agent_id: str) -> Response:
     the same change as the clear on the machine, and from the machine's store
     here once the grants that named it are stripped.
     """
-    prelude = _write_prelude(agent_id)
+    prelude = _read_first_write_prelude(agent_id)
     if isinstance(prelude, Response):
         return prelude
     body, handler = prelude
@@ -1013,7 +1046,7 @@ def _handle_shared_path(agent_id: str) -> Response:
     computes an agent's -- see
     :meth:`LatchkeyGatewayClient.create_file_sharing_request`.
     """
-    prelude = _write_prelude(agent_id)
+    prelude = _read_first_write_prelude(agent_id)
     if isinstance(prelude, Response):
         return prelude
     body, handler = prelude
@@ -1055,21 +1088,15 @@ def _handle_shared_path(agent_id: str) -> Response:
     if share_request.access == FileSharingAccess.READ:
         try:
             _revoke_file_sharing_names(agent_id, handler, share_request.path, (FileSharingAccess.WRITE,))
-        except (
-            PermissionToggleError,
-            PermissionOverviewError,
-            LatchkeyGatewayClientError,
-            MachineOperationError,
-        ) as e:
+        except (PermissionToggleError, PermissionOverviewError, LatchkeyGatewayClientError) as e:
             logger.warning("Shared {} but could not narrow it to read-only: {}", share_request.path, e)
             return make_json_error_response(_SHARE_FAILED_SENTENCE, status_code=502, detail=str(e))
-    # Unconditionally, and never left to the revoke above: that one is a no-op
-    # for a path being shared for the first time, and a no-op flip returns
-    # without pushing anything (see ``apply_self_toggle``). The gateway spliced
-    # this grant into this computer's copy only, and the next read of the pane
-    # adopts the machine's policy back over it -- so a grant the machine is
-    # never told about is deleted moments after it is made, taking its row with
-    # it.
+    # Unconditionally: the gateway spliced this grant into this computer's copy
+    # only, and the next read of the pane adopts the machine's policy back over
+    # it -- so a grant the machine is never told about is deleted moments after
+    # it is made, taking its row with it. The one push carries the narrowing
+    # above too, since the read this write began with covers a single push to a
+    # machine that gives no fingerprint of its policy.
     try:
         _push_permissions_to_machine()(agent_id)
     except MachineOperationError as e:
@@ -1087,7 +1114,7 @@ def _handle_shared_path_remove(agent_id: str) -> Response:
     to ask for -- and the machine's copy is deleted, since no row would be left
     to offer that from.
     """
-    prelude = _write_prelude(agent_id)
+    prelude = _read_first_write_prelude(agent_id)
     if isinstance(prelude, Response):
         return prelude
     body, handler = prelude
@@ -1104,9 +1131,11 @@ def _handle_shared_path_remove(agent_id: str) -> Response:
     if manager is not None:
         manager.forget_shared_path(agent_id, remove_request.path)
     try:
-        _revoke_file_sharing_names(
+        is_policy_changed = _revoke_file_sharing_names(
             agent_id, handler, remove_request.path, (FileSharingAccess.READ, FileSharingAccess.WRITE)
         )
+        if is_policy_changed:
+            _push_permissions_to_machine()(agent_id)
     except WorkspaceHostUnresolvedError as e:
         return make_json_error_response(_HOST_NOT_LOCATED_SENTENCE, status_code=409, detail=str(e))
     except (PermissionToggleError, PermissionOverviewError) as e:
@@ -1130,13 +1159,15 @@ def _set_file_sharing_name(
     path: str,
     access: FileSharingAccess,
     enabled: bool,
+    # Called with the workspace when the flip changed this computer's copy of the policy.
+    push_permissions_to_machine: Callable[[str], None],
 ) -> None:
     """Turn one ``minds-file-server-*`` name for a path of this desktop on or off.
 
-    Carried to the workspace's own machine like every other permissions edit:
-    the file server the name governs runs where the agent does, so a grant this
-    computer alone knows about is one the agent cannot use and a revoke it
-    alone knows about is one the agent still has.
+    The edit has to be carried to the workspace's own machine like every other
+    permissions edit: the file server the name governs runs where the agent
+    does, so a grant this computer alone knows about is one the agent cannot
+    use and a revoke it alone knows about is one the agent still has.
 
     Raises :class:`PermissionToggleError` when the app was built without a
     device id, since a grant names the desktop whose file it shares.
@@ -1153,7 +1184,7 @@ def _set_file_sharing_name(
             FileSharingGrant(access=access, device_id=DesktopDeviceId(device_id), path=path)
         ),
         enabled=enabled,
-        push_permissions_to_machine=_push_permissions_to_machine(),
+        push_permissions_to_machine=push_permissions_to_machine,
     )
 
 
@@ -1162,16 +1193,25 @@ def _revoke_file_sharing_names(
     handler: LatchkeyPermissionGrantHandler,
     path: str,
     accesses: Sequence[FileSharingAccess],
-) -> None:
-    """Turn off the ``minds-file-server-*`` names for ``path`` on this desktop.
+    # whether any of the names was there to turn off
+) -> bool:
+    """Turn off the ``minds-file-server-*`` names for ``path`` on this desktop, in this computer's copy of the policy.
+
+    Nothing is pushed: the caller carries the copy to the workspace's machine
+    once, however many names went, because the read its write began with
+    covers a single push to a machine that gives no fingerprint of its policy.
 
     The names from before grants named a desktop go with them (see
     :func:`compute_self_permissions`). A name the file never carried is simply
     not in the recomputed rule, so revoking one that was never granted writes
     nothing.
     """
+    workspaces_edited: list[str] = []
     for access in accesses:
-        _set_file_sharing_name(agent_id, handler, path, access, enabled=False)
+        _set_file_sharing_name(
+            agent_id, handler, path, access, enabled=False, push_permissions_to_machine=workspaces_edited.append
+        )
+    return bool(workspaces_edited)
 
 
 def _handle_connect_browser(agent_id: str) -> Response:
@@ -1192,7 +1232,7 @@ def _handle_connect_browser(agent_id: str) -> Response:
     Blocks for as long as the sign-in takes, and grants nothing: the account
     joins the pane with no permissions, exactly as typed-in credentials do.
     """
-    prelude = _write_prelude(agent_id)
+    prelude = _read_first_write_prelude(agent_id)
     if isinstance(prelude, Response):
         return prelude
     body, handler = prelude

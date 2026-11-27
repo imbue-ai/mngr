@@ -2,8 +2,12 @@
 # Read a document from the user's computer (see lk_read_document) and make this
 # machine match it. Every entry is optional; the ones present are applied in
 # the order below, under one "set -e", so nothing is reported done that was
-# not. The last stdout line says the script ran to its end.
+# not. The last stdout line says the script ran to its end, after an answer
+# naming the policy the machine holds now (see lk_policy_fingerprint).
 #
+#   expected_policy_fingerprint   the policy the document was made from: when
+#                                 this machine holds another, nothing below is
+#                                 applied and the last stdout line says so
 #   encryption_key                the machine's own key (adopted: refused if it
 #                                 already runs under a different one)
 #   listen_password               the machine's own gateway password (adopted)
@@ -40,6 +44,13 @@ _lk_scratch="$(mktemp -d "$LK_RUNTIME_DIR/apply.XXXXXX")"
 trap 'rm -rf "$_lk_scratch"' EXIT
 lk_read_document "$_lk_scratch/doc"
 mkdir -p "$LK_LATCHKEY_DIR"
+
+# A policy arrives whole, so one made from a policy this machine no longer
+# holds would erase whatever another of the user's computers changed since.
+if lk_doc_has expected_policy_fingerprint && [ "$(lk_doc_get expected_policy_fingerprint)" != "$(lk_policy_fingerprint)" ]; then
+  printf '%s\n' "$LK_OUTCOME_POLICY_CHANGED"
+  exit 0
+fi
 
 # The machine's own secrets first: a machine running under a key other than
 # the one this document carries refuses the whole document here, before
@@ -184,4 +195,5 @@ if lk_doc_has restart_gateway; then
   lk_supervisor_restart "$LK_GATEWAY_PROGRAM"
 fi
 
+printf '%s' "$(lk_policy_fingerprint)" | lk_answer POLICY_FINGERPRINT
 printf '%s\n' "$LK_OUTCOME_DONE"

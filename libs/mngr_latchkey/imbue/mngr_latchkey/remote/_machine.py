@@ -7,11 +7,13 @@ five commands the package provides, each one remote command:
 * ``mngr-latchkey read-state`` assembles what the machine holds -- the secrets
   its gateway runs under, its config, the policy it enforces, the desktop
   egress rules its curl router reads, the format version the policy is written
-  in, how the agent's container was created (when asked about one), and (when
-  asked) its credential store, still encrypted under the machine's own key --
-  and prints it as prefixed base64 lines (:func:`read_remote_state`).
+  in, a fingerprint of those three, how the agent's container was created
+  (when asked about one), and (when asked) its credential store, still
+  encrypted under the machine's own key -- and prints it as prefixed base64
+  lines (:func:`read_remote_state`).
 * ``mngr-latchkey apply-state`` makes the machine match a document of what this
-  computer wants it to hold, applied in one ``set -e`` script on the machine
+  computer wants it to hold, applied in one ``set -e`` script on the machine,
+  and answers with the fingerprint of the policy it holds afterwards
   (:func:`apply_remote_state`).
 * ``mngr-latchkey announce-device`` records this computer as one of the
   desktops connected to the machine: the loopback port its tunnel binds there
@@ -47,6 +49,15 @@ A policy crosses the wire in the machine's projection of it, in both
 directions (:mod:`imbue.mngr_latchkey.remote._machine_policy`): what an update
 carries is projected as its document is built, and what a read answers with is
 restored before anything else sees it.
+
+The fingerprint is the machine's own: it digests its policy file, its desktop
+egress rules file and its format stamp, and this computer never computes one.
+An update can carry the fingerprint a read or an earlier update answered with
+(:attr:`RemoteStateUpdate.expected_policy_fingerprint`), and a machine that
+holds any other policy by then applies none of it. That is what lets a
+whole-policy push skip the read that would otherwise have to precede it. A
+machine whose package does not answer with a fingerprint would not check one
+either, so there is nothing to hand it back and its updates stay unconditional.
 """
 
 import base64
@@ -74,10 +85,12 @@ from imbue.mngr_latchkey.devices import DeviceRecord
 from imbue.mngr_latchkey.filed_permission_requests import FiledPermissionRequest
 from imbue.mngr_latchkey.filed_permission_requests import FiledPermissionRequestsError
 from imbue.mngr_latchkey.filed_permission_requests import parse_filed_permission_requests
+from imbue.mngr_latchkey.primitives import MachinePolicyFingerprint
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.remote._machine_policy import project_policy_for_machine
 from imbue.mngr_latchkey.remote._machine_policy import restore_policy_from_machine
 from imbue.mngr_latchkey.remote.errors import MachineNewerError
+from imbue.mngr_latchkey.remote.errors import MachinePolicyChangedError
 from imbue.mngr_latchkey.remote.errors import MachineTransferError
 from imbue.mngr_latchkey.remote.errors import ReceivedFromMachine
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
@@ -140,6 +153,10 @@ MACHINE_GENERATION_FILE: Final[Path] = Path("/etc/mngr-machine/generation")
 # The last stdout line of a command that found the machine's generation newer
 # than this build's and so did nothing.
 OUTCOME_MACHINE_NEWER_MARKER: Final[str] = "MNGR_LATCHKEY_OUTCOME=MACHINE_NEWER"
+
+# The last stdout line of an update that found the machine holding another
+# policy than the one it was made from and so applied nothing.
+OUTCOME_POLICY_CHANGED_MARKER: Final[str] = "MNGR_LATCHKEY_OUTCOME=POLICY_CHANGED"
 
 # Prefix of every answer a read prints, one per line, each holding a base64
 # payload. Prefixed rather than positional because anything else the script
@@ -204,6 +221,7 @@ DIFFERENT_MACHINE_PASSWORD_MESSAGE: Final[str] = (
 
 # The document entries ``apply-state`` and ``read-state`` understand, spelled
 # the way the package's scripts read them.
+_ENTRY_EXPECTED_POLICY_FINGERPRINT: Final[str] = "expected_policy_fingerprint"
 _ENTRY_ABANDON_CREDENTIAL_STORE: Final[str] = "abandon_credential_store"
 _ENTRY_ENCRYPTION_KEY: Final[str] = "encryption_key"
 _ENTRY_LISTEN_PASSWORD: Final[str] = "listen_password"
@@ -238,6 +256,8 @@ _ANSWER_CONFIG_JSON: Final[str] = "CONFIG_JSON"
 _ANSWER_PERMISSIONS_JSON: Final[str] = "PERMISSIONS_JSON"
 _ANSWER_DESKTOP_EGRESS_RULES_JSON: Final[str] = "DESKTOP_EGRESS_RULES_JSON"
 _ANSWER_PERMISSIONS_FORMAT_VERSION: Final[str] = "PERMISSIONS_FORMAT_VERSION"
+# Answered by ``read-state`` and by ``apply-state``; a machine whose package gives none is read as having none.
+_ANSWER_POLICY_FINGERPRINT: Final[str] = "POLICY_FINGERPRINT"
 _ANSWER_CREDENTIALS: Final[str] = "CREDENTIALS"
 _ANSWER_DATA_FORMAT_VERSION: Final[str] = "DATA_FORMAT_VERSION"
 _ANSWER_HAS_CONTAINER_TUNNEL_KEY: Final[str] = "HAS_CONTAINER_TUNNEL_KEY"
@@ -248,6 +268,7 @@ _FLAG_TRUE: Final[bytes] = b"1"
 
 # The part of what is sent that each document entry belongs to (see :func:`_command_parts`).
 _SENT_PART_BY_ENTRY: Final[Mapping[str, SentToMachine]] = {
+    _ENTRY_EXPECTED_POLICY_FINGERPRINT: SentToMachine.EXPECTED_POLICY_FINGERPRINT,
     _ENTRY_ENCRYPTION_KEY: SentToMachine.ENCRYPTION_KEY,
     _ENTRY_LISTEN_PASSWORD: SentToMachine.LISTEN_PASSWORD,
     _ENTRY_CONFIG_JSON: SentToMachine.CONFIG,
@@ -374,6 +395,12 @@ class RemoteMachineState(FrozenModel):
             ":mod:`imbue.mngr_latchkey.migrations.runner`); 0 for a machine never stamped."
         )
     )
+    policy_fingerprint: MachinePolicyFingerprint | None = Field(
+        description=(
+            "What the machine says identifies its policy, its desktop egress rules and its format stamp as they "
+            "are now, or ``None`` when its package does not say."
+        )
+    )
     credential_store: EncryptedCredentialStore | None = Field(
         description=(
             "The machine's store as it holds it, encrypted under its own key, or ``None`` when it was not asked "
@@ -474,6 +501,13 @@ class RemoteStateUpdate(FrozenModel):
     is_gateway_restarted: bool = Field(
         default=False, description="Whether to restart the gateway afterwards so rewritten secrets take effect."
     )
+    expected_policy_fingerprint: MachinePolicyFingerprint | None = Field(
+        default=None,
+        description=(
+            "The fingerprint the machine gave of the policy this update was made from. A machine holding any "
+            "other applies none of the update; ``None`` applies it over whatever the machine holds."
+        ),
+    )
 
 
 def announce_device(host: OuterHostInterface, record: DeviceRecord, host_id: HostId) -> None:
@@ -531,15 +565,34 @@ def read_remote_state(host: OuterHostInterface, request: RemoteStateRequest, hos
         raise _command_parts(_READ_STATE_SUBCOMMAND, document).failure(host, host_id, str(e)) from e
 
 
-def apply_remote_state(host: OuterHostInterface, update: RemoteStateUpdate, host_id: HostId) -> None:
+def apply_remote_state(
+    host: OuterHostInterface,
+    update: RemoteStateUpdate,
+    host_id: HostId,
+    # what the machine says identifies the policy it holds once the update is applied, or ``None`` when its
+    # package does not say
+) -> MachinePolicyFingerprint | None:
     """Make ``host_id``'s machine hold ``update``, in one round trip.
+
+    An update that names the policy it was made from cannot be replayed the
+    way the host layer replays a command whose connection dropped: a second
+    run of one that had applied finds the policy its own first run installed,
+    and reports it changed. The caller's read of the machine then adopts what
+    that first run left.
 
     Raises:
         MachineNewerError: when the machine's software is of a newer generation than this build's.
-        MachineTransferError: when the update does not fit one command, or the
-            command fails.
+        MachinePolicyChangedError: when the update names the policy it was
+            made from and the machine holds another. Nothing was applied.
+        MachineTransferError: when the update does not fit one command, the
+            command fails, or it answers with something this build cannot read.
     """
-    _run_remote_command(host, host_id, _APPLY_STATE_SUBCOMMAND, _update_document(update))
+    document = _update_document(update)
+    stdout = _run_remote_command(host, host_id, _APPLY_STATE_SUBCOMMAND, document)
+    try:
+        return _policy_fingerprint(_parse_answers(stdout))
+    except _UnreadableAnswerError as e:
+        raise _command_parts(_APPLY_STATE_SUBCOMMAND, document).failure(host, host_id, str(e)) from e
 
 
 @pure
@@ -572,6 +625,8 @@ def _request_document(request: RemoteStateRequest) -> dict[str, bytes]:
 @pure
 def _update_document(update: RemoteStateUpdate) -> dict[str, bytes]:
     document: dict[str, bytes] = {}
+    if update.expected_policy_fingerprint is not None:
+        document[_ENTRY_EXPECTED_POLICY_FINGERPRINT] = update.expected_policy_fingerprint.encode("utf-8")
     if update.is_credential_store_abandoned:
         document[_ENTRY_ABANDON_CREDENTIAL_STORE] = _FLAG_TRUE
     if update.encryption_key is not None:
@@ -682,6 +737,9 @@ def _run_remote_command(
     Raises:
         MachineNewerError: when the machine's software is of a newer
             generation than this build's, so the command did not run.
+        MachinePolicyChangedError: when the command was an update made from
+            another policy than the machine holds, so the machine applied none
+            of it.
         MachineTransferError: when the command does not fit one remote
             command, never reaches the machine or loses it midway, is refused
             or failed by the machine, or finishes without reporting an outcome
@@ -733,6 +791,10 @@ def _run_remote_command(
         raise MachineNewerError(host.get_name())
     stdout_lines = result.stdout.strip().splitlines()
     last_line = stdout_lines[-1] if stdout_lines else ""
+    if last_line == OUTCOME_POLICY_CHANGED_MARKER:
+        raise MachinePolicyChangedError(
+            host_id, f"VPS {host.get_name()} holds another policy than the one the push was made from"
+        )
     if last_line != OUTCOME_DONE_MARKER:
         last_diagnostic_line = diagnostic_lines[-1] if diagnostic_lines else ""
         raise parts.failure(
@@ -785,6 +847,7 @@ def _machine_state_from_answers(answers: Mapping[str, bytes]) -> RemoteMachineSt
     )
     desktop_egress_rules_json = _optional_text(answers, _ANSWER_DESKTOP_EGRESS_RULES_JSON)
     permissions_format_version = _permissions_format_version(answers)
+    policy_fingerprint = _policy_fingerprint(answers)
     credentials = answers.get(_ANSWER_CREDENTIALS)
     if (credentials is None) != (data_format_version is None):
         raise _UnreadableAnswerError(
@@ -800,6 +863,7 @@ def _machine_state_from_answers(answers: Mapping[str, bytes]) -> RemoteMachineSt
         permissions_json=permissions_json,
         desktop_egress_rules_json=desktop_egress_rules_json,
         permissions_format_version=permissions_format_version,
+        policy_fingerprint=policy_fingerprint,
         credential_store=(
             EncryptedCredentialStore(content=credentials, data_format_version=data_format_version)
             if credentials is not None and data_format_version is not None
@@ -828,6 +892,16 @@ def _permissions_format_version(answers: Mapping[str, bytes]) -> PermissionsForm
         raise _UnreadableAnswerError(
             f"the machine's permissions format version is not the non-negative integer it should be: {answer!r}"
         ) from e
+
+
+def _policy_fingerprint(answers: Mapping[str, bytes]) -> MachinePolicyFingerprint | None:
+    """The fingerprint the machine gave of its policy; ``None`` when its package gives none.
+
+    Raises:
+        _UnreadableAnswerError: when the fingerprint is not text.
+    """
+    answer = _optional_text(answers, _ANSWER_POLICY_FINGERPRINT)
+    return MachinePolicyFingerprint(answer) if answer else None
 
 
 def _container_extra_hosts(answer: str) -> tuple[str, ...]:

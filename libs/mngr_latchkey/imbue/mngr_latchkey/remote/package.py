@@ -98,6 +98,7 @@ from imbue.mngr_latchkey.remote._machine import MACHINE_GATEWAY_PASSWORD_FILENAM
 from imbue.mngr_latchkey.remote._machine import MACHINE_GENERATION
 from imbue.mngr_latchkey.remote._machine import MACHINE_GENERATION_FILE
 from imbue.mngr_latchkey.remote._machine import OUTCOME_DONE_MARKER
+from imbue.mngr_latchkey.remote._machine import OUTCOME_POLICY_CHANGED_MARKER
 from imbue.mngr_latchkey.remote._machine import REMOTE_LATCHKEY_DIR_NAME
 from imbue.mngr_latchkey.remote._machine import RUNTIME_DIR
 from imbue.mngr_latchkey.remote._machine import machine_generation_check
@@ -560,6 +561,9 @@ class RemotePackageContext(FrozenModel):
     different_key_message: str = Field(description="Why a key that differs from the machine's is refused.")
     different_password_message: str = Field(description="Why a password that differs from the machine's is refused.")
     outcome_done_marker: str = Field(description="The last stdout line of a script that ran to its end.")
+    outcome_policy_changed_marker: str = Field(
+        description="The last stdout line of an apply that found the machine holding another policy than it named."
+    )
     answer_prefix: str = Field(description="Prefix of every answer line ``read-state`` prints.")
     legacy_gateway_run_script_filename: str = Field(description="The wrapper an older build wrote beside the store.")
     legacy_extension_candidate_suffix: str = Field(description="Suffix an older build staged the extension under.")
@@ -680,6 +684,7 @@ def remote_package_context(layout: RemotePackageLayout) -> RemotePackageContext:
         different_key_message=DIFFERENT_MACHINE_KEY_MESSAGE,
         different_password_message=DIFFERENT_MACHINE_PASSWORD_MESSAGE,
         outcome_done_marker=OUTCOME_DONE_MARKER,
+        outcome_policy_changed_marker=OUTCOME_POLICY_CHANGED_MARKER,
         answer_prefix=ANSWER_PREFIX,
         legacy_gateway_run_script_filename=_LEGACY_GATEWAY_RUN_SCRIPT_FILENAME,
         legacy_extension_candidate_suffix=_LEGACY_EXTENSION_CANDIDATE_SUFFIX,

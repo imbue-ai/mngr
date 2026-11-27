@@ -2,11 +2,13 @@ import json
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 import pytest
 from pydantic import JsonValue
 from pydantic import SecretStr
 
+from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -24,6 +26,9 @@ from imbue.mngr_latchkey.migrations.mock_permissions_migration_test import RuleA
 from imbue.mngr_latchkey.migrations.runner import CURRENT_PERMISSIONS_FORMAT_VERSION
 from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.remote._machine import MACHINE_ENCRYPTION_KEY_FILENAME
+from imbue.mngr_latchkey.remote._machine import OUTCOME_DONE_MARKER
+from imbue.mngr_latchkey.remote._machine import RemoteStateRequest
+from imbue.mngr_latchkey.remote._machine import read_remote_state
 from imbue.mngr_latchkey.remote._machine_policy import project_policy_for_machine
 from imbue.mngr_latchkey.remote._mirror import machine_credentials_path
 from imbue.mngr_latchkey.remote._mirror import machine_store_dir
@@ -33,11 +38,16 @@ from imbue.mngr_latchkey.remote._mirror import stored_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import write_machine_credentials
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
 from imbue.mngr_latchkey.remote.credentials import MachineCredentialsError
+from imbue.mngr_latchkey.remote.credentials import _write_machine_policy_record
+from imbue.mngr_latchkey.remote.credentials import can_edit_host_policy_without_reading
 from imbue.mngr_latchkey.remote.credentials import migrate_permissions_and_push
 from imbue.mngr_latchkey.remote.credentials import read_host_desktop_egress_rules
+from imbue.mngr_latchkey.remote.errors import MachinePolicyChangedError
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
+from imbue.mngr_latchkey.remote.mock_outer_host_test import AnsweringVps
 from imbue.mngr_latchkey.remote.mock_outer_host_test import MACHINE_KEY
 from imbue.mngr_latchkey.remote.mock_outer_host_test import SLACK_GRANTED
+from imbue.mngr_latchkey.remote.mock_outer_host_test import UnreachableVps
 from imbue.mngr_latchkey.remote.mock_outer_host_test import as_vps
 from imbue.mngr_latchkey.remote.mock_outer_host_test import desktop_latchkey
 from imbue.mngr_latchkey.remote.mock_outer_host_test import fake_latchkey_binary
@@ -45,7 +55,9 @@ from imbue.mngr_latchkey.remote.mock_outer_host_test import fake_vps
 from imbue.mngr_latchkey.remote.mock_outer_host_test import grant_host_permissions
 from imbue.mngr_latchkey.remote.mock_outer_host_test import store_accounts
 from imbue.mngr_latchkey.remote.mock_outer_host_test import store_document
+from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
+from imbue.mngr_latchkey.store import dump_permissions_text
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 from imbue.mngr_latchkey.store import read_permissions_format_version
@@ -55,6 +67,9 @@ from imbue.mngr_latchkey.testing import rule_keys_of_permissions_json
 
 _SLACK_ROUTED = '{\n  "slack": true\n}\n'
 _EMPTY_POLICY = '{"rules": []}'
+_SLACK_WRITE_GRANTED = dump_permissions_text(
+    LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all", "slack-write"]},))
+)
 
 
 def _credentials_of(
@@ -65,6 +80,21 @@ def _credentials_of(
 ) -> MachineCredentials:
     latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts=machine_accounts)
     return MachineCredentials(host=outer, latchkey=latchkey, host_id=host_id)
+
+
+def _having_read_the_machine(credentials: MachineCredentials) -> MachineCredentials:
+    """``credentials`` with what its machine holds on record here, as a read leaves it, and nothing adopted.
+
+    A push is made on that record, so a test of a push alone starts from here.
+    The command that read the machine is taken off the recording, which is
+    then of the push.
+    """
+    fingerprint = read_remote_state(credentials.host, RemoteStateRequest(), credentials.host_id).policy_fingerprint
+    _write_machine_policy_record(
+        plugin_data_dir(credentials.latchkey.latchkey_directory), credentials.host_id, fingerprint
+    )
+    as_vps(credentials.host).recorded.clear()
+    return credentials
 
 
 def _merge_call(outer: OuterHostInterface) -> str:
@@ -562,7 +592,7 @@ def test_migrating_a_machines_older_policy_hands_it_back_with_its_stamp(tmp_path
     grant_host_permissions(latchkey, host_id, SLACK_GRANTED)
     migration = _migration_to_version_one()
 
-    migrated = migrate_permissions_and_push(outer, latchkey, host_id, MIGRATION_CONTEXT, (migration,))
+    migrated = migrate_permissions_and_push(outer, latchkey, host_id, MIGRATION_CONTEXT, None, (migration,))
 
     assert migrated is not None
     assert rule_keys_of_permissions_json(migrated.permissions_json) == ["slack-api", "migrated-6231"]
@@ -585,7 +615,7 @@ def test_migrating_a_policy_already_in_this_builds_format_pushes_nothing(tmp_pat
     )
     migration = _migration_to_version_one()
 
-    assert migrate_permissions_and_push(outer, latchkey, host_id, MIGRATION_CONTEXT, (migration,)) is None
+    assert migrate_permissions_and_push(outer, latchkey, host_id, MIGRATION_CONTEXT, None, (migration,)) is None
 
     assert migration.applied_to == []
     assert as_vps(outer).recorded == []
@@ -599,7 +629,7 @@ def test_migrating_a_policy_leaves_the_machines_rules_alone(tmp_path: Path) -> N
     latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={})
     grant_host_permissions(latchkey, host_id, SLACK_GRANTED)
 
-    migrate_permissions_and_push(outer, latchkey, host_id, MIGRATION_CONTEXT, (_migration_to_version_one(),))
+    migrate_permissions_and_push(outer, latchkey, host_id, MIGRATION_CONTEXT, None, (_migration_to_version_one(),))
 
     assert as_vps(outer).machine_desktop_egress_rules() == _SLACK_ROUTED
     assert as_vps(outer).machine_permissions_format_version() == 1
@@ -610,7 +640,7 @@ def test_a_push_carries_the_format_stamp_of_this_computers_copy(tmp_path: Path) 
     """What travels is a snapshot of the copy here, so the machine is stamped as that copy is."""
     host_id = HostId.generate()
     outer = fake_vps(tmp_path)
-    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={})
+    credentials = _having_read_the_machine(_credentials_of(tmp_path, host_id, outer, machine_accounts={}))
     data_dir = plugin_data_dir(credentials.latchkey.latchkey_directory)
 
     credentials.set_permissions(SLACK_GRANTED)
@@ -619,6 +649,136 @@ def test_a_push_carries_the_format_stamp_of_this_computers_copy(tmp_path: Path) 
     write_permissions_format_version(data_dir, host_id, PermissionsFormatVersion(1))
     credentials.set_permissions(SLACK_GRANTED)
     assert as_vps(outer).machine_permissions_format_version() == 1
+
+
+def _edit_the_copy_here(credentials: MachineCredentials, permissions_json: str) -> None:
+    grant_host_permissions(credentials.latchkey, credentials.host_id, permissions_json)
+
+
+def test_a_read_leaves_the_policy_editable_without_another_and_each_push_keeps_it_so(tmp_path: Path) -> None:
+    """A read and every push are answered with the machine's fingerprint, so a run of edits costs one command each."""
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path, machine_permissions=SLACK_GRANTED)
+    as_vps(outer).hold_permissions_format_version(CURRENT_PERMISSIONS_FORMAT_VERSION)
+    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={})
+    data_dir = plugin_data_dir(credentials.latchkey.latchkey_directory)
+    is_editable_before_the_read = can_edit_host_policy_without_reading(data_dir, host_id)
+    credentials.refresh(MIGRATION_CONTEXT)
+    command_count_after_the_read = len(as_vps(outer).recorded)
+
+    for edited in (_SLACK_WRITE_GRANTED, _EMPTY_POLICY):
+        assert can_edit_host_policy_without_reading(data_dir, host_id)
+        _edit_the_copy_here(credentials, edited)
+        assert not can_edit_host_policy_without_reading(data_dir, host_id)
+        credentials.set_permissions(edited)
+
+    assert not is_editable_before_the_read
+    assert can_edit_host_policy_without_reading(data_dir, host_id)
+    assert as_vps(outer).machine_permissions() == project_policy_for_machine(_EMPTY_POLICY)
+    assert len(as_vps(outer).recorded) == command_count_after_the_read + 2
+
+
+def test_a_push_this_computer_has_no_record_to_make_on_never_reaches_the_machine(tmp_path: Path) -> None:
+    """Nothing says which policy the copy here was edited from, so it is not sent to replace the machine's."""
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path, machine_permissions=SLACK_GRANTED)
+    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={})
+
+    with pytest.raises(MachinePolicyChangedError, match="has not read the machine"):
+        credentials.set_permissions(_EMPTY_POLICY)
+
+    assert as_vps(outer).recorded == []
+    assert as_vps(outer).machine_permissions() == SLACK_GRANTED
+
+
+def test_a_push_the_machine_has_moved_on_from_changes_nothing_there_and_waits_for_a_read(tmp_path: Path) -> None:
+    """A grant another of the user's computers made since the read is not erased by a push that never saw it."""
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path, machine_permissions=SLACK_GRANTED)
+    as_vps(outer).hold_permissions_format_version(CURRENT_PERMISSIONS_FORMAT_VERSION)
+    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={})
+    data_dir = plugin_data_dir(credentials.latchkey.latchkey_directory)
+    credentials.refresh(MIGRATION_CONTEXT)
+    granted_elsewhere = project_policy_for_machine(_SLACK_WRITE_GRANTED)
+    as_vps(outer).hold_permissions(granted_elsewhere)
+
+    with pytest.raises(MachinePolicyChangedError, match="holds another policy"):
+        credentials.set_permissions(_EMPTY_POLICY)
+    command_count_after_the_refusal = len(as_vps(outer).recorded)
+    with pytest.raises(MachinePolicyChangedError, match="has not read the machine"):
+        credentials.set_permissions(_EMPTY_POLICY)
+
+    assert as_vps(outer).machine_permissions() == granted_elsewhere
+    assert len(as_vps(outer).recorded) == command_count_after_the_refusal
+    assert not can_edit_host_policy_without_reading(data_dir, host_id)
+
+
+def test_a_grant_the_machine_has_moved_on_from_leaves_the_credential_off_it_too(tmp_path: Path) -> None:
+    """The account and the policy that grants it are one change, so a refused policy takes the account with it."""
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path, {"github": ["kept@example.com"]}, machine_permissions=SLACK_GRANTED)
+    credentials = _having_read_the_machine(
+        _credentials_of(tmp_path, host_id, outer, machine_accounts={"slack": ["a@example.com"]})
+    )
+    as_vps(outer).hold_permissions(project_policy_for_machine(_SLACK_WRITE_GRANTED))
+
+    with pytest.raises(MachinePolicyChangedError):
+        credentials.connect_service_with_permissions("slack", "a@example.com", _EMPTY_POLICY)
+
+    assert as_vps(outer).machine_accounts() == {"github": ["kept@example.com"]}
+
+
+def test_a_push_that_fails_for_another_reason_leaves_the_record_for_the_next_one(tmp_path: Path) -> None:
+    """The machine checks the fingerprint itself, so a push that may or may not have landed costs the record nothing."""
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path, machine_permissions=SLACK_GRANTED)
+    credentials = _having_read_the_machine(_credentials_of(tmp_path, host_id, outer, machine_accounts={}))
+    unreachable = MachineCredentials(
+        host=cast(OuterHostInterface, UnreachableVps(root=tmp_path / "unreachable", error=OSError("no route"))),
+        latchkey=credentials.latchkey,
+        host_id=host_id,
+    )
+
+    with pytest.raises(RemoteGatewayError, match="no route"):
+        unreachable.set_permissions(_EMPTY_POLICY)
+    credentials.set_permissions(_EMPTY_POLICY)
+
+    assert as_vps(outer).machine_permissions() == project_policy_for_machine(_EMPTY_POLICY)
+
+
+def test_a_machine_whose_package_gives_no_fingerprint_takes_one_push_for_each_read_of_it(tmp_path: Path) -> None:
+    """Such a machine checks nothing, so a push to it goes out only straight after a read, as it always did."""
+    host_id = HostId.generate()
+    machine = AnsweringVps(
+        root=tmp_path / "vps", canned=CommandResult(stdout=f"{OUTCOME_DONE_MARKER}\n", stderr="", success=True)
+    )
+    latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={})
+    credentials = MachineCredentials(host=cast(OuterHostInterface, machine), latchkey=latchkey, host_id=host_id)
+    data_dir = plugin_data_dir(latchkey.latchkey_directory)
+    _write_machine_policy_record(data_dir, host_id, None)
+
+    is_editable_after_the_read = can_edit_host_policy_without_reading(data_dir, host_id)
+    credentials.set_permissions(SLACK_GRANTED)
+    with pytest.raises(MachinePolicyChangedError, match="has not read the machine"):
+        credentials.set_permissions(_EMPTY_POLICY)
+
+    assert not is_editable_after_the_read
+    assert len(machine.recorded) == 1
+    assert "expected_policy_fingerprint" not in machine.recorded[0].command
+
+
+def test_a_read_that_seeds_the_machine_records_the_policy_the_seed_left_on_it(tmp_path: Path) -> None:
+    """The copies here are what the read left on the machine, so that is the policy the next push has to name."""
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path)
+    latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={})
+    grant_host_permissions(latchkey, host_id, SLACK_GRANTED)
+    credentials = MachineCredentials(host=outer, latchkey=latchkey, host_id=host_id)
+
+    credentials.refresh(MIGRATION_CONTEXT)
+    credentials.set_permissions(_EMPTY_POLICY)
+
+    assert as_vps(outer).machine_permissions() == project_policy_for_machine(_EMPTY_POLICY)
 
 
 def test_a_seed_carries_this_computers_stamp(tmp_path: Path) -> None:
@@ -676,7 +836,7 @@ def test_permissions_and_desktop_egress_rules_reach_the_machine_without_touching
     """A pure push: the caller edits this computer's copies first, and nothing here writes them."""
     host_id = HostId.generate()
     outer = fake_vps(tmp_path)
-    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={})
+    credentials = _having_read_the_machine(_credentials_of(tmp_path, host_id, outer, machine_accounts={}))
     data_dir = plugin_data_dir(credentials.latchkey.latchkey_directory)
 
     credentials.set_permissions_and_desktop_egress_rules(SLACK_GRANTED, _SLACK_ROUTED)
@@ -693,7 +853,9 @@ def test_a_grant_lands_both_halves_on_the_machine_in_one_round_trip(tmp_path: Pa
     """The credential and the policy that grants it travel as one remote command."""
     host_id = HostId.generate()
     outer = fake_vps(tmp_path, {"github": ["kept@example.com"]})
-    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={"slack": ["a@example.com"]})
+    credentials = _having_read_the_machine(
+        _credentials_of(tmp_path, host_id, outer, machine_accounts={"slack": ["a@example.com"]})
+    )
 
     credentials.connect_service_with_permissions("slack", "a@example.com", SLACK_GRANTED)
 
@@ -706,7 +868,9 @@ def test_a_grant_lands_both_halves_on_the_machine_in_one_round_trip(tmp_path: Pa
 def test_a_grant_that_changes_a_route_lands_all_three_on_the_machine_in_one_round_trip(tmp_path: Path) -> None:
     host_id = HostId.generate()
     outer = fake_vps(tmp_path, {"github": ["kept@example.com"]})
-    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={"slack": ["a@example.com"]})
+    credentials = _having_read_the_machine(
+        _credentials_of(tmp_path, host_id, outer, machine_accounts={"slack": ["a@example.com"]})
+    )
 
     credentials.connect_service_with_permissions_and_desktop_egress_rules(
         "slack", "a@example.com", SLACK_GRANTED, _SLACK_ROUTED
@@ -722,7 +886,9 @@ def test_a_grant_that_changes_a_route_lands_all_three_on_the_machine_in_one_roun
 def test_a_grant_reads_nothing_back_like_every_other_push(tmp_path: Path) -> None:
     host_id = HostId.generate()
     outer = fake_vps(tmp_path, {"slack": ["already@example.com"]})
-    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={"slack": ["new@example.com"]})
+    credentials = _having_read_the_machine(
+        _credentials_of(tmp_path, host_id, outer, machine_accounts={"slack": ["new@example.com"]})
+    )
     data_dir = plugin_data_dir(credentials.latchkey.latchkey_directory)
 
     credentials.connect_service_with_permissions("slack", "new@example.com", SLACK_GRANTED)
@@ -735,7 +901,7 @@ def test_a_permissions_snapshot_reaches_a_machine_that_has_lost_its_key(tmp_path
     """A policy is not encrypted, so a machine holding no key still gets the rules its gateway will enforce."""
     host_id = HostId.generate()
     outer = fake_vps(tmp_path)
-    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={})
+    credentials = _having_read_the_machine(_credentials_of(tmp_path, host_id, outer, machine_accounts={}))
 
     credentials.set_permissions(SLACK_GRANTED)
 

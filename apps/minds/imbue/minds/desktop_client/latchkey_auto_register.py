@@ -107,6 +107,7 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import find_host_system_services_agent
 from imbue.minds.desktop_client.latchkey.machine_access import MACHINE_NEWER_FAILURE
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
+from imbue.minds.desktop_client.latchkey.machine_operations import MachinePolicyChangedOperationError
 from imbue.minds.errors import MindError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
@@ -735,7 +736,9 @@ class LatchkeyAutoRegister(MutableModel):
         connection) retries the whole carry after each of
         ``transient_failure_retry_delays_seconds``, reading the machine again
         before pinning and pushing, since the push carries the whole copy and
-        must be based on what the machine holds now. A failure that is not
+        must be based on what the machine holds now. So does a push the
+        machine refuses because another of the user's computers changed its
+        policy between this carry's read and its push. A failure that is not
         transient (a rejected key, a machine refusing the policy), one that
         outlasts the retries, and a wait :meth:`stop` or the app's shutdown cuts
         short are logged as an error, with the error that ended the carry
@@ -752,8 +755,11 @@ class LatchkeyAutoRegister(MutableModel):
         """
         try:
             for attempt in Retrying(
-                retry=retry_if_exception_type(MachineOperationError)
-                & retry_if_exception(is_transient_remote_wiring_error),
+                retry=(
+                    retry_if_exception_type(MachineOperationError)
+                    & retry_if_exception(is_transient_remote_wiring_error)
+                )
+                | retry_if_exception_type(MachinePolicyChangedOperationError),
                 stop=stop_after_attempt(len(self.transient_failure_retry_delays_seconds) + 1),
                 wait=wait_chain(*(wait_fixed(delay) for delay in self.transient_failure_retry_delays_seconds)),
                 sleep=self._wait_to_retry,

@@ -617,6 +617,13 @@ def _push_host_permissions(latchkey: Latchkey, machine: MachineCredentials) -> N
         raise click.ClickException(
             f"Registered locally, but the machine of host {machine.host_id} did not take the updated permissions: {e}"
         ) from e
+    except LatchkeyStoreError as e:
+        # The record is read before the push and rewritten after it, so the machine may or may not hold the policy.
+        raise click.ClickException(
+            f"Registered locally, but what this computer keeps on record of the policy the machine of host "
+            f"{machine.host_id} holds could not be read or written, so the updated permissions are not known to "
+            f"have reached it: {e}"
+        ) from e
 
 
 _add_common_latchkey_options(_register_agent_command)

@@ -27,6 +27,7 @@ from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import SYSTEM_SERVICES_AGENT_NAME
 from imbue.minds.desktop_client.latchkey.machine_access import MACHINE_NEWER_FAILURE
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
+from imbue.minds.desktop_client.latchkey.machine_operations import MachinePolicyChangedOperationError
 from imbue.minds.desktop_client.latchkey.testing import leave_copies_on_this_computer_as_they_are
 from imbue.minds.desktop_client.latchkey.testing import leave_permissions_on_this_computer
 from imbue.minds.desktop_client.latchkey_auto_register import LatchkeyAutoRegister
@@ -927,6 +928,28 @@ def test_a_push_that_timed_out_in_ssh_authentication_is_retried_on_a_fresh_read(
         resolver,
         build_latchkey_auto_register,
         push_failures=(_machine_operation_error_from_ssh_auth_timeout(),),
+    )
+    with capture_loguru(level="ERROR") as log_output:
+        carry.auto_register.start()
+        _wait_for_pushes(carry.machine, 2)
+        _wait_until_pushes_settle(carry.auto_register)
+
+    assert carry.machine.read_counts_at_push == [1, 2]
+    assert str(carry.new_agent) in carry.machine.registered_agent_ids()
+    assert log_output.getvalue() == ""
+
+
+def test_a_push_the_machine_refuses_as_made_from_another_policy_is_retried_on_a_fresh_read(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    build_latchkey_auto_register: Callable[..., LatchkeyAutoRegister],
+) -> None:
+    """Another computer changed the machine's policy between the read and the push, so the carry reads it again."""
+    carry = _carry_of_a_new_agent_through_failures(
+        tmp_path,
+        resolver,
+        build_latchkey_auto_register,
+        push_failures=(MachinePolicyChangedOperationError("The machine holds another policy.", None),),
     )
     with capture_loguru(level="ERROR") as log_output:
         carry.auto_register.start()

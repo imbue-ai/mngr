@@ -1,5 +1,6 @@
 import json
 import stat
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -40,6 +41,7 @@ from imbue.mngr_latchkey.remote._transfer import push_credentials
 from imbue.mngr_latchkey.remote._transfer import push_credentials_with_permissions
 from imbue.mngr_latchkey.remote._transfer import push_permissions_and_desktop_egress_rules
 from imbue.mngr_latchkey.remote._transfer import push_permissions_snapshot
+from imbue.mngr_latchkey.remote.errors import MachinePolicyChangedError
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.remote.mock_outer_host_test import FakeVps
 from imbue.mngr_latchkey.remote.mock_outer_host_test import MACHINE_KEY
@@ -63,6 +65,7 @@ from imbue.mngr_latchkey.store import read_permissions_format_version
 from imbue.mngr_latchkey.testing import rule_keys_of_permissions_json
 
 _SLACK_ANY = dump_permissions_text(LatchkeyPermissionsConfig(rules=({"slack-api": ["any"]},)))
+_SLACK_READ = dump_permissions_text(LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},)))
 _SLACK_ROUTED = '{\n  "slack": true\n}\n'
 _CUSTOM_REGISTRATION = build_custom_service_registration("api.example.com", "https")
 _CUSTOM_CONFIG = merge_minds_latchkey_config(None, {"custom_https_api_example_com": _CUSTOM_REGISTRATION})
@@ -248,7 +251,9 @@ def test_a_pushed_host_policy_lands_without_the_per_agent_gate_and_reads_back_wi
     vps = as_vps(fake_vps(tmp_path))
     policy = dump_permissions_text(AGENT_BASELINE_PERMISSIONS)
 
-    push_permissions_snapshot(cast(OuterHostInterface, vps), HostId.generate(), policy, PermissionsFormatVersion(1))
+    push_permissions_snapshot(
+        cast(OuterHostInterface, vps), HostId.generate(), policy, PermissionsFormatVersion(1), None
+    )
 
     machine_policy = vps.machine_permissions()
     assert SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED not in rule_keys_of_permissions_json(machine_policy)
@@ -519,6 +524,7 @@ def _push_grant(
         permissions_json,
         PermissionsFormatVersion(0),
         desktop_egress_rules_json,
+        None,
     )
 
 
@@ -643,10 +649,132 @@ def test_a_permissions_snapshot_costs_one_remote_command_and_no_home_probe(tmp_p
     host_id = HostId.generate()
     outer = fake_vps(tmp_path)
 
-    push_permissions_snapshot(outer, host_id, _SLACK_ANY, PermissionsFormatVersion(0))
+    push_permissions_snapshot(outer, host_id, _SLACK_ANY, PermissionsFormatVersion(0), None)
 
     assert len(as_vps(outer).recorded) == 1
     assert as_vps(outer).written == []
+    assert as_vps(outer).machine_permissions() == project_policy_for_machine(_SLACK_ANY)
+
+
+def test_a_snapshot_edited_from_the_policy_the_machine_holds_is_installed_in_the_one_command(tmp_path: Path) -> None:
+    """The machine checks the policy the edit was made from itself, so no read has to precede the push."""
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path)
+    held = push_permissions_and_desktop_egress_rules(
+        outer, host_id, _SLACK_ANY, _SLACK_ROUTED, PermissionsFormatVersion(1), None
+    )
+
+    then_held = push_permissions_snapshot(outer, host_id, _SLACK_READ, PermissionsFormatVersion(1), held)
+
+    assert len(as_vps(outer).recorded) == 2
+    assert as_vps(outer).machine_permissions() == project_policy_for_machine(_SLACK_READ)
+    assert held is not None
+    assert then_held not in (None, held)
+
+
+def test_a_read_gives_the_fingerprint_a_snapshot_edited_from_what_it_read_hands_back(tmp_path: Path) -> None:
+    """A read and a push name the same policy the same way, whichever of them this computer learned it from."""
+    host_id = HostId.generate()
+    vps = as_vps(fake_vps(tmp_path))
+    outer = cast(OuterHostInterface, vps)
+    pushed = push_permissions_snapshot(
+        outer, host_id, dump_permissions_text(AGENT_BASELINE_PERMISSIONS), PermissionsFormatVersion(1), None
+    )
+    read = _read(vps, RemoteStateRequest()).policy_fingerprint
+
+    push_permissions_snapshot(outer, host_id, _SLACK_READ, PermissionsFormatVersion(1), read)
+
+    assert read == pushed
+    assert vps.machine_permissions() == project_policy_for_machine(_SLACK_READ)
+
+
+def test_a_machine_with_no_policy_at_all_takes_a_snapshot_made_from_what_it_was_read_to_hold(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    vps = as_vps(fake_vps(tmp_path))
+    nothing_held = _read(vps, RemoteStateRequest()).policy_fingerprint
+
+    push_permissions_snapshot(
+        cast(OuterHostInterface, vps), host_id, _SLACK_ANY, PermissionsFormatVersion(0), nothing_held
+    )
+
+    assert nothing_held is not None
+    assert vps.machine_permissions() == project_policy_for_machine(_SLACK_ANY)
+
+
+def _hold_another_policy(vps: FakeVps) -> None:
+    vps.hold_permissions(project_policy_for_machine(_SLACK_READ))
+
+
+def _hold_no_policy(vps: FakeVps) -> None:
+    (vps.latchkey_dir / PERMISSIONS_CONFIG_FILENAME).unlink()
+
+
+def _hold_other_rules(vps: FakeVps) -> None:
+    vps.hold_desktop_egress_rules('{"slack": false}')
+
+
+def _hold_no_rules(vps: FakeVps) -> None:
+    (vps.latchkey_dir / DESKTOP_EGRESS_RULES_FILENAME).unlink()
+
+
+def _hold_another_format(vps: FakeVps) -> None:
+    vps.hold_permissions_format_version(2)
+
+
+def _hold_no_format(vps: FakeVps) -> None:
+    (vps.latchkey_dir / PERMISSIONS_FORMAT_VERSION_FILENAME).unlink()
+
+
+@pytest.mark.parametrize(
+    "change_made_from_another_computer",
+    [
+        _hold_another_policy,
+        _hold_no_policy,
+        _hold_other_rules,
+        _hold_no_rules,
+        _hold_another_format,
+        _hold_no_format,
+    ],
+)
+def test_a_snapshot_edited_from_another_policy_than_the_machine_holds_changes_nothing_there(
+    tmp_path: Path, change_made_from_another_computer: Callable[[FakeVps], None]
+) -> None:
+    """What the machine gained since this computer read it is kept: the push is refused whole, stamp included."""
+    host_id = HostId.generate()
+    vps = as_vps(fake_vps(tmp_path))
+    outer = cast(OuterHostInterface, vps)
+    held = push_permissions_and_desktop_egress_rules(
+        outer, host_id, _SLACK_ANY, _SLACK_ROUTED, PermissionsFormatVersion(1), None
+    )
+    change_made_from_another_computer(vps)
+    held_since = (
+        vps.machine_permissions(),
+        vps.machine_desktop_egress_rules(),
+        vps.machine_permissions_format_version(),
+    )
+
+    with pytest.raises(MachinePolicyChangedError):
+        push_permissions_and_desktop_egress_rules(
+            outer, host_id, _SLACK_ANY, '{"slack": true}', PermissionsFormatVersion(3), held
+        )
+
+    assert held is not None
+    assert held_since == (
+        vps.machine_permissions(),
+        vps.machine_desktop_egress_rules(),
+        vps.machine_permissions_format_version(),
+    )
+
+
+def test_an_update_made_from_no_named_policy_is_installed_over_whatever_the_machine_holds(tmp_path: Path) -> None:
+    """What a push made on a read that gave no fingerprint is: it names no policy, so the machine checks none."""
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path)
+    push_permissions_snapshot(outer, host_id, _SLACK_ANY, PermissionsFormatVersion(1), None)
+    _hold_another_policy(as_vps(outer))
+
+    push_permissions_snapshot(outer, host_id, _SLACK_ANY, PermissionsFormatVersion(1), None)
+
     assert as_vps(outer).machine_permissions() == project_policy_for_machine(_SLACK_ANY)
 
 
@@ -655,7 +783,7 @@ def test_a_permissions_snapshot_is_run_without_its_command_reaching_the_logs(tmp
     host_id = HostId.generate()
     outer = fake_vps(tmp_path)
 
-    push_permissions_snapshot(outer, host_id, _SLACK_ANY, PermissionsFormatVersion(0))
+    push_permissions_snapshot(outer, host_id, _SLACK_ANY, PermissionsFormatVersion(0), None)
 
     assert [entry.is_kept_out_of_logs for entry in as_vps(outer).recorded] == [True]
 
@@ -678,7 +806,7 @@ def test_a_permissions_snapshot_this_build_cannot_read_never_reaches_the_machine
     outer = fake_vps(tmp_path)
 
     with pytest.raises(RemoteGatewayError, match="unreadable permissions snapshot"):
-        push_permissions_snapshot(outer, host_id, '{"rules": "not-a-list"}', PermissionsFormatVersion(0))
+        push_permissions_snapshot(outer, host_id, '{"rules": "not-a-list"}', PermissionsFormatVersion(0), None)
 
     assert as_vps(outer).recorded == []
 
@@ -687,7 +815,9 @@ def test_permissions_and_desktop_egress_rules_cost_one_remote_command_between_th
     host_id = HostId.generate()
     outer = fake_vps(tmp_path)
 
-    push_permissions_and_desktop_egress_rules(outer, host_id, _SLACK_ANY, _SLACK_ROUTED, PermissionsFormatVersion(0))
+    push_permissions_and_desktop_egress_rules(
+        outer, host_id, _SLACK_ANY, _SLACK_ROUTED, PermissionsFormatVersion(0), None
+    )
 
     assert len(as_vps(outer).recorded) == 1
     assert as_vps(outer).written == []
@@ -704,7 +834,7 @@ def test_desktop_egress_rules_the_router_could_not_read_never_reach_the_machine(
 
     with pytest.raises(RemoteGatewayError, match="unreadable desktop egress rules"):
         push_permissions_and_desktop_egress_rules(
-            outer, host_id, _SLACK_ANY, desktop_egress_rules_json, PermissionsFormatVersion(0)
+            outer, host_id, _SLACK_ANY, desktop_egress_rules_json, PermissionsFormatVersion(0), None
         )
 
     assert as_vps(outer).recorded == []
@@ -716,7 +846,7 @@ def test_an_unreadable_policy_stops_the_desktop_egress_rules_from_reaching_the_m
 
     with pytest.raises(RemoteGatewayError, match="unreadable permissions snapshot"):
         push_permissions_and_desktop_egress_rules(
-            outer, host_id, '{"rules": "not-a-list"}', _SLACK_ROUTED, PermissionsFormatVersion(0)
+            outer, host_id, '{"rules": "not-a-list"}', _SLACK_ROUTED, PermissionsFormatVersion(0), None
         )
 
     assert as_vps(outer).recorded == []
@@ -891,10 +1021,12 @@ def test_every_push_of_a_policy_carries_its_format_stamp(tmp_path: Path) -> None
     latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={"slack": ["a@example.com"]})
     machine_latchkey = latchkey_for_machine(latchkey, plugin_data_dir(latchkey.latchkey_directory), host_id)
 
-    push_permissions_snapshot(outer, host_id, _SLACK_ANY, PermissionsFormatVersion(1))
+    push_permissions_snapshot(outer, host_id, _SLACK_ANY, PermissionsFormatVersion(1), None)
     assert as_vps(outer).machine_permissions_format_version() == 1
 
-    push_permissions_and_desktop_egress_rules(outer, host_id, _SLACK_ANY, _SLACK_ROUTED, PermissionsFormatVersion(2))
+    push_permissions_and_desktop_egress_rules(
+        outer, host_id, _SLACK_ANY, _SLACK_ROUTED, PermissionsFormatVersion(2), None
+    )
     assert as_vps(outer).machine_permissions_format_version() == 2
 
     push_credentials_with_permissions(
@@ -906,6 +1038,7 @@ def test_every_push_of_a_policy_carries_its_format_stamp(tmp_path: Path) -> None
         SecretStr(MACHINE_KEY),
         _SLACK_ANY,
         PermissionsFormatVersion(3),
+        None,
         None,
     )
     assert as_vps(outer).machine_permissions_format_version() == 3
