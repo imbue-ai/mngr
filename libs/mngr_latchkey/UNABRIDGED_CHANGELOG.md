@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-27
+
+- Every push of a host's policy to its machine is now conditional on the policy the machine holds. The machine's `read-state` and `apply-state` answer with a fingerprint of its policy (one SHA-256 over the policy file, the desktop egress rules file and the format stamp, computed on the machine). `MachineCredentials.refresh` and every push record it in `hosts/<host_id>/machine-policy-record.json`, and `set_permissions`, `set_permissions_and_desktop_egress_rules` and the grant pushes hand it back: `apply-state` installs nothing for a document whose `expected_policy_fingerprint` is not what the machine holds, and the push raises `MachinePolicyChangedError`. A push with nothing on record raises the same error without contacting the machine. The method signatures are unchanged.
+
+- `can_edit_host_policy_without_reading(data_dir, host_id)` says whether this computer's copies are still what the machine last answered for, so a writer can skip the read before an edit and rely on the conditional push.
+
+- A machine whose package predates this answers with no fingerprint and checks none: a read of it covers exactly one push, so its writers keep reading before every write. The seed and the migration a read or a provisioning pass makes are conditional on the policy that pass just read.
+
 ## 2026-11-25
 
 - The latchkey version installed on remote hosts, and the minimum version a local CLI must have (`LATCHKEY_MIN_VERSION`), both move to 3.26.0. The minimum only keeps the pins in lockstep: nothing here depends on 3.26.0.

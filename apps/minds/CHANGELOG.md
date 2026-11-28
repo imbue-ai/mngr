@@ -12,12 +12,17 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: New Modal workspaces keep mngr's data at `/home/user/.mngr` like every other provider, with only that dir on the persistent host Volume; existing Modal workspaces are not migrated.
 - Changed: The bundled latchkey moves to 3.26.0 (fixes Dropbox sign-in; Google sign-in can pick among accounts).
 - Changed: `install-linux.sh` retries its gVisor downloads on timeouts, refused connections and server errors.
+- Changed: Flipping a toggle in a remote workspace's Permissions tab costs one round trip to the workspace's machine instead of two (once the machine's package supports conditional pushes).
+- Changed: The first-run welcome fades into the workspace on its own once it is ready instead of waiting for Continue.
+- Changed: A click outside the sign-in dialog no longer cancels the sign-in; Cancel or Escape still close it.
+- Changed: First-run styling: the loading screen uses the first run's cream, the sign-in dialog is a white card with black text, light-mode tooltips are black, main buttons are smaller, and the Share button has a new icon.
 
 ### Fixed
 
 - Fixed: Imbue Studio no longer signs itself out after 30 days of running (its windows use a session value from the backend it starts instead of the one-time login code), and "Restart Imbue Studio" on the sign-in page signs the app back in; in a plain browser a session lasts as long as it is used at least once every 30 days.
 - Fixed: Workspaces no longer reopen with every window minimized after the 0.10.6 per-account partitions: the app keeps one client id per workspace shell (`shell-client-ids.json`) and recovers layouts saved on 0.10.5 and earlier.
 - Fixed: Intermittent 500s from the backup history and backup check routes right after unlocking, caused by concurrent `restic.env` writes sharing one temp file name.
+- Fixed: A permissions change pushed to a workspace's machine no longer overwrites one another computer made concurrently (once the machine's package supports conditional pushes); it is retried on a fresh read or fails with the usual "couldn't apply that change" message.
 
 ## [minds-v0.10.7] - 2026-11-23
 

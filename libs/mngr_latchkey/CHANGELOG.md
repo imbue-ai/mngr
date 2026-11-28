@@ -18,6 +18,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Latchkey service plugins: `imbue.mngr_latchkey.service_plugins` pins Garmin Connect, Spotify and Strava (`KNOWN_SERVICE_PLUGINS`), installed by `mngr latchkey forward` before the gateway starts and by the `mngr-latchkey` Debian package on remote machines; the service catalog lists their services.
 - Added: `is_capture_login_flow` and `is_capture_login_registration` tell whether a custom service signs in by capturing a cookie or token (`cookie-capture`, `token-capture`).
 - Added: Machine generations: `mngr-latchkey` records generation 1 in `/etc/mngr-machine/generation`, and every command sent to a machine first checks it, raising `MachineNewerError` on a newer machine. `mngr latchkey forward` then records a `machine_newer` marker and leaves the host alone until it stops, moves or the forward restarts; `register-agent` registers locally and errors asking to update.
+- Added: `can_edit_host_policy_without_reading(data_dir, host_id)` says whether a writer can skip the read before a policy edit.
 
 ### Changed
 
@@ -30,6 +31,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Discovery reports a wiring step that failed from file-descriptor exhaustion as an error at once instead of after 10 transient cycles.
 - Changed: Remote machine commands (`read-state`, `apply-state`, `announce-device`, `forget-request`, `list-requests`) raise `MachineTransferError` (a `RemoteGatewayError`) with typed `sent`/`expected` parts and take the host id instead of `failure_description`; failing to store a read machine state locally is now a `LatchkeyStoreError`.
 - Changed: A remote machine keeps its latchkey encryption key and gateway password on disk in `~/.latchkey/` instead of only in RAM, so its gateway returns after a VPS reboot without reprovisioning (except over the legacy reverse tunnel), and a disk snapshot can now read them; `postinst` migrates existing machines; desktop reads and sign-outs no longer send the machine's key, and the desktop no longer records its gateway password.
+- Changed: Every policy push to a machine is conditional on the machine's policy fingerprint (reported by `read-state`/`apply-state`, recorded in `hosts/<host_id>/machine-policy-record.json`); `set_permissions`, `set_permissions_and_desktop_egress_rules` and grant pushes raise `MachinePolicyChangedError` when the machine's policy changed or none is on record. Machines on older packages check no fingerprint.
 
 ### Removed
 

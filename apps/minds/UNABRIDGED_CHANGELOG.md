@@ -4,6 +4,34 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-11-27
+
+- Flipping a toggle in a remote workspace's Permissions tab (a connector permission, a Local files or Other workspaces toggle, a route, a revoke) costs one round trip to the workspace's machine instead of two. The machine is no longer read before such a change while this computer's copy of the policy is still what the machine last answered for; the change is pushed on the condition that the machine still holds that policy. When it does not (another of your computers changed the permissions since), nothing is applied, the machine is read, and the change is made again on what it holds. A machine keeps the two round trips until a provisioning pass has installed the package that makes the condition checkable.
+
+- Every other permissions change pushed to a workspace's machine (a grant, a sign-out, a shared path, an agent registration) is conditional in the same way. It still reads the machine first, so the condition only bites when another computer changes the policy in the moment between the read and the push: the change then fails with the usual "couldn't apply that change" message instead of overwriting what the other computer did, and a background agent registration is retried on a fresh read.
+
+- Narrowing a shared path to read-only, and removing one that was shared for both reading and writing, push the change to the workspace's machine once instead of twice.
+
+- The loading screen draws the studio lockup, progress bar and status text in the first run's cream instead of mint, and its hand-off to the start page settles to that cream instead of white, so it lands on the start page's own ground.
+
+- The sign-in dialog over the first-run page is a white card in the app's regular black text, like the start page's tooltips, instead of cream with brown text.
+
+- A click outside the sign-in dialog no longer cancels the sign-in, so clicking back into the app after signing in in the browser keeps the flow going. Cancel or Escape still close it.
+
+- The Share button in the title bar and Sharing's rail entry use a new outlined forward-arrow icon.
+
+- The first run's main buttons (Sign in, Try again) are smaller, with 12px by 20px padding.
+
+- The first-run welcome no longer waits for Continue: once the workspace has its provider page (or chat) on screen, "Your workspace is ready!" stands for a beat and the welcome fades into the workspace on its own.
+
+- Tooltips are black again in light mode, instead of the first run's brown.
+
+- The studio logo in the title bar sits 1px higher within its Home button.
+
+- The title bar's account and workspace buttons sit tighter around their dropdown chevron: 6px after it and 4px between the parts, with 10px before the content.
+
+- The end-to-end workspace runner and the smoke journey wait for the cover over a new workspace to lower itself instead of pressing its Continue.
+
 ## 2026-11-25
 
 The smoke journey can grant its workspace. With `MINDS_SMOKE_SHARE_GRANTEE_EMAIL` set to an address, a new step 5b opens the workspace's Sharing page once the share has served the app, grants the whole workspace to that address, and waits for the grant's card to say what became of the invitation the grant sends, so a run recorded as a profile (`MINDS_SMOKE_PROFILE_FILE`) holds a grant to measure. An entry the page refuses, or a grant it cannot save, fails the step with the page's own sentence; an invitation the tier refused or could not send does not. Granting emails the address a real invitation, so it has to be a mailbox the run owns. Unset, as CI's run after a deploy leaves it, the journey grants nobody, lists the step as skipped in its report, and counts the same results as before. `docs/testing-overview.md` section 1.10 describes the step.
